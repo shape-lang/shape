@@ -1,0 +1,78 @@
+// Multi-timeframe strategy backtest without print statements
+// Returns results as an object for analysis
+
+// Load ES futures data
+let data = load("market_data", { symbol: "ES", from: "2023-01-01", to: "2023-12-31" });
+
+// Get market data series
+let closes = series("close");
+let highs = series("high");
+let lows = series("low");
+let volumes = series("volume");
+
+// Define multi-timeframe strategy
+function multiframe_strategy() {
+    // Get current market data
+    let close_series = series("close");
+    let high_series = series("high");
+    let low_series = series("low");
+    
+    // Calculate indicators
+    let sma_20 = rolling_mean(close_series, 20);
+    let sma_50 = rolling_mean(close_series, 50);
+    let sma_200 = rolling_mean(close_series, 200);
+    
+    // Calculate ATR for volatility
+    let tr = rolling_max(high_series, 1) - rolling_min(low_series, 1);
+    let atr_14 = rolling_mean(tr, 14);
+    
+    // Get current values
+    let current_close = last(close_series);
+    let current_sma_20 = last(sma_20);
+    let current_sma_50 = last(sma_50);
+    let current_sma_200 = last(sma_200);
+    let current_atr = last(atr_14);
+    
+    // Calculate Bollinger Bands
+    let bb_mean = rolling_mean(close_series, 20);
+    let bb_std = rolling_std(close_series, 20);
+    let bb_upper = last(bb_mean + bb_std * 2.0);
+    let bb_lower = last(bb_mean - bb_std * 2.0);
+    
+    // Trend determination
+    let uptrend = current_sma_20 > current_sma_50 && current_sma_50 > current_sma_200;
+    let downtrend = current_sma_20 < current_sma_50 && current_sma_50 < current_sma_200;
+    
+    // Entry conditions
+    let long_signal = uptrend && current_close < bb_lower;
+    let short_signal = downtrend && current_close > bb_upper;
+    
+    // Generate signal
+    if (long_signal) {
+        return 1.0;  // Long
+    } else if (short_signal) {
+        return -1.0; // Short
+    } else {
+        return 0.0;  // Neutral
+    }
+}
+
+// Configure backtest
+let backtest_config = {
+    strategy: "multiframe_strategy",
+    capital: 100000,
+    commission: 2.50,      // ES futures commission
+    slippage: 12.50,       // 1 tick slippage on ES
+    risk_per_trade: 0.02   // 2% risk per trade
+};
+
+// Run backtest
+let results = run_simulation(backtest_config);
+
+// Return comprehensive results
+{
+    config: backtest_config,
+    data_points: length(closes),
+    backtest_results: results,
+    status: "Backtest complete"
+}

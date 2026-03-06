@@ -1,0 +1,56 @@
+[package]
+name = "shape-lsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Language Server Protocol implementation for Shape"
+
+[features]
+default = []
+
+[dependencies]
+# Shape crates for parsing and semantic analysis
+shape-ast = { version = "0.1.0", path = "../../crates/shape-ast" }
+shape-runtime = { version = "0.1.0", path = "../../crates/shape-runtime" }
+shape-vm = { version = "0.1.0", path = "../../crates/shape-vm" }
+shape-wire = { version = "0.1.0", path = "../../crates/shape-wire" }
+
+# LSP protocol implementation (community-maintained fork)
+tower-lsp-server = "0.23"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Concurrent data structures
+dashmap = { workspace = true }
+
+# Text handling with rope for efficient editing
+ropey = "1.6"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+pest = "2.7"
+toml = "0.8"
+
+[[bin]]
+name = "shape-lsp"
+path = "src/main.rs"
+
+[lib]
+name = "shape_lsp"
+path = "src/lib.rs"
+
+[dev-dependencies]
+rust_decimal = { workspace = true }
+tempfile = "3.24"

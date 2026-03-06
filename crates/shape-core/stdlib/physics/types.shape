@@ -1,0 +1,20 @@
+//! Physics Types
+
+pub type Particle = {
+    position: [number, number, number];
+    velocity: [number, number, number];
+    mass: number;
+};
+
+pub type OscillatorState = {
+    x: number;
+    v: number;
+};
+
+pub type ProjectileState = {
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    t: number;
+};

@@ -1,0 +1,6 @@
+// Test const reassignment (should fail)
+
+const x = 10
+x = 20  // This should error
+
+find hammer last(5 candles)

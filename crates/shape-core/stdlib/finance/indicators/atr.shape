@@ -1,0 +1,75 @@
+// Average True Range (ATR) Indicator
+//
+// ATR measures market volatility by decomposing the entire range of an asset price
+// for that period. It was developed by J. Welles Wilder Jr.
+
+// Need one extra candle for true range calculation
+pub @warmup(period + 1) fn atr_candle(period = 14) {
+    // Calculate True Range for each candle
+    let tr_values = []
+    
+    // Calculate true range for the period
+    for i in range(period) {
+        let high = candle[-i].high
+        let low = candle[-i].low
+        let prev_close = candle[-i-1].close
+        
+        // True Range is the greatest of:
+        // 1. Current High - Current Low
+        // 2. |Current High - Previous Close|
+        // 3. |Current Low - Previous Close|
+        let tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close)
+        )
+        
+        tr_values = push(tr_values, tr)
+    }
+    
+    // Calculate the average of the true ranges
+    if length(tr_values) < period {
+        return None  // Not enough data
+    }
+    
+    // Use Wilder's smoothing method (similar to EMA)
+    let atr_value = avg(slice(tr_values, 0, period))  // Initial ATR
+    
+    for i in range(period, length(tr_values)) {
+        atr_value = ((atr_value * (period - 1)) + tr_values[i]) / period
+    }
+    
+    return atr_value
+}
+
+// ATR-based support/resistance levels
+pub @warmup(period + 1) fn atr_bands(period = 14, multiplier = 2.0) {
+    let atr_value = atr_candle(period)
+    
+    if atr_value == None {
+        return None
+    }
+    
+    let current_close = candle[0].close
+    
+    return {
+        upper: current_close + (atr_value * multiplier),
+        middle: current_close,
+        lower: current_close - (atr_value * multiplier),
+        atr: atr_value
+    }
+}
+
+// ATR percentage of price
+pub @warmup(period + 1) fn atr_percent(period = 14) {
+    let atr_value = atr_candle(period)
+    
+    if atr_value == None {
+        return None
+    }
+    
+    let current_close = candle[0].close
+    
+    // Return ATR as percentage of current price
+    return (atr_value / current_close) * 100
+}

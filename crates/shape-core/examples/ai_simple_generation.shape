@@ -1,0 +1,20 @@
+// Simple AI Strategy Generation Example
+//
+// This is the minimal example showing AI strategy generation.
+//
+// To run:
+//   export ANTHROPIC_API_KEY=your-key
+//   cargo run --features ai -p shape --bin shape -- run examples/ai_simple_generation.shape
+
+from stdlib::ai::generate use { ai_generate };
+
+// Generate a strategy
+let strategy = ai_generate("Create a Bollinger Bands mean reversion strategy");
+
+// Print the generated code
+print("=== Generated Strategy ===");
+print(strategy);
+print();
+
+print("✓ Strategy generated successfully!");
+print("You can now save this to a .shape file and backtest it.");

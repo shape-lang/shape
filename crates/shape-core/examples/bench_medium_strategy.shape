@@ -1,0 +1,61 @@
+// Benchmark: SMA Crossover Strategy
+// Complexity: 20+ candle reads, 10+ divisions, volume filter
+// Data: 10 years ES futures (2015-2025)
+
+// Load real ES data from DuckDB
+let data = load("market_data", { symbol: "ES", from: "2015-01-01", to: "2025-01-01" });
+
+// SMA crossover with volume filter
+function sma_crossover() {
+    let volume = data[0].volume
+
+    // Calculate 5-period SMA
+    let sum5 = data[0].close + data[-1].close + data[-2].close + data[-3].close + data[-4].close
+    let sma5 = sum5 / 5
+
+    // Calculate 10-period SMA
+    let sum10 = sum5 + data[-5].close + data[-6].close + data[-7].close + data[-8].close + data[-9].close
+    let sma10 = sum10 / 10
+
+    // Volume filter - need above average volume
+    let vol_sum = data[0].volume + data[-1].volume + data[-2].volume + data[-3].volume + data[-4].volume
+    let avg_vol = vol_sum / 5
+
+    if volume < avg_vol * 0.8 {
+        return "hold"
+    }
+
+    // Calculate previous SMAs for crossover detection
+    let prev_sum5 = data[-1].close + data[-2].close + data[-3].close + data[-4].close + data[-5].close
+    let prev_sma5 = prev_sum5 / 5
+    let prev_sum10 = prev_sum5 + data[-6].close + data[-7].close + data[-8].close + data[-9].close + data[-10].close
+    let prev_sma10 = prev_sum10 / 10
+
+    // Bullish crossover
+    if prev_sma5 <= prev_sma10 and sma5 > sma10 {
+        return "buy"
+    }
+    // Bearish crossover
+    if prev_sma5 >= prev_sma10 and sma5 < sma10 {
+        return "sell"
+    }
+
+    return "hold"
+}
+
+// Run backtest
+let config = {
+    strategy: "sma_crossover",
+    capital: 100000
+};
+
+let result = run_simulation(config);
+
+// Output results
+{
+    benchmark: "SMA Crossover Strategy",
+    complexity: "20+ candle reads, 10+ divisions, volume filter",
+    total_return: result.summary.total_return,
+    total_trades: result.summary.total_trades,
+    win_rate: result.summary.win_rate
+}

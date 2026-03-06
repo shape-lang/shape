@@ -1,0 +1,50 @@
+//! Simple Moving Average Crossover Strategy
+//! Using intrinsics for performance
+
+// This demonstrates a realistic strategy using intrinsics
+
+function sma_crossover_strategy() {
+    // Get price data
+    let close = series("close");
+
+    // Calculate fast and slow SMAs using intrinsics (FAST!)
+    let fast_sma = __intrinsic_rolling_mean(close, 10);
+    let slow_sma = __intrinsic_rolling_mean(close, 20);
+
+    // Get current and previous values
+    let fast_current = fast_sma.last();
+    let slow_current = slow_sma.last();
+
+    // Use logical operators (Phase 2 feature!)
+    if fast_current > slow_current {
+        "buy"
+    } else if fast_current < slow_current {
+        "sell"
+    } else {
+        "hold"
+    }
+}
+
+// Load market data
+let data = load("market_data", { symbol: "ES", from: "2023-01-01", to: "2023-01-10" });
+
+// Run backtest with intrinsics-powered strategy
+let config = {
+    strategy: "sma_crossover_strategy",
+    capital: 100000,
+    commission: 0.001,
+    stop_loss: 0.02,
+    take_profit: 0.05
+};
+
+let result = run_simulation(config);
+
+// Display results
+{
+    strategy: "SMA Crossover with Intrinsics",
+    total_return: result.summary.total_return,
+    sharpe_ratio: result.summary.sharpe_ratio,
+    total_trades: result.summary.total_trades,
+    win_rate: result.summary.win_rate,
+    status: "Backtest complete using intrinsics!"
+}

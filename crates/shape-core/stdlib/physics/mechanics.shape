@@ -1,0 +1,105 @@
+//! Physics Mechanics
+//!
+//! Basic step functions for common mechanics systems.
+
+function vec_add(a, b) {
+    let out = [];
+    for i in range(0, len(a)) {
+        out.push(a[i] + b[i]);
+    }
+    out
+}
+
+function vec_scale(a, s) {
+    let out = [];
+    for i in range(0, len(a)) {
+        out.push(a[i] * s);
+    }
+    out
+}
+
+/// Projectile step (no drag)
+///
+/// @param state - ProjectileState
+/// @param dt - time step
+/// @param g - gravity (positive, downward)
+pub fn projectile_step(state, dt, g = 9.81) {
+    let new_x = state.x + state.vx * dt;
+    let new_y = state.y + state.vy * dt - 0.5 * g * dt * dt;
+    let new_vy = state.vy - g * dt;
+
+    {
+        x: new_x,
+        y: new_y,
+        vx: state.vx,
+        vy: new_vy,
+        t: state.t + dt
+    }
+}
+
+/// Spring-mass oscillator step (1D)
+///
+/// @param state - OscillatorState
+/// @param k - spring constant
+/// @param m - mass
+/// @param dt - time step
+/// @param damping - damping coefficient
+pub fn spring_mass_step(state, k, m, dt, damping = 0.0) {
+    let a = -(k / m) * state.x - (damping / m) * state.v;
+    let v_next = state.v + a * dt;
+    let x_next = state.x + v_next * dt;
+
+    {
+        x: x_next,
+        v: v_next
+    }
+}
+
+/// Single step for n-body gravitational system
+///
+/// @param particles - array of Particle
+/// @param dt - time step
+/// @param G - gravitational constant
+pub fn n_body_step(particles, dt, G = 1.0) {
+    let n = len(particles);
+    let acc = [];
+
+    for i in range(0, n) {
+        acc.push([0.0, 0.0, 0.0]);
+    }
+
+    // Compute pairwise accelerations
+    for i in range(0, n) {
+        for j in range(i + 1, n) {
+            let pi = particles[i];
+            let pj = particles[j];
+            let dx = pj.position[0] - pi.position[0];
+            let dy = pj.position[1] - pi.position[1];
+            let dz = pj.position[2] - pi.position[2];
+            let dist2 = dx * dx + dy * dy + dz * dz + 0.000000001;
+            let dist = sqrt(dist2);
+            let inv = G / (dist2 * dist);
+
+            let ax = inv * pj.mass * dx;
+            let ay = inv * pj.mass * dy;
+            let az = inv * pj.mass * dz;
+
+            acc[i] = vec_add(acc[i], [ax, ay, az]);
+            acc[j] = vec_add(acc[j], [-inv * pi.mass * dx, -inv * pi.mass * dy, -inv * pi.mass * dz]);
+        }
+    }
+
+    let updated = [];
+    for i in range(0, n) {
+        let p = particles[i];
+        let v_next = vec_add(p.velocity, vec_scale(acc[i], dt));
+        let pos_next = vec_add(p.position, vec_scale(v_next, dt));
+        updated.push({
+            position: pos_next,
+            velocity: v_next,
+            mass: p.mass
+        });
+    }
+
+    updated
+}

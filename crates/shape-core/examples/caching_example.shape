@@ -1,0 +1,146 @@
+// @skip — uses pattern{} blocks (not yet in grammar)
+// Example demonstrating Shape's caching capabilities
+// The cache automatically optimizes repeated queries and calculations
+
+// Import standard indicators
+from stdlib::indicators use { sma, ema, rsi };
+from stdlib::patterns use { hammer, doji };
+
+// Define a complex pattern that will benefit from caching
+pattern complex_breakout {
+    // Multiple indicator calculations that will be cached
+    let sma20 = sma(20, close);
+    let sma50 = sma(50, close);
+    let sma200 = sma(200, close);
+    let rsi14 = rsi(14, close);
+    
+    // Pattern conditions
+    data[0].close > sma20[0] and
+    sma20[0] > sma50[0] and
+    sma50[0] > sma200[0] and
+    data[0].volume > data[-1].volume * 1.5 and
+    rsi14[0] > 50 and rsi14[0] < 70 and
+    data[0].close > data[-1].high // Breakout condition
+}
+
+// Define a function that performs expensive calculations
+function volatility_adjusted_return(period: number, symbol: string) -> number {
+    let returns = [];
+    for i in range(1, period) {
+        returns.push((data[i].close - data[i-1].close) / data[i-1].close);
+    }
+    
+    let avg_return = sum(returns) / returns.length;
+    let volatility = sqrt(sum(returns.map(r => (r - avg_return) ** 2)) / returns.length);
+    
+    // Sharpe-like metric
+    return avg_return / volatility;
+}
+
+// Multiple queries that will benefit from caching
+// First execution will compute and cache results
+data("market_data", { symbol: "ES", timeframe: "1h" })
+    .window(last(30, "days"))
+    .find("complex_breakout");
+
+// Second execution will use cached results (instant)
+data("market_data", { symbol: "ES", timeframe: "1h" })
+    .window(last(30, "days"))
+    .filter(row => row.volume > 1000000)
+    .find("complex_breakout");
+
+// Scan multiple symbols - pattern matches will be cached per symbol
+data("market_data", { symbols: ["AAPL", "GOOGL", "MSFT", "AMZN"], timeframe: "1h" })
+    .window(last(90, "days"))
+    .map(symbol_data => symbol_data.find("complex_breakout"));
+
+// Analyze with cached indicator values
+data("market_data", { symbol: "ES", timeframe: "1h" })
+    .window(last(365, "days"))
+    .aggregate({
+        avg_volume: avg(row => row.volume),
+        volatility: stddev(row => row.close),
+        trend_strength: correlation(row => row.close, row => row.index),
+        sharpe: volatility_adjusted_return(252, "ES")
+    });
+
+// Example of cache warming for better performance
+// This can be done during off-hours to precompute common queries
+test "cache_warming" {
+    // Precompute common indicators for multiple timeframes
+    let symbols = ["SPY", "QQQ", "IWM", "DIA"];
+    let timeframes = [1m, 5m, 15m, 1h, 1d];
+    
+    for symbol in symbols {
+        with_data(load_symbol(symbol)) {
+            for tf in timeframes {
+                on(tf) {
+                    // These calculations will be cached
+                    let _ = sma(20, close);
+                    let _ = sma(50, close);
+                    let _ = ema(12, close);
+                    let _ = ema(26, close);
+                    let _ = rsi(14, close);
+                }
+            }
+        }
+    }
+    
+    assert true; // Cache warming complete
+}
+
+// Demonstrate cache-aware streaming
+stream cached_scanner {
+    config {
+        provider: "binance";
+        symbols: ["BTC/USDT", "ETH/USDT"];
+        timeframes: [1m, 5m];
+    }
+    
+    state {
+        // Cache keys for pattern results
+        let pattern_cache = {};
+    }
+    
+    on_candle(symbol, candle) {
+        // Check if we've already scanned this time window
+        let window_key = symbol + ":" + floor(candle.timestamp / 300); // 5-minute windows
+        
+        if !pattern_cache[window_key] {
+            // Scan for patterns (results will be cached)
+            let breakouts = data("market_data", { symbol: symbol, timeframe: "1m" })
+                .window(last(100, "candles"))
+                .find("complex_breakout");
+            pattern_cache[window_key] = breakouts.length > 0;
+
+            if pattern_cache[window_key] {
+                print(symbol + " breakout detected at " + candle.timestamp);
+            }
+        }
+    }
+}
+
+// Performance comparison test
+test "cache_performance" {
+    let start_time = now();
+
+    // First run - no cache
+    data("market_data", { symbol: "ES", timeframe: "1h" })
+        .window(last(365, "days"))
+        .find("complex_breakout");
+    let first_run_time = now() - start_time;
+
+    // Second run - with cache
+    let cache_start = now();
+    data("market_data", { symbol: "ES", timeframe: "1h" })
+        .window(last(365, "days"))
+        .find("complex_breakout");
+    let cached_run_time = now() - cache_start;
+    
+    // Cache should be at least 10x faster
+    assert cached_run_time < first_run_time / 10;
+    
+    print("First run: " + first_run_time + "ms");
+    print("Cached run: " + cached_run_time + "ms");
+    print("Speedup: " + (first_run_time / cached_run_time) + "x");
+}

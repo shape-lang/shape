@@ -1,0 +1,236 @@
+//! Monte Carlo Utilities
+//!
+//! Provides simple Monte Carlo runner and summary statistics helpers.
+
+// percentile is defined in math.shape but each stdlib file is compiled
+// independently, so we call the intrinsic directly.
+fn percentile(series, p) {
+    __intrinsic_percentile(series, p)
+}
+
+type MonteCarloConfig {
+    seed: int,
+    collect_results: bool
+}
+
+/// Run n_sims simulations
+///
+/// @param n_sims - number of simulations
+/// @param sim_fn - function (i, config) => result
+/// @param config - optional config (seed, collect_results)
+pub fn monte_carlo(
+    n_sims,
+    sim_fn,
+    config: MonteCarloConfig = { seed: 0, collect_results: true }
+) {
+    let cfg: MonteCarloConfig = config;
+
+    if cfg.seed != 0 {
+        __intrinsic_random_seed(cfg.seed);
+    }
+
+    let results = [];
+
+    for i in range(0, n_sims) {
+        let r = sim_fn(i, cfg);
+        if cfg.collect_results {
+            results.push(r);
+        }
+    }
+
+    return {
+        simulations: n_sims,
+        results: results
+    };
+}
+
+/// Monte Carlo with antithetic variates for variance reduction
+///
+/// For each simulation, runs the user function twice:
+///   1. With the original random stream
+///   2. With the "antithetic" (complementary) random stream
+/// The average of each pair reduces variance by exploiting
+/// negative correlation between U and (1-U).
+///
+/// @param n_sims - number of simulation pairs (total evals = 2 * n_sims)
+/// @param sim_fn - function (i, is_antithetic) => result (number)
+///   When is_antithetic is true, use (1 - U) instead of U for random draws.
+/// @param config - optional config (seed, collect_results)
+/// @returns { simulations, results } where results are pair averages
+pub fn monte_carlo_antithetic(
+    n_sims,
+    sim_fn,
+    config: MonteCarloConfig = { seed: 0, collect_results: true }
+) {
+    let cfg: MonteCarloConfig = config;
+
+    if cfg.seed != 0 {
+        __intrinsic_random_seed(cfg.seed);
+    }
+
+    let results = [];
+
+    for i in range(0, n_sims) {
+        let r1 = sim_fn(i, false);
+        let r2 = sim_fn(i, true);
+        let avg = (r1 + r2) / 2.0;
+        if cfg.collect_results {
+            results.push(avg);
+        }
+    }
+
+    return {
+        simulations: n_sims * 2,
+        results: results
+    };
+}
+
+/// Monte Carlo with control variate for variance reduction
+///
+/// Reduces variance by using a correlated variable with known expected value.
+/// The adjusted estimate is: X_adj = X - c * (Y - E[Y])
+/// where c is the optimal coefficient estimated from the data.
+///
+/// @param n_sims - number of simulations
+/// @param sim_fn - function (i) => { value: number, control: number }
+///   Returns both the quantity of interest and the control variate value.
+/// @param control_mean - known expected value of the control variate
+/// @param config - optional config (seed, collect_results)
+/// @returns { simulations, results, raw_mean, adjusted_mean, variance_reduction }
+pub fn monte_carlo_control_variate(
+    n_sims,
+    sim_fn,
+    control_mean,
+    config: MonteCarloConfig = { seed: 0, collect_results: true }
+) {
+    let cfg: MonteCarloConfig = config;
+
+    if cfg.seed != 0 {
+        __intrinsic_random_seed(cfg.seed);
+    }
+
+    let values = [];
+    let controls = [];
+
+    for i in range(0, n_sims) {
+        let r = sim_fn(i);
+        values.push(r.value);
+        controls.push(r.control);
+    }
+
+    // Compute optimal coefficient c = Cov(X,Y) / Var(Y)
+    let n = len(values);
+    let mean_x = __intrinsic_mean(values);
+    let mean_y = __intrinsic_mean(controls);
+
+    var cov_xy = 0.0;
+    var var_y = 0.0;
+    for i in range(0, n) {
+        let dx = values[i] - mean_x;
+        let dy = controls[i] - mean_y;
+        cov_xy = cov_xy + dx * dy;
+        var_y = var_y + dy * dy;
+    }
+
+    var c_star = 0.0;
+    if var_y > 0.0 {
+        c_star = cov_xy / var_y;
+    }
+
+    // Compute adjusted values
+    let adjusted = [];
+    for i in range(0, n) {
+        adjusted.push(values[i] - c_star * (controls[i] - control_mean));
+    }
+
+    let adjusted_mean = __intrinsic_mean(adjusted);
+    let raw_var = __intrinsic_std(values);
+    let adj_var = __intrinsic_std(adjusted);
+    var var_reduction = 0.0;
+    if raw_var > 0.0 {
+        var_reduction = 1.0 - (adj_var * adj_var) / (raw_var * raw_var);
+    }
+
+    return {
+        simulations: n_sims,
+        results: adjusted,
+        raw_mean: mean_x,
+        adjusted_mean: adjusted_mean,
+        variance_reduction: var_reduction
+    };
+}
+
+/// Monte Carlo with stratified sampling for variance reduction
+///
+/// Divides [0,1) into n_sims equal strata and draws one sample per stratum.
+/// Guarantees better coverage of the sample space than pure random.
+///
+/// @param n_sims - number of strata (= number of simulations)
+/// @param sim_fn - function (i, u) => result where u is in [0,1)
+/// @param config - optional config (seed, collect_results)
+/// @returns { simulations, results }
+pub fn monte_carlo_stratified(
+    n_sims,
+    sim_fn,
+    config: MonteCarloConfig = { seed: 0, collect_results: true }
+) {
+    let cfg: MonteCarloConfig = config;
+
+    if cfg.seed != 0 {
+        __intrinsic_random_seed(cfg.seed);
+    }
+
+    let results = [];
+    let n = n_sims;
+
+    for i in range(0, n) {
+        // Stratified sample: u in [i/n, (i+1)/n)
+        let u = (i + __intrinsic_random()) / n;
+        let r = sim_fn(i, u);
+        if cfg.collect_results {
+            results.push(r);
+        }
+    }
+
+    return {
+        simulations: n_sims,
+        results: results
+    };
+}
+
+/// Compute summary statistics for Monte Carlo results
+pub fn monte_carlo_stats(results) {
+    let n = len(results);
+    if n == 0 {
+        return {
+            count: 0,
+            mean: None,
+            std: None,
+            min: None,
+            max: None,
+            p5: None,
+            p50: None,
+            p95: None,
+            ci_low: None,
+            ci_high: None
+        };
+    }
+
+    let mean_val = __intrinsic_mean(results);
+    let std_val = __intrinsic_std(results);
+    let stderr = std_val / sqrt(n);
+    let z = 1.96; // 95% CI
+
+    return {
+        count: n,
+        mean: mean_val,
+        std: std_val,
+        min: __intrinsic_min(results),
+        max: __intrinsic_max(results),
+        p5: percentile(results, 5),
+        p50: percentile(results, 50),
+        p95: percentile(results, 95),
+        ci_low: mean_val - z * stderr,
+        ci_high: mean_val + z * stderr
+    };
+}

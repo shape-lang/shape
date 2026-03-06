@@ -1,0 +1,32 @@
+[
+  {
+    "name": "RSI_Oversold_Mean_Reversion",
+    "code": "@indicators({ rsi: rsi(series(\"close\"), 14) })\nfunction strategy() {\n  if (rsi[-1] < 30) {\n    return { action: \"buy\", confidence: (30 - rsi[-1]) / 30.0 };\n  }\n  if (in_position && rsi[-1] > 70) {\n    return { action: \"sell\" };\n  }\n  return \"none\";\n}",
+    "symbol": "ES",
+    "timeframe": "1h"
+  },
+  {
+    "name": "SMA_Crossover_Trend_Following",
+    "code": "@indicators({ \n  sma_fast: sma(series(\"close\"), 10), \n  sma_slow: sma(series(\"close\"), 30) \n})\nfunction strategy() {\n  let prev_fast = sma_fast[-2];\n  let prev_slow = sma_slow[-2];\n  let curr_fast = sma_fast[-1];\n  let curr_slow = sma_slow[-1];\n  \n  // Golden cross - bullish\n  if (prev_fast <= prev_slow && curr_fast > curr_slow) {\n    return { action: \"buy\" };\n  }\n  \n  // Death cross - bearish\n  if (prev_fast >= prev_slow && curr_fast < curr_slow) {\n    return { action: \"sell\" };\n  }\n  \n  return \"none\";\n}",
+    "symbol": "ES",
+    "timeframe": "1h"
+  },
+  {
+    "name": "Bollinger_Bands_Reversal",
+    "code": "@indicators({ \n  bb: bollinger_bands(series(\"close\"), 20, 2) \n})\nfunction strategy() {\n  let close_price = close[-1];\n  let lower = bb.lower[-1];\n  let upper = bb.upper[-1];\n  \n  // Buy when price touches lower band\n  if (!in_position && close_price <= lower) {\n    return { \n      action: \"buy\", \n      stop_loss: close_price * 0.98,\n      take_profit: close_price * 1.04\n    };\n  }\n  \n  // Sell when price touches upper band\n  if (in_position && close_price >= upper) {\n    return { action: \"sell\" };\n  }\n  \n  return \"none\";\n}",
+    "symbol": "ES",
+    "timeframe": "1h"
+  },
+  {
+    "name": "MACD_Momentum",
+    "code": "@indicators({ \n  macd_data: macd(series(\"close\"), 12, 26, 9) \n})\nfunction strategy() {\n  let macd_line = macd_data.macd[-1];\n  let signal_line = macd_data.signal[-1];\n  let prev_macd = macd_data.macd[-2];\n  let prev_signal = macd_data.signal[-2];\n  \n  // Bullish crossover\n  if (prev_macd <= prev_signal && macd_line > signal_line) {\n    return { action: \"buy\" };\n  }\n  \n  // Bearish crossover\n  if (prev_macd >= prev_signal && macd_line < signal_line) {\n    return { action: \"sell\" };\n  }\n  \n  return \"none\";\n}",
+    "symbol": "ES",
+    "timeframe": "1h"
+  },
+  {
+    "name": "Combined_RSI_SMA_Strategy",
+    "code": "@indicators({ \n  rsi: rsi(series(\"close\"), 14),\n  sma_fast: sma(series(\"close\"), 20),\n  sma_slow: sma(series(\"close\"), 50)\n})\nfunction strategy() {\n  let rsi_val = rsi[-1];\n  let fast = sma_fast[-1];\n  let slow = sma_slow[-1];\n  let close_price = close[-1];\n  \n  // Buy when trend is up and RSI is oversold\n  if (!in_position && fast > slow && rsi_val < 35) {\n    return { \n      action: \"buy\",\n      confidence: (35 - rsi_val) / 35.0,\n      stop_loss: close_price * 0.97\n    };\n  }\n  \n  // Sell when RSI is overbought or trend reverses\n  if (in_position && (rsi_val > 65 || fast < slow)) {\n    return { action: \"sell\" };\n  }\n  \n  return \"none\";\n}",
+    "symbol": "ES",
+    "timeframe": "1h"
+  }
+]

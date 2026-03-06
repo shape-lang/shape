@@ -1,0 +1,31 @@
+// Finance Type Definitions
+//
+// Standard financial data structures used across the Shape ecosystem.
+// These types enable:
+// - Static type checking for function parameters
+// - JIT optimization (direct field access for known types)
+// - IDE/LSP support (type hints and autocompletion)
+
+// OHLCV Candle type for candlestick data
+pub type Candle = {
+    timestamp: timestamp;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+};
+
+// Trade type for backtesting
+pub type Trade = {
+    id: string;
+    symbol: string;
+    side: string;
+    entry_price: number;
+    exit_price: number;
+    quantity: number;
+    entry_time: timestamp;
+    exit_time: timestamp;
+    pnl: number;
+    pnl_pct: number;
+};

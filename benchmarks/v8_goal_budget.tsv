@@ -1,0 +1,14 @@
+# End-state goal: beat Node/V8 on every benchmark and geomean.
+# Use with: bash shape/benchmarks/run_all.sh --fast --enforce --budget-file shape/benchmarks/v8_goal_budget.tsv
+
+01_fib 1.00
+02_fib_iter 1.00
+03_sieve 1.00
+04_mandelbrot 1.00
+05_spectral 1.00
+06_ackermann 1.00
+07_sum_loop 1.00
+08_collatz 1.00
+09_matrix_mul 1.00
+10_primes_count 1.00
+GEOMEAN_MAX 1.00

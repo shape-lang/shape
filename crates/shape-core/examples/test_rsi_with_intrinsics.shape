@@ -1,0 +1,49 @@
+//! RSI Indicator Implementation Using Intrinsics
+//! This demonstrates how intrinsics enable efficient RSI calculation
+
+function rsi(series, period) {
+    // Calculate price changes using diff intrinsic
+    let changes = __intrinsic_diff(series)
+
+    // Separate gains and losses
+    let gains = changes.map(|x| max(x, 0))
+    let losses = changes.map(|x| max(-x, 0))
+
+    // Calculate average gains and losses using EMA intrinsic
+    let avg_gain = __intrinsic_ema(gains, period)
+    let avg_loss = __intrinsic_ema(losses, period)
+
+    // Calculate RS and RSI
+    let rs = avg_gain / avg_loss
+    let rsi = 100 - (100 / (1 + rs))
+
+    rsi
+}
+
+// Test data - realistic price movement
+let prices = series([
+    44.0, 44.5, 44.2, 43.8, 44.1,
+    44.5, 44.3, 44.8, 45.1, 45.5,
+    45.2, 45.8, 46.1, 45.9, 46.3,
+    46.8, 47.2, 46.9, 47.5, 48.0
+])
+
+// Calculate 14-period RSI
+let rsi_14 = rsi(prices, 14)
+
+print("Prices:", prices)
+print("RSI(14):", rsi_14)
+print("Latest RSI:", rsi_14.last())
+
+{
+    test: "rsi_with_intrinsics",
+    indicator: "RSI",
+    period: 14,
+    data_points: 20,
+    uses_intrinsic_diff: true,
+    uses_intrinsic_ema: true,
+    result: rsi_14,
+    latest_rsi: rsi_14.last(),
+    rsi_in_range: rsi_14.last() >= 0 && rsi_14.last() <= 100,
+    status: "RSI calculated using intrinsics!"
+}

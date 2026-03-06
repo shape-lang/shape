@@ -1,0 +1,60 @@
+//! Random Number Generation
+//!
+//! Provides high-quality random number generation using ChaCha8 PRNG.
+//! All functions use thread-local state for performance and reproducibility.
+
+/// Generate random f64 in [0, 1)
+///
+/// @example
+/// let r = random();  // 0.734521...
+pub fn random() {
+    __intrinsic_random()
+}
+
+/// Generate random integer in [lo, hi] (inclusive)
+///
+/// @param lo - Lower bound (inclusive)
+/// @param hi - Upper bound (inclusive)
+/// @returns Random integer in [lo, hi]
+///
+/// @example
+/// let dice = random_int(1, 6);  // 1, 2, 3, 4, 5, or 6
+pub fn random_int(lo, hi) {
+    __intrinsic_random_int(lo, hi)
+}
+
+/// Seed the RNG for reproducibility
+///
+/// @param seed - Seed value (number)
+///
+/// @example
+/// random_seed(42);
+/// let r1 = random();
+/// random_seed(42);
+/// let r2 = random();  // r1 == r2
+pub fn random_seed(seed) {
+    __intrinsic_random_seed(seed)
+}
+
+/// Generate random number from normal distribution
+///
+/// @param mean - Mean of the distribution
+/// @param std - Standard deviation (must be non-negative)
+/// @returns Random number from N(mean, std²)
+///
+/// @example
+/// let price_shock = random_normal(0, 0.02);  // 2% volatility
+pub fn random_normal(mean, std) {
+    __intrinsic_random_normal(mean, std)
+}
+
+/// Generate array of n random numbers in [0, 1)
+///
+/// @param n - Number of samples
+/// @returns Vec of random numbers
+///
+/// @example
+/// let samples = random_array(1000);
+pub fn random_array(n) {
+    __intrinsic_random_array(n)
+}

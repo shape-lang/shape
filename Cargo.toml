@@ -1,0 +1,95 @@
+[workspace]
+members = [
+  "crates/shape-macros",
+  "crates/shape-ast",
+  "crates/shape-value",
+  "crates/shape-wire",
+  "crates/shape-runtime",
+  "crates/shape-vm",
+  "crates/shape-jit",
+  "crates/shape-viz/shape-viz-core",
+  "crates/shape-viz/shape-viz-native",
+  "bin/shape-cli",
+  "tools/shape-lsp",
+  "tools/shape-test",
+  "tools/xtask",
+  "crates/shape-abi-v1",
+  "crates/shape-gc",
+  "extensions/python",
+  "extensions/typescript",
+]
+exclude = [
+  "tree-sitter-shape",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Daniel Amesberger"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/shape-lang/shape"
+description = "The Shape programming language"
+
+[workspace.dependencies]
+# Core dependencies
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+
+# Internal crates
+shape-macros = { version = "0.1.0", path = "crates/shape-macros" }
+shape-ast = { version = "0.1.0", path = "crates/shape-ast" }
+shape-value = { version = "0.1.0", path = "crates/shape-value" }
+shape-wire = { version = "0.1.0", path = "crates/shape-wire" }
+shape-runtime = { version = "0.1.0", path = "crates/shape-runtime" }
+shape-vm = { version = "0.1.0", path = "crates/shape-vm" }
+shape-jit = { version = "0.1.0", path = "crates/shape-jit" }
+shape-abi-v1 = { version = "0.1.0", path = "crates/shape-abi-v1" }
+shape-gc = { version = "0.1.0", path = "crates/shape-gc" }
+
+# Arrow columnar format
+arrow-array = "57"
+arrow-schema = "57"
+arrow-buffer = "57"
+arrow-ipc = "57"
+arrow-ord = "57"
+arrow-select = "57"
+arrow-csv = "57"
+arrow-json = "57"
+parquet = "57"
+
+# Numeric types
+rust_decimal = { version = "1.36", features = ["serde-str"] }
+
+# Performance
+ahash = "0.8"
+rayon = "1.10"
+parking_lot = "0.12"
+dashmap = "6.1"
+ordered-float = { version = "3.9", features = ["serde"] }
+
+# Web/API
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tungstenite = "0.24"
+tokio-tungstenite = "0.24"
+
+# Testing
+mockall = "0.13"
+proptest = "1.5"
+criterion = "0.5"
+
+# Visualization
+image = "0.25"
+glam = { version = "0.28", features = ["bytemuck"] }
+bytemuck = { version = "1.23.1", features = ["derive"] }
+wgpu = "25.0.2"
+winit = "0.30"

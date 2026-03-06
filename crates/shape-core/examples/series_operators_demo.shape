@@ -1,0 +1,47 @@
+// Demo of series operators and clear syntax
+
+// Access price series
+let closes = series("close");
+let opens = series("open");
+let highs = series("high");
+let lows = series("low");
+let volume = series("volume");
+
+// Basic arithmetic operations
+let body = closes - opens;  // Candle body size
+let range = highs - lows;   // Candle range
+let midpoint = (highs + lows) / 2;  // Midpoint price
+
+// Comparisons
+let bullish_candles = closes > opens;  // Boolean series
+let high_volume = volume > volume * 1.5;  // Compare to scaled version
+
+// Complex conditions
+let strong_bullish = (closes > opens) && (body > range * 0.5);
+
+// Indicator methods need to be implemented as functions for now
+// Since method calls on series aren't yet fully supported
+// This is what we want eventually:
+// let sma20 = closes.sma(20);
+// let ema50 = closes.ema(50);
+// let trend_up = sma20 > ema50;
+
+// For now, indicators would be functions:
+// let sma20 = sma(closes, 20);
+// let ema50 = ema(closes, 50);
+
+// Signal generation (when fully integrated):
+// let signals = closes
+//     .where(closes > sma20 && volume > volume.sma(10))
+//     .capture({
+//         entry: closes,
+//         stop: lows - atr(14) * 2,
+//         target: closes + atr(14) * 3
+//     });
+
+// Print results
+print("Closes series:", closes);
+print("Opens series:", opens);
+print("Body sizes:", body);
+print("Bullish candles:", bullish_candles);
+print("Strong bullish candles:", strong_bullish);

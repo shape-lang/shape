@@ -1,0 +1,14 @@
+// Test block expressions and scoping
+
+let x = 10
+
+// Block expression that creates its own scope
+let y = {
+    let local = 5;
+    local + x
+}
+
+// This should error - local is not in scope
+// let z = local
+
+find hammer last(5 candles)

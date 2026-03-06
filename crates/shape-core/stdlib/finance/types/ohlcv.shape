@@ -1,0 +1,47 @@
+//! OHLCV Data Type Definition
+//! Standard Open-High-Low-Close-Volume market data structure
+//!
+//! OHLCV data is now represented as generic Objects with specific fields.
+//! These helper functions provide convenience methods for working with OHLCV data.
+
+// Helper to validate OHLCV data
+pub fn is_ohlcv(row) {
+    row.open != None
+        and row.high != None
+        and row.low != None
+        and row.close != None
+        and row.volume != None
+}
+
+// Computed properties
+
+pub fn body(row) {
+    abs(row.close - row.open)
+}
+
+pub fn upper_wick(row) {
+    row.high - max(row.open, row.close)
+}
+
+pub fn lower_wick(row) {
+    min(row.open, row.close) - row.low
+}
+
+pub fn candle_range(row) {
+    row.high - row.low
+}
+
+pub fn is_green(row) {
+    row.close >= row.open
+}
+
+pub fn is_red(row) {
+    row.close < row.open
+}
+
+pub fn is_doji(row, threshold) {
+    let thresh = if threshold == None then 0.001 else threshold;
+    let body_size = body(row);
+    let range_size = range(row);
+    range_size > 0 and (body_size / range_size) < thresh
+}

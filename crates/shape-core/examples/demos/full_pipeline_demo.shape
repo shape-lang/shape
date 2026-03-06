@@ -1,0 +1,178 @@
+// ====================================================================
+// Full Pipeline Demo: Data Loading -> Query -> Simulate -> Display
+// ====================================================================
+//
+// This script demonstrates the complete Shape pipeline:
+//   1. Load data from CSV (extension-based data loader)
+//   2. Filter/select using the Queryable pattern
+//   3. Run a backtest simulation via DataTable.simulate()
+//   4. Display performance metrics
+//
+// The key design principle: data loading logic never pollutes the core
+// Shape language. Extensions are self-contained — each data source
+// provides its own Queryable implementation for filter/select/orderBy.
+//
+// Run:
+//   cargo run --bin shape -- run shape-core/examples/demos/full_pipeline_demo.shape
+//
+// Prerequisites:
+//   Create OHLCV data at /tmp/demo_ohlcv.csv:
+//     open,high,low,close,volume
+//     100.0,105.0,98.0,103.0,1000.0
+//     103.0,108.0,101.0,107.0,1200.0
+//     ...
+
+// ===== Step 1: Load data from CSV =====
+// csv.load() returns a DataTable backed by Arrow RecordBatch.
+// This uses the built-in CSV loader extension — no domain logic in Rust.
+
+let data = csv.load("/tmp/demo_ohlcv.csv")
+print("Loaded " + data.row_count() + " rows from CSV")
+
+// ===== Step 2: Define backtest configuration =====
+// All configuration is plain Shape objects — no special Rust types.
+
+let config = {
+    initial_state: {
+        cash: 100000.0,
+        position: 0.0,
+        entry_price: 0.0,
+        equity: 100000.0,
+        trades: 0,
+        wins: 0,
+        losses: 0,
+        total_pnl: 0.0,
+        peak_equity: 100000.0,
+        max_drawdown: 0.0
+    }
+}
+
+// ===== Step 3: Run backtest via DataTable.simulate() =====
+// The strategy is a pure Shape function: (row, state, idx) => new_state
+// DataTable.simulate() iterates rows and threads state through the handler.
+//
+// Strategy: simple mean-reversion
+//   - Buy when price drops below entry (reversal expected)
+//   - Sell when price rises above entry + 2% (take profit)
+
+let result = data.simulate(|row, state, idx| {
+    let close = row.close
+
+    // First bar: just record the close
+    if idx == 0 {
+        return {
+            cash: state.cash,
+            position: state.position,
+            entry_price: close,
+            equity: state.equity,
+            trades: state.trades,
+            wins: state.wins,
+            losses: state.losses,
+            total_pnl: state.total_pnl,
+            peak_equity: state.peak_equity,
+            max_drawdown: state.max_drawdown
+        }
+    }
+
+    // Buy signal: not in position and price dropped below entry
+    if state.position == 0.0 && close < state.entry_price * 0.98 {
+        let size = floor(state.cash * 0.10 / close)
+        if size > 0 {
+            let cost = size * close
+            let new_cash = state.cash - cost
+            let new_equity = new_cash + size * close
+            let new_peak = if new_equity > state.peak_equity { new_equity } else { state.peak_equity }
+            return {
+                cash: new_cash,
+                position: size,
+                entry_price: close,
+                equity: new_equity,
+                trades: state.trades,
+                wins: state.wins,
+                losses: state.losses,
+                total_pnl: state.total_pnl,
+                peak_equity: new_peak,
+                max_drawdown: state.max_drawdown
+            }
+        }
+    }
+
+    // Sell signal: in position and price rose above entry + 2%
+    if state.position > 0.0 && close > state.entry_price * 1.02 {
+        let proceeds = state.position * close
+        let pnl = (close - state.entry_price) * state.position
+        let new_cash = state.cash + proceeds
+        let new_equity = new_cash
+        let new_peak = if new_equity > state.peak_equity { new_equity } else { state.peak_equity }
+        let dd = (new_peak - new_equity) / new_peak
+        let new_dd = if dd > state.max_drawdown { dd } else { state.max_drawdown }
+        let new_wins = if pnl > 0 { state.wins + 1 } else { state.wins }
+        let new_losses = if pnl <= 0 { state.losses + 1 } else { state.losses }
+        return {
+            cash: new_cash,
+            position: 0.0,
+            entry_price: close,
+            equity: new_equity,
+            trades: state.trades + 1,
+            wins: new_wins,
+            losses: new_losses,
+            total_pnl: state.total_pnl + pnl,
+            peak_equity: new_peak,
+            max_drawdown: new_dd
+        }
+    }
+
+    // Hold: update equity tracking
+    let eq = state.cash + state.position * close
+    let new_peak = if eq > state.peak_equity { eq } else { state.peak_equity }
+    let dd = (new_peak - eq) / new_peak
+    let new_dd = if dd > state.max_drawdown { dd } else { state.max_drawdown }
+    {
+        cash: state.cash,
+        position: state.position,
+        entry_price: state.entry_price,
+        equity: eq,
+        trades: state.trades,
+        wins: state.wins,
+        losses: state.losses,
+        total_pnl: state.total_pnl,
+        peak_equity: new_peak,
+        max_drawdown: new_dd
+    }
+}, config)
+
+// ===== Step 4: Display results =====
+let s = result.final_state
+print("=== Full Pipeline Results ===")
+print("Final equity:    $" + s.equity)
+print("Total P&L:       $" + s.total_pnl)
+print("Total trades:    " + s.trades)
+print("Wins:            " + s.wins)
+print("Losses:          " + s.losses)
+print("Max drawdown:    " + (s.max_drawdown * 100) + "%")
+print("Bars processed:  " + result.elements_processed)
+
+// ===== Pipeline Summary =====
+// This demo shows:
+// 1. Data loaded via extension (csv.load) - no CSV logic in core Shape
+// 2. DataTable.simulate() - generic iteration primitive in core
+// 3. Strategy logic - pure Shape functions, no Rust needed
+// 4. Results - plain Shape objects, queryable like any other data
+//
+// The same pattern works with any data source:
+//   DuckDB:   duckdb.connect("duckdb://market_data.duckdb")
+//   Postgres: postgres.connect("postgres://localhost/trades")
+//   OpenAPI:  openapi.connect({...}).data.filter(|d| d.id > 10).execute()
+//
+// Each uses its own Queryable impl — filter generates SQL/params/SIMD
+// depending on the backend, but the Shape code looks identical.
+//
+// ===== DuckDB Variant (requires --features ext-duckdb) =====
+// Uncomment below to run backtest from DuckDB:
+//
+// let db = duckdb.connect("duckdb://market_data.duckdb")
+// let data = duckdb.load({ connection: db, query: "SELECT * FROM ohlcv ORDER BY timestamp" })
+// let result = data.simulate(|row, state, idx| {
+//     // ... same strategy logic as above ...
+// }, config)
+// print("DuckDB backtest: " + result.final_state.trades + " trades")

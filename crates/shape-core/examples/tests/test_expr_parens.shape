@@ -1,0 +1,8 @@
+// Test expressions with parentheses
+
+let x = 10
+let y = 20
+let z = 30
+let avg = (x + y + z) / 3
+
+find hammer last(5 candles)

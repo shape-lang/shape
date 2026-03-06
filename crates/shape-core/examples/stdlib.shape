@@ -1,0 +1,217 @@
+// @skip — uses pattern{} blocks (not yet in grammar)
+// Shape Standard Library
+// Common pattern definitions that can be imported
+
+// ===== Single Candle Patterns =====
+
+pattern hammer ~0.02 {
+    abs(data[0].close - data[0].open) / data[0].open < 0.01 and
+    (min(data[0].open, data[0].close) - data[0].low) > 
+        2 * abs(data[0].close - data[0].open) and
+    (data[0].high - max(data[0].open, data[0].close)) < 
+        0.1 * abs(data[0].close - data[0].open)
+}
+
+pattern inverted_hammer ~0.02 {
+    abs(data[0].close - data[0].open) / data[0].open < 0.01 and
+    (data[0].high - max(data[0].open, data[0].close)) > 
+        2 * abs(data[0].close - data[0].open) and
+    (min(data[0].open, data[0].close) - data[0].low) < 
+        0.1 * abs(data[0].close - data[0].open)
+}
+
+pattern doji ~0.001 {
+    data[0].open ~= data[0].close and
+    (data[0].high - data[0].low) > 3 * abs(data[0].close - data[0].open)
+}
+
+pattern dragonfly_doji {
+    doji and
+    data[0].high ~= max(data[0].open, data[0].close) and
+    (min(data[0].open, data[0].close) - data[0].low) > 
+        (data[0].high - data[0].low) * 0.7
+}
+
+pattern gravestone_doji {
+    doji and
+    data[0].low ~= min(data[0].open, data[0].close) and
+    (data[0].high - max(data[0].open, data[0].close)) > 
+        (data[0].high - data[0].low) * 0.7
+}
+
+pattern marubozu ~0.001 {
+    data[0].high ~= max(data[0].open, data[0].close) and
+    data[0].low ~= min(data[0].open, data[0].close) and
+    abs(data[0].close - data[0].open) / data[0].open > 0.005
+}
+
+// ===== Two Candle Patterns =====
+
+pattern bullish_engulfing {
+    data[-1].close < data[-1].open and
+    data[0].close > data[0].open and
+    data[0].open <= data[-1].close and
+    data[0].close > data[-1].open
+}
+
+pattern bearish_engulfing {
+    data[-1].close > data[-1].open and
+    data[0].close < data[0].open and
+    data[0].open >= data[-1].close and
+    data[0].close < data[-1].open
+}
+
+pattern piercing_line {
+    data[-1].close < data[-1].open and
+    data[0].close > data[0].open and
+    data[0].open < data[-1].close and
+    data[0].close > (data[-1].open + data[-1].close) / 2 and
+    data[0].close < data[-1].open
+}
+
+pattern dark_cloud_cover {
+    data[-1].close > data[-1].open and
+    data[0].close < data[0].open and
+    data[0].open > data[-1].close and
+    data[0].close < (data[-1].open + data[-1].close) / 2 and
+    data[0].close > data[-1].open
+}
+
+pattern harami {
+    max(data[0].open, data[0].close) < max(data[-1].open, data[-1].close) and
+    min(data[0].open, data[0].close) > min(data[-1].open, data[-1].close) and
+    abs(data[0].close - data[0].open) < 
+        0.5 * abs(data[-1].close - data[-1].open)
+}
+
+pattern tweezer_top {
+    data[-1].high ~= data[0].high and
+    data[-1].close > data[-1].open and
+    data[0].close < data[0].open
+}
+
+pattern tweezer_bottom {
+    data[-1].low ~= data[0].low and
+    data[-1].close < data[-1].open and
+    data[0].close > data[0].open
+}
+
+// ===== Three Candle Patterns =====
+
+pattern morning_star {
+    data[-2].close < data[-2].open and
+    abs(data[-2].close - data[-2].open) > 0.01 * data[-2].open and
+    abs(data[-1].close - data[-1].open) < 
+        0.3 * abs(data[-2].close - data[-2].open) and
+    data[0].close > data[0].open and
+    data[0].close > (data[-2].open + data[-2].close) / 2
+}
+
+pattern evening_star {
+    data[-2].close > data[-2].open and
+    abs(data[-2].close - data[-2].open) > 0.01 * data[-2].open and
+    abs(data[-1].close - data[-1].open) < 
+        0.3 * abs(data[-2].close - data[-2].open) and
+    data[0].close < data[0].open and
+    data[0].close < (data[-2].open + data[-2].close) / 2
+}
+
+pattern three_white_soldiers {
+    data[-2].close > data[-2].open and
+    data[-1].close > data[-1].open and
+    data[0].close > data[0].open and
+    data[-1].open > data[-2].open and
+    data[-1].open < data[-2].close and
+    data[0].open > data[-1].open and
+    data[0].open < data[-1].close and
+    data[0].close > data[-1].close
+}
+
+pattern three_black_crows {
+    data[-2].close < data[-2].open and
+    data[-1].close < data[-1].open and
+    data[0].close < data[0].open and
+    data[-1].open < data[-2].open and
+    data[-1].open > data[-2].close and
+    data[0].open < data[-1].open and
+    data[0].open > data[-1].close and
+    data[0].close < data[-1].close
+}
+
+// ===== Complex Patterns =====
+
+pattern head_and_shoulders {
+    // Simplified version - would need more candles for full pattern
+    // Left shoulder
+    data[-4].high > data[-5].high and
+    data[-4].high > data[-3].high and
+    // Head
+    data[-2].high > data[-4].high and
+    data[-2].high > data[-3].high and
+    data[-2].high > data[-1].high and
+    // Right shoulder
+    data[0].high > data[-1].high and
+    data[0].high < data[-2].high and
+    abs(data[0].high - data[-4].high) / data[0].high < 0.02
+}
+
+// ===== Pattern Combinations =====
+
+pattern bullish_reversal {
+    (hammer or bullish_engulfing or morning_star or piercing_line) and
+    data[0].low < lowest(low, 20)
+}
+
+pattern bearish_reversal {
+    (shooting_star or bearish_engulfing or evening_star or dark_cloud_cover) and
+    data[0].high > highest(high, 20)
+}
+
+// ===== Volume-based Patterns =====
+
+pattern high_volume_hammer {
+    hammer and
+    data[0].volume > sma(volume, 20) * 2
+}
+
+pattern climax_top {
+    data[0].high > highest(high, 50) and
+    data[0].volume > highest(volume, 50) and
+    data[0].close < data[0].open
+}
+
+pattern climax_bottom {
+    data[0].low < lowest(low, 50) and
+    data[0].volume > highest(volume, 50) and
+    data[0].close > data[0].open
+}
+
+// ===== Utility Functions (exported) =====
+
+function body_size(offset) {
+    abs(data[offset].close - data[offset].open)
+}
+
+function body_pct(offset) {
+    body_size(offset) / data[offset].open
+}
+
+function is_bullish(offset) {
+    data[offset].close > data[offset].open
+}
+
+function is_bearish(offset) {
+    data[offset].close < data[offset].open
+}
+
+function upper_shadow(offset) {
+    data[offset].high - max(data[offset].open, data[offset].close)
+}
+
+function lower_shadow(offset) {
+    min(data[offset].open, data[offset].close) - data[offset].low
+}
+
+// Usage:
+// from "stdlib" use { hammer, doji, bullish_engulfing }
+// find hammer or doji

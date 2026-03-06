@@ -1,0 +1,48 @@
+// Test basic backtesting - simplified syntax
+// Focus on making each component work
+
+// Load ES data with date range
+print("Loading ES data from 2020 to 2024...");
+let es = load("market_data", { symbol: "ES", from: "2020-01-01", to: "2024-12-31" });
+
+// Verify data loaded
+let closes = series("close");
+print("Loaded " + closes.length() + " candles");
+print("Current close: " + closes[-1]);
+
+// Define a simple strategy
+function ma_strategy() {
+    let c = series("close");
+    let ma20 = rolling_mean(c, 20);
+    let ma50 = rolling_mean(c, 50);
+    
+    if (ma20[-1] > ma50[-1]) {
+        return "buy";
+    } else {
+        return "sell";
+    }
+}
+
+// Test strategy
+let signal = ma_strategy();
+print("Strategy signal: " + signal);
+
+// Now test backtest function
+// Since object literals have parsing issues, let's create the config differently
+let config = {};
+config["strategy"] = "ma_strategy";
+config["capital"] = 100000;
+config["commission"] = 0.001;
+
+print("\nRunning backtest...");
+let result = run_simulation(config);
+
+// Access results
+print("\n=== Results ===");
+print("Trades: " + result.trades.length());
+print("Final equity: " + result.equity[-1]);
+print("Win rate: " + result.summary["win_rate"] + "%");
+print("Sharpe: " + result.summary["sharpe_ratio"]);
+print("Max DD: " + result.summary["max_drawdown"] + "%");
+
+print("\nTest complete!");

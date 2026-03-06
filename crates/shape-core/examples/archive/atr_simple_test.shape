@@ -1,0 +1,29 @@
+# Simple ATR reversal test
+# Load data
+:data /home/amd/dev/finance/data ES 2020-01-01 2020-01-31
+
+# Check data loaded
+count(all candles)
+
+# Get current candle info
+data[0].close
+data[0].open
+
+# Calculate price change
+let current_close = data[0].close
+let current_open = data[0].open
+let price_change = current_close - current_open
+price_change
+
+# Check absolute value
+let abs_change = abs(price_change)
+abs_change
+
+# Simple reversal check
+let is_green = data[0].close > data[0].open
+let next_is_green = data[1].close > data[1].open
+let is_reversal = is_green != next_is_green
+
+is_green
+next_is_green
+is_reversal

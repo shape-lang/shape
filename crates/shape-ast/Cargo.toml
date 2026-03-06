@@ -1,0 +1,20 @@
+[package]
+name = "shape-ast"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AST types and Pest grammar for the Shape programming language"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+logos = "0.13"
+pest = "2.8"
+pest_derive = "2.8"
+ordered-float = { workspace = true }
+rust_decimal = { workspace = true }

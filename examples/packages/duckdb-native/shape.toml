@@ -1,0 +1,8 @@
+[project]
+name = "duckdb_native"
+version = "0.1.0"
+
+[native-dependencies]
+# Override with an absolute path if needed:
+# duckdb = { provider = "path", path = "/path/to/libduckdb.so" }
+duckdb = { provider = "system", linux = "libduckdb.so", macos = "libduckdb.dylib", windows = "duckdb.dll" }

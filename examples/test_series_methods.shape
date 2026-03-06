@@ -1,0 +1,27 @@
+// Test Series method resolution
+// This file tests if Series methods from stdlib are properly resolved
+
+// First, let's test basic series creation
+let prices = series([100, 102, 98, 103, 105, 101, 104]);
+print("Created series with length:", prices.length);
+
+// Test built-in method that should work
+let mean_val = prices.mean();
+print("Mean value:", mean_val);
+
+// Now test SMA which is defined in stdlib
+print("Testing SMA calculation...");
+let sma5 = prices.sma(5);
+print("SMA(5) calculated successfully");
+print("SMA values:", sma5);
+
+// Test direct series arithmetic (should work)
+let doubled = prices * 2;
+print("Doubled series first value:", doubled[0]);
+
+// Test where method for signal generation
+let high_prices = prices > 102;
+print("High prices series created");
+
+let signals = prices.where(high_prices);
+print("SignalBuilder created:", typeof(signals));

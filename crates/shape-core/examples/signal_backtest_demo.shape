@@ -1,0 +1,175 @@
+// Demo: Signal Generation and Backtesting Pipeline
+// This example shows the complete workflow from signal generation to backtest results
+
+// Import our indicator functions
+from std::core::math use { sma, rsi };
+
+// Simple Moving Average Crossover Strategy
+function ma_crossover_demo() {
+    print("=== Moving Average Crossover Strategy ===");
+    
+    // Get price data
+    let closes = series("close");
+    
+    // Calculate moving averages
+    let fast_ma = sma(closes, 20);
+    let slow_ma = sma(closes, 50);
+    
+    // Generate signals
+    let golden_cross = (fast_ma > slow_ma) && (shift(fast_ma, 1) <= shift(slow_ma, 1));
+    let death_cross = (fast_ma < slow_ma) && (shift(fast_ma, 1) >= shift(slow_ma, 1));
+    
+    // Create long signals with stop loss and take profit
+    let long_signals = closes
+        .where(golden_cross)
+        .capture({
+            side: "long",
+            entry: closes,
+            stop_loss: closes * 0.98,    // 2% stop loss
+            take_profit: closes * 1.05,   // 5% take profit
+            fast_ma: fast_ma,
+            slow_ma: slow_ma
+        });
+    
+    // Run backtest
+    let results = long_signals.backtest({
+        initial_capital: 100000,
+        position_size: 0.1,  // 10% of capital per trade
+        commission: 0.001,   // 0.1% commission
+        slippage: 0.0005    // 0.05% slippage
+    });
+    
+    // Display results
+    print("Initial Capital: $100,000");
+    print("Final Capital: $" + (100000 * (1 + results.total_return / 100)));
+    print("Total Return: " + results.total_return + "%");
+    print("Sharpe Ratio: " + results.sharpe_ratio);
+    print("Max Drawdown: " + results.max_drawdown + "%");
+    print("Number of Trades: " + results.num_trades);
+    print("Win Rate: " + (results.win_rate * 100) + "%");
+    print("Profit Factor: " + results.profit_factor);
+    print("Average Win: $" + results.avg_win);
+    print("Average Loss: $" + results.avg_loss);
+    
+    // Show first few trades
+    print("\nFirst 5 trades:");
+    for i in 0..min(5, results.trades.length) {
+        let trade = results.trades[i];
+        print("  Trade " + (i+1) + ": " + trade.side + 
+              " Entry: $" + trade.entry_price + 
+              " Exit: $" + trade.exit_price + 
+              " P&L: $" + trade.pnl +
+              " Reason: " + trade.exit_reason);
+    }
+    
+    return results;
+}
+
+// RSI Mean Reversion Strategy
+function rsi_reversion_demo() {
+    print("\n=== RSI Mean Reversion Strategy ===");
+    
+    let closes = series("close");
+    let rsi_values = rsi(closes, 14);
+    
+    // Buy when RSI < 30 (oversold)
+    let oversold = rsi_values < 30;
+    
+    // Capture entry conditions
+    let signals = closes
+        .where(oversold)
+        .capture({
+            side: "long",
+            entry: closes,
+            stop_loss: closes * 0.97,     // 3% stop loss
+            take_profit: closes * 1.04,    // 4% take profit
+            entry_rsi: rsi_values
+        });
+    
+    // Backtest with different parameters
+    let results = signals.backtest({
+        initial_capital: 50000,
+        position_size: 0.2,  // 20% per trade (more aggressive)
+        commission: 0.001,
+        max_positions: 3     // Allow up to 3 concurrent positions
+    });
+    
+    print("Strategy: Buy when RSI < 30");
+    print("Initial Capital: $50,000");
+    print("Total Return: " + results.total_return + "%");
+    print("Number of Trades: " + results.num_trades);
+    print("Win Rate: " + (results.win_rate * 100) + "%");
+    
+    return results;
+}
+
+// Risk-Based Position Sizing Example
+function risk_based_sizing_demo() {
+    print("\n=== Risk-Based Position Sizing Demo ===");
+    
+    let closes = series("close");
+    let highs = series("high");
+    let lows = series("low");
+    
+    // Use ATR for dynamic stops
+    let atr14 = atr(highs, lows, closes, 14);
+    
+    // Simple breakout signal
+    let highest_20 = max(highs, 20);
+    let breakout = closes > shift(highest_20, 1);
+    
+    let signals = closes
+        .where(breakout)
+        .capture({
+            side: "long",
+            entry: closes,
+            stop_loss: closes - (atr14 * 2),    // 2 ATR stop
+            take_profit: closes + (atr14 * 4),  // 4 ATR target (2:1 RR)
+            atr: atr14
+        });
+    
+    // Use risk-based sizing - risk 1% per trade
+    let results = signals.backtest({
+        initial_capital: 100000,
+        position_sizing: {
+            type: "risk_based",
+            risk_percent: 0.01  // 1% risk per trade
+        },
+        commission: 0.001
+    });
+    
+    print("Strategy: Breakout with ATR-based stops");
+    print("Risk per trade: 1% of capital");
+    print("Total Return: " + results.total_return + "%");
+    print("Max Drawdown: " + results.max_drawdown + "%");
+    print("Risk-Reward Ratio: 2:1");
+    
+    return results;
+}
+
+// Run all demos
+print("Shape Signal Generation & Backtesting Demo");
+print("============================================\n");
+
+let ma_results = ma_crossover_demo();
+let rsi_results = rsi_reversion_demo();
+let risk_results = risk_based_sizing_demo();
+
+print("\n=== Summary Comparison ===");
+print("Strategy               | Return  | Sharpe | Max DD | Trades | Win Rate");
+print("----------------------|---------|--------|--------|--------|----------");
+print("MA Crossover          | " + ma_results.total_return.toFixed(2) + "% | " + 
+      ma_results.sharpe_ratio.toFixed(2) + " | " + 
+      ma_results.max_drawdown.toFixed(2) + "% | " +
+      ma_results.num_trades + " | " +
+      (ma_results.win_rate * 100).toFixed(1) + "%");
+print("RSI Mean Reversion    | " + rsi_results.total_return.toFixed(2) + "% | " +
+      rsi_results.sharpe_ratio.toFixed(2) + " | " +
+      rsi_results.max_drawdown.toFixed(2) + "% | " +
+      rsi_results.num_trades + " | " +
+      (rsi_results.win_rate * 100).toFixed(1) + "%");
+print("Breakout (Risk-Based) | " + risk_results.total_return.toFixed(2) + "% | " +
+      risk_results.sharpe_ratio.toFixed(2) + " | " +
+      risk_results.max_drawdown.toFixed(2) + "% | " +
+      risk_results.num_trades + " | " +
+      (risk_results.win_rate * 100).toFixed(1) + "%");

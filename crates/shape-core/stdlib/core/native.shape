@@ -1,0 +1,44 @@
+//! Low-level native interop helpers.
+//!
+//! This module wraps internal `__native_*` builtins and provides stable names
+//! for package-level C interop code.
+
+/// Pointer width for the current host (bytes).
+pub fn ptr_size() -> usize { __native_ptr_size() }
+
+/// Allocate a pointer-sized cell initialized to null.
+pub fn ptr_new_cell() -> ptr { __native_ptr_new_cell() }
+
+/// Free a pointer-sized cell allocated by `ptr_new_cell`.
+pub fn ptr_free_cell(cell: ptr) -> void { __native_ptr_free_cell(cell) }
+
+/// Read pointer-sized value at memory address.
+pub fn ptr_read(addr: ptr) -> ptr { __native_ptr_read_ptr(addr) }
+
+/// Write pointer-sized value to memory address.
+pub fn ptr_write(addr: ptr, value: ptr) -> void { __native_ptr_write_ptr(addr, value) }
+
+/// Import Arrow C schema/array pointers into an untyped table.
+pub fn table_from_arrow_c(
+  schema_ptr: ptr,
+  array_ptr: ptr
+) -> Result<Table<any>, AnyError> {
+  __native_table_from_arrow_c(schema_ptr, array_ptr)
+}
+
+/// Import Arrow C schema/array pointers and bind to a named row schema.
+pub fn table_from_arrow_c_typed<T>(
+  schema_ptr: ptr,
+  array_ptr: ptr,
+  type_name: string
+) -> Result<Table<T>, AnyError> {
+  __native_table_from_arrow_c_typed(schema_ptr, array_ptr, type_name)
+}
+
+/// Bind an existing table to a named row schema.
+pub fn table_bind_type<T>(
+  table: Table<any>,
+  type_name: string
+) -> Result<Table<T>, AnyError> {
+  __native_table_bind_type(table, type_name)
+}

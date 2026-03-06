@@ -1,0 +1,69 @@
+[package]
+name = "shape-viz-core"
+version = "0.1.0"
+edition = "2024"
+description = "Core charting library with GPU-accelerated rendering for time series visualization"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/shape-lang/shape"
+authors = ["Daniel Amesberger"]
+keywords = ["charts", "visualization", "gpu", "wgpu", "time-series"]
+categories = ["visualization", "graphics"]
+
+[dependencies]
+# GPU Rendering
+wgpu = "25.0"
+bytemuck = { version = "1.16", features = ["derive"] }
+pollster = "0.3"
+
+# Math and geometry
+glam = { version = "0.28", features = ["bytemuck"] }
+ultraviolet = "0.9"
+
+# Data structures and time handling
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = "0.3"
+
+# Error handling and logging
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+
+# Text rendering  
+glyphon = { version = "0.9", optional = true }
+cosmic-text = { version = "0.12" }
+etagere = { version = "0.2" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Memory management and performance
+rayon = "1.8"
+ahash = "0.8"
+smallvec = "1.13"
+
+# Wire protocol for data exchange
+shape-wire = { version = "0.1.0", path = "../../shape-wire" }
+
+[features]
+default = ["text-rendering"]
+text-rendering = ["glyphon"]
+debug = []
+web = []
+
+[dev-dependencies]
+env_logger = "0.11"
+criterion = "0.5"
+tokio = { version = "1.0", features = ["rt", "macros"] }
+image = "0.25"
+
+[[example]]
+name = "test_axes"
+required-features = ["text-rendering"]
+
+[[example]]
+name = "custom_themes"
+required-features = ["text-rendering"]
+
+[[example]]
+name = "test_reference_theme"
+required-features = ["text-rendering"]

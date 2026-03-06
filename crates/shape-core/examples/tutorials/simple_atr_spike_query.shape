@@ -1,0 +1,62 @@
+// @skip - Uses query blocks and module imports not yet implemented
+// Simple ATR Spike Reversal Query
+// Find all 15-minute candles where price moved 20%+ of ATR
+// Check if reversal occurred within next 10 bars
+
+from stdlib::indicators::atr use { atr }
+
+// Simple query to find ATR spikes and check reversals
+query find_atr_spikes {
+    from candles 
+    where (candle.high - candle.low) >= atr(14) * 0.20
+    select {
+        time: candle.timestamp,
+        spike_size: (candle.high - candle.low) / atr(14),
+        direction: candle.close > candle.open ? "bullish" : "bearish",
+        
+        // Check for reversal in next 10 bars
+        reversed: any(candles[1:10], c => 
+            direction == "bullish" ? 
+                c.close < candle.low :    // Bullish spike reverses if price drops below low
+                c.close > candle.high      // Bearish spike reverses if price rises above high
+        ),
+        
+        // Find exact reversal point if it exists
+        reversal_bar: first_index(candles[1:10], c =>
+            direction == "bullish" ?
+                c.close < candle.low :
+                c.close > candle.high
+        ),
+        
+        // Calculate reversal magnitude
+        reversal_percent: reversed ? 
+            (direction == "bullish" ?
+                (candle.low - min(candles[1:10].close)) / candle.low * 100 :
+                (max(candles[1:10].close) - candle.high) / candle.high * 100
+            ) : 0
+    }
+}
+
+// Execute the query
+let spikes = run query find_atr_spikes 
+    on "ES" 
+    with timeframe("15m") 
+    from @"2020-01-01" 
+    to @"2022-12-31"
+
+// Calculate statistics
+let total_spikes = spikes.length
+let reversals = spikes.filter(s => s.reversed)
+let reversal_rate = reversals.length / total_spikes * 100
+
+print(f"Found {total_spikes} ATR spikes (20%+ of ATR)")
+print(f"Reversals: {reversals.length} ({reversal_rate:.1f}%)")
+print(f"Average reversal bar: {avg(reversals.map(r => r.reversal_bar)):.1f}")
+print(f"Average reversal magnitude: {avg(reversals.map(r => r.reversal_percent)):.2f}%")
+
+// Show some examples
+print("\nRecent spike examples:")
+for spike in spikes.last(5) {
+    print(f"{spike.time}: {spike.direction} spike {spike.spike_size:.1f}x ATR, " +
+          f"{spike.reversed ? 'reversed in ' + spike.reversal_bar + ' bars' : 'no reversal'}")
+}

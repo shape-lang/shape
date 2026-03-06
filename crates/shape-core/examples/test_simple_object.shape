@@ -1,0 +1,12 @@
+// Simple test
+
+// This works at top level
+let obj1 = { test: 42 };
+
+// This should also work in a block
+let result = {
+    let obj2 = { inner: 99 };
+    obj2.inner
+};
+
+print("Result: " + result);

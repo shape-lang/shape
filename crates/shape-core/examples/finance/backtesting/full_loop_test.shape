@@ -1,0 +1,149 @@
+// ====================================================================
+// Full Loop Test: CSV Load -> Simulate -> Display Results
+// ====================================================================
+// This script tests the complete pipeline:
+// 1. Load OHLCV data from CSV via extension module import
+// 2. Run a backtest using DataTable.simulate()
+// 3. Print performance metrics
+//
+// Prerequisites:
+//   Create a CSV file at /tmp/test_ohlcv.csv with OHLCV data.
+//   All numeric columns should be float to avoid Int64/Float64 mismatch
+//   in the DenseKernel (see KNOWN GAPS below).
+//
+// Run: cargo run --bin shape -- run shape-core/examples/finance/backtesting/full_loop_test.shape
+
+// ===== Step 1: Load CSV data =====
+// csv.load() returns a DataTable backed by Arrow RecordBatch.
+// The DataTable.simulate() method iterates over rows as RowView objects.
+
+let data = csv.load({ path: "/tmp/test_ohlcv.csv" })
+print("Loaded " + data.row_count() + " rows x " + data.column_count() + " columns")
+
+// ===== Step 2: Define strategy state =====
+// simulate() accepts an initial_state in the config object.
+// The handler returns the new state each tick.
+
+let config = {
+    initial_state: {
+        cash: 100000.0,
+        position: 0.0,
+        entry_price: 0.0,
+        equity: 100000.0,
+        trades: 0,
+        wins: 0,
+        losses: 0,
+        total_pnl: 0.0
+    }
+}
+
+// ===== Step 3: Run backtest via simulate() =====
+// handler(row, state, idx) where row is a RowView with column access.
+// Returns the new state each tick.
+
+let result = data.simulate(|row, state, idx| {
+    let close = row.close
+
+    // Skip first bar (need previous close for signal)
+    if idx == 0 {
+        return state
+    }
+
+    // Simple momentum: buy if price up, sell if price down
+    // We track previous close in state for comparison
+    let prev_equity = state.equity
+
+    // Buy signal: not in position and close is rising
+    if state.position == 0.0 && close > state.entry_price && state.entry_price > 0.0 {
+        let size = floor(state.cash * 0.1 / close)
+        if size > 0 {
+            let cost = size * close
+            let new_cash = state.cash - cost
+            return {
+                cash: new_cash,
+                position: size,
+                entry_price: close,
+                equity: new_cash + size * close,
+                trades: state.trades,
+                wins: state.wins,
+                losses: state.losses,
+                total_pnl: state.total_pnl
+            }
+        }
+    }
+
+    // Sell signal: in position and price dropped
+    if state.position > 0.0 && close < state.entry_price {
+        let proceeds = state.position * close
+        let pnl = (close - state.entry_price) * state.position
+        let new_cash = state.cash + proceeds
+        let new_wins = if pnl > 0 { state.wins + 1 } else { state.wins }
+        let new_losses = if pnl <= 0 { state.losses + 1 } else { state.losses }
+        return {
+            cash: new_cash,
+            position: 0.0,
+            entry_price: close,
+            equity: new_cash,
+            trades: state.trades + 1,
+            wins: new_wins,
+            losses: new_losses,
+            total_pnl: state.total_pnl + pnl
+        }
+    }
+
+    // Hold: update equity and track close for next bar's signal
+    let eq = state.cash + state.position * close
+    {
+        cash: state.cash,
+        position: state.position,
+        entry_price: if state.entry_price == 0.0 { close } else { state.entry_price },
+        equity: eq,
+        trades: state.trades,
+        wins: state.wins,
+        losses: state.losses,
+        total_pnl: state.total_pnl
+    }
+}, config)
+
+// ===== Step 4: Display results =====
+let s = result.final_state
+print("=== Backtest Results ===")
+print("Final cash:      $" + s.cash)
+print("Final position:  " + s.position)
+print("Final equity:    $" + s.equity)
+print("Total trades:    " + s.trades)
+print("Wins:            " + s.wins)
+print("Losses:          " + s.losses)
+print("Total P&L:       $" + s.total_pnl)
+print("Bars processed:  " + result.elements_processed)
+print("Completed:       " + result.completed)
+
+// ===== KNOWN GAPS =====
+//
+// 1. Int64/Float64 column mismatch:
+//    csv.load() infers integer columns (e.g., volume = "1000") as Int64.
+//    DenseKernel's column pointer extraction filters by stride == 8,
+//    which includes both Float64 AND Int64. If a strategy reads col_ptrs[N]
+//    as *const f64 but the column is actually Int64, the bits will be
+//    misinterpreted. Workaround: ensure CSV data uses decimal points
+//    (e.g., "1000.0") for all numeric columns, or cast to f64 after load.
+//
+// 2. RowView vs raw pointer access:
+//    DataTable.simulate() in the VM uses RowView objects (safe field access
+//    by name). DenseKernel uses raw column pointers (indexed by column
+//    position). These are two separate code paths:
+//    - Shape scripts use the VM path (RowView, safe, ~1-5M rows/sec)
+//    - Rust/JIT kernels use DenseKernel (raw ptrs, >10M ticks/sec)
+//    The VM path handles type coercion; the DenseKernel path does not.
+//
+// 3. No automatic Int64->Float64 column promotion:
+//    There is no automatic coercion layer between csv.load() output
+//    and DenseKernel input. If csv.load() produces an Int64 column,
+//    it remains Int64 in the DataTable. The VM RowView path handles
+//    this (reading row.volume returns a number regardless), but the
+//    DenseKernel raw-pointer path does not.
+//
+// 4. Missing simulate_correlated() in VM:
+//    The Shape backtest_correlated() function calls simulate_correlated(),
+//    but this is not yet wired up as a VM builtin. Multi-asset backtesting
+//    currently requires direct Rust DenseKernel/CorrelatedKernel usage.

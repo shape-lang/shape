@@ -1,0 +1,258 @@
+//! Backtest Performance Metrics
+//!
+//! Functions for calculating trading performance metrics from backtest results.
+
+// ===== Core Metrics =====
+
+/// Calculate total return as percentage
+/// @param final_state - Final backtest state
+/// @param initial_capital - Starting capital
+pub fn total_return_pct(final_state, initial_capital) {
+    (final_state.equity - initial_capital) / initial_capital * 100.0
+}
+
+/// Calculate annualized return
+/// @param total_return - Total return as decimal (e.g., 0.25 for 25%)
+/// @param days - Number of trading days
+/// @param trading_days_per_year - Trading days per year (default 252)
+pub fn annualized_return(total_return, days, trading_days_per_year = 252.0) {
+    let years = days / trading_days_per_year;
+    if years <= 0 {
+        0.0
+    } else {
+        pow(1.0 + total_return, 1.0 / years) - 1.0
+    }
+}
+
+/// Calculate win rate
+/// @param final_state - Final backtest state
+pub fn calc_win_rate(final_state) {
+    if final_state.trades == 0 {
+        0.0
+    } else {
+        final_state.wins / final_state.trades
+    }
+}
+
+/// Calculate loss rate
+pub fn calc_loss_rate(final_state) {
+    if final_state.trades == 0 {
+        0.0
+    } else {
+        final_state.losses / final_state.trades
+    }
+}
+
+// ===== Risk Metrics =====
+
+/// Calculate Sharpe Ratio from equity curve
+/// @param equity_series - Column of equity values over time
+/// @param risk_free_rate - Annual risk-free rate (default 0.02 = 2%)
+/// @param periods_per_year - Number of periods per year (252 for daily)
+pub fn sharpe_ratio(equity_series, risk_free_rate = 0.02, periods_per_year = 252.0) {
+    // Calculate returns
+    let returns = equity_series.pct_change();
+
+    // Calculate mean and std of returns
+    let mean_return = returns.mean();
+    let std_return = returns.std();
+
+    if std_return == 0.0 {
+        return 0.0;
+    }
+
+    // Annualize
+    let annual_return = mean_return * periods_per_year;
+    let annual_std = std_return * sqrt(periods_per_year);
+
+    (annual_return - risk_free_rate) / annual_std
+}
+
+/// Calculate Sortino Ratio (uses downside deviation)
+/// @param equity_series - Column of equity values
+/// @param risk_free_rate - Annual risk-free rate
+/// @param periods_per_year - Periods per year
+pub fn sortino_ratio(equity_series, risk_free_rate = 0.02, periods_per_year = 252.0) {
+    let returns = equity_series.pct_change();
+    let mean_return = returns.mean();
+
+    // Calculate downside deviation (only negative returns)
+    let negative_returns = returns.filter(|r| r < 0);
+    let downside_std = negative_returns.std();
+
+    if downside_std == 0.0 {
+        return 0.0;
+    }
+
+    let annual_return = mean_return * periods_per_year;
+    let annual_downside = downside_std * sqrt(periods_per_year);
+
+    (annual_return - risk_free_rate) / annual_downside
+}
+
+/// Calculate Calmar Ratio (return / max drawdown)
+/// @param annual_return - Annualized return
+/// @param max_drawdown - Maximum drawdown as decimal
+pub fn calmar_ratio(annual_return, max_drawdown) {
+    if max_drawdown == 0.0 {
+        0.0
+    } else {
+        annual_return / max_drawdown
+    }
+}
+
+// ===== Drawdown Analysis =====
+
+/// Calculate maximum drawdown from equity series
+/// @param equity_series - Column of equity values
+pub fn max_drawdown(equity_series) {
+    let peak = 0.0;
+    let max_dd = 0.0;
+
+    for equity in equity_series {
+        if equity > peak {
+            peak = equity;
+        }
+        let dd = (peak - equity) / peak;
+        if dd > max_dd {
+            max_dd = dd;
+        }
+    }
+
+    max_dd
+}
+
+/// Calculate average drawdown
+/// @param equity_series - Column of equity values
+pub fn avg_drawdown(equity_series) {
+    let peak = 0.0;
+    let total_dd = 0.0;
+    let count = 0;
+
+    for equity in equity_series {
+        if equity > peak {
+            peak = equity;
+        }
+        let dd = (peak - equity) / peak;
+        if dd > 0 {
+            total_dd = total_dd + dd;
+            count = count + 1;
+        }
+    }
+
+    if count == 0 {
+        0.0
+    } else {
+        total_dd / count
+    }
+}
+
+// ===== Trade Analysis =====
+
+/// Calculate average trade P&L
+pub fn avg_trade_pnl(final_state) {
+    if final_state.trades == 0 {
+        0.0
+    } else {
+        final_state.total_pnl / final_state.trades
+    }
+}
+
+/// Calculate average winning trade
+/// Note: Requires tracking of win_pnl in state
+pub fn avg_win(total_win_pnl, wins) {
+    if wins == 0 {
+        0.0
+    } else {
+        total_win_pnl / wins
+    }
+}
+
+/// Calculate average losing trade
+pub fn avg_loss(total_loss_pnl, losses) {
+    if losses == 0 {
+        0.0
+    } else {
+        total_loss_pnl / losses
+    }
+}
+
+/// Calculate expectancy (expected value per trade)
+/// @param win_rate - Win rate as decimal
+/// @param avg_win - Average winning trade
+/// @param avg_loss - Average losing trade (positive number)
+pub fn expectancy(win_rate, avg_win, avg_loss) {
+    (win_rate * avg_win) - ((1.0 - win_rate) * avg_loss)
+}
+
+/// Calculate profit factor
+/// @param gross_profit - Total profit from winning trades
+/// @param gross_loss - Total loss from losing trades (positive number)
+pub fn profit_factor(gross_profit, gross_loss) {
+    if gross_loss == 0.0 {
+        if gross_profit > 0.0 {
+            999999.0  // Infinity representation
+        } else {
+            0.0
+        }
+    } else {
+        gross_profit / gross_loss
+    }
+}
+
+// ===== Summary Report =====
+
+/// Generate a complete metrics report from backtest result
+/// @param result - Simulation result from backtest()
+/// @param initial_capital - Starting capital
+/// @param days - Number of trading days
+pub fn generate_report(result, initial_capital, days) {
+    let state = result.final_state;
+
+    let total_ret = total_return_pct(state, initial_capital);
+    let total_ret_decimal = total_ret / 100.0;
+    let annual_ret = annualized_return(total_ret_decimal, days);
+    let win_r = calc_win_rate(state);
+    let calmar = calmar_ratio(annual_ret, state.max_drawdown);
+    let avg_pnl = avg_trade_pnl(state);
+
+    {
+        // Returns
+        total_return_pct: total_ret,
+        annualized_return_pct: annual_ret * 100.0,
+
+        // Risk metrics
+        max_drawdown_pct: state.max_drawdown * 100.0,
+        calmar_ratio: calmar,
+
+        // Trade statistics
+        total_trades: state.trades,
+        winning_trades: state.wins,
+        losing_trades: state.losses,
+        win_rate_pct: win_r * 100.0,
+
+        // P&L
+        total_pnl: state.total_pnl,
+        avg_trade_pnl: avg_pnl,
+
+        // Final state
+        final_equity: state.equity,
+        final_cash: state.cash,
+        final_position: state.position
+    }
+}
+
+/// Print a formatted metrics report
+pub fn print_report(report) {
+    print("=== Backtest Results ===");
+    print("Total Return: " + report.total_return_pct + "%");
+    print("Annualized Return: " + report.annualized_return_pct + "%");
+    print("Max Drawdown: " + report.max_drawdown_pct + "%");
+    print("Calmar Ratio: " + report.calmar_ratio);
+    print("");
+    print("Total Trades: " + report.total_trades);
+    print("Win Rate: " + report.win_rate_pct + "%");
+    print("Avg Trade P&L: $" + report.avg_trade_pnl);
+    print("");
+    print("Final Equity: $" + report.final_equity);
+}

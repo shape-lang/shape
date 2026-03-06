@@ -1,0 +1,1 @@
+- ignore the watermark in the reference image.

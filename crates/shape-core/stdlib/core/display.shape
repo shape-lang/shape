@@ -1,0 +1,19 @@
+// Core Display trait for string representation.
+// Types implementing Display can be converted to human-readable strings.
+// Used by print() and string interpolation to format typed values.
+
+trait Display {
+    // Convert self value to a human-readable string representation.
+    // Implementors should override self for custom formatting.
+    display(): string
+}
+
+// User types implement Display via:
+//   impl Display for Currency {
+//       method display() -> string {
+//           return self.symbol + self.amount.toFixed(self.decimals)
+//       }
+//   }
+//
+// Comptime fields on the type (e.g. symbol, decimals) are resolved
+// at compile time with zero runtime cost.

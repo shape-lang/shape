@@ -1,0 +1,121 @@
+// ====================================================================
+// Multi-Source Queryable Demo
+// ====================================================================
+//
+// Demonstrates that Shape's Queryable trait provides a uniform query
+// interface across ALL data sources. Each data source implements
+// Queryable differently (SQL, HTTP params, SIMD) but the Shape code
+// is identical.
+//
+// This file is illustrative — it shows the patterns for each backend.
+// To run individual sections, enable the corresponding extension:
+//   cargo run --bin shape --features ext-duckdb -- run ...
+//   cargo run --bin shape --features ext-postgres -- run ...
+//   cargo run --bin shape --features ext-openapi -- run ...
+
+// ===== Pattern 1: In-Memory Table (SIMD-optimized) =====
+//
+// Table<T> implements Queryable with native PHF methods.
+// filter/select/orderBy use SIMD-accelerated column operations.
+//
+// let data = csv.load({ path: "trades.csv" })
+// let winners = data
+//     .filter(|t| t.pnl > 0)
+//     .select(["symbol", "pnl", "entry_time"])
+//     .orderBy(|t| t.pnl, Order.Desc)
+//     .limit(10)
+//     .execute()
+
+// ===== Pattern 2: DuckDB (SQL Generation) =====
+//
+// DuckDbQuery implements Queryable by generating SQL.
+// filter(|u| u.age >= 18) -> ExprProxy -> FilterExpr -> "age >= 18"
+//
+// from std::loaders::duckdb use { connect, Order }
+// let conn = duckdb.connect("duckdb://analytics.db")
+// let active_users = conn.users
+//     .filter(|u| u.age >= 18 && u.active == true)
+//     .select(["name", "email", "age"])
+//     .orderBy(|u| u.age, Order.Desc)
+//     .limit(100)
+//     .execute()
+//
+// Generated SQL: SELECT name, email, age FROM users WHERE age >= 18 AND active = true ORDER BY age DESC LIMIT 100
+
+// ===== Pattern 3: PostgreSQL (SQL Generation) =====
+//
+// PgQuery implements Queryable with the same proxy pattern.
+// Uses postgres.filter_to_sql() instead of duckdb.filter_to_sql().
+//
+// from std::loaders::postgres use { connect, Order }
+// let conn = postgres.connect("postgres://localhost/trading")
+// let recent_trades = conn.trades
+//     .filter(|t| t.symbol == "AAPL" && t.pnl > 0)
+//     .orderBy(|t| t.entry_time, Order.Desc)
+//     .limit(50)
+//     .execute()
+//
+// Generated SQL: SELECT * FROM trades WHERE symbol = 'AAPL' AND pnl > 0 ORDER BY entry_time DESC LIMIT 50
+
+// ===== Pattern 4: OpenAPI (HTTP Parameter Generation) =====
+//
+// ApiQuery implements Queryable by building query parameters.
+// filter_to_params() converts FilterExpr to {key: value} pairs.
+//
+// let conn = openapi.connect({
+//     base_url: "https://api.broker.com",
+//     endpoints: [{
+//         path: "/v2/positions",
+//         method: "GET",
+//         response_fields: [
+//             { name: "symbol", field_type: "string" },
+//             { name: "qty", field_type: "number" },
+//             { name: "market_value", field_type: "number" }
+//         ],
+//         query_params: ["symbol", "status"]
+//     }]
+// })
+// let positions = conn.positions
+//     .filter(|p| p.market_value > 10000)
+//     .limit(20)
+//     .execute()
+//
+// Generated request: GET /v2/positions?market_value_gt=10000&limit=20
+
+// ===== The Uniform Interface =====
+//
+// All four patterns use EXACTLY the same Shape code:
+//   source.filter(predicate).select(cols).orderBy(key, dir).limit(n).execute()
+//
+// The Queryable trait (stdlib/core/queryable.shape):
+//   trait Queryable {
+//       filter(predicate): any,
+//       select(columns): any,
+//       orderBy(column, direction): any,
+//       limit(n): any,
+//       execute(): any
+//   }
+//
+// Extension authors implement this trait for their query type,
+// and all query generation logic lives in the extension's .shape file.
+// The Shape core has ZERO knowledge of SQL, HTTP, or any backend.
+
+// ===== Composable Pipeline =====
+//
+// Because all sources return DataTables after execute(),
+// you can chain cross-source operations:
+//
+// let db_prices = duckdb.connect("...").prices
+//     .filter(|p| p.date >= "2024-01-01")
+//     .execute()
+//
+// let result = db_prices.simulate((row, state, idx) => {
+//     // Strategy logic here
+//     state
+// }, { initial_state: { cash: 100000.0, position: 0.0 } })
+//
+// This is the "full loop": load -> query -> simulate -> display.
+// Every step is generic. Domain logic lives in Shape stdlib.
+
+print("Multi-source Queryable demo loaded successfully")
+print("See comments for usage patterns with each backend")

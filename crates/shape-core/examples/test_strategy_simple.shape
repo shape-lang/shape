@@ -1,0 +1,45 @@
+// Simple test to verify basic functionality
+print("Starting simple strategy test...");
+
+// Load ES data
+let data = load("market_data", { symbol: "ES", from: "2023-01-01", to: "2023-12-31" });
+print("Data loaded");
+
+// Get close prices
+let closes = series("close");
+print("Got close series with length: " + length(closes));
+
+// Calculate simple moving average
+let sma20 = rolling_mean(closes, 20);
+print("Calculated SMA(20) with length: " + length(sma20));
+
+// Define a simple strategy
+function simple_ma_strategy() {
+    return 1.0; // Always return long signal for testing
+}
+
+print("Strategy defined");
+
+// Create config
+let config = {
+    strategy: "simple_ma_strategy",
+    capital: 100000,
+    commission: 0.001
+};
+
+print("Config created");
+print("Running backtest...");
+
+// Run backtest
+let result = run_simulation(config);
+
+print("Backtest complete");
+print("Result type: " + result);
+
+// Return final output
+{
+    status: "Test complete",
+    data_loaded: true,
+    strategy_executed: true,
+    result: result
+}

@@ -1,0 +1,92 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: ubuntu-latest
+            use_cross: true
+            target: x86_64-unknown-linux-gnu
+            artifact: shape-linux-x86_64
+          - runs_on: ubuntu-latest
+            use_cross: true
+            target: aarch64-unknown-linux-gnu
+            artifact: shape-linux-aarch64
+          - runs_on: macos-14
+            use_cross: false
+            target: aarch64-apple-darwin
+            artifact: shape-macos-aarch64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install target
+        if: ${{ !matrix.use_cross }}
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build shape CLI (${{ matrix.target }})
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release -p shape-cli --bin shape --target ${{ matrix.target }}
+          else
+            cargo build --release -p shape-cli --bin shape --target ${{ matrix.target }}
+          fi
+
+      - name: Package artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/shape dist/shape
+          chmod +x dist/shape
+          tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz shape
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum dist/${{ matrix.artifact }}.tar.gz > dist/${{ matrix.artifact }}.sha256
+          else
+            shasum -a 256 dist/${{ matrix.artifact }}.tar.gz > dist/${{ matrix.artifact }}.sha256
+          fi
+          rm dist/shape
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}.tar.gz
+            dist/${{ matrix.artifact }}.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: shape-*
+          merge-multiple: true
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

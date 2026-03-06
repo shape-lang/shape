@@ -1,0 +1,375 @@
+//! Bidirectional Type Checking
+//!
+//! Implements bidirectional type checking for improved type inference,
+//! especially for function expressions and higher-order functions where expected
+//! types can guide parameter type inference.
+//!
+//! ## Check Modes
+//!
+//! - `Infer`: No expected type, purely synthesize
+//! - `Check(Type)`: Check against expected type
+//! - `Synth(Type)`: Synthesize with hint (soft constraint)
+
+use super::TypeInferenceEngine;
+use crate::type_system::*;
+use shape_ast::ast::{Expr, FunctionParameter, ObjectEntry, TypeAnnotation};
+
+/// Mode for bidirectional type checking
+#[derive(Debug, Clone)]
+pub enum CheckMode {
+    /// Infer the type without any expectation
+    Infer,
+    /// Check the expression against an expected type (hard constraint)
+    Check(Type),
+    /// Synthesize with a hint type (soft constraint)
+    Synth(Type),
+}
+
+impl CheckMode {
+    /// Get the expected type if in Check or Synth mode
+    pub fn expected(&self) -> Option<&Type> {
+        match self {
+            CheckMode::Infer => None,
+            CheckMode::Check(ty) | CheckMode::Synth(ty) => Some(ty),
+        }
+    }
+
+    /// Check if this is a hard constraint
+    pub fn is_hard_constraint(&self) -> bool {
+        matches!(self, CheckMode::Check(_))
+    }
+}
+
+impl TypeInferenceEngine {
+    /// Check an expression with a given mode
+    ///
+    /// This is the main entry point for bidirectional type checking.
+    pub fn check_expr(&mut self, expr: &Expr, mode: CheckMode) -> TypeResult<Type> {
+        match mode {
+            CheckMode::Infer => self.infer_expr(expr),
+            CheckMode::Check(expected) => self.check_against(expr, &expected),
+            CheckMode::Synth(hint) => self.synth_with_hint(expr, &hint),
+        }
+    }
+
+    /// Check an expression against an expected type
+    ///
+    /// The expected type guides inference and provides better error messages.
+    pub fn check_against(&mut self, expr: &Expr, expected: &Type) -> TypeResult<Type> {
+        match expr {
+            // Function expression: use expected function type for parameter inference
+            Expr::FunctionExpr {
+                params,
+                return_type,
+                body,
+                span: _span,
+            } => self.check_function_expr_against(params, return_type.as_ref(), body, expected),
+
+            // Array: propagate element type to elements
+            Expr::Array(elements, _) => {
+                if let Type::Concrete(TypeAnnotation::Array(elem_ty)) = expected {
+                    self.check_array_against(elements, &Type::Concrete(*elem_ty.clone()))
+                } else {
+                    // Expected isn't an array type, infer and unify
+                    let inferred = self.infer_expr(expr)?;
+                    self.constraints.push((inferred.clone(), expected.clone()));
+                    Ok(inferred)
+                }
+            }
+
+            // Object: propagate field types
+            Expr::Object(entries, _) => {
+                if let Type::Concrete(TypeAnnotation::Object(expected_fields)) = expected {
+                    self.check_object_against(entries, expected_fields)
+                } else {
+                    let inferred = self.infer_expr(expr)?;
+                    self.constraints.push((inferred.clone(), expected.clone()));
+                    Ok(inferred)
+                }
+            }
+
+            // Conditional: propagate expected to both branches
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                let cond_type = self.infer_expr(condition)?;
+                self.constraints.push((cond_type, BuiltinTypes::boolean()));
+
+                let then_type = self.check_against(then_expr, expected)?;
+
+                if let Some(else_e) = else_expr {
+                    let else_type = self.check_against(else_e, expected)?;
+                    self.constraints.push((then_type.clone(), else_type));
+                }
+
+                Ok(then_type)
+            }
+
+            // Match: propagate expected to arms
+            Expr::Match(match_expr, _) => {
+                let _scrutinee_type = self.infer_expr(&match_expr.scrutinee)?;
+
+                let mut arm_types = Vec::new();
+
+                for arm in &match_expr.arms {
+                    self.env.push_scope();
+                    self.bind_pattern_vars(&arm.pattern)?;
+
+                    let arm_type = self.check_against(&arm.body, expected)?;
+                    arm_types.push(arm_type);
+
+                    self.env.pop_scope();
+                }
+
+                // All arms should have the same type (the expected type)
+                if !arm_types.is_empty() {
+                    let first = arm_types[0].clone();
+                    for ty in &arm_types[1..] {
+                        self.constraints.push((first.clone(), ty.clone()));
+                    }
+                    Ok(first)
+                } else {
+                    Ok(expected.clone())
+                }
+            }
+
+            // Default: infer and constrain to expected
+            _ => {
+                let inferred = self.infer_expr(expr)?;
+                self.constraints.push((inferred.clone(), expected.clone()));
+                Ok(inferred)
+            }
+        }
+    }
+
+    /// Synthesize type with a hint (soft constraint)
+    ///
+    /// The hint guides inference but doesn't force the type.
+    fn synth_with_hint(&mut self, expr: &Expr, hint: &Type) -> TypeResult<Type> {
+        let inferred = self.infer_expr(expr)?;
+
+        // Try to unify with hint - if it fails, just return inferred
+        // This is a "soft" constraint that helps but doesn't force
+        if self.unifier.try_unify(&inferred, hint).is_ok() {
+            Ok(hint.clone())
+        } else {
+            Ok(inferred)
+        }
+    }
+
+    /// Check a function expression against an expected function type
+    fn check_function_expr_against(
+        &mut self,
+        params: &[FunctionParameter],
+        return_type_ann: Option<&TypeAnnotation>,
+        body: &[shape_ast::ast::Statement],
+        expected: &Type,
+    ) -> TypeResult<Type> {
+        // Extract expected param types and return type from expected function type
+        let (expected_params, expected_return) = match expected {
+            Type::Concrete(TypeAnnotation::Function {
+                params: expected_param_anns,
+                returns,
+            }) => {
+                let param_types: Vec<Type> = expected_param_anns
+                    .iter()
+                    .map(|p| Type::Concrete(p.type_annotation.clone()))
+                    .collect();
+                let return_type = Type::Concrete(*returns.clone());
+                (param_types, return_type)
+            }
+            Type::Function {
+                params: fp,
+                returns: fr,
+            } => (fp.clone(), *fr.clone()),
+            _ => {
+                // Expected isn't a function type, fall back to regular inference
+                return self.infer_function_expr(params, return_type_ann, body);
+            }
+        };
+
+        // Enter a new scope for the function
+        self.env.push_scope();
+        self.push_fallible_scope();
+
+        // Bind parameters with expected types (or declared/fresh if not enough info)
+        for (i, param) in params.iter().enumerate() {
+            let param_type = if i < expected_params.len() {
+                expected_params[i].clone()
+            } else if let Some(ann) = &param.type_annotation {
+                Type::Concrete(ann.clone())
+            } else {
+                Type::Variable(TypeVar::fresh())
+            };
+
+            // Define all identifiers from the pattern
+            for name in param.get_identifiers() {
+                self.env.define(&name, TypeScheme::mono(param_type.clone()));
+            }
+        }
+
+        let inferred_result = self.infer_callable_return_type(body, true);
+        let was_fallible = self.pop_fallible_scope();
+        self.env.pop_scope();
+        let inferred_return_type = inferred_result?;
+
+        let constrained_expected_return =
+            self.apply_fallibility_to_return_type(expected_return.clone(), was_fallible);
+        if was_fallible && !self.is_result_type(&expected_return) {
+            self.constraints
+                .push((constrained_expected_return.clone(), expected_return.clone()));
+        }
+
+        // Constrain inferred callable return to expected return type
+        self.constraints
+            .push((inferred_return_type, constrained_expected_return.clone()));
+
+        // Build the function type using Type::Function to preserve type variables
+        let actual_param_types: Vec<_> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if i < expected_params.len() {
+                    expected_params[i].clone()
+                } else if let Some(ann) = &p.type_annotation {
+                    Type::Concrete(ann.clone())
+                } else {
+                    Type::Variable(TypeVar::fresh())
+                }
+            })
+            .collect();
+
+        Ok(Type::Function {
+            params: actual_param_types,
+            returns: Box::new(constrained_expected_return),
+        })
+    }
+
+    /// Infer a function expression (fallback when no expected type)
+    fn infer_function_expr(
+        &mut self,
+        params: &[FunctionParameter],
+        return_type_ann: Option<&TypeAnnotation>,
+        body: &[shape_ast::ast::Statement],
+    ) -> TypeResult<Type> {
+        self.env.push_scope();
+        self.push_fallible_scope();
+
+        let mut param_types = Vec::new();
+        for param in params {
+            let param_type = if let Some(ann) = &param.type_annotation {
+                Type::Concrete(ann.clone())
+            } else {
+                Type::Variable(TypeVar::fresh())
+            };
+
+            // Define all identifiers from the pattern
+            for name in param.get_identifiers() {
+                self.env.define(&name, TypeScheme::mono(param_type.clone()));
+            }
+            param_types.push(param_type);
+        }
+
+        let inferred_result = self.infer_callable_return_type(body, return_type_ann.is_some());
+        let was_fallible = self.pop_fallible_scope();
+        self.env.pop_scope();
+        let inferred_return_type = inferred_result?;
+
+        // If return type is annotated, constrain inferred type to annotation.
+        let return_type = if let Some(ann) = return_type_ann {
+            let annotated = Type::Concrete(ann.clone());
+            self.constraints
+                .push((inferred_return_type, annotated.clone()));
+            annotated
+        } else {
+            inferred_return_type
+        };
+        let return_type = self.apply_fallibility_to_return_type(return_type, was_fallible);
+
+        // Build function type using Type::Function to preserve type variables
+        Ok(Type::Function {
+            params: param_types,
+            returns: Box::new(return_type),
+        })
+    }
+
+    /// Check array elements against expected element type
+    fn check_array_against(&mut self, elements: &[Expr], elem_type: &Type) -> TypeResult<Type> {
+        for elem in elements {
+            self.check_against(elem, elem_type)?;
+        }
+        Ok(BuiltinTypes::array(elem_type.clone()))
+    }
+
+    /// Check object entries against expected field types
+    fn check_object_against(
+        &mut self,
+        entries: &[ObjectEntry],
+        expected_fields: &[shape_ast::ast::ObjectTypeField],
+    ) -> TypeResult<Type> {
+        let mut result_fields = Vec::new();
+
+        for entry in entries {
+            match entry {
+                ObjectEntry::Field {
+                    key,
+                    value,
+                    type_annotation: _type_annotation,
+                } => {
+                    // Find expected field type if available
+                    let expected_field_type = expected_fields
+                        .iter()
+                        .find(|f| &f.name == key)
+                        .map(|f| Type::Concrete(f.type_annotation.clone()));
+
+                    let field_type = if let Some(expected) = expected_field_type {
+                        self.check_against(value, &expected)?
+                    } else {
+                        self.infer_expr(value)?
+                    };
+
+                    result_fields.push(shape_ast::ast::ObjectTypeField {
+                        name: key.clone(),
+                        optional: false,
+                        type_annotation: field_type.to_annotation().unwrap_or(TypeAnnotation::Any),
+                        annotations: vec![],
+                    });
+                }
+                ObjectEntry::Spread(expr) => {
+                    // For spread, we infer the type of the expression
+                    // TODO: merge fields from spread object type
+                    let _spread_type = self.infer_expr(expr)?;
+                }
+            }
+        }
+
+        Ok(Type::Concrete(TypeAnnotation::Object(result_fields)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_mode_expected() {
+        let mode = CheckMode::Infer;
+        assert!(mode.expected().is_none());
+
+        let mode = CheckMode::Check(BuiltinTypes::number());
+        assert!(mode.expected().is_some());
+
+        let mode = CheckMode::Synth(BuiltinTypes::string());
+        assert!(mode.expected().is_some());
+    }
+
+    #[test]
+    fn test_check_mode_is_hard_constraint() {
+        assert!(!CheckMode::Infer.is_hard_constraint());
+        assert!(CheckMode::Check(BuiltinTypes::number()).is_hard_constraint());
+        assert!(!CheckMode::Synth(BuiltinTypes::number()).is_hard_constraint());
+    }
+}

@@ -1,0 +1,13 @@
+// Test Data Check - verify data loading works
+let data = load("market_data", { symbol: "ES", from: "2023-01-01", to: "2023-01-31" });
+
+let closes = series("close");
+print("First 5 closes: ");
+print(closes.slice(0, 5));
+
+// Try a simple function call
+function get_signal() {
+    return "buy";
+}
+
+print("Signal: " + get_signal());

@@ -1,0 +1,130 @@
+// Simplified Multi-Timeframe Strategy for Testing
+// Demonstrates proper exit logic with stop loss concepts
+
+// Load market data
+let data = load("market_data", { symbol: "ES", from: "2023-01-01", to: "2023-12-31" });
+
+// Simple helper to calculate ATR
+function calculate_atr() {
+    let highs = series("high");
+    let lows = series("low");
+    let ranges = highs - lows;
+    rolling_mean(ranges, 14)  // Fixed period
+}
+
+// Main trading strategy with simplified logic
+function multi_timeframe_strategy() {
+    // Get price series
+    let closes = series("close");
+    let volumes = series("volume");
+    
+    // Calculate moving averages for trend
+    let ma_fast = rolling_mean(closes, 20);
+    let ma_slow = rolling_mean(closes, 50);
+    
+    // Calculate ATR for volatility
+    let atr = calculate_atr();
+    
+    // Get current values using last() method
+    let current_close = closes.last();
+    let current_fast = ma_fast.last();
+    let current_slow = ma_slow.last();
+    let current_atr = atr.last();
+    let current_volume = volumes.last();
+    
+    // Volume average
+    let vol_ma = rolling_mean(volumes, 20);
+    let vol_avg = vol_ma.last();
+    
+    // === Trading Logic ===
+    
+    // Trend determination
+    let uptrend = current_fast > current_slow;
+    let downtrend = current_slow > current_fast;
+    
+    // Volume confirmation
+    let high_volume = current_volume > vol_avg * 1.2;
+    
+    // Calculate theoretical stop/target levels
+    // These show where stops and targets WOULD be placed
+    let stop_distance = current_atr * 2.0;     // 2 ATR stop
+    let target_distance = current_atr * 3.0;   // 3 ATR target
+    
+    // === Signal Generation ===
+    // Using simple trend-following logic
+    
+    if (uptrend) {
+        if (high_volume) {
+            "buy"  // Strong uptrend with volume
+        } else {
+            "none"  // Uptrend but wait for volume
+        }
+    } else if (downtrend) {
+        // In downtrend, we exit longs (not short)
+        // This demonstrates proper exit logic
+        "exit_long"  
+    } else {
+        "none"  // No clear trend
+    }
+}
+
+// Run backtest
+let config = {
+    strategy: "multi_timeframe_strategy",
+    capital: 100000,
+    commission: 0.001,
+    slippage: 0.0005,
+    risk_per_trade: 0.02
+};
+
+let results = run_simulation(config);
+
+// Display results with analysis
+{
+    strategy_name: "Simplified Multi-Timeframe Strategy",
+    
+    description: {
+        approach: "Trend following with volume confirmation",
+        entry: "Buy on uptrend with high volume",
+        exit: "Exit longs on downtrend (proper exit signal)",
+        risk_management: "2 ATR stop loss, 3 ATR take profit targets"
+    },
+    
+    signal_logic: {
+        buy_signal: "MA20 > MA50 AND Volume > 1.2x average",
+        exit_long_signal: "MA50 > MA20 (trend reversal)",
+        no_short_signals: "Only long-side trading in this example"
+    },
+    
+    risk_parameters: {
+        stop_loss: "2x ATR(14) below entry",
+        take_profit: "3x ATR(14) above entry",
+        risk_reward_ratio: "1:1.5",
+        position_sizing: "2% risk per trade"
+    },
+    
+    backtest_results: results,
+    
+    key_insights: {
+        exit_vs_sell: "Using 'exit_long' instead of 'sell' for position exits",
+        stop_loss_concept: "Stop loss calculated but not enforced (need position tracking)",
+        volume_filter: "High volume confirms trend entries",
+        trend_following: "Simple MA crossover for trend detection"
+    },
+    
+    limitations_identified: {
+        position_state: "Cannot track if we're already in a position",
+        entry_price: "Cannot reference original entry for stop/target calculation",
+        multiple_conditions: "Parser doesn't support && operator, using nested if",
+        numeric_signals: "Signals must be strings, not numbers"
+    },
+    
+    improvements_needed: {
+        state_management: "Track position entry price and state",
+        conditional_exits: "Check both stop loss and take profit conditions",
+        order_management: "Support for limit and stop orders",
+        position_info: "Access to current P&L and position details"
+    },
+    
+    status: "Simplified strategy backtest complete"
+}

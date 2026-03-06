@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/target/
+
+# Generated extension artifacts
+/extensions/
+extensions/*.so
+
+# Node / frontend
+**/node_modules/
+**/dist/
+**/.astro/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local env
+.env
+.env.*

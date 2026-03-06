@@ -1,0 +1,110 @@
+//! Complete Strategy Test with Real Market Data
+//! Uses load_instrument to get ES data with timestamps
+
+// Load real ES futures data from DuckDB
+// This loads actual market data with proper timestamps
+load_instrument("ES", "2023-01-01", "2023-01-10");
+
+// Define a comprehensive strategy using intrinsics
+function multi_indicator_strategy() {
+    // Get price series (from loaded data - has timestamps!)
+    let close = series("close");
+    let high = series("high");
+    let low = series("low");
+    let volume = series("volume");
+
+    // Calculate indicators using high-performance intrinsics
+    // All of these are 10-50x faster than Shape loops!
+
+    // Moving averages
+    let sma_fast = __intrinsic_rolling_mean(close, 10);
+    let sma_slow = __intrinsic_rolling_mean(close, 20);
+    let ema_12 = __intrinsic_ema(close, 12);
+
+    // Volatility
+    let std_20 = __intrinsic_rolling_std(close, 20);
+    let atr = __intrinsic_ema(true_range(high, low, close), 14);
+
+    // Get current values
+    let price = close.last();
+    let sma_fast_val = sma_fast.last();
+    let sma_slow_val = sma_slow.last();
+    let ema_val = ema_12.last();
+    let vol = std_20.last();
+
+    // Complex trading logic using Phase 2 features
+    // Logical operators (&&, ||) + position state management
+
+    if !in_position {
+        // Entry logic - multiple confirmations
+        let trend_up = sma_fast_val > sma_slow_val && ema_val > sma_slow_val;
+        let not_too_volatile = vol < price * 0.02;  // Less than 2% volatility
+        let volume_ok = volume.last() > __intrinsic_rolling_mean(volume, 20).last();
+
+        if trend_up && not_too_volatile && volume_ok {
+            "buy"
+        } else {
+            "hold"
+        }
+    } else {
+        // Exit logic using position state (Phase 2)
+        // ATR-based dynamic stops
+
+        let atr_pct = atr.last() / price;
+
+        // Stop loss: 2x ATR
+        if current_pnl_pct < -(2.0 * atr_pct) {
+            "exit_long"
+        }
+        // Take profit: 3x ATR
+        else if current_pnl_pct > (3.0 * atr_pct) {
+            "exit_long"
+        }
+        // Trend reversal exit
+        else if sma_fast_val < sma_slow_val {
+            "exit_long"
+        }
+        else {
+            "hold"
+        }
+    }
+}
+
+// Helper function for True Range (uses intrinsics)
+function true_range(high, low, close) {
+    let prev_close = __intrinsic_shift(close, 1);
+    let tr1 = high - low;
+    let tr2 = abs(high - prev_close);
+    let tr3 = abs(low - prev_close);
+    max(tr1, max(tr2, tr3))
+}
+
+// Run backtest with the strategy
+let config = {
+    strategy: "multi_indicator_strategy",
+    capital: 100000,
+    commission: 0.001,
+    stop_loss: 0.02,
+    take_profit: 0.05
+};
+
+let result = run_simulation(config);
+
+// Display results
+print("=== Backtest Results ===");
+print("Total Return:", result.summary.total_return, "%");
+print("Sharpe Ratio:", result.summary.sharpe_ratio);
+print("Max Drawdown:", result.summary.max_drawdown, "%");
+print("Total Trades:", result.summary.total_trades);
+print("Win Rate:", result.summary.win_rate * 100, "%");
+
+{
+    test: "Complex Multi-Indicator Strategy with Real Data",
+    uses_intrinsics: true,
+    indicators: ["SMA", "EMA", "ATR", "Volatility"],
+    uses_position_state: true,
+    uses_logical_operators: true,
+    data_source: "Real ES futures from DuckDB",
+    result: result.summary,
+    status: "Backtest complete with high-performance intrinsics!"
+}

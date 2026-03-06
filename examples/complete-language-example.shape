@@ -1,0 +1,394 @@
+// Complete Shape Language Example
+// This demonstrates all language features in a real trading strategy
+
+// Module imports
+import patterns from "std:patterns"
+import indicators from "std:indicators"
+import risk from "std:risk"
+import statistics from "std:statistics"
+
+// Custom type definitions
+type Trade = {
+    symbol: string,
+    entry_time: timestamp,
+    exit_time: timestamp?,
+    entry_price: number,
+    exit_price: number?,
+    size: number,
+    direction: "long" | "short",
+    pnl: number?,
+    pnl_percent: number?,
+    exit_reason: string?
+}
+
+type MarketRegime = "trending_up" | "trending_down" | "ranging" | "volatile"
+
+// Constants
+const INITIAL_CAPITAL = 100000
+const MAX_RISK_PER_TRADE = 0.01  // 1% risk per trade
+const MAX_POSITIONS = 5
+
+// Global variables for state management
+var current_positions: Trade[] = []
+var closed_trades: Trade[] = []
+var equity_curve: number[] = [INITIAL_CAPITAL]
+
+// User-defined functions
+function calculate_position_size(stop_distance: number): number {
+    let current_equity = equity_curve[equity_curve.length - 1]
+    let risk_amount = current_equity * MAX_RISK_PER_TRADE
+    return risk_amount / stop_distance
+}
+
+function identify_market_regime(lookback: number = 50): MarketRegime {
+    let sma_fast = indicators.sma(20)
+    let sma_slow = indicators.sma(50)
+    let atr = indicators.atr(14)
+    
+    // Calculate trend strength
+    let trend_strength = (sma_fast - sma_slow) / sma_slow * 100
+    
+    // Calculate volatility regime
+    let volatility_ratio = atr / candle[0].close
+    
+    if trend_strength > 2 {
+        return "trending_up"
+    } else if trend_strength < -2 {
+        return "trending_down"
+    } else if volatility_ratio > 0.02 {
+        return "volatile"
+    } else {
+        return "ranging"
+    }
+}
+
+// Pattern with custom logic
+pattern mean_reversion_setup {
+    // Price stretched from mean
+    let sma = indicators.sma(20)
+    let distance_from_mean = (candle[0].close - sma) / sma * 100
+    
+    // Oversold/overbought conditions
+    let rsi = indicators.rsi(14)
+    let is_oversold = rsi < 30
+    let is_overbought = rsi > 70
+    
+    // Volume confirmation
+    let volume_spike = candle[0].volume > indicators.sma(candle[0:20].volume) * 1.5
+    
+    // Pattern conditions
+    (is_oversold and distance_from_mean < -3 and volume_spike) or
+    (is_overbought and distance_from_mean > 3 and volume_spike)
+}
+
+// Advanced indicator definition
+function market_breadth(symbols: string[]): number {
+    var advancing = 0
+    var declining = 0
+    
+    // Loop through multiple symbols
+    foreach symbol in symbols {
+        on symbol {
+            if candle[0].close > candle[-1].close {
+                advancing += 1
+            } else {
+                declining += 1
+            }
+        }
+    }
+    
+    return (advancing - declining) / symbols.length * 100
+}
+
+// Main strategy definition
+strategy adaptive_mean_reversion {
+    // Strategy parameters
+    params {
+        symbols: ["ES", "NQ", "YM", "RTY"]
+        lookback_period: 20
+        profit_target_atr: 2.0
+        stop_loss_atr: 1.0
+        max_hold_bars: 50
+    }
+    
+    // Initialize strategy
+    on_start {
+        print("Starting Adaptive Mean Reversion Strategy")
+        print(f"Initial Capital: ${INITIAL_CAPITAL}")
+        
+        // Validate data availability
+        foreach symbol in params.symbols {
+            let candles = market_data.get_candles(symbol, timeframe, last(1000))
+            if candles.length < 200 {
+                throw Error(f"Insufficient data for {symbol}")
+            }
+        }
+    }
+    
+    // Main strategy logic - called on each bar
+    on_bar {
+        let current_regime = identify_market_regime()
+        
+        // Adjust strategy based on market regime
+        let position_size_multiplier = match current_regime {
+            "ranging" => 1.5,      // Increase size in ranging markets
+            "volatile" => 0.5,     // Reduce size in volatile markets
+            _ => 1.0              // Normal size in trending markets
+        }
+        
+        // Scan for opportunities across all symbols
+        foreach symbol in params.symbols {
+            on symbol {
+                // Check if we already have a position in this symbol
+                let existing_position = current_positions.find(p => p.symbol == symbol)
+                
+                if existing_position == null and current_positions.length < MAX_POSITIONS {
+                    // Look for entry signals
+                    if pattern mean_reversion_setup {
+                        let atr = indicators.atr(14)
+                        let rsi = indicators.rsi(14)
+                        
+                        // Determine direction
+                        let direction = rsi < 50 ? "long" : "short"
+                        
+                        // Calculate position details
+                        let entry_price = candle[0].close
+                        let stop_distance = atr * params.stop_loss_atr
+                        let stop_price = direction == "long" 
+                            ? entry_price - stop_distance
+                            : entry_price + stop_distance
+                        let target_price = direction == "long"
+                            ? entry_price + (atr * params.profit_target_atr)
+                            : entry_price - (atr * params.profit_target_atr)
+                        
+                        // Calculate position size with risk management
+                        let base_size = calculate_position_size(stop_distance)
+                        let adjusted_size = base_size * position_size_multiplier
+                        
+                        // Create and track position
+                        let trade: Trade = {
+                            symbol: symbol,
+                            entry_time: candle[0].timestamp,
+                            exit_time: null,
+                            entry_price: entry_price,
+                            exit_price: null,
+                            size: adjusted_size,
+                            direction: direction,
+                            pnl: null,
+                            pnl_percent: null,
+                            exit_reason: null
+                        }
+                        
+                        current_positions.push(trade)
+                        log_trade_entry(trade, stop_price, target_price)
+                    }
+                } else if existing_position != null {
+                    // Manage existing position
+                    let bars_held = candle[0].index - existing_position.entry_time.to_candle_index()
+                    let unrealized_pnl = calculate_unrealized_pnl(existing_position, candle[0].close)
+                    
+                    // Exit conditions
+                    var should_exit = false
+                    var exit_reason = ""
+                    
+                    // Stop loss check
+                    let atr = indicators.atr(14)
+                    let stop_distance = atr * params.stop_loss_atr
+                    let stop_price = existing_position.direction == "long"
+                        ? existing_position.entry_price - stop_distance
+                        : existing_position.entry_price + stop_distance
+                    
+                    if (existing_position.direction == "long" and candle[0].low <= stop_price) or
+                       (existing_position.direction == "short" and candle[0].high >= stop_price) {
+                        should_exit = true
+                        exit_reason = "stop_loss"
+                    }
+                    
+                    // Profit target check
+                    let target_distance = atr * params.profit_target_atr
+                    let target_price = existing_position.direction == "long"
+                        ? existing_position.entry_price + target_distance
+                        : existing_position.entry_price - target_distance
+                    
+                    if (existing_position.direction == "long" and candle[0].high >= target_price) or
+                       (existing_position.direction == "short" and candle[0].low <= target_price) {
+                        should_exit = true
+                        exit_reason = "profit_target"
+                    }
+                    
+                    // Time exit
+                    if bars_held >= params.max_hold_bars {
+                        should_exit = true
+                        exit_reason = "time_exit"
+                    }
+                    
+                    // Mean reversion complete
+                    let sma = indicators.sma(20)
+                    if (existing_position.direction == "long" and candle[0].close > sma) or
+                       (existing_position.direction == "short" and candle[0].close < sma) {
+                        should_exit = true
+                        exit_reason = "mean_reversion_complete"
+                    }
+                    
+                    // Execute exit
+                    if should_exit {
+                        close_position(existing_position, candle[0].close, exit_reason)
+                    }
+                }
+            }
+        }
+        
+        // Update equity curve
+        let current_equity = calculate_current_equity()
+        equity_curve.push(current_equity)
+        
+        // Risk management checks
+        let drawdown = calculate_drawdown(equity_curve)
+        if drawdown > 0.10 {  // 10% drawdown limit
+            close_all_positions("max_drawdown")
+        }
+    }
+    
+    // End of strategy
+    on_end {
+        // Close any remaining positions
+        foreach position in current_positions {
+            close_position(position, candle[0].close, "strategy_end")
+        }
+        
+        // Calculate final statistics
+        let stats = calculate_performance_statistics()
+        print_performance_report(stats)
+    }
+}
+
+// Helper functions
+function calculate_unrealized_pnl(position: Trade, current_price: number): number {
+    let price_diff = current_price - position.entry_price
+    return position.direction == "long" 
+        ? price_diff * position.size
+        : -price_diff * position.size
+}
+
+function close_position(position: Trade, exit_price: number, reason: string) {
+    // Update position with exit details
+    position.exit_time = candle[0].timestamp
+    position.exit_price = exit_price
+    position.exit_reason = reason
+    
+    // Calculate PnL
+    let price_diff = exit_price - position.entry_price
+    position.pnl = position.direction == "long"
+        ? price_diff * position.size
+        : -price_diff * position.size
+    position.pnl_percent = (price_diff / position.entry_price) * 100
+    
+    // Move to closed trades
+    current_positions = current_positions.filter(p => p != position)
+    closed_trades.push(position)
+    
+    log_trade_exit(position)
+}
+
+function calculate_performance_statistics(): object {
+    let total_trades = closed_trades.length
+    let winning_trades = closed_trades.filter(t => t.pnl > 0).length
+    let losing_trades = closed_trades.filter(t => t.pnl <= 0).length
+    
+    let gross_profit = closed_trades
+        .filter(t => t.pnl > 0)
+        .reduce((sum, t) => sum + t.pnl, 0)
+    
+    let gross_loss = closed_trades
+        .filter(t => t.pnl <= 0)
+        .reduce((sum, t) => sum + Math.abs(t.pnl), 0)
+    
+    let profit_factor = gross_loss > 0 ? gross_profit / gross_loss : null
+    let win_rate = total_trades > 0 ? winning_trades / total_trades : 0
+    
+    // Calculate Sharpe ratio
+    let returns = equity_curve.map((eq, i) => 
+        i > 0 ? (eq - equity_curve[i-1]) / equity_curve[i-1] : 0
+    ).slice(1)
+    
+    let sharpe = statistics.sharpe_ratio(returns, 0.02 / 252)  // 2% annual risk-free rate
+    
+    return {
+        total_trades: total_trades,
+        winning_trades: winning_trades,
+        losing_trades: losing_trades,
+        win_rate: win_rate,
+        profit_factor: profit_factor,
+        total_pnl: gross_profit - gross_loss,
+        sharpe_ratio: sharpe,
+        max_drawdown: calculate_max_drawdown(equity_curve),
+        avg_win: winning_trades > 0 ? gross_profit / winning_trades : 0,
+        avg_loss: losing_trades > 0 ? gross_loss / losing_trades : 0
+    }
+}
+
+// Backtest execution
+backtest adaptive_mean_reversion {
+    // Data configuration
+    data_source {
+        provider: market_data_crate
+        symbols: ["ES", "NQ", "YM", "RTY"]
+        timeframe: 15m
+        start: @"2023-01-01"
+        end: @"2024-01-01"
+    }
+    
+    // Execution settings
+    settings {
+        initial_capital: 100000
+        commission: 2.50  // per contract
+        slippage: 1 tick
+        margin_requirement: 0.05  // 5% margin
+    }
+    
+    // Run backtest
+    run()
+    
+    // Generate reports
+    export {
+        trades_csv: "trades.csv"
+        equity_curve: "equity.json"
+        performance_summary: "performance.html"
+    }
+}
+
+// Unit tests
+test "position_sizing" {
+    let stop_distance = 10.0
+    let expected_size = (INITIAL_CAPITAL * MAX_RISK_PER_TRADE) / stop_distance
+    let actual_size = calculate_position_size(stop_distance)
+    assert actual_size == expected_size
+}
+
+test "market_regime_detection" {
+    // Mock market data
+    mock_candles([
+        {close: 100, high: 101, low: 99, volume: 1000},
+        {close: 102, high: 103, low: 101, volume: 1100},
+        // ... more test data
+    ])
+    
+    let regime = identify_market_regime()
+    assert regime in ["trending_up", "trending_down", "ranging", "volatile"]
+}
+
+// Entry point
+main {
+    // Parse command line arguments
+    let args = parse_args()
+    
+    if args.mode == "backtest" {
+        run backtest adaptive_mean_reversion
+    } else if args.mode == "live" {
+        // Connect to live data feed
+        market_data.connect_live()
+        run strategy adaptive_mean_reversion
+    } else {
+        print("Usage: shape run [--mode backtest|live]")
+    }
+}

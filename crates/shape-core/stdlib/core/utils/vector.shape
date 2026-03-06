@@ -1,0 +1,8 @@
+//! Vector Utilities
+//! General purpose vector operations
+
+// Select / Ternary Operator
+// result[i] = if condition[i] { true_val[i] } else { false_val[i] }
+pub fn select(condition, true_val, false_val) {
+    __intrinsic_vec_select(condition, true_val, false_val)
+}

@@ -1,0 +1,4 @@
+// Minimal expression test to debug parser issue
+let x = 10
+
+find hammer last(5 candles)

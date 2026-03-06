@@ -1,0 +1,304 @@
+// @skip — uses unimplemented syntax (stream{} blocks not in grammar)
+// Example: Real-time streaming data processing in Shape
+
+// Import required modules
+from stdlib::indicators use { sma, ema }
+from stdlib::patterns use { hammer, doji }
+
+// Define a stream for real-time market analysis
+stream market_analyzer {
+    config {
+        provider: "binance";  // or "polygon", "mock" for testing
+        symbols: ["BTC/USDT", "ETH/USDT", "SOL/USDT"];
+        timeframes: [1m, 5m, 15m];
+        buffer_size: 10000;
+        reconnect: true;
+        reconnect_delay: 5.0;
+    }
+    
+    state {
+        // Track indicators per symbol
+        let sma_20 = {};
+        let ema_10 = {};
+        let volume_avg = {};
+        
+        // Pattern detection counts
+        let pattern_counts = {};
+        
+        // Price alerts
+        let alert_levels = {
+            "BTC/USDT": { high: 50000, low: 40000 },
+            "ETH/USDT": { high: 3000, low: 2500 }
+        };
+        
+        // Statistics
+        let total_ticks = 0;
+        let total_candles = 0;
+    }
+    
+    on_connect() {
+        print("🟢 Connected to market data stream");
+        print("Monitoring symbols: " + symbols.join(", "));
+    }
+    
+    on_disconnect() {
+        print("🔴 Disconnected from stream");
+        print("Total ticks processed: " + total_ticks);
+        print("Total candles processed: " + total_candles);
+    }
+    
+    on_tick(tick) {
+        total_ticks = total_ticks + 1;
+        
+        // Check for price alerts
+        if alert_levels[tick.symbol] {
+            let alerts = alert_levels[tick.symbol];
+            
+            if tick.price > alerts.high {
+                alert("🚀 " + tick.symbol + " above " + alerts.high + ": " + tick.price);
+            } else if tick.price < alerts.low {
+                alert("📉 " + tick.symbol + " below " + alerts.low + ": " + tick.price);
+            }
+        }
+        
+        // Log high volume ticks
+        if tick.volume > 100 {
+            print("📊 High volume tick: " + tick.symbol + " vol=" + tick.volume);
+        }
+    }
+    
+    on_candle(symbol, candle) {
+        total_candles = total_candles + 1;
+        
+        // Update moving averages
+        if !sma_20[symbol] {
+            sma_20[symbol] = [];
+            ema_10[symbol] = [];
+        }
+        
+        // Store candle closes for indicators
+        sma_20[symbol].push(candle.close);
+        if sma_20[symbol].length > 20 {
+            sma_20[symbol].shift(); // Keep only last 20
+        }
+        
+        // Calculate current SMA
+        if sma_20[symbol].length == 20 {
+            let current_sma = sum(sma_20[symbol]) / 20;
+            
+            // Check for price crossing SMA
+            if candle.close > current_sma && candle.open < current_sma {
+                alert("📈 " + symbol + " crossed above SMA(20): " + candle.close);
+            } else if candle.close < current_sma && candle.open > current_sma {
+                alert("📉 " + symbol + " crossed below SMA(20): " + candle.close);
+            }
+        }
+        
+        // Pattern detection
+        checkPatterns(symbol, candle);
+        
+        // Volume analysis
+        updateVolumeAnalysis(symbol, candle);
+        
+        // Log significant moves
+        let change_pct = ((candle.close - candle.open) / candle.open) * 100;
+        if abs(change_pct) > 1.0 {
+            print("⚡ " + symbol + " moved " + change_pct.toFixed(2) + "%");
+        }
+    }
+    
+    on_error(error) {
+        print("❌ Stream error: " + error);
+        
+        // Implement error recovery logic
+        if error.contains("connection lost") {
+            print("Attempting to reconnect...");
+        }
+    }
+    
+    // Helper function to check patterns
+    function checkPatterns(symbol, candle) {
+        // Initialize pattern counter if needed
+        if !pattern_counts[symbol] {
+            pattern_counts[symbol] = {
+                hammer: 0,
+                doji: 0,
+                bullish_engulfing: 0,
+                bearish_engulfing: 0
+            };
+        }
+        
+        // Simple pattern checks (in real implementation, use pattern matcher)
+        let body = abs(candle.close - candle.open);
+        let range = candle.high - candle.low;
+        
+        // Doji detection
+        if body < range * 0.1 {
+            pattern_counts[symbol].doji = pattern_counts[symbol].doji + 1;
+            alert("🎯 Doji pattern on " + symbol);
+        }
+        
+        // Hammer detection (simplified)
+        if candle.close > candle.open && 
+           (candle.high - candle.close) < body * 0.3 &&
+           (candle.open - candle.low) > body * 2 {
+            pattern_counts[symbol].hammer = pattern_counts[symbol].hammer + 1;
+            alert("🔨 Hammer pattern on " + symbol);
+        }
+    }
+    
+    // Helper function for volume analysis
+    function updateVolumeAnalysis(symbol, candle) {
+        if !volume_avg[symbol] {
+            volume_avg[symbol] = [];
+        }
+        
+        volume_avg[symbol].push(candle.volume);
+        if volume_avg[symbol].length > 20 {
+            volume_avg[symbol].shift();
+        }
+        
+        if volume_avg[symbol].length == 20 {
+            let avg_volume = sum(volume_avg[symbol]) / 20;
+            
+            // Alert on unusual volume
+            if candle.volume > avg_volume * 2 {
+                alert("📢 Unusual volume on " + symbol + ": " + 
+                      (candle.volume / avg_volume).toFixed(1) + "x average");
+            }
+        }
+    }
+}
+
+// Define another stream for order book analysis
+stream orderbook_analyzer {
+    config {
+        provider: "binance";
+        symbols: ["BTC/USDT"];
+        buffer_size: 5000;
+    }
+    
+    state {
+        let bid_ask_spreads = [];
+        let imbalance_history = [];
+        let large_orders = [];
+    }
+    
+    on_tick(tick) {
+        // Analyze bid-ask spread
+        if tick.bid && tick.ask {
+            let spread = tick.ask - tick.bid;
+            let spread_pct = (spread / tick.bid) * 100;
+            
+            bid_ask_spreads.push({
+                timestamp: tick.timestamp,
+                spread: spread,
+                spread_pct: spread_pct
+            });
+            
+            // Alert on wide spreads
+            if spread_pct > 0.1 {
+                alert("⚠️ Wide spread on " + tick.symbol + ": " + spread_pct.toFixed(3) + "%");
+            }
+        }
+        
+        // Track large orders (simplified - would need order book data)
+        if tick.volume > 10 {
+            large_orders.push({
+                timestamp: tick.timestamp,
+                price: tick.price,
+                volume: tick.volume,
+                side: tick.price > tick.bid ? "buy" : "sell"
+            });
+            
+            print("🐋 Large order: " + tick.volume + " @ " + tick.price);
+        }
+    }
+}
+
+// Stream for arbitrage detection across exchanges
+stream arbitrage_monitor {
+    config {
+        provider: "multi";  // Custom provider that aggregates multiple exchanges
+        symbols: ["BTC/USDT", "ETH/USDT"];
+        buffer_size: 1000;
+    }
+    
+    state {
+        let prices_by_exchange = {};
+        let opportunities = [];
+    }
+    
+    on_tick(tick) {
+        // Store prices by exchange (assuming tick has exchange field)
+        if !prices_by_exchange[tick.symbol] {
+            prices_by_exchange[tick.symbol] = {};
+        }
+        
+        prices_by_exchange[tick.symbol][tick.exchange] = {
+            bid: tick.bid,
+            ask: tick.ask,
+            timestamp: tick.timestamp
+        };
+        
+        // Check for arbitrage opportunities
+        checkArbitrage(tick.symbol);
+    }
+    
+    function checkArbitrage(symbol) {
+        let exchanges = Object.keys(prices_by_exchange[symbol]);
+        
+        if exchanges.length < 2 {
+            return;
+        }
+        
+        // Find best bid and ask across exchanges
+        let best_bid = { price: 0, exchange: "" };
+        let best_ask = { price: Infinity, exchange: "" };
+        
+        for exchange in exchanges {
+            let data = prices_by_exchange[symbol][exchange];
+            
+            if data.bid > best_bid.price {
+                best_bid.price = data.bid;
+                best_bid.exchange = exchange;
+            }
+            
+            if data.ask < best_ask.price {
+                best_ask.price = data.ask;
+                best_ask.exchange = exchange;
+            }
+        }
+        
+        // Calculate potential profit
+        let spread = best_bid.price - best_ask.price;
+        let spread_pct = (spread / best_ask.price) * 100;
+        
+        // Alert if profitable (considering fees)
+        if spread_pct > 0.2 {  // 0.2% threshold
+            alert("💰 Arbitrage opportunity on " + symbol + ":");
+            alert("  Buy on " + best_ask.exchange + " @ " + best_ask.price);
+            alert("  Sell on " + best_bid.exchange + " @ " + best_bid.price);
+            alert("  Profit: " + spread_pct.toFixed(3) + "%");
+            
+            opportunities.push({
+                symbol: symbol,
+                buy_exchange: best_ask.exchange,
+                sell_exchange: best_bid.exchange,
+                profit_pct: spread_pct,
+                timestamp: now()
+            });
+        }
+    }
+}
+
+// Helper function to send alerts (would integrate with external services)
+function alert(message) {
+    print("[ALERT] " + message);
+    
+    // In production, could send to:
+    // - Telegram/Discord
+    // - Email
+    // - SMS
+    // - Webhook
+}

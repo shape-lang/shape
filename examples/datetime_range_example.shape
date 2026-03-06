@@ -1,0 +1,37 @@
+// Example of datetime range syntax for candle slicing
+
+// Load an instrument
+let es = load_instrument("ES");
+
+// Create a date range for the year 2020
+let year_2020 = candle[@"2020-01-01" to @"2020-12-31"];
+
+// Create a range for a specific month
+let jan_2020 = candle[@"2020-01-01" to @"2020-01-31"];
+
+// Use market keywords in ranges
+let trading_day = candle[@market_open to @market_close];
+
+// Apply indicators on ranges
+@warmup(50)
+function sma_on_range(range, period: number) {
+    return range.sma(period);
+}
+
+// Example usage
+let sma50_2020 = sma_on_range(year_2020, 50);
+
+// Multiple timeframe analysis with datetime ranges
+let daily_range = candle[@"2020-01-01" to @"2020-12-31", 1d];
+let hourly_range = candle[@"2020-01-01" to @"2020-12-31", 1h];
+
+// Pattern detection on specific date ranges
+@warmup(10)
+pattern bullish_hammer {
+    candle[0].body < candle[0].range * 0.3 and
+    candle[0].lower_wick > candle[0].body * 2 and
+    candle[0].color == 'green'
+}
+
+// Find patterns within a specific date range
+find bullish_hammer in jan_2020;

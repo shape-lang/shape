@@ -1,0 +1,61 @@
+// Test loops and control flow
+
+// Test for-in loop with array
+function sum_array(values) {
+    let sum = 0;
+    for val in values {
+        sum = sum + val;
+    }
+    return sum;
+}
+
+// Test while loop
+function count_to(n) {
+    let i = 0;
+    while i < n {
+        i = i + 1;
+    }
+    return i;
+}
+
+// Test break and continue
+function find_first_above(values, threshold) {
+    for val in values {
+        if val <= threshold {
+            continue;
+        }
+        return val;
+    }
+    return -1;
+}
+
+// Test nested loops
+function multiply_arrays(arr1, arr2) {
+    let result = [];
+    for x in arr1 {
+        for y in arr2 {
+            // TODO: Need array push method
+            // result.push(x * y);
+        }
+    }
+    return result;
+}
+
+// Test with real data
+let prices = [100, 102, 98, 103, 105];
+let total = sum_array(prices);
+let counted = count_to(5);
+let first_high = find_first_above(prices, 101);
+
+// Traditional for loop (C-style)
+function factorial(n) {
+    let result = 1;
+    for (let i = 2; i <= n; i = i + 1) {
+        result = result * i;
+    }
+    return result;
+}
+
+let fact5 = factorial(5);
+
+find hammer last(5 candles)

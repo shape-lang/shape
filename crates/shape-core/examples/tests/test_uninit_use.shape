@@ -1,0 +1,6 @@
+// Test using uninitialized variable (should error)
+
+let x: number
+let y = x + 5  // This should error: used before initialization
+
+find hammer last(5 candles)

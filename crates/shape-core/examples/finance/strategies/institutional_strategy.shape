@@ -1,0 +1,246 @@
+// ====================================================================
+// Institutional-Grade Multi-Factor Strategy
+// ====================================================================
+// A sophisticated trading system demonstrating:
+// - Multi-factor signal generation
+// - Dynamic position sizing
+// - Risk management with ATR-based stops
+// - Performance analytics
+
+// ====================================================================
+// MAIN STRATEGY
+// ====================================================================
+
+function institutional_multi_factor() {
+    let closes = series("close")
+    let highs = series("high")
+    let lows = series("low")
+    let volume = series("volume")
+
+    // =========================================
+    // MARKET REGIME DETECTION
+    // =========================================
+
+    // Trend: 200-period SMA
+    let sma_200 = rolling_mean(closes, 200)
+    let in_uptrend = closes[-1] > sma_200[-1]
+
+    // Volatility: ATR relative to its average
+    let atr_14 = atr(14)
+    let atr_avg = rolling_mean(atr_14, 50)
+    let vol_ratio = atr_14[-1] / atr_avg[-1]
+    let high_volatility = vol_ratio > 1.5
+    let low_volatility = vol_ratio < 0.7
+
+    // =========================================
+    // FACTOR 1: MOMENTUM (RSI + ROC)
+    // =========================================
+
+    let rsi_14 = rsi(closes, 14)
+    let roc_20 = (closes[-1] - closes[-20]) / closes[-20] * 100
+
+    var momentum_score = 0
+    if (rsi_14[-1] < 30 and roc_20 < -10) {
+        momentum_score = 0.8
+    } else if (rsi_14[-1] < 40 and roc_20 < -5) {
+        momentum_score = 0.5
+    } else if (rsi_14[-1] > 70 and roc_20 > 10) {
+        momentum_score = -0.8
+    } else if (rsi_14[-1] > 60 and roc_20 > 5) {
+        momentum_score = -0.5
+    }
+
+    // =========================================
+    // FACTOR 2: TREND (EMA Crossover)
+    // =========================================
+
+    let ema_12 = ema(closes, 12)
+    let ema_26 = ema(closes, 26)
+    let macd_val = ema_12[-1] - ema_26[-1]
+    let macd_prev = ema_12[-2] - ema_26[-2]
+
+    var trend_score = 0
+    if (macd_val > 0 and macd_prev <= 0) {
+        trend_score = 0.9
+    } else if (macd_val > 0 and macd_val > macd_prev) {
+        trend_score = 0.5
+    } else if (macd_val < 0 and macd_prev >= 0) {
+        trend_score = -0.9
+    } else if (macd_val < 0 and macd_val < macd_prev) {
+        trend_score = -0.5
+    }
+
+    // =========================================
+    // FACTOR 3: MEAN REVERSION (Bollinger)
+    // =========================================
+
+    let bb = bollinger(closes, 20, 2)
+    let bb_range = bb.upper[-1] - bb.lower[-1]
+    let bb_position = (closes[-1] - bb.lower[-1]) / bb_range
+
+    var mean_rev_score = 0
+    if (bb_position < 0.1) {
+        mean_rev_score = 0.8
+    } else if (bb_position < 0.3) {
+        mean_rev_score = 0.4
+    } else if (bb_position > 0.9) {
+        mean_rev_score = -0.8
+    } else if (bb_position > 0.7) {
+        mean_rev_score = -0.4
+    }
+
+    // =========================================
+    // FACTOR 4: VOLUME
+    // =========================================
+
+    let vol_avg = rolling_mean(volume, 20)
+    let volume_ratio = volume[-1] / vol_avg[-1]
+
+    var volume_score = 0
+    if (volume_ratio > 1.5) {
+        volume_score = 0.3
+    } else if (volume_ratio < 0.5) {
+        volume_score = -0.2
+    }
+
+    // =========================================
+    // COMPOSITE SIGNAL
+    // =========================================
+
+    let composite = momentum_score * 0.3 +
+                    trend_score * 0.35 +
+                    mean_rev_score * 0.25 +
+                    volume_score * 0.1
+
+    // =========================================
+    // POSITION SIZING
+    // =========================================
+
+    let base_size = 0.1
+    let strength_adj = abs(composite) * 0.5 + 0.5
+
+    // Reduce size in high volatility
+    var vol_adj = 1.0
+    if (high_volatility) {
+        vol_adj = 0.5
+    } else if (low_volatility) {
+        vol_adj = 1.2
+    }
+
+    // Boost with-trend trades
+    var trend_adj = 0.9
+    if (in_uptrend and composite > 0) {
+        trend_adj = 1.1
+    } else if (!in_uptrend and composite < 0) {
+        trend_adj = 1.1
+    }
+
+    let position_size = min(base_size * strength_adj * vol_adj * trend_adj, 0.2)
+
+    // =========================================
+    // DYNAMIC STOPS
+    // =========================================
+
+    var atr_mult = 2
+    if (high_volatility) {
+        atr_mult = 3
+    }
+    let stop_distance = atr_14[-1] * atr_mult
+
+    var target_mult = 3
+    if (high_volatility) {
+        target_mult = 2
+    }
+    let target_distance = stop_distance * target_mult
+
+    // =========================================
+    // SIGNAL GENERATION
+    // =========================================
+
+    // Long signal
+    if (composite > 0.4) {
+        return buy({
+            strength: composite,
+            stop_loss: closes[-1] - stop_distance,
+            take_profit: closes[-1] + target_distance
+        })
+    }
+
+    // Short signal
+    if (composite < -0.4) {
+        return short({
+            strength: abs(composite),
+            stop_loss: closes[-1] + stop_distance,
+            take_profit: closes[-1] - target_distance
+        })
+    }
+
+    // Exit conditions
+    if (rsi_14[-1] > 75 or bb_position > 0.95) {
+        return sell({})
+    }
+
+    if (rsi_14[-1] < 25 or bb_position < 0.05) {
+        return cover({})
+    }
+
+    return None
+}
+
+// ====================================================================
+// BACKTEST EXECUTION
+// ====================================================================
+
+let data = load("market_data", { symbol: "ES", from: "2020-01-01", to: "2024-12-31" })
+
+let results = backtest(
+    institutional_multi_factor,
+    data,
+    capital: 1000000,
+    commission: 0.00025,
+    slippage: 0.0001
+)
+
+// ====================================================================
+// PERFORMANCE ANALYSIS
+// ====================================================================
+
+print("============================================================")
+print("INSTITUTIONAL MULTI-FACTOR STRATEGY RESULTS")
+print("ES Futures | 2020-01-01 to 2024-12-31")
+print("============================================================")
+
+print("\n=== PERFORMANCE SUMMARY ===")
+print("Total Return: " + results.total_return + "%")
+print("Sharpe Ratio: " + results.sharpe_ratio)
+print("Sortino Ratio: " + results.sortino_ratio)
+print("Max Drawdown: " + results.max_drawdown + "%")
+
+print("\n=== TRADE STATISTICS ===")
+print("Total Trades: " + results.total_trades)
+print("Win Rate: " + results.win_rate + "%")
+print("Profit Factor: " + results.profit_factor)
+
+// Trade analysis
+let winners = results.trades.filter(|t| t.pnl > 0)
+let losers = results.trades.filter(|t| t.pnl < 0)
+
+print("\n=== TRADE ANALYSIS ===")
+print("Winning Trades: " + winners.count())
+print("Losing Trades: " + losers.count())
+print("Avg Win: $" + winners.mean(|t| t.pnl))
+print("Avg Loss: $" + losers.mean(|t| abs(t.pnl)))
+
+// Direction breakdown
+let longs = results.trades.filter(|t| t.side == "long")
+let shorts = results.trades.filter(|t| t.side == "short")
+
+print("\n=== DIRECTIONAL BREAKDOWN ===")
+print("Long Trades: " + longs.count())
+print("Short Trades: " + shorts.count())
+
+print("\n============================================================")
+print("Backtest Complete")
+print("============================================================")
+
+results

@@ -1,0 +1,48 @@
+// @skip — uses unimplemented syntax (object literals in expression/if-else contexts)
+// Test object literals in various contexts
+
+// 1. Top-level object literal
+let config = { name: "test", value: 42 };
+print("Config: " + config.name);
+
+// 2. Object literal in function
+function test_function() {
+    let obj = { strategy: "ma_cross", capital: 100000 };
+    return obj;
+}
+
+let result = test_function();
+print("Strategy: " + result.strategy);
+
+// 3. Nested objects
+let nested = {
+    outer: "value",
+    inner: { 
+        deep: "nested",
+        number: 123
+    }
+};
+print("Nested: " + nested.inner.deep);
+
+// 4. Object as function argument (simulated)
+function process_config(cfg) {
+    print("Processing: " + cfg.name);
+    return cfg.value * 2;
+}
+
+// For now, create object first then pass it
+let test_cfg = { name: "processor", value: 21 };
+let doubled = process_config(test_cfg);
+print("Doubled: " + doubled);
+
+// 5. Empty object
+let empty = {};
+print("Empty object created");
+
+// 6. Object in expression context
+let expr_result = if (true) {
+    { status: "success", code: 200 }
+} else {
+    { status: "error", code: 500 }
+};
+print("Status: " + expr_result.status);

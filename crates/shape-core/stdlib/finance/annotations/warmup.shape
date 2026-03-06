@@ -1,0 +1,61 @@
+/// Specifies warmup period for indicators and functions
+///
+/// The warmup annotation ensures that functions have enough historical data
+/// before computing their results. This is essential for indicators like
+/// moving averages that require N periods of data.
+///
+/// # Parameters
+/// * `period` - Number of data points needed for warmup (expression, evaluated at call time)
+///
+/// # Handler Signatures
+/// * `before(args, ctx)` — `self` = annotated function, `period` = annotation param
+/// * `after(args, result, ctx)` — same binding
+/// * `metadata()` — returns static metadata
+///
+/// # Example
+/// ```shape
+/// @warmup(20)
+/// @indicator
+/// pub fn sma(data: Column<number>, period: number) -> number {
+///     return data.rolling(period).mean();
+/// }
+/// ```
+///
+/// # How It Works
+/// When a function with `@warmup(20)` is called via UFCS (`candles.sma(50)`):
+/// 1. `before` gets `args[0]` (the DataTable via UFCS receiver)
+/// 2. `before` is currently a no-op and returns `None`
+/// 3. The function computes over original input data
+/// 4. `after` returns result unchanged when no warmup state is present
+annotation warmup(period) {
+    // Called before each function invocation
+    // self = the annotated function (e.g., sma)
+    // period = annotation parameter (e.g., 20, or days+1)
+    before(args, ctx) {
+        // Data source reloading is removed from stdlib.
+        // Keep warmup annotation as a no-op pre-hook.
+        None
+    }
+
+    // Called after each function invocation
+    // self = the annotated function
+    after(args, result, ctx) {
+        let orig_len = ctx.get("state").get("original_length")
+
+        // If no state (before didn't extend), return as-is
+        if orig_len == None {
+            return result
+        }
+
+        // Trim result back to original length
+        result.slice(result.len() - orig_len, orig_len)
+    }
+
+    // Return static metadata
+    metadata() {
+        return {
+            warmup_period: period,
+            requires_historical_data: true
+        }
+    }
+}

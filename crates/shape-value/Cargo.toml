@@ -1,0 +1,26 @@
+[package]
+name = "shape-value"
+version = "0.1.0"
+edition = "2024"
+description = "NaN-boxed value representation and heap types for Shape"
+license = "MIT OR Apache-2.0"
+authors = ["Daniel Amesberger"]
+repository = "https://github.com/shape-lang/shape"
+
+[dependencies]
+shape-ast = { version = "0.1.0", path = "../shape-ast" }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+rust_decimal = { version = "1.36", features = ["serde-str"] }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-buffer = { workspace = true }
+shape-gc = { version = "0.1.0", path = "../shape-gc", optional = true }
+thiserror = { workspace = true }
+ahash = { workspace = true }
+
+[features]
+default = []
+gc = ["shape-gc"]

@@ -1,0 +1,12 @@
+mod array_methods;
+mod basic;
+mod capture;
+mod default_params;
+mod dynamic_captures;
+mod edge_cases;
+mod higher_order;
+mod mutable_capture;
+mod stress_capture;
+mod stress_closure_edge;
+mod stress_hof;
+mod stress_lambda_basic;

@@ -1,0 +1,31 @@
+// Benchmark 4: Mandelbrot set computation
+function mandelbrot(size) {
+    var count = 0;
+    var y = 0;
+    while y < size {
+        var x = 0;
+        while x < size {
+            let cr = 2.0 * x / size - 1.5;
+            let ci = 2.0 * y / size - 1.0;
+            var zr = 0.0;
+            var zi = 0.0;
+            var iter = 0;
+            while iter < 50 {
+                let tr = zr * zr - zi * zi + cr;
+                zi = 2.0 * zr * zi + ci;
+                zr = tr;
+                if zr * zr + zi * zi > 4.0 {
+                    break;
+                }
+                iter = iter + 1;
+            }
+            if iter == 50 {
+                count = count + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return count;
+}
+print(mandelbrot(4000));

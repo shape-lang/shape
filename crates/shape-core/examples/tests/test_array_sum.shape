@@ -1,0 +1,20 @@
+// Simple test of arrays and loops
+
+// Sum an array using for-in loop
+function sum(values) {
+    let total = 0;
+    for val in values {
+        total = total + val;
+    }
+    return total;
+}
+
+// Test data
+let numbers = [10, 20, 30, 40, 50];
+let result = sum(numbers);
+
+// Also test array indexing
+let first = numbers[0];
+let last = numbers[-1];  // Negative indexing
+
+find hammer last(5 candles)

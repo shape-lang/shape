@@ -1,0 +1,14 @@
+// Core serialization trait for binary encoding/decoding.
+// Types implementing Serializable can be converted to/from byte arrays,
+// enabling snapshot persistence, wire transfer, and distributed computing.
+
+trait Serializable {
+    /// Serialize self value to a byte array
+    to_bytes(self): Vec<byte>
+
+    /// Deserialize a value from a byte array
+    from_bytes(bytes: Vec<byte>): Self
+}
+
+// Builtin implementations are registered in Rust (registry.rs)
+// for: number, string, bool, Vec<T> where T: Serializable

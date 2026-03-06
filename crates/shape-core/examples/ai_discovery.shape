@@ -1,0 +1,66 @@
+// Shape AI-Powered Strategy Discovery Example
+//
+// This example demonstrates how to use Shape's AI features
+// for autonomous strategy generation and optimization.
+//
+// To run this example:
+//   1. Build with AI features: cargo build --features ai
+//   2. Set API key: export ANTHROPIC_API_KEY=your-key
+//   3. Run: cargo run --features ai -p shape --bin shape -- run examples/ai_discovery.shape
+
+from stdlib::ai::generate use { ai_generate, ai_evaluate };
+
+// Example 1: Simple strategy generation
+print("=== Example 1: Generate a Simple Strategy ===");
+
+let rsi_strategy = ai_generate("Create a simple RSI oversold strategy that buys when RSI < 30 and sells when RSI > 70");
+
+print("Generated RSI Strategy:");
+print(rsi_strategy);
+print();
+
+// Example 2: Generate with custom configuration
+print("=== Example 2: Generate with Custom Config ===");
+
+let macd_strategy = ai_generate(
+    "Create a MACD crossover momentum strategy",
+    {
+        model: "claude-sonnet-4",
+        temperature: 0.8,  // More creative
+        max_tokens: 2048
+    }
+);
+
+print("Generated MACD Strategy:");
+print(macd_strategy);
+print();
+
+// Example 3: AI Discover Block (Native Syntax)
+// Note: This requires full Phase 3 implementation
+//
+// ai discover (
+//     model: "claude-sonnet-4",
+//     iterations: 10,
+//     objective: "maximize sharpe",
+//     constraints: {
+//         max_drawdown: 0.15,
+//         min_trades: 50
+//     }
+// ) {
+//     // Define parameter search space
+//     let rsi_period = optimize rsi_period in [7..21] for sharpe;
+//     let sma_fast = optimize sma_fast in [10..50] for sharpe;
+//     let sma_slow = optimize sma_slow in [50..200] for sharpe;
+//
+//     // AI will generate strategies exploring this space
+// }
+//
+// // Access results
+// let top_strategies = ai_results.sort_by("sharpe").reverse();
+// print("Top 5 Strategies:");
+// top_strategies.head(5).each(s => {
+//     print(s.name + ": Sharpe=" + s.sharpe + ", MaxDD=" + s.max_drawdown);
+// });
+
+print("✓ AI features are working!");
+print("Note: Full ai discover blocks require additional implementation.");

@@ -1,0 +1,23 @@
+// Test function references
+
+// Define a simple function
+function my_strategy() {
+    print("Strategy function called!");
+    return 42;
+}
+
+// Test 1: Function reference as value
+let fn_ref = my_strategy;
+print("Function reference: " + fn_ref);
+
+// Test 2: Check built-in function references
+let sma_ref = sma;
+print("SMA reference: " + sma_ref);
+
+// Test 3: Function in variable
+function process() {
+    return "processed";
+}
+
+let processor = process;
+print("Processor reference: " + processor);

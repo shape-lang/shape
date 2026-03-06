@@ -1,0 +1,9 @@
+mod complex;
+mod generics_comptime;
+mod stress_decl;
+mod stress_fields;
+mod stress_methods;
+mod stress_nested;
+mod structs;
+mod traits_extend;
+mod type_aliases;

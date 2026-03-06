@@ -1,0 +1,25 @@
+// Debug backtest specifically
+
+// Load market data
+let data = load("market_data", { symbol: "ES", from: "2023-01-01", to: "2023-01-07" });  // Just one week
+
+// Simplest possible strategy
+function simple_strategy() {
+    "buy"  // Always buy for testing
+}
+
+// Run backtest
+let config = {
+    strategy: "simple_strategy",
+    capital: 100000,
+    commission: 0.001
+};
+
+let results = run_simulation(config);
+
+// Display results
+{
+    test: "backtest debug",
+    results: results,
+    status: "complete"
+}

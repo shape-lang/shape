@@ -1,0 +1,556 @@
+//! Matrix integration tests — bytecode-level tests for Matrix creation, methods, operators,
+//! and property access.
+//!
+//! Tests use the legacy stack-based CallMethod convention:
+//!   push receiver, push args..., push method_name, push arg_count, CallMethod
+
+use super::*;
+use shape_value::ValueWord;
+use shape_value::aligned_vec::AlignedVec;
+use shape_value::heap_value::MatrixData;
+use std::sync::Arc;
+
+/// Build a 2x3 matrix [[1,2,3],[4,5,6]]
+fn test_matrix_2x3() -> ValueWord {
+    let mut data = AlignedVec::with_capacity(6);
+    for v in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] {
+        data.push(v);
+    }
+    ValueWord::from_matrix(Box::new(MatrixData::from_flat(data, 2, 3)))
+}
+
+/// Build a 2x2 matrix [[a,b],[c,d]]
+fn test_matrix_2x2(a: f64, b: f64, c: f64, d: f64) -> ValueWord {
+    let mut data = AlignedVec::with_capacity(4);
+    for v in [a, b, c, d] {
+        data.push(v);
+    }
+    ValueWord::from_matrix(Box::new(MatrixData::from_flat(data, 2, 2)))
+}
+
+/// Build a 3x2 matrix [[1,2],[3,4],[5,6]]
+fn test_matrix_3x2() -> ValueWord {
+    let mut data = AlignedVec::with_capacity(6);
+    for v in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] {
+        data.push(v);
+    }
+    ValueWord::from_matrix(Box::new(MatrixData::from_flat(data, 3, 2)))
+}
+
+// ============================================================
+// NewMatrix opcode
+// ============================================================
+
+#[test]
+fn test_new_matrix_2x2() {
+    // Push 4 values, then NewMatrix(2, 2)
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 1.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 2.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 3.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 4.0
+        Instruction::new(
+            OpCode::NewMatrix,
+            Some(Operand::MatrixDims { rows: 2, cols: 2 }),
+        ),
+    ];
+    let constants = vec![
+        Constant::Number(1.0),
+        Constant::Number(2.0),
+        Constant::Number(3.0),
+        Constant::Number(4.0),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let mat = result.as_matrix().expect("should be matrix");
+    assert_eq!(mat.rows, 2);
+    assert_eq!(mat.cols, 2);
+    assert_eq!(&mat.data[..], &[1.0, 2.0, 3.0, 4.0]);
+}
+
+// ============================================================
+// Property access: .rows, .cols, .length, [i]
+// ============================================================
+
+#[test]
+fn test_matrix_rows_property() {
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::GetProp),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x3()),
+        Constant::String("rows".to_string()),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    assert_eq!(result.as_i64(), Some(2));
+}
+
+#[test]
+fn test_matrix_cols_property() {
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::GetProp),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x3()),
+        Constant::String("cols".to_string()),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    assert_eq!(result.as_i64(), Some(3));
+}
+
+#[test]
+fn test_matrix_length_property() {
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::GetProp),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x3()),
+        Constant::String("length".to_string()),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    assert_eq!(result.as_i64(), Some(6));
+}
+
+#[test]
+fn test_matrix_index_access() {
+    // matrix[0] => first row as FloatArray
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::GetProp),
+    ];
+    let constants = vec![Constant::Value(test_matrix_2x3()), Constant::Number(0.0)];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let arr = result.as_float_array().expect("should be FloatArray");
+    assert_eq!(&arr[..], &[1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn test_matrix_negative_index() {
+    // matrix[-1] => last row
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::GetProp),
+    ];
+    let constants = vec![Constant::Value(test_matrix_2x3()), Constant::Number(-1.0)];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let arr = result.as_float_array().expect("should be FloatArray");
+    assert_eq!(&arr[..], &[4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn test_matrix_length_opcode() {
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::Length),
+    ];
+    let constants = vec![Constant::Value(test_matrix_2x3())];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    assert_eq!(result.as_i64(), Some(6));
+}
+
+// ============================================================
+// Matrix methods
+// ============================================================
+
+fn method_call(receiver: ValueWord, method: &str, args: Vec<ValueWord>) -> ValueWord {
+    let n_args = args.len();
+    let mut instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // receiver
+    ];
+    let mut constants: Vec<Constant> = vec![Constant::Value(receiver)];
+
+    for (i, arg) in args.into_iter().enumerate() {
+        instructions.push(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const((i + 1) as u16)),
+        ));
+        constants.push(Constant::Value(arg));
+    }
+
+    let method_const_idx = constants.len();
+    constants.push(Constant::String(method.to_string()));
+    instructions.push(Instruction::new(
+        OpCode::PushConst,
+        Some(Operand::Const(method_const_idx as u16)),
+    ));
+
+    let count_const_idx = constants.len();
+    constants.push(Constant::Number(n_args as f64));
+    instructions.push(Instruction::new(
+        OpCode::PushConst,
+        Some(Operand::Const(count_const_idx as u16)),
+    ));
+
+    instructions.push(Instruction::simple(OpCode::CallMethod));
+    execute_bytecode(instructions, constants).unwrap()
+}
+
+#[test]
+fn test_matrix_transpose() {
+    // [[1,2,3],[4,5,6]].transpose() => [[1,4],[2,5],[3,6]]
+    let result = method_call(test_matrix_2x3(), "transpose", vec![]);
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(mat.rows, 3);
+    assert_eq!(mat.cols, 2);
+    assert_eq!(&mat.data[..], &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+}
+
+#[test]
+fn test_matrix_shape() {
+    let result = method_call(test_matrix_2x3(), "shape", vec![]);
+    let arr = result.as_array().unwrap();
+    assert_eq!(arr[0].as_i64(), Some(2));
+    assert_eq!(arr[1].as_i64(), Some(3));
+}
+
+#[test]
+fn test_matrix_reshape() {
+    // [[1,2,3],[4,5,6]].reshape(3, 2) => [[1,2],[3,4],[5,6]]
+    let result = method_call(
+        test_matrix_2x3(),
+        "reshape",
+        vec![ValueWord::from_f64(3.0), ValueWord::from_f64(2.0)],
+    );
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(mat.rows, 3);
+    assert_eq!(mat.cols, 2);
+    assert_eq!(&mat.data[..], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn test_matrix_row() {
+    // [[1,2,3],[4,5,6]].row(1) => [4,5,6]
+    let result = method_call(test_matrix_2x3(), "row", vec![ValueWord::from_f64(1.0)]);
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn test_matrix_col() {
+    // [[1,2,3],[4,5,6]].col(0) => [1,4]
+    let result = method_call(test_matrix_2x3(), "col", vec![ValueWord::from_f64(0.0)]);
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[1.0, 4.0]);
+}
+
+#[test]
+fn test_matrix_diag() {
+    // [[1,2],[3,4]].diag() => [1,4]
+    let result = method_call(test_matrix_2x2(1.0, 2.0, 3.0, 4.0), "diag", vec![]);
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[1.0, 4.0]);
+}
+
+#[test]
+fn test_matrix_flatten() {
+    let result = method_call(test_matrix_2x3(), "flatten", vec![]);
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn test_matrix_sum() {
+    // sum of [1,2,3,4,5,6] = 21
+    let result = method_call(test_matrix_2x3(), "sum", vec![]);
+    assert_eq!(result.as_f64(), Some(21.0));
+}
+
+#[test]
+fn test_matrix_min() {
+    let result = method_call(test_matrix_2x3(), "min", vec![]);
+    assert_eq!(result.as_f64(), Some(1.0));
+}
+
+#[test]
+fn test_matrix_max() {
+    let result = method_call(test_matrix_2x3(), "max", vec![]);
+    assert_eq!(result.as_f64(), Some(6.0));
+}
+
+#[test]
+fn test_matrix_mean() {
+    // mean of [1,2,3,4,5,6] = 3.5
+    let result = method_call(test_matrix_2x3(), "mean", vec![]);
+    assert_eq!(result.as_f64(), Some(3.5));
+}
+
+#[test]
+fn test_matrix_row_sum() {
+    // [[1,2,3],[4,5,6]].rowSum() => [6, 15]
+    let result = method_call(test_matrix_2x3(), "rowSum", vec![]);
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[6.0, 15.0]);
+}
+
+#[test]
+fn test_matrix_col_sum() {
+    // [[1,2,3],[4,5,6]].colSum() => [5, 7, 9]
+    let result = method_call(test_matrix_2x3(), "colSum", vec![]);
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[5.0, 7.0, 9.0]);
+}
+
+#[test]
+fn test_matrix_trace() {
+    // [[1,2],[3,4]].trace() => 5
+    let result = method_call(test_matrix_2x2(1.0, 2.0, 3.0, 4.0), "trace", vec![]);
+    assert_eq!(result.as_f64(), Some(5.0));
+}
+
+#[test]
+fn test_matrix_determinant() {
+    // [[1,2],[3,4]].det() => 1*4 - 2*3 = -2
+    let result = method_call(test_matrix_2x2(1.0, 2.0, 3.0, 4.0), "det", vec![]);
+    let det = result.as_f64().unwrap();
+    assert!((det - (-2.0)).abs() < 1e-10);
+}
+
+#[test]
+fn test_matrix_inverse() {
+    // [[1,2],[3,4]].inverse() => [[-2, 1], [1.5, -0.5]]
+    let result = method_call(test_matrix_2x2(1.0, 2.0, 3.0, 4.0), "inverse", vec![]);
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(mat.rows, 2);
+    assert_eq!(mat.cols, 2);
+    assert!((mat.data[0] - (-2.0)).abs() < 1e-10);
+    assert!((mat.data[1] - 1.0).abs() < 1e-10);
+    assert!((mat.data[2] - 1.5).abs() < 1e-10);
+    assert!((mat.data[3] - (-0.5)).abs() < 1e-10);
+}
+
+// ============================================================
+// Arithmetic operators
+// ============================================================
+
+#[test]
+fn test_matrix_add() {
+    // [[1,2],[3,4]] + [[5,6],[7,8]] => [[6,8],[10,12]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::Add),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Value(test_matrix_2x2(5.0, 6.0, 7.0, 8.0)),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(&mat.data[..], &[6.0, 8.0, 10.0, 12.0]);
+}
+
+#[test]
+fn test_matrix_sub() {
+    // [[5,6],[7,8]] - [[1,2],[3,4]] => [[4,4],[4,4]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::Sub),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(5.0, 6.0, 7.0, 8.0)),
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(&mat.data[..], &[4.0, 4.0, 4.0, 4.0]);
+}
+
+#[test]
+fn test_matrix_matmul() {
+    // [[1,2],[3,4]] * [[5,6],[7,8]] => [[19,22],[43,50]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::Mul),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Value(test_matrix_2x2(5.0, 6.0, 7.0, 8.0)),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(mat.rows, 2);
+    assert_eq!(mat.cols, 2);
+    assert_eq!(&mat.data[..], &[19.0, 22.0, 43.0, 50.0]);
+}
+
+#[test]
+fn test_matrix_scale_right() {
+    // [[1,2],[3,4]] * 2.0 => [[2,4],[6,8]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::Mul),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Number(2.0),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(&mat.data[..], &[2.0, 4.0, 6.0, 8.0]);
+}
+
+#[test]
+fn test_matrix_scale_left() {
+    // 3.0 * [[1,2],[3,4]] => [[3,6],[9,12]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::Mul),
+    ];
+    let constants = vec![
+        Constant::Number(3.0),
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(&mat.data[..], &[3.0, 6.0, 9.0, 12.0]);
+}
+
+#[test]
+fn test_matrix_matvec() {
+    // [[1,2],[3,4]] * FloatArray([1, 1]) => FloatArray([3, 7])
+    let mut vec_data = AlignedVec::with_capacity(2);
+    vec_data.push(1.0);
+    vec_data.push(1.0);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::Mul),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Value(ValueWord::from_float_array(Arc::new(vec_data.into()))),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[3.0, 7.0]);
+}
+
+// ============================================================
+// Non-square matrix operations
+// ============================================================
+
+#[test]
+fn test_matrix_matmul_non_square() {
+    // (2x3) * (3x2) => (2x2)
+    // [[1,2,3],[4,5,6]] * [[1,2],[3,4],[5,6]] => [[22,28],[49,64]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::Mul),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x3()),
+        Constant::Value(test_matrix_3x2()),
+    ];
+    let result = execute_bytecode(instructions, constants).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(mat.rows, 2);
+    assert_eq!(mat.cols, 2);
+    assert_eq!(&mat.data[..], &[22.0, 28.0, 49.0, 64.0]);
+}
+
+#[test]
+fn test_matrix_dimension_mismatch_add() {
+    // 2x3 + 2x2 => error
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::Add),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x3()),
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+    ];
+    let result = execute_bytecode(instructions, constants);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_matrix_row_negative_index() {
+    // [[1,2,3],[4,5,6]].row(-1) => [4,5,6]
+    let result = method_call(test_matrix_2x3(), "row", vec![ValueWord::from_f64(-1.0)]);
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn test_matrix_col_negative_index() {
+    // [[1,2,3],[4,5,6]].col(-1) => [3,6]
+    let result = method_call(test_matrix_2x3(), "col", vec![ValueWord::from_f64(-1.0)]);
+    let arr = result.as_float_array().unwrap();
+    assert_eq!(&arr[..], &[3.0, 6.0]);
+}
+
+#[test]
+fn test_matrix_reshape_invalid() {
+    // [[1,2,3],[4,5,6]].reshape(2, 2) => error (6 elements != 4)
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),
+        Instruction::simple(OpCode::CallMethod),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x3()),
+        Constant::Number(2.0),
+        Constant::Number(2.0),
+        Constant::String("reshape".to_string()),
+        Constant::Number(2.0), // 2 args
+    ];
+    let result = execute_bytecode(instructions, constants);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_matrix_singular_inverse() {
+    // [[1,2],[2,4]] is singular => error
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::simple(OpCode::CallMethod),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 2.0, 4.0)),
+        Constant::String("inverse".to_string()),
+        Constant::Number(0.0), // 0 args
+    ];
+    let result = execute_bytecode(instructions, constants);
+    assert!(result.is_err());
+}
+
+// ============================================================
+// Identity matrix operations
+// ============================================================
+
+#[test]
+fn test_matrix_identity_determinant() {
+    // [[1,0],[0,1]].det() => 1.0
+    let result = method_call(test_matrix_2x2(1.0, 0.0, 0.0, 1.0), "det", vec![]);
+    let det = result.as_f64().unwrap();
+    assert!((det - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_matrix_identity_inverse() {
+    // [[1,0],[0,1]].inverse() => [[1,0],[0,1]]
+    let result = method_call(test_matrix_2x2(1.0, 0.0, 0.0, 1.0), "inverse", vec![]);
+    let mat = result.as_matrix().unwrap();
+    assert!((mat.data[0] - 1.0).abs() < 1e-10);
+    assert!((mat.data[1] - 0.0).abs() < 1e-10);
+    assert!((mat.data[2] - 0.0).abs() < 1e-10);
+    assert!((mat.data[3] - 1.0).abs() < 1e-10);
+}

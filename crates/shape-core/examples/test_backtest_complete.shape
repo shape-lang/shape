@@ -1,0 +1,48 @@
+// Complete end-to-end backtest test
+// Tests the new function-style backtest API
+
+// 1. Define a trading strategy function
+function ma_crossover_strategy() {
+    // Get price series
+    let closes = series("close")
+
+    // Calculate moving averages
+    let fast_ma = rolling_mean(closes, 20)
+    let slow_ma = rolling_mean(closes, 50)
+
+    // Generate signals based on crossover
+    if (fast_ma[-1] > slow_ma[-1] and fast_ma[-2] <= slow_ma[-2]) {
+        return buy({})
+    }
+    if (fast_ma[-1] < slow_ma[-1] and fast_ma[-2] >= slow_ma[-2]) {
+        return sell({})
+    }
+    return None
+}
+
+// 2. Load market data with date range
+let data = load("market_data", { symbol: "ES", from: "2020-01-01", to: "2023-12-31" })
+
+// 3. Run basic backtest with new API
+let results = backtest(
+    ma_crossover_strategy,
+    data,
+    capital: 100000,
+    commission: 0.001
+)
+
+// 4. Display results
+print("=== Backtest Results ===")
+print("Sharpe Ratio: " + results.sharpe_ratio)
+print("Total Return: " + results.total_return + "%")
+print("Max Drawdown: " + results.max_drawdown + "%")
+print("Total Trades: " + results.total_trades)
+
+// 5. Return summary
+{
+    capital: 100000,
+    strategy: "ma_crossover_strategy",
+    sharpe: results.sharpe_ratio,
+    return_pct: results.total_return,
+    test_status: "Backtest framework operational"
+}

@@ -1,0 +1,253 @@
+//! IoT Anomaly Detection Patterns
+//!
+//! Statistical and rule-based anomaly detection for sensor data.
+//! Uses SIMD-accelerated computations where possible.
+
+// ===== Statistical Anomaly Detection =====
+
+/// Z-score based anomaly detection
+/// Detects values that deviate significantly from the mean
+///
+/// @param data - Sensor reading data
+/// @param threshold - Number of standard deviations (default 3.0)
+/// @returns Column of boolean values (true = anomaly)
+pub fn zscore_anomalies(series, threshold = 3.0) {
+    let mean_val = series.mean();
+    let std_val = series.std();
+
+    if std_val == 0 {
+        // No variance, no anomalies
+        series.map(|v| false)
+    } else {
+        series.map(|v| abs(v - mean_val) / std_val > threshold)
+    }
+}
+
+/// Modified Z-score using median absolute deviation (MAD)
+/// More robust to outliers than standard Z-score
+///
+/// @param series - Sensor reading data
+/// @param threshold - Number of MAD units (default 3.5)
+pub fn mad_anomalies(series, threshold = 3.5) {
+    let median_val = series.median();
+
+    // Calculate absolute deviations from median
+    let abs_devs = series.map(|v| abs(v - median_val));
+    let mad = abs_devs.median();
+
+    // MAD scaling factor for normal distribution
+    let k = 1.4826;
+
+    if mad == 0 {
+        series.map(|v| false)
+    } else {
+        let scaled_mad = k * mad;
+        series.map(|v| abs(v - median_val) / scaled_mad > threshold)
+    }
+}
+
+/// Interquartile range (IQR) based anomaly detection
+/// Values outside [Q1 - k*IQR, Q3 + k*IQR] are anomalies
+///
+/// @param series - Sensor reading data
+/// @param k - IQR multiplier (default 1.5)
+pub fn iqr_anomalies(series, k = 1.5) {
+    let q1 = series.percentile(25);
+    let q3 = series.percentile(75);
+    let iqr = q3 - q1;
+
+    let lower_bound = q1 - k * iqr;
+    let upper_bound = q3 + k * iqr;
+
+    series.map(|v| v < lower_bound || v > upper_bound)
+}
+
+// ===== Rolling Window Anomaly Detection =====
+
+/// Rolling Z-score anomaly detection
+/// Adapts to local statistics in a sliding window
+///
+/// @param series - Sensor reading data
+/// @param window - Window size for statistics
+/// @param threshold - Z-score threshold
+pub fn rolling_zscore_anomalies(series, window = 50, threshold = 3.0) {
+    let rolling_mean = series.rolling(window).mean();
+    let rolling_std = series.rolling(window).std();
+
+    // Create anomaly flags
+    // Note: First (window-1) values won't have full statistics
+    series.map(|v, idx| {
+        let mean_at_idx = rolling_mean.get(idx);
+        let std_at_idx = rolling_std.get(idx);
+
+        if std_at_idx == None || std_at_idx == 0 {
+            false
+        } else {
+            abs(v - mean_at_idx) / std_at_idx > threshold
+        }
+    })
+}
+
+/// Detect sudden spikes or drops
+/// Compares current value to recent average
+///
+/// @param series - Sensor reading data
+/// @param window - Lookback window for baseline
+/// @param spike_threshold - Percentage change threshold
+pub fn spike_detection(series, window = 10, spike_threshold = 0.5) {
+    let baseline = series.rolling(window).mean();
+
+    series.map(|v, idx| {
+        let base = baseline.get(idx);
+        if base == None || base == 0 {
+            false
+        } else {
+            let pct_change = abs(v - base) / abs(base);
+            pct_change > spike_threshold
+        }
+    })
+}
+
+// ===== Pattern-Based Anomaly Detection =====
+
+/// Detect flatline conditions (no change over period)
+/// Useful for detecting stuck sensors
+///
+/// @param series - Sensor reading data
+/// @param window - Window to check for variance
+/// @param epsilon - Minimum expected variance
+pub fn flatline_detection(series, window = 10, epsilon = 0.0001) {
+    let rolling_var = series.rolling(window).var();
+
+    rolling_var.map(|v| v != None && v < epsilon)
+}
+
+/// Detect rapid oscillation
+/// Values alternating above/below threshold frequently
+///
+/// @param series - Sensor reading data
+/// @param window - Window to count oscillations
+/// @param threshold - Reference threshold
+/// @param min_oscillations - Minimum oscillations to flag
+pub fn oscillation_detection(series, window = 10, threshold = 0.0, min_oscillations = 5) {
+    // Count sign changes relative to threshold
+    let above_threshold = series.map(|v| v > threshold);
+
+    above_threshold.rolling(window).map(|window_vals| {
+        let changes = 0;
+        let prev = None;
+        for val in window_vals {
+            if prev != None && val != prev {
+                changes = changes + 1;
+            }
+            prev = val;
+        }
+        changes >= min_oscillations
+    })
+}
+
+/// Detect drift from baseline
+/// Values slowly moving away from expected range
+///
+/// @param series - Sensor reading data
+/// @param baseline_window - Initial window to establish baseline
+/// @param drift_threshold - Percentage drift threshold
+pub fn drift_detection(series, baseline_window = 100, drift_threshold = 0.2) {
+    // Use first N readings as baseline
+    let baseline_data = series.slice(0, baseline_window);
+    let baseline_mean = baseline_data.mean();
+
+    if baseline_mean == 0 {
+        series.map(|v| false)
+    } else {
+        series.map(|v| abs(v - baseline_mean) / abs(baseline_mean) > drift_threshold)
+    }
+}
+
+// ===== Contextual Anomaly Detection =====
+
+/// Time-of-day based anomaly detection
+/// Different thresholds for different time periods
+///
+/// @param readings - Table with timestamp and value columns
+/// @param day_thresholds - ThresholdConfig for daytime
+/// @param night_thresholds - ThresholdConfig for nighttime
+/// @param day_start_hour - Start of daytime (default 6)
+/// @param day_end_hour - End of daytime (default 18)
+pub fn time_aware_anomalies(readings, day_thresholds, night_thresholds, day_start_hour = 6, day_end_hour = 18) {
+    readings.map(|reading| {
+        let hour_of_day = hour(reading.timestamp);
+        let is_daytime = hour_of_day >= day_start_hour && hour_of_day < day_end_hour;
+
+        let thresholds = if is_daytime {
+            day_thresholds
+        } else {
+            night_thresholds
+        };
+
+        reading.value > thresholds.high_critical ||
+        reading.value < thresholds.low_critical
+    })
+}
+
+// ===== Anomaly Aggregation =====
+
+/// Combine multiple anomaly detection methods
+/// Returns true if any method flags an anomaly
+///
+/// @param series - Sensor reading data
+pub fn combined_anomaly_detection(series) {
+    let zscore = zscore_anomalies(series, 3.0);
+    let iqr = iqr_anomalies(series, 1.5);
+    let spikes = spike_detection(series, 10, 0.5);
+
+    // Combine with OR logic
+    series.map(|v, idx| {
+        zscore.get(idx) == true ||
+        iqr.get(idx) == true ||
+        spikes.get(idx) == true
+    })
+}
+
+/// Consensus anomaly detection
+/// Only flags if multiple methods agree
+///
+/// @param series - Sensor reading data
+/// @param min_agreement - Minimum methods that must agree
+pub fn consensus_anomalies(series, min_agreement = 2) {
+    let zscore = zscore_anomalies(series, 3.0);
+    let mad = mad_anomalies(series, 3.5);
+    let iqr = iqr_anomalies(series, 1.5);
+
+    series.map(|v, idx| {
+        let count = 0;
+        if zscore.get(idx) == true { count = count + 1; }
+        if mad.get(idx) == true { count = count + 1; }
+        if iqr.get(idx) == true { count = count + 1; }
+        count >= min_agreement
+    })
+}
+
+/// Count anomalies in a series
+pub fn count_anomalies(anomaly_flags) {
+    let count = 0;
+    for flag in anomaly_flags {
+        if flag == true {
+            count = count + 1;
+        }
+    }
+    count
+}
+
+/// Get indices of anomalies
+pub fn get_anomaly_indices(anomaly_flags) {
+    let indices = [];
+    let idx = 0;
+    for flag in anomaly_flags {
+        if flag == true {
+            indices = push(indices, idx);
+        }
+        idx = idx + 1;
+    }
+    indices
+}

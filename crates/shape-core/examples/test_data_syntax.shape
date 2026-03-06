@@ -1,0 +1,12 @@
+// Test new data[i] syntax
+
+function test_data_access() {
+    // This should work now that backtest sets "data" variable
+    if data[0].close > 100 {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+test_data_access()

@@ -1,0 +1,135 @@
+// @skip - Uses pattern definitions and indicators not yet in stdlib
+// Shape Pattern Definitions
+// This file shows how to define common candlestick patterns using Shape syntax
+
+// Hammer Pattern - Bullish reversal signal
+// A hammer has a small body at the top and a long lower shadow
+pattern hammer ~0.02 {
+    // Small body (close is near open)
+    abs(data[0].close - data[0].open) / data[0].open < 0.01 and
+    
+    // Long lower shadow (at least 2x the body size)
+    (min(data[0].open, data[0].close) - data[0].low) > 
+        2 * abs(data[0].close - data[0].open) and
+    
+    // Small or no upper shadow
+    (data[0].high - max(data[0].open, data[0].close)) < 
+        0.1 * abs(data[0].close - data[0].open)
+}
+
+// Doji Pattern - Indecision
+// Open and close are virtually equal
+pattern doji ~0.001 {
+    // Open equals close (with fuzzy matching)
+    data[0].open ~= data[0].close and
+    
+    // Has both upper and lower shadows
+    (data[0].high - data[0].low) > 3 * abs(data[0].close - data[0].open)
+}
+
+// Shooting Star - Bearish reversal
+// Small body at bottom with long upper shadow
+pattern shooting_star {
+    // Small body
+    abs(data[0].close - data[0].open) / data[0].open < 0.01 and
+    
+    // Long upper shadow (at least 2x body)
+    (data[0].high - max(data[0].open, data[0].close)) > 
+        2 * abs(data[0].close - data[0].open) and
+    
+    // Small lower shadow
+    (min(data[0].open, data[0].close) - data[0].low) < 
+        0.1 * abs(data[0].close - data[0].open)
+}
+
+// Bullish Engulfing - Strong bullish reversal
+// Current bullish candle completely engulfs previous bearish candle
+pattern bullish_engulfing {
+    // Previous candle is bearish
+    data[-1].close < data[-1].open and
+    
+    // Current candle is bullish
+    data[0].close > data[0].open and
+    
+    // Current open is at or below previous close
+    data[0].open <= data[-1].close and
+    
+    // Current close is above previous open (engulfs it)
+    data[0].close > data[-1].open
+}
+
+// Morning Star - Three-candle bullish reversal
+pattern morning_star {
+    // First candle: Large bearish
+    data[-2].close < data[-2].open and
+    abs(data[-2].close - data[-2].open) > 0.01 * data[-2].open and
+    
+    // Second candle: Small body (star)
+    abs(data[-1].close - data[-1].open) < 
+        0.3 * abs(data[-2].close - data[-2].open) and
+    
+    // Third candle: Bullish that closes above midpoint of first
+    data[0].close > data[0].open and
+    data[0].close > (data[-2].open + data[-2].close) / 2
+}
+
+// Advanced Hammer with Volume Confirmation
+// Shows how patterns can incorporate indicators
+pattern hammer_with_volume {
+    // All hammer conditions
+    abs(data[0].close - data[0].open) / data[0].open < 0.01 and
+    (min(data[0].open, data[0].close) - data[0].low) > 
+        2 * abs(data[0].close - data[0].open) and
+    (data[0].high - max(data[0].open, data[0].close)) < 
+        0.1 * abs(data[0].close - data[0].open) and
+    
+    // Plus volume confirmation
+    data[0].volume > sma(volume, 20) * 1.5
+}
+
+// Weighted Pattern Example
+// Shows how to assign importance to conditions
+pattern strong_reversal_signal {
+    // Primary condition - heavily weighted
+    (hammer or bullish_engulfing) weight 3.0 and
+    
+    // Supporting conditions
+    rsi(14) < 30 weight 2.0 and
+    data[0].volume > sma(volume, 50) weight 1.0 and
+    
+    // Context check
+    data[0].low < bb_lower(20, 2) weight 1.0
+}
+
+// Multi-timeframe Pattern
+// Demonstrates cross-timeframe analysis
+pattern confluence_buy {
+    // Hammer on current timeframe
+    hammer and
+    
+    // Bullish trend on higher timeframe
+    on(4h) {
+        sma(close, 50) > sma(close, 200)
+    } and
+    
+    // Oversold on lower timeframe
+    on(15m) {
+        rsi(14) < 30
+    }
+}
+
+// Pattern with Dynamic Thresholds
+// Shows how patterns can adapt to volatility
+pattern adaptive_doji {
+    // Body size relative to average true range
+    abs(data[0].close - data[0].open) < atr(14) * 0.1 and
+    
+    // Shadows exist but proportional to volatility
+    (data[0].high - data[0].low) > atr(14) * 0.5
+}
+
+// Example usage:
+// data("market_data", { symbol: "ES", timeframe: "1h" }).find("hammer")
+// data("market_data", { symbol: "ES", timeframe: "1h" }).filter(row => row.close > 100).find("hammer_with_volume")
+// data("market_data", { symbol: "ES", timeframe: "1h" }).window(last(30, "days")).find("strong_reversal_signal")
+// data("market_data", { symbol: "ES", timeframe: "1h" }).find("confluence_buy").aggregate({ success_rate: ..., avg_gain: ... })

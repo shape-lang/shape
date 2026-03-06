@@ -1,0 +1,22 @@
+// Benchmark: 1 Year of ES Data
+// Tests all three strategy complexities
+
+let data = load("market_data", { symbol: "ES", from: "2024-01-01", to: "2025-01-01" });
+
+// Simple strategy
+function simple_momentum() {
+    let close = data[0].close
+    let prev_close = data[-1].close
+    let change = (close - prev_close) / prev_close
+    if change > 0.001 { return "buy" }
+    if change < -0.001 { return "sell" }
+    return "hold"
+}
+
+print("Running Simple Strategy...");
+let result1 = run_simulation({ strategy: "simple_momentum", capital: 100000 });
+
+print("=== BENCHMARK RESULTS ===");
+print("Simple Strategy:");
+print("  Trades: " + result1.summary.total_trades);
+print("  Return: " + result1.summary.total_return + "%");

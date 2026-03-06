@@ -1,0 +1,87 @@
+//! Math Functions - Optimized with Intrinsics
+//! High-performance mathematical operations
+
+// ===== Basic Statistics =====
+
+pub fn sum(series) {
+    __intrinsic_sum(series)
+}
+
+pub fn mean(series) {
+    __intrinsic_mean(series)
+}
+
+// min() and max() are builtin functions that handle both:
+// - Single argument: series/array - finds min/max in the collection
+// - Multiple arguments: numbers - finds min/max among them
+// The builtin intrinsics are used internally via __intrinsic_min/__intrinsic_max
+
+pub fn std(series) {
+    __intrinsic_std(series)
+}
+
+pub fn variance(series) {
+    __intrinsic_variance(series)
+}
+
+// ===== Advanced Statistics =====
+
+pub fn correlation(series_a, series_b) {
+    __intrinsic_correlation(series_a, series_b)
+}
+
+pub fn covariance(series_a, series_b) {
+    __intrinsic_covariance(series_a, series_b)
+}
+
+pub fn percentile(series, p) {
+    __intrinsic_percentile(series, p)
+}
+
+pub fn median(series) {
+    __intrinsic_median(series)
+}
+
+// ===== Derived Functions =====
+
+pub fn coefficient_of_variation(series) {
+    let std_val = __intrinsic_std(series);
+    let mean_val = __intrinsic_mean(series);
+
+    if mean_val == 0 {
+        None
+    } else {
+        std_val / mean_val
+    }
+}
+
+pub fn spread(series) {
+    __intrinsic_max(series) - __intrinsic_min(series)
+}
+
+pub fn zscore(series) {
+    let mean_val = __intrinsic_mean(series);
+    let std_val = __intrinsic_std(series);
+    (series - mean_val) / std_val
+}
+
+// ===== Vec Operations =====
+
+// Note: map, filter, reduce are built into the language
+// but can use intrinsics for large arrays:
+
+pub fn parallel_map(array, fn) {
+    if array.len() > 1000 {
+        __intrinsic_map(array, fn)  // Parallel!
+    } else {
+        array.map(fn)  // Sequential is fine
+    }
+}
+
+pub fn parallel_filter(array, predicate) {
+    if array.len() > 1000 {
+        __intrinsic_filter(array, predicate)  // Parallel!
+    } else {
+        array.filter(predicate)
+    }
+}

@@ -1,0 +1,172 @@
+// ATR-Based Aggressive Price Movement Analysis
+// This program analyzes candles where price changed 20% or more of the ATR
+// in a 15-minute timeframe, using ES futures data from 2020-2022
+
+// Import required functions from standard library
+import indicators from "std/indicators.lmn"
+import statistics from "std/statistics.lmn"
+
+// Define what constitutes an "aggressive" price movement
+pattern atr_aggressive_move {
+    // Calculate 14-period ATR (standard period)
+    let atr_value = atr(14)
+    
+    // Calculate absolute price change from previous candle
+    let price_change = abs(data[0].close - data[1].close)
+    
+    // Movement is aggressive if it exceeds 20% of ATR
+    price_change >= atr_value * 0.20
+}
+
+// Enhanced pattern that captures direction and magnitude
+pattern directional_atr_move {
+    let atr_value = atr(14)
+    let price_change = data[0].close - data[1].close
+    let abs_change = abs(price_change)
+    
+    // Must exceed 20% of ATR
+    abs_change >= atr_value * 0.20 and
+    
+    // Store direction and relative magnitude for analysis
+    store {
+        direction: price_change > 0 ? "up" : "down",
+        atr_multiple: abs_change / atr_value,
+        actual_change: price_change,
+        atr_value: atr_value,
+        timestamp: data[0].timestamp
+    }
+}
+
+// Function to analyze probability of follow-through moves
+function analyze_follow_through(matches) {
+    let total = len(matches)
+    let follow_through_same_direction = 0
+    let reversal = 0
+    let continuation_magnitude = []
+    
+    for i in range(0, total - 1) {
+        let current = matches[i]
+        let next = matches[i + 1]
+        
+        // Check if next aggressive move is in same direction
+        if current.direction == next.direction {
+            follow_through_same_direction += 1
+            push(continuation_magnitude, next.atr_multiple)
+        } else {
+            reversal += 1
+        }
+    }
+    
+    return {
+        total_aggressive_moves: total,
+        same_direction_probability: follow_through_same_direction / (total - 1),
+        reversal_probability: reversal / (total - 1),
+        avg_continuation_magnitude: avg(continuation_magnitude),
+        
+        // Distribution of ATR multiples
+        magnitude_distribution: {
+            "0.2-0.5x": count(matches where m.atr_multiple < 0.5),
+            "0.5-1.0x": count(matches where m.atr_multiple >= 0.5 and m.atr_multiple < 1.0),
+            "1.0-2.0x": count(matches where m.atr_multiple >= 1.0 and m.atr_multiple < 2.0),
+            ">2.0x": count(matches where m.atr_multiple >= 2.0)
+        }
+    }
+}
+
+// Main analysis query - to be run after loading data
+// Usage: :data ~/dev/finance/data ES 2020-01-01 2022-12-31
+query main_analysis {
+    // Find all aggressive moves on 15-minute timeframe
+    let aggressive_15m = find directional_atr_move on(15m) in all
+    
+    // Calculate basic statistics
+    let stats = {
+        total_candles: count(all candles on(15m)),
+        aggressive_moves: len(aggressive_15m),
+        frequency: len(aggressive_15m) / count(all candles on(15m)) * 100,
+        
+        // Directional breakdown
+        up_moves: count(aggressive_15m where m.direction == "up"),
+        down_moves: count(aggressive_15m where m.direction == "down"),
+        
+        // Magnitude statistics
+        avg_atr_multiple: avg(aggressive_15m.atr_multiple),
+        max_atr_multiple: max(aggressive_15m.atr_multiple),
+        
+        // Time-based analysis
+        by_hour: group_by(aggressive_15m, hour_of_day(m.timestamp)),
+        by_day_of_week: group_by(aggressive_15m, day_of_week(m.timestamp))
+    }
+    
+    // Analyze follow-through probability
+    let follow_through = analyze_follow_through(aggressive_15m)
+    
+    // Market regime analysis
+    let regime_analysis = {
+        // Check if aggressive moves cluster
+        clustering: analyze_clustering(aggressive_15m, window: 24h),
+        
+        // Correlation with volatility regimes
+        high_vol_periods: find_high_volatility_periods(threshold: 1.5),
+        aggressive_in_high_vol: correlation(aggressive_15m, high_vol_periods)
+    }
+    
+    return {
+        summary: stats,
+        follow_through_analysis: follow_through,
+        regime_correlation: regime_analysis,
+        
+        // Key finding: Probability of similar aggressiveness following
+        key_probability: follow_through.same_direction_probability,
+        
+        // Trading implications
+        trading_edge: {
+            signal: "After aggressive move (>20% ATR)",
+            probability_continuation: follow_through.same_direction_probability,
+            avg_magnitude_if_continues: follow_through.avg_continuation_magnitude,
+            recommended_action: follow_through.same_direction_probability > 0.55 ? 
+                "Consider momentum trades" : "Expect mean reversion"
+        }
+    }
+}
+
+// Backtest strategy based on findings
+strategy atr_momentum_strategy {
+    parameters {
+        atr_threshold: 0.20,  // 20% of ATR
+        position_size: 1.0,
+        stop_loss_atr: 1.0,   // Stop at 1x ATR
+        take_profit_atr: 2.0  // Target 2x ATR
+    }
+    
+    on_bar {
+        // Check if previous bar was aggressive move
+        if data[-1].matches(atr_aggressive_move) {
+            let atr_value = atr(14)
+            let direction = data[0].close > data[-1].close ? "long" : "short"
+            
+            // Enter position in direction of momentum
+            if direction == "long" and not has_position() {
+                entry_price = data[0].close
+                stop_loss = entry_price - atr_value * parameters.stop_loss_atr
+                take_profit = entry_price + atr_value * parameters.take_profit_atr
+                
+                open_long(parameters.position_size)
+            } else if direction == "short" and not has_position() {
+                entry_price = data[0].close
+                stop_loss = entry_price + atr_value * parameters.stop_loss_atr
+                take_profit = entry_price - atr_value * parameters.take_profit_atr
+                
+                open_short(parameters.position_size)
+            }
+        }
+        
+        // Manage existing positions
+        if has_position() {
+            check_stops()
+        }
+    }
+}
+
+// Run the analysis
+export main_analysis

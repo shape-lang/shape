@@ -1,0 +1,11 @@
+// Benchmark 14: String concatenation
+function string_concat(n: int) -> int {
+    var s = ""
+    var i = 0
+    while i < n {
+        s = s + "x"
+        i = i + 1
+    }
+    return s.length()
+}
+print(string_concat(100000))

@@ -1,0 +1,16 @@
+date_utc	week	git_rev	geomean_jit_node	warm_geomean_jit_exec_node	wins	losses	snapshot_file	notes
+2026-02-22T11:10:37Z	W1	defb6dad	2.66	2.30	2	8	shape/benchmarks/tracking/snapshots/20260222_111037_W1.tsv	baseline after tracking + module split
+2026-02-22T11:23:29Z	W2	defb6dad	2.66	2.30	2	8	shape/benchmarks/tracking/snapshots/20260222_112329_W2.tsv	strict typed default + trusted hoisted numeric array get/set (no hot-path fallback)
+2026-02-22T11:30:23Z	W3	defb6dad	2.34	2.01	2	8	shape/benchmarks/tracking/snapshots/20260222_113023_W3.tsv	inner-loop invariant int-local unboxing (i/j) + strict hoisted array fast path
+2026-02-22T11:35:12Z	W4	defb6dad	2.35	2.01	2	8	shape/benchmarks/tracking/snapshots/20260222_113512_W4.tsv	tight-loop groundwork: float-unroll eligibility gate + stable invariant-unboxing path
+2026-02-22T14:45:38Z	W1	caf12ee6	1.88	1.58	2	8	shape/benchmarks/tracking/snapshots/20260222_144538_W1.tsv	week1 measurement hardening + anti-cheating guard; runs=5; geomean_range=1.88-1.91; warm_range=1.57-1.61; pin_core=3
+2026-02-22T15:03:04Z	W2	caf12ee6	1.88		2	8	shape/benchmarks/tracking/snapshots/20260222_150304_W2.tsv	week2: fused-branch comparison bool materialization elision; runs=3; geomean_range=1.86-1.89; warm_range=-; pin_core=3
+2026-02-22T15:24:07Z	W2	0b1871a8	1.61	1.23	4	6	shape/benchmarks/tracking/snapshots/20260222_152407_W2.tsv	week2 numeric-local fast-path; runs=3; geomean_range=1.57-1.62; warm_range=1.19-1.25; pin_core=none
+2026-02-22T16:37:52Z	W2	51da645b	1.60	1.21	4	6	shape/benchmarks/tracking/snapshots/20260222_163752_W2.tsv	week2 continue: bounds inference update + inline array address refactor; runs=3; geomean_range=1.58-1.60; warm_range=1.19-1.22; pin_core=none
+2026-02-22T17:22:43Z	W4	234f2495	1.82	1.37	4	6	shape/benchmarks/tracking/snapshots/20260222_172243_W4.tsv	typed numeric arrays + get/set site planning; runs=3; geomean_range=1.79-1.82; warm_range=1.36-1.38; pin_core=none
+2026-02-22T17:24:14Z	W5	234f2495	1.82	1.37	4	6	shape/benchmarks/tracking/snapshots/20260222_172414_W5.tsv	bounds-check hoist + noalias memory pipeline; runs=3; geomean_range=1.80-1.84; warm_range=1.37-1.38; pin_core=none
+2026-02-22T17:25:46Z	W6	234f2495	1.82	1.37	4	6	shape/benchmarks/tracking/snapshots/20260222_172546_W6.tsv	SIMD planning infrastructure + vector width integration; runs=3; geomean_range=1.81-1.83; warm_range=1.37-1.38; pin_core=none
+2026-02-22T17:27:17Z	W7	234f2495	1.82	1.38	3	7	shape/benchmarks/tracking/snapshots/20260222_172717_W7.tsv	numeric kernel vectorization + strip-mining policy; runs=3; geomean_range=1.82-1.82; warm_range=1.38-1.39; pin_core=none
+2026-02-22T17:28:46Z	W8	234f2495	1.82	1.38	4	6	shape/benchmarks/tracking/snapshots/20260222_172846_W8.tsv	call-path redesign + selective restore on direct call; runs=3; geomean_range=1.81-1.83; warm_range=1.37-1.38; pin_core=none
+2026-02-22T17:30:16Z	W9	234f2495	1.83	1.38	4	6	shape/benchmarks/tracking/snapshots/20260222_173016_W9.tsv	typed column load inlining + Table/Queryable fusion groundwork; runs=3; geomean_range=1.77-1.83; warm_range=1.34-1.39; pin_core=none
+2026-02-22T17:31:47Z	W10	310c7222	1.82	1.37	4	6	shape/benchmarks/tracking/snapshots/20260222_173147_W10.tsv	correctness validation + maintainability stabilization; runs=3; geomean_range=1.82-1.84; warm_range=1.37-1.40; pin_core=none

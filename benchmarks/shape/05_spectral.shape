@@ -1,0 +1,41 @@
+// Benchmark 5: Spectral norm (partial)
+function spectral(n) {
+    var u = [];
+    var v = [];
+    var i = 0;
+    while i < n {
+        u = u.push(1.0);
+        v = v.push(0.0);
+        i = i + 1;
+    }
+    var iter = 0;
+    while iter < 10 {
+        var vi = 0;
+        while vi < n {
+            var sum = 0.0;
+            var vj = 0;
+            while vj < n {
+                let denom = (vi + vj) * (vi + vj + 1) / 2.0 + vi + 1.0;
+                sum = sum + u[vj] / denom;
+                vj = vj + 1;
+            }
+            v[vi] = sum;
+            vi = vi + 1;
+        }
+        var ui = 0;
+        while ui < n {
+            var sum2 = 0.0;
+            var uj = 0;
+            while uj < n {
+                let denom2 = (ui + uj) * (ui + uj + 1) / 2.0 + ui + 1.0;
+                sum2 = sum2 + v[uj] / denom2;
+                uj = uj + 1;
+            }
+            u[ui] = sum2;
+            ui = ui + 1;
+        }
+        iter = iter + 1;
+    }
+    print(u[0]);
+}
+spectral(5000);

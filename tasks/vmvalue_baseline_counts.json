@@ -1,0 +1,17 @@
+{
+  "snapshot_date": "2026-02-19",
+  "total_references": 1354,
+  "total_files": 71,
+  "per_crate": {
+    "shape-jit": 2,
+    "shape-runtime": 314,
+    "shape-value": 415,
+    "shape-vm": 623
+  },
+  "per_category": {
+    "boundary": 2,
+    "hot_path": 34,
+    "support_or_legacy": 26,
+    "test_or_bench": 9
+  }
+}

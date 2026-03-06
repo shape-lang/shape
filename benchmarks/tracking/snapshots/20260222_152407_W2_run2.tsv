@@ -1,0 +1,12 @@
+benchmark	rust_ms	node_ms	python_ms	vm_ms	jit_ms	jit_node_ratio	jit_node_warm_ratio	jit_node_ratio_100x	jit_node_warm_ratio_100x	typed_numeric_ops	generic_numeric_ops	bytecode_compile_ms	jit_compile_ms	jit_exec_ms	geomean_jit_node	warm_geomean_jit_exec_node
+01_fib	174	701			578	0.82	0.72	82	72	4	0	0	1	506		
+02_fib_iter	21	108			106	0.98	0.37	98	37	3	0	0	0	40		
+03_sieve	13	40			143	3.58	1.72	358	172	11	0	0	1	69		
+04_mandelbrot	664	675			1356	2.01	1.90	201	190	25	0	0	1	1284		
+05_spectral	394	483			1150	2.38	2.23	238	223	30	0	0	1	1075		
+06_ackermann	45	119			202	1.70	1.13	170	113	6	0	0	0	134		
+07_sum_loop	1	549			527	0.96	0.83	96	83	3	0	0	0	457		
+08_collatz	177	2041			2021	0.99	0.95	99	95	10	0	0	1	1949		
+09_matrix_mul	239	392			1841	4.70	4.49	470	449	21	0	0	1	1762		
+10_primes_count	1066	1083			1326	1.22	1.16	122	116	12	0	0	1	1255		
+__summary__															1.62	1.25

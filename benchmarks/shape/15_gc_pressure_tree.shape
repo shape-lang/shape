@@ -1,0 +1,18 @@
+// Benchmark 15: GC pressure - binary tree
+function build_tree(depth: int) -> int {
+    if depth == 0 { return 0; }
+    let left = build_tree(depth - 1)
+    let right = build_tree(depth - 1)
+    return left + right + 1
+}
+
+function gc_pressure_tree(depth: int, iterations: int) -> int {
+    var total = 0
+    var i = 0
+    while i < iterations {
+        total = total + build_tree(depth)
+        i = i + 1
+    }
+    return total
+}
+print(gc_pressure_tree(20, 5))

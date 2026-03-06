@@ -1,0 +1,216 @@
+// @skip — uses method chaining on function calls (not yet in grammar)
+// Comprehensive backtesting example with Shape
+// This demonstrates the complete pipeline from data loading to analysis
+
+// Load market data - this populates the ExecutionContext with candles
+// The data stays in the context and is used by all subsequent operations
+let es_data = load("market_data", { symbol: "ES", from: "2024-01-01", to: "2024-06-30" });
+
+// Define RSI + Moving Average strategy
+function rsi_ma_strategy() {
+    // Get current candle data
+    let closes = series("close");
+    let rsi = rsi(closes, 14);
+    let sma_fast = sma(closes, 20);
+    let sma_slow = sma(closes, 50);
+    
+    // Get latest values
+    let current_rsi = rsi[-1];
+    let fast_ma = sma_fast[-1];
+    let slow_ma = sma_slow[-1];
+    
+    // Generate trading signals
+    if (current_rsi < 30 and fast_ma > slow_ma) {
+        return { action: "buy", strength: (30 - current_rsi) / 30 };
+    } else if (current_rsi > 70 and fast_ma < slow_ma) {
+        return { action: "short", strength: (current_rsi - 70) / 30 };
+    } else if (current_rsi > 50 and fast_ma < slow_ma) {
+        return { action: "sell", strength: 0.8 };
+    } else if (current_rsi < 50 and fast_ma > slow_ma) {
+        return { action: "cover", strength: 0.8 };
+    } else {
+        return { action: "hold", strength: 0.0 };
+    }
+}
+
+// Alternative: Bollinger Band mean reversion strategy
+function bb_reversion_strategy() {
+    let closes = series("close");
+    let bb = bollinger(closes, 20, 2);
+    let current_price = closes[-1];
+    let upper_band = bb.upper[-1];
+    let lower_band = bb.lower[-1];
+    let middle_band = bb.middle[-1];
+    
+    // Calculate position relative to bands
+    let band_width = upper_band - lower_band;
+    let price_position = (current_price - lower_band) / band_width;
+    
+    if (current_price < lower_band) {
+        // Price below lower band - buy signal
+        return { action: "buy", strength: min(1.0, (lower_band - current_price) / band_width) };
+    } else if (current_price > upper_band) {
+        // Price above upper band - short signal
+        return { action: "short", strength: min(1.0, (current_price - upper_band) / band_width) };
+    } else if (current_price > middle_band * 1.01) {
+        // Price crossing above middle - potential exit long
+        return { action: "sell", strength: 0.5 };
+    } else if (current_price < middle_band * 0.99) {
+        // Price crossing below middle - potential exit short
+        return { action: "cover", strength: 0.5 };
+    } else {
+        return { action: "hold", strength: 0.0 };
+    }
+}
+
+// Run backtest with configuration
+// The backtest engine uses the data already loaded in the context
+// Note: This will be native syntax once parser support is added
+/*
+let result = backtest {
+    strategy: rsi_ma_strategy,  // Strategy function operates on context data
+    capital: 100000,
+    position_sizing: "volatility_adjusted",
+    target_risk: 0.01,  // 1% risk per trade
+    max_positions: 3,
+    stop_loss: 0.02,    // 2% stop loss
+    take_profit: 0.06,  // 6% take profit
+    commission: 0.0005, // 0.05% commission
+    slippage: 0.0002,   // 0.02% slippage
+};
+*/
+
+// For now, simulate the result structure
+// In production, this comes from the backtest engine
+let result = {
+    trades: series([
+        { timestamp: "2024-01-15T10:30:00Z", symbol: "ES", pnl: 850, duration: 7200, side: "long", mae: -0.5, mfe: 1.2 },
+        { timestamp: "2024-01-20T14:15:00Z", symbol: "ES", pnl: -320, duration: 3600, side: "long", mae: -0.8, mfe: 0.3 },
+        { timestamp: "2024-02-01T09:45:00Z", symbol: "ES", pnl: 1250, duration: 10800, side: "short", mae: -0.3, mfe: 1.5 },
+        { timestamp: "2024-02-15T11:00:00Z", symbol: "ES", pnl: 420, duration: 5400, side: "long", mae: -0.4, mfe: 0.7 },
+        { timestamp: "2024-03-01T13:30:00Z", symbol: "ES", pnl: -180, duration: 9000, side: "short", mae: -0.6, mfe: 0.2 },
+    ]),
+    
+    equity: series([100000, 100850, 100530, 101780, 102200, 102020]),
+    returns: series([0.0, 0.0085, -0.0032, 0.0124, 0.0041, -0.0018]),
+    drawdown: series([0.0, 0.0, 0.32, 0.0, 0.0, 0.18])
+};
+
+// === Advanced Analysis ===
+
+// 1. Trade Quality Analysis
+let winners = result.trades.filter(t => t.pnl > 0);
+let losers = result.trades.filter(t => t.pnl < 0);
+
+print("=== Trade Quality Metrics ===");
+print("Win Rate: " + (winners.count() / result.trades.count() * 100) + "%");
+print("Average Winner: $" + winners.mean(t => t.pnl));
+print("Average Loser: $" + losers.mean(t => abs(t.pnl)));
+print("Profit Factor: " + (winners.sum(t => t.pnl) / losers.sum(t => abs(t.pnl))));
+
+// 2. Risk-Reward Analysis
+let avg_mae = result.trades.mean(t => t.mae);
+let avg_mfe = result.trades.mean(t => t.mfe);
+print("\n=== Risk-Reward Analysis ===");
+print("Average MAE: " + avg_mae + "%");
+print("Average MFE: " + avg_mfe + "%");
+print("MFE/MAE Ratio: " + (avg_mfe / abs(avg_mae)));
+
+// 3. Trade Duration Analysis
+let long_trades = result.trades.filter(t => t.side == "long");
+let short_trades = result.trades.filter(t => t.side == "short");
+
+print("\n=== Duration Analysis ===");
+print("Average Trade Duration: " + (result.trades.mean(t => t.duration) / 3600) + " hours");
+print("Long Trade Avg Duration: " + (long_trades.mean(t => t.duration) / 3600) + " hours");
+print("Short Trade Avg Duration: " + (short_trades.mean(t => t.duration) / 3600) + " hours");
+
+// 4. Side Performance
+print("\n=== Directional Performance ===");
+print("Long Trades: " + long_trades.count() + " trades, Total PnL: $" + long_trades.sum(t => t.pnl));
+print("Short Trades: " + short_trades.count() + " trades, Total PnL: $" + short_trades.sum(t => t.pnl));
+print("Long Win Rate: " + (long_trades.filter(t => t.pnl > 0).count() / long_trades.count() * 100) + "%");
+print("Short Win Rate: " + (short_trades.filter(t => t.pnl > 0).count() / short_trades.count() * 100) + "%");
+
+// 5. Monthly Performance Breakdown
+let monthly_trades = result.trades.group_by_time(month);
+print("\n=== Monthly Performance ===");
+for (month, trades) in monthly_trades {
+    let monthly_pnl = trades.sum(t => t.pnl);
+    let monthly_win_rate = trades.filter(t => t.pnl > 0).count() / trades.count() * 100;
+    print(month + ": " + trades.count() + " trades, PnL: $" + monthly_pnl + ", Win Rate: " + monthly_win_rate + "%");
+}
+
+// 6. Risk Metrics
+let sharpe = result.returns.sharpe(0.02 / 252);  // 2% annual risk-free rate
+let sortino = result.returns.sortino(0.02 / 252, 0.0);
+let max_dd = result.drawdown.max();
+
+print("\n=== Risk Metrics ===");
+print("Sharpe Ratio: " + sharpe);
+print("Sortino Ratio: " + sortino);
+print("Maximum Drawdown: " + max_dd + "%");
+print("Calmar Ratio: " + ((result.equity.last() - result.equity.first()) / result.equity.first() * 100 / max_dd));
+
+// 7. Trade Clustering Analysis
+// Identify if losses tend to cluster
+let consecutive_losses = 0;
+let max_consecutive_losses = 0;
+let loss_streaks = [];
+
+for (trade in result.trades) {
+    if (trade.pnl < 0) {
+        consecutive_losses += 1;
+    } else {
+        if (consecutive_losses > 0) {
+            loss_streaks.push(consecutive_losses);
+            max_consecutive_losses = max(max_consecutive_losses, consecutive_losses);
+        }
+        consecutive_losses = 0;
+    }
+}
+
+print("\n=== Trade Clustering ===");
+print("Max Consecutive Losses: " + max_consecutive_losses);
+print("Average Loss Streak: " + (loss_streaks.sum() / loss_streaks.length));
+
+// 8. Generate Final Report
+let report = {
+    performance: {
+        total_return: ((result.equity.last() - result.equity.first()) / result.equity.first() * 100),
+        total_trades: result.trades.count(),
+        win_rate: winners.count() / result.trades.count() * 100,
+        profit_factor: winners.sum(t => t.pnl) / losers.sum(t => abs(t.pnl)),
+        sharpe_ratio: sharpe,
+        max_drawdown: max_dd
+    },
+    
+    trade_stats: {
+        avg_win: winners.mean(t => t.pnl),
+        avg_loss: losers.mean(t => t.pnl),
+        largest_win: winners.max(t => t.pnl),
+        largest_loss: losers.min(t => t.pnl),
+        avg_duration_hours: result.trades.mean(t => t.duration) / 3600
+    },
+    
+    risk_metrics: {
+        sharpe: sharpe,
+        sortino: sortino,
+        calmar: (result.equity.last() - result.equity.first()) / result.equity.first() * 100 / max_dd,
+        max_drawdown: max_dd,
+        mae_mfe_ratio: avg_mfe / abs(avg_mae)
+    }
+};
+
+// Display summary
+print("\n=== BACKTEST SUMMARY ===");
+print("Total Return: " + report.performance.total_return + "%");
+print("Sharpe Ratio: " + report.performance.sharpe_ratio);
+print("Win Rate: " + report.performance.win_rate + "%");
+print("Max Drawdown: " + report.performance.max_drawdown + "%");
+print("Total Trades: " + report.performance.total_trades);
+
+// Export capabilities (once implemented)
+// result.to_csv("backtest_results.csv");
+// result.to_html("backtest_report.html");
+// report.to_json("backtest_summary.json");

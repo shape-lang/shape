@@ -1,0 +1,88 @@
+//! Iterable implementation for Array (Vec<T>).
+//!
+//! Delegates performance-critical operations to Rust builtins registered
+//! in VM method dispatch and JIT (findIndex, flatten, unique, slice, join, take).
+//! Pure Shape fallbacks for methods without native dispatch.
+
+impl Iterable for Array {
+    method findIndex(predicate) {
+        // Delegated to JIT builtin via control::jit_control_find_index
+        self.findIndex(predicate)
+    }
+
+    method includes(value) {
+        // Delegated to JIT builtin (array.includes)
+        self.includes(value)
+    }
+
+    method zip(other) {
+        let result = [];
+        let n = if self.len() < other.len() { self.len() } else { other.len() };
+        let i = 0;
+        while i < n {
+            result.push([self[i], other[i]]);
+            i = i + 1;
+        }
+        result
+    }
+
+    method chunk(size) {
+        let result = [];
+        let i = 0;
+        while i < self.len() {
+            result.push(self.slice(i, i + size));
+            i = i + size;
+        }
+        result
+    }
+
+    method unique() {
+        // Delegated to JIT builtin (array.unique)
+        self.unique()
+    }
+
+    method flatten() {
+        // Delegated to JIT builtin (array.flatten)
+        self.flatten()
+    }
+
+    method slice(start, end) {
+        // Delegated to JIT builtin (array.slice)
+        self.slice(start, end)
+    }
+
+    method join(separator) {
+        // Delegated to JIT builtin (array.join)
+        self.join(separator)
+    }
+
+    method sortBy(key_fn) {
+        self.sort(|a, b| {
+            let ka = key_fn(a);
+            let kb = key_fn(b);
+            if ka < kb { -1 }
+            else if ka > kb { 1 }
+            else { 0 }
+        })
+    }
+
+    method take(n) {
+        // Delegated to JIT builtin (array.take)
+        self.take(n)
+    }
+
+    method skip(n) {
+        // Delegated to JIT builtin (array.drop)
+        self.drop(n)
+    }
+
+    method enumerate() {
+        let result = [];
+        let i = 0;
+        while i < self.len() {
+            result.push({ index: i, value: self[i] });
+            i = i + 1;
+        }
+        result
+    }
+}

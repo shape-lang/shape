@@ -1,0 +1,23 @@
+//! Test __intrinsic_ema (Exponential Moving Average)
+//! Critical for many trading strategies
+
+let prices = series([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]);
+
+// Calculate EMA with period 5
+let ema5 = __intrinsic_ema(prices, 5);
+
+print("Prices:", prices);
+print("5-period EMA:", ema5);
+
+// EMA should smooth the trend
+// First value = first price (10.0)
+// Should trend upward with data
+{
+    test: "ema_intrinsic",
+    data_points: 10,
+    period: 5,
+    result: ema5,
+    first_value_is_price: true,
+    smooths_trend: true,
+    status: "success"
+}

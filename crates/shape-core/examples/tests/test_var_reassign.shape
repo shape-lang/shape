@@ -1,0 +1,13 @@
+// Test var reassignment (should work)
+
+var x = 10
+x = 20  // This should work
+x = 30  // This should also work
+
+let y = 40
+y = 50  // This should work
+
+const z = 60
+// z = 70  // This would error
+
+find hammer last(5 candles)

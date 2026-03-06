@@ -1,0 +1,120 @@
+//! Math Trigonometry — Constants and Helper Functions
+//!
+//! Provides mathematical constants and convenience functions
+//! built on the trig intrinsics (sin, cos, tan, etc.).
+
+// ===== Constants =====
+
+let PI = 3.141592653589793;
+let E = 2.718281828459045;
+let TAU = 6.283185307179586;
+
+// ===== Trig Wrappers (delegate to intrinsics) =====
+
+pub fn sin(x) {
+    __intrinsic_sin(x)
+}
+
+pub fn cos(x) {
+    __intrinsic_cos(x)
+}
+
+pub fn tan(x) {
+    __intrinsic_tan(x)
+}
+
+pub fn asin(x) {
+    __intrinsic_asin(x)
+}
+
+pub fn acos(x) {
+    __intrinsic_acos(x)
+}
+
+pub fn atan(x) {
+    __intrinsic_atan(x)
+}
+
+pub fn atan2(y, x) {
+    __intrinsic_atan2(y, x)
+}
+
+pub fn sinh(x) {
+    __intrinsic_sinh(x)
+}
+
+pub fn cosh(x) {
+    __intrinsic_cosh(x)
+}
+
+pub fn tanh(x) {
+    __intrinsic_tanh(x)
+}
+
+// ===== Pure Shape Helpers =====
+
+/// Clamp a value to [min, max].
+///
+/// @param x - The value to clamp
+/// @param lo - Lower bound
+/// @param hi - Upper bound
+/// @returns x clamped to [lo, hi]
+///
+/// @example
+/// clamp(15, 0, 10)  // 10
+/// clamp(-5, 0, 10)  // 0
+pub fn clamp(x, lo, hi) {
+    if x < lo { lo }
+    else if x > hi { hi }
+    else { x }
+}
+
+/// Linear interpolation between two values.
+///
+/// @param a - Start value
+/// @param b - End value
+/// @param t - Interpolation factor [0, 1]
+/// @returns a + (b - a) * t
+///
+/// @example
+/// lerp(0, 100, 0.5)  // 50
+pub fn lerp(a, b, t) {
+    a + (b - a) * t
+}
+
+/// Return the sign of a number: -1, 0, or 1.
+///
+/// @param x - The number
+/// @returns -1 if negative, 0 if zero, 1 if positive
+///
+/// @example
+/// sign(-42)  // -1
+/// sign(0)    // 0
+/// sign(7.5)  // 1
+pub fn sign(x) {
+    if x > 0 { 1 }
+    else if x < 0 { -1 }
+    else { 0 }
+}
+
+/// Convert radians to degrees.
+///
+/// @param radians - Angle in radians
+/// @returns Angle in degrees
+///
+/// @example
+/// degrees(PI)  // 180
+pub fn degrees(radians) {
+    radians * 180 / PI
+}
+
+/// Convert degrees to radians.
+///
+/// @param deg - Angle in degrees
+/// @returns Angle in radians
+///
+/// @example
+/// radians(180)  // PI
+pub fn radians(deg) {
+    deg * PI / 180
+}

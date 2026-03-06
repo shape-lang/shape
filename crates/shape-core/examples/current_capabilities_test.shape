@@ -1,0 +1,42 @@
+// @skip — uses hash comments (# not in grammar)
+# Test current Shape capabilities
+
+# 1. Data loading (works)
+:data /home/amd/dev/finance/data ES 2020-01-01 2020-01-31
+
+# 2. Count function (works)
+count(all candles)
+
+# 3. Candle access (works)
+data[0].close
+data[0].open
+data[0].high
+data[0].low
+data[0].volume
+
+# 4. Basic arithmetic (test)
+data[0].close - data[0].open
+
+# 5. Variables (test)
+let price_diff = data[0].close - data[0].open
+price_diff
+
+# 6. Built-in functions (test)
+abs(price_diff)
+
+# 7. Multiple variables (test)
+let current_close = data[0].close
+let previous_close = data[1].close
+let change = current_close - previous_close
+change
+
+# 8. Boolean comparisons (test)
+data[0].close > data[0].open
+
+# 9. ATR function call (test - likely won't work)
+# atr(14)
+
+# 10. For loop (test - likely won't work)
+# for i in range(0, 5) {
+#     data[i].close
+# }

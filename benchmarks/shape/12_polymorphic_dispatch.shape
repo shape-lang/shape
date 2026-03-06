@@ -1,0 +1,26 @@
+// Benchmark 12: Polymorphic dispatch
+type Linear { slope: number, intercept: number }
+type Quadratic { a: number, b: number, c: number }
+type Cubic { a: number, b: number, c: number, d: number }
+
+function polymorphic_dispatch(n: int) -> number {
+    let lin = Linear { slope: 2.0, intercept: 1.0 }
+    let quad = Quadratic { a: 1.0, b: 2.0, c: 3.0 }
+    let cub = Cubic { a: 0.5, b: 1.0, c: 1.5, d: 2.0 }
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        let x = (i % 100) * 1.0
+        let r = i % 3
+        if r == 0 {
+            sum = sum + lin.slope * x + lin.intercept
+        } else if r == 1 {
+            sum = sum + quad.a * x * x + quad.b * x + quad.c
+        } else {
+            sum = sum + cub.a * x * x * x + cub.b * x * x + cub.c * x + cub.d
+        }
+        i = i + 1
+    }
+    return sum
+}
+print(polymorphic_dispatch(5000000))

@@ -1,0 +1,8 @@
+//! Infallible reverse-conversion trait.
+//!
+//! `impl From<Source> for Target` auto-derives `Into<Target>` and
+//! `TryInto<Target>` on the source type so `as`/`as?` operators work.
+
+trait From<Source> {
+    from(value: Source): Self
+}

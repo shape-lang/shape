@@ -1,0 +1,106 @@
+// @skip — uses unimplemented syntax (pipe operator |>)
+// @test
+// @industry: database
+// Database example: User Analytics and Aggregations
+
+// Load user event data
+let events = data("database", { table: "user_events", where: "created_at > '2024-01-01'" });
+
+// Basic aggregations
+let total_events = events.length();
+let unique_users = events |> map(e => e.user_id) |> unique() |> length();
+
+print("Event Summary:");
+print("  Total events:", total_events);
+print("  Unique users:", unique_users);
+
+// Group by user tier
+let by_tier = events
+    |> group(e => e.user_tier)
+    |> aggregate({
+        count: count(),
+        avg_revenue: avg(e => e.revenue),
+        total_revenue: sum(e => e.revenue)
+    });
+
+print("\nBy User Tier:");
+for tier in by_tier {
+    print("  ", tier.key, "- Count:", tier.count, "Avg Revenue:", tier.avg_revenue);
+}
+
+// Time-based analysis
+let by_day = events
+    |> group(e => date(e.created_at))
+    |> aggregate({
+        daily_events: count(),
+        daily_revenue: sum(e => e.revenue),
+        daily_users: count_distinct(e => e.user_id)
+    });
+
+print("\nDaily Metrics (last 7 days):");
+for day in by_day |> take(7) {
+    print("  ", day.key, "- Events:", day.daily_events, "Revenue:", day.daily_revenue);
+}
+
+// Cohort analysis
+function cohort_retention(events, cohort_date) {
+    let cohort_users = events
+        |> filter(e => date(e.first_seen) == cohort_date)
+        |> map(e => e.user_id)
+        |> unique();
+
+    let retention = [];
+    for week in 0..12 {
+        let active_in_week = events
+            |> filter(e => cohort_users.contains(e.user_id))
+            |> filter(e => week_of_year(e.created_at) == week_of_year(cohort_date) + week)
+            |> map(e => e.user_id)
+            |> unique()
+            |> length();
+
+        retention = retention.push({
+            week: week,
+            retained: active_in_week,
+            rate: active_in_week / cohort_users.length()
+        });
+    }
+
+    return retention;
+}
+
+// Funnel analysis
+let funnel_steps = ["page_view", "signup_start", "signup_complete", "first_purchase"];
+
+function calculate_funnel(events, steps) {
+    let funnel = [];
+    let prev_users = null;
+
+    for step in steps {
+        let step_users = events
+            |> filter(e => e.event_type == step)
+            |> map(e => e.user_id)
+            |> unique();
+
+        let conversion = if prev_users == null {
+            1.0
+        } else {
+            step_users.length() / prev_users.length()
+        };
+
+        funnel = funnel.push({
+            step: step,
+            users: step_users.length(),
+            conversion: conversion
+        });
+
+        prev_users = step_users;
+    }
+
+    return funnel;
+}
+
+print("\nConversion Funnel:");
+let funnel = calculate_funnel(events, funnel_steps);
+for step in funnel {
+    print("  ", step.step, "- Users:", step.users, "Conversion:", step.conversion * 100, "%");
+}

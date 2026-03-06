@@ -1,0 +1,34 @@
+// Benchmark 3: Sieve of Eratosthenes (with & references for zero-copy mutation)
+function mark_composites(&flags, p: int, n: int) {
+    var j = p * p
+    while j <= n {
+        flags[j] = false
+        j = j + p
+    }
+}
+
+function sieve(n: int) -> int {
+    var flags = []
+    var i = 0
+    while i <= n {
+        flags = flags.push(true)
+        i = i + 1
+    }
+    var p = 2
+    while p * p <= n {
+        if flags[p] {
+            mark_composites(&flags, p, n)
+        }
+        p = p + 1
+    }
+    var count = 0
+    var k = 2
+    while k <= n {
+        if flags[k] {
+            count = count + 1
+        }
+        k = k + 1
+    }
+    return count
+}
+print(sieve(10000000))

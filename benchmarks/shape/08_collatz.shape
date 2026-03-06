@@ -1,0 +1,28 @@
+// Benchmark 8: Longest Collatz sequence under N
+function collatz_len(n: int) -> int {
+    var count = 0;
+    var x = n;
+    while x != 1 {
+        if x % 2 == 0 {
+            x = x / 2;
+        } else {
+            x = 3 * x + 1;
+        }
+        count = count + 1;
+    }
+    return count;
+}
+
+function longest_collatz(limit: int) -> int {
+    var best = 0;
+    var n = 2;
+    while n < limit {
+        let len = collatz_len(n);
+        if len > best {
+            best = len;
+        }
+        n = n + 1;
+    }
+    return best;
+}
+print(longest_collatz(1000000));

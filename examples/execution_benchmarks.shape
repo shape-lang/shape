@@ -1,0 +1,121 @@
+// Execution Mode Benchmark Strategies
+//
+// These strategies are used to benchmark Interpreter vs VM vs JIT performance.
+// Run with: cargo run --release --features jit -p shape-core --bin execution_mode_bench
+//
+// Performance (10k ES candles from DuckDB):
+// | Strategy          | Interpreter | VM      | JIT          |
+// |-------------------|-------------|---------|--------------|
+// | simple_momentum   | 7,636/sec   | 7,797/s | 69.1M/sec    |
+// | sma_crossover     | 610/sec     | 623/s   | 9.2M/sec     |
+//
+// JIT achieves ~9,000x speedup through:
+// - Direct memory access (no interpreter overhead)
+// - ~6 native instructions per candle field access
+// - NaN-boxed values for fast type checks
+
+// =============================================================================
+// Strategy 1: Simple Momentum (JIT optimal - minimal operations)
+// =============================================================================
+// 2 candle reads, 1 division, 2 comparisons
+// JIT: ~15ns per candle (69M candles/sec)
+
+function simple_momentum() {
+    let close = candle[0].close
+    let prev_close = candle[-1].close
+    let change = (close - prev_close) / prev_close
+
+    if (change > 0.001) {
+        return 1
+    }
+    if (change < -0.001) {
+        return -1
+    }
+    return 0
+}
+
+// =============================================================================
+// Strategy 2: SMA Crossover (Complex - many candle reads)
+// =============================================================================
+// 20+ candle reads, 10+ divisions, multiple comparisons
+// JIT: ~108ns per candle (9.2M candles/sec)
+
+function sma_crossover() {
+    let close = candle[0].close
+    let volume = candle[0].volume
+
+    // Calculate 5-period SMA
+    let sum5 = candle[0].close + candle[-1].close + candle[-2].close +
+               candle[-3].close + candle[-4].close
+    let sma5 = sum5 / 5
+
+    // Calculate 10-period SMA (reuse sum5)
+    let sum10 = sum5 + candle[-5].close + candle[-6].close +
+                candle[-7].close + candle[-8].close + candle[-9].close
+    let sma10 = sum10 / 10
+
+    // Calculate average volume (5 periods)
+    let vol_sum = candle[0].volume + candle[-1].volume + candle[-2].volume +
+                  candle[-3].volume + candle[-4].volume
+    let avg_vol = vol_sum / 5
+
+    // Volume filter
+    if (volume < avg_vol * 0.8) {
+        return 0
+    }
+
+    // SMA crossover signals
+    let prev_sma5 = (candle[-1].close + candle[-2].close + candle[-3].close +
+                     candle[-4].close + candle[-5].close) / 5
+    let prev_sma10 = (candle[-1].close + candle[-2].close + candle[-3].close +
+                      candle[-4].close + candle[-5].close + candle[-6].close +
+                      candle[-7].close + candle[-8].close + candle[-9].close +
+                      candle[-10].close) / 10
+
+    // Bullish crossover
+    if (prev_sma5 <= prev_sma10 && sma5 > sma10) {
+        return 1
+    }
+
+    // Bearish crossover
+    if (prev_sma5 >= prev_sma10 && sma5 < sma10) {
+        return -1
+    }
+
+    return 0
+}
+
+// =============================================================================
+// Strategy 3: Momentum with Threshold Parameter (for sweep testing)
+// =============================================================================
+// Used to test parameter sweeps with BytecodeVM named argument support
+
+function momentum_threshold(threshold) {
+    let close = candle[0].close
+    let prev = candle[-1].close
+    let pct = (close - prev) / prev
+
+    if (!in_position) {
+        if (pct > threshold) {
+            return "buy"
+        }
+    } else {
+        if (pct < 0) {
+            return "sell"
+        }
+    }
+    return null
+}
+
+// =============================================================================
+// Example: Run strategies
+// =============================================================================
+
+// Note: These are designed to be run via the execution_mode_bench binary
+// for accurate timing, not via the CLI which has additional overhead.
+//
+// To run the benchmark:
+// cargo run --release --features jit -p shape-core --bin execution_mode_bench -- --candles 10000
+//
+// The benchmark runs each strategy through Interpreter, VM, and JIT modes
+// and reports candles/sec for each.

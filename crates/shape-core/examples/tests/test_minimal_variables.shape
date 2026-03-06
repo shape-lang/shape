@@ -1,0 +1,9 @@
+// Minimal variable declaration test
+
+let x = 10
+
+pattern simple_pattern {
+    data[0].close > 100
+}
+
+find simple_pattern last(5 candles)

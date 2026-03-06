@@ -1,0 +1,10 @@
+// Test simple block without variable shadowing
+
+let x = 10
+
+// Simple block that uses outer variable
+let y = {
+    x + 5
+}
+
+find hammer last(5 candles)

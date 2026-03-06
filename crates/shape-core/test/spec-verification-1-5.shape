@@ -1,0 +1,99 @@
+// Test file to verify spec sections 1-5
+// Note: Market data loading requires the data files to be present
+// For now, we'll focus on testing the language features without market data
+
+// Section 1: Basic Syntax - Variables
+let x = 10;
+const pi = 3.14159;
+var legacy = 5;
+print("Variables: x=" + x + ", pi=" + pi + ", legacy=" + legacy);
+
+// Section 2: Type System - Type annotations
+function calculate(price: number, period: number = 20) -> number {
+    return price * period;
+}
+let result = calculate(100.5);
+print("Calculate result: " + result);
+
+// Variable type annotations
+let price: number = 100.5;
+let symbol: string = "ES";
+let signals: bool[] = [true, false, true];
+
+// Section 3: Functions - Arrow functions
+let double = (x) => x * 2;
+let add = (a, b) => a + b;
+print("Double 5: " + double(5));
+print("Add 3 + 4: " + add(3, 4));
+
+// Functions as values
+let fn = double;
+print("Function as value: " + fn(10));
+
+// Single expression arrow functions
+let square = x => x * x;
+let greet = () => "Hello!";
+print("Square 4: " + square(4));
+print("Greeting: " + greet());
+
+// Section 4: Built-in Functions
+// Math functions
+print("abs(-5): " + abs(-5));
+print("sqrt(16): " + sqrt(16));
+print("ln(2.718): " + ln(2.718));
+print("max(1,5,3): " + max(1, 5, 3));
+
+// Vec functions
+let arr = [1, 2, 3, 4, 5];
+print("count: " + count(arr));
+print("first: " + first(arr));
+print("last: " + last(arr));
+print("slice(1,3): " + slice(arr, 1, 3));
+
+// Range function
+let r = range(5);
+print("range(5): " + r);
+
+// Statistical functions
+print("sum: " + sum(arr));
+print("mean: " + mean(arr));
+print("stddev: " + stddev(arr));
+
+// Section 5: Pattern example with real market data
+// Using ES futures data to demonstrate pattern detection
+set_instrument("ES");
+
+// Test pattern with calculated candle properties
+pattern hammer {
+    let body = abs(candle[0].close - candle[0].open);
+    let range = candle[0].high - candle[0].low;
+    let lower_wick = min(candle[0].open, candle[0].close) - candle[0].low;
+    let upper_wick = candle[0].high - max(candle[0].open, candle[0].close);
+    
+    lower_wick >= body * 2 and
+    upper_wick <= body * 0.1 and
+    range > 0  // Ensure valid candle
+}
+
+// Pattern with threshold (fuzzy matching)
+pattern bullish_engulfing ~0.8 {
+    // Calculate body sizes
+    let body_prev = abs(candle[-1].close - candle[-1].open);
+    let body_curr = abs(candle[0].close - candle[0].open);
+    
+    // Previous candle: bearish
+    candle[-1].close < candle[-1].open and
+    // Current candle: bullish
+    candle[0].close > candle[0].open and
+    // Current body larger than previous
+    body_curr > body_prev and
+    // Current candle engulfs previous
+    candle[0].open <= candle[-1].close and
+    candle[0].close >= candle[-1].open
+}
+
+// Test finding patterns in real data
+print("\nSearching for patterns in ES futures data...");
+find hammer in last(1000 candles)
+
+print("\nAll tests completed!");

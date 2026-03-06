@@ -1,0 +1,229 @@
+// Complex Benchmark Strategy - Tests All New Shape Features
+//
+// Features tested:
+// 1. @strategy annotation with signal functions
+// 2. Closures with captured variables
+// 3. Range methods (step, map, filter)
+// 4. Higher-order functions (map, filter, fold)
+// 5. Parameter sweeps
+// 6. Monte Carlo analysis
+
+// =============================================================================
+// 1. Strategy with Closures - @strategy annotation and signal functions
+// =============================================================================
+
+@strategy
+function momentum_crossover(fast_period: number, slow_period: number, atr_mult: number) {
+    // Calculate fast EMA using closure
+    let calc_ema = |values, period| {
+        let alpha = 2 / (period + 1);
+        values.fold(values[0], |prev, curr| alpha * curr + (1 - alpha) * prev)
+    };
+
+    // Get close prices for calculation
+    let closes = [];
+    for i in 0..slow_period {
+        closes.push(candle[-i].close);
+    }
+
+    // Calculate EMAs
+    let fast_ema = calc_ema(closes.slice(0, fast_period), fast_period);
+    let slow_ema = calc_ema(closes, slow_period);
+
+    // Calculate ATR for stops
+    let atr_sum = 0;
+    for i in 0..14 {
+        let tr = max(
+            candle[-i].high - candle[-i].low,
+            max(
+                abs(candle[-i].high - candle[-i-1].close),
+                abs(candle[-i].low - candle[-i-1].close)
+            )
+        );
+        atr_sum = atr_sum + tr;
+    }
+    let atr = atr_sum / 14;
+
+    // Previous EMAs for crossover detection
+    let prev_closes = [];
+    for i in 1..(slow_period + 1) {
+        prev_closes.push(candle[-i].close);
+    }
+    let prev_fast = calc_ema(prev_closes.slice(0, fast_period), fast_period);
+    let prev_slow = calc_ema(prev_closes, slow_period);
+
+    // Entry signal: bullish crossover
+    if !in_position && prev_fast <= prev_slow && fast_ema > slow_ema {
+        return buy({
+            stop_loss: candle[0].close - atr * atr_mult,
+            take_profit: candle[0].close + atr * atr_mult * 2,
+            strength: (fast_ema - slow_ema) / slow_ema
+        });
+    }
+
+    // Exit signal: bearish crossover
+    if in_position && prev_fast >= prev_slow && fast_ema < slow_ema {
+        return sell();
+    }
+
+    return null;
+}
+
+// =============================================================================
+// 2. RSI Mean Reversion Strategy with Range Methods
+// =============================================================================
+
+@strategy
+function rsi_mean_reversion(period: number, oversold: number, overbought: number) {
+    // Calculate RSI using range methods
+    let gains = (0..period).map(|i| {
+        let change = candle[-i].close - candle[-i-1].close;
+        if change > 0 { change } else { 0 }
+    });
+
+    let losses = (0..period).map(|i| {
+        let change = candle[-i-1].close - candle[-i].close;
+        if change > 0 { change } else { 0 }
+    });
+
+    let avg_gain = gains.fold(0, |acc, g| acc + g) / period;
+    let avg_loss = losses.fold(0, |acc, l| acc + l) / period;
+
+    let rsi = if avg_loss > 0 {
+        100 - (100 / (1 + avg_gain / avg_loss))
+    } else {
+        100
+    };
+
+    // Entry on oversold
+    if !in_position && rsi < oversold {
+        return buy({
+            strength: (oversold - rsi) / oversold,
+            stop_loss: candle[0].close * 0.98
+        });
+    }
+
+    // Exit on overbought
+    if in_position && rsi > overbought {
+        return sell();
+    }
+
+    return null;
+}
+
+// =============================================================================
+// 3. Multi-Factor Strategy with Higher-Order Functions
+// =============================================================================
+
+@strategy
+function multi_factor(lookback: number, vol_threshold: number, trend_strength: number) {
+    // Volume analysis using filter and fold
+    let volumes = (0..lookback).map(|i| candle[-i].volume).toArray();
+    let avg_volume = volumes.fold(0, |acc, v| acc + v) / lookback;
+    let high_volume = candle[0].volume > avg_volume * vol_threshold;
+
+    // Price momentum
+    let price_change = (candle[0].close - candle[-lookback].close) / candle[-lookback].close;
+    let momentum_up = price_change > trend_strength;
+    let momentum_down = price_change < -trend_strength;
+
+    // Volatility (simplified)
+    let highs = (0..lookback).map(|i| candle[-i].high).toArray();
+    let lows = (0..lookback).map(|i| candle[-i].low).toArray();
+    let max_high = highs.fold(highs[0], |a, b| if a > b { a } else { b });
+    let min_low = lows.fold(lows[0], |a, b| if a < b { a } else { b });
+    let volatility = (max_high - min_low) / min_low;
+
+    // Multi-factor entry
+    if !in_position && momentum_up && high_volume && volatility > 0.02 {
+        return buy({
+            strength: 0.8,
+            stop_loss: min_low
+        });
+    }
+
+    // Exit on momentum reversal
+    if in_position && momentum_down {
+        return sell();
+    }
+
+    return null;
+}
+
+// =============================================================================
+// 4. Simple Benchmark - Pure Numeric (JIT Optimized)
+// =============================================================================
+
+function simple_momentum() {
+    let close = candle[0].close;
+    let prev_close = candle[-1].close;
+    let change = (close - prev_close) / prev_close;
+
+    if change > 0.001 {
+        return 1;
+    }
+    if change < -0.001 {
+        return -1;
+    }
+    return 0;
+}
+
+// =============================================================================
+// Benchmark Execution
+// =============================================================================
+
+print("=== Shape Feature Benchmark ===");
+print("");
+
+// Simple benchmark - pure numeric strategy
+print("Running simple_momentum benchmark...");
+let simple_result = backtest {
+    strategy: simple_momentum,
+    symbol: "ES",
+    start: "2020-01-01",
+    end: "2020-12-31",
+    capital: 100000
+};
+print("Simple momentum trades:", simple_result.summary.total_trades);
+
+// Complex strategy with parameter sweep
+print("");
+print("Running momentum_crossover with parameter sweep...");
+let sweep_result = backtest {
+    strategy: momentum_crossover(
+        fast_period: (5..20).step(5),     // [5, 10, 15]
+        slow_period: (20..50).step(10),   // [20, 30, 40]
+        atr_mult: [1.5, 2.0, 2.5]         // 3 values
+    ),
+    symbol: "ES",
+    start: "2020-01-01",
+    end: "2020-12-31",
+    capital: 100000,
+    objective: "sharpe"
+};
+print("Best parameters:", sweep_result.best.parameters);
+print("Best Sharpe:", sweep_result.best.sharpe_ratio);
+
+// Monte Carlo on best result
+print("");
+print("Running Monte Carlo analysis (100 simulations)...");
+let mc = sweep_result.best.monte_carlo(100);
+print("VaR 95%:", mc.var_95);
+print("Probability of profit:", mc.probability_of_profit);
+print("Sharpe 95% CI:", mc.confidence_intervals.sharpe_ratio_95.lower,
+      "to", mc.confidence_intervals.sharpe_ratio_95.upper);
+
+// Range and closure demo
+print("");
+print("=== Range & Closure Demo ===");
+let doubled = (1..6).map(|x| x * 2).toArray();
+print("Doubled 1-5:", doubled);
+
+let evens = (1..11).filter(|x| x % 2 == 0).toArray();
+print("Evens 1-10:", evens);
+
+let sum = (1..101).step(1).fold(0, |acc, x| acc + x);
+print("Sum 1-100:", sum);
+
+print("");
+print("Benchmark complete!");

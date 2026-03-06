@@ -1,0 +1,26 @@
+// Test rolling functions
+
+// Create a test series with known values
+let test_values = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+let s = series(test_values);
+
+// Test rolling mean (already working)
+let ma3 = rolling_mean(s, 3);
+
+// Test rolling min
+let min3 = rolling_min(s, 3);
+
+// Test rolling max
+let max3 = rolling_max(s, 3);
+
+// Test rolling std
+let std3 = rolling_std(s, 3);
+
+// Return results as object
+{
+    input: test_values,
+    mean_result: ma3,
+    min_result: min3,
+    max_result: max3,
+    std_result: std3
+}

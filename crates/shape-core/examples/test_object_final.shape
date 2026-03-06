@@ -1,0 +1,67 @@
+// Comprehensive test of object literal parsing fix
+
+// 1. Simple object with unquoted keys
+let simple = { name: "test", value: 42 };
+
+// 2. Object in function
+function create_config() {
+    let config = { 
+        strategy: "ma_cross", 
+        capital: 100000,
+        risk: 0.02 
+    };
+    return config;
+}
+
+// 3. Nested objects
+let nested = {
+    level1: "top",
+    level2: {
+        level2a: "middle",
+        level3: {
+            deep: "bottom",
+            value: 999
+        }
+    }
+};
+
+// 4. Object in conditional expression
+let conditional = if true {
+    { status: "success", code: 200 }
+} else {
+    { status: "error", code: 500 }
+};
+
+// 5. Block expression still works
+let block_result = {
+    let x = 10;
+    let y = 20;
+    x + y
+};
+
+// 6. Empty object
+let empty = {};
+
+// 7. Function reference in object
+function my_strategy() {
+    return 1.0;
+}
+
+let strategy_config = {
+    strategy: my_strategy,
+    capital: 50000
+};
+
+// Test results
+let test_results = {
+    simple_name: simple.name,
+    simple_value: simple.value,
+    config_capital: create_config().capital,
+    nested_deep: nested.level2.level3.value,
+    conditional_status: conditional.status,
+    block_result: block_result,
+    has_strategy: strategy_config.strategy
+};
+
+// Return test results
+test_results

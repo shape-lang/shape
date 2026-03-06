@@ -1,0 +1,36 @@
+date_utc	week	git_rev	run_index	geomean_jit_node	warm_geomean_jit_exec_node	snapshot_file	pin_core	notes
+2026-02-22T14:45:38Z	W1	caf12ee6	1	1.88	1.57	shape/benchmarks/tracking/snapshots/20260222_144538_W1_run1.tsv	3	week1 measurement hardening + anti-cheating guard
+2026-02-22T14:45:38Z	W1	caf12ee6	2	1.88	1.57	shape/benchmarks/tracking/snapshots/20260222_144538_W1_run2.tsv	3	week1 measurement hardening + anti-cheating guard
+2026-02-22T14:45:38Z	W1	caf12ee6	3	1.91	1.61	shape/benchmarks/tracking/snapshots/20260222_144538_W1_run3.tsv	3	week1 measurement hardening + anti-cheating guard
+2026-02-22T14:45:38Z	W1	caf12ee6	4	1.88	1.58	shape/benchmarks/tracking/snapshots/20260222_144538_W1_run4.tsv	3	week1 measurement hardening + anti-cheating guard
+2026-02-22T14:45:38Z	W1	caf12ee6	5	1.88	1.58	shape/benchmarks/tracking/snapshots/20260222_144538_W1_run5.tsv	3	week1 measurement hardening + anti-cheating guard
+2026-02-22T15:03:04Z	W2	caf12ee6	1	1.89		shape/benchmarks/tracking/snapshots/20260222_150304_W2_run1.tsv	3	week2: fused-branch comparison bool materialization elision
+2026-02-22T15:03:04Z	W2	caf12ee6	2	1.86		shape/benchmarks/tracking/snapshots/20260222_150304_W2_run2.tsv	3	week2: fused-branch comparison bool materialization elision
+2026-02-22T15:03:04Z	W2	caf12ee6	3	1.88		shape/benchmarks/tracking/snapshots/20260222_150304_W2_run3.tsv	3	week2: fused-branch comparison bool materialization elision
+2026-02-22T15:24:07Z	W2	0b1871a8	1	1.57	1.19	shape/benchmarks/tracking/snapshots/20260222_152407_W2_run1.tsv		week2 numeric-local fast-path
+2026-02-22T15:24:07Z	W2	0b1871a8	2	1.62	1.25	shape/benchmarks/tracking/snapshots/20260222_152407_W2_run2.tsv		week2 numeric-local fast-path
+2026-02-22T15:24:07Z	W2	0b1871a8	3	1.61	1.23	shape/benchmarks/tracking/snapshots/20260222_152407_W2_run3.tsv		week2 numeric-local fast-path
+2026-02-22T16:37:52Z	W2	51da645b	1	1.60	1.21	shape/benchmarks/tracking/snapshots/20260222_163752_W2_run1.tsv		week2 continue: bounds inference update + inline array address refactor
+2026-02-22T16:37:52Z	W2	51da645b	2	1.60	1.22	shape/benchmarks/tracking/snapshots/20260222_163752_W2_run2.tsv		week2 continue: bounds inference update + inline array address refactor
+2026-02-22T16:37:52Z	W2	51da645b	3	1.58	1.19	shape/benchmarks/tracking/snapshots/20260222_163752_W2_run3.tsv		week2 continue: bounds inference update + inline array address refactor
+2026-02-22T17:22:43Z	W4	234f2495	1	1.82	1.37	shape/benchmarks/tracking/snapshots/20260222_172243_W4_run1.tsv		typed numeric arrays + get/set site planning
+2026-02-22T17:22:43Z	W4	234f2495	2	1.79	1.36	shape/benchmarks/tracking/snapshots/20260222_172243_W4_run2.tsv		typed numeric arrays + get/set site planning
+2026-02-22T17:22:43Z	W4	234f2495	3	1.82	1.38	shape/benchmarks/tracking/snapshots/20260222_172243_W4_run3.tsv		typed numeric arrays + get/set site planning
+2026-02-22T17:24:14Z	W5	234f2495	1	1.80	1.37	shape/benchmarks/tracking/snapshots/20260222_172414_W5_run1.tsv		bounds-check hoist + noalias memory pipeline
+2026-02-22T17:24:14Z	W5	234f2495	2	1.84	1.38	shape/benchmarks/tracking/snapshots/20260222_172414_W5_run2.tsv		bounds-check hoist + noalias memory pipeline
+2026-02-22T17:24:14Z	W5	234f2495	3	1.82	1.37	shape/benchmarks/tracking/snapshots/20260222_172414_W5_run3.tsv		bounds-check hoist + noalias memory pipeline
+2026-02-22T17:25:46Z	W6	234f2495	1	1.81	1.37	shape/benchmarks/tracking/snapshots/20260222_172546_W6_run1.tsv		SIMD planning infrastructure + vector width integration
+2026-02-22T17:25:46Z	W6	234f2495	2	1.83	1.38	shape/benchmarks/tracking/snapshots/20260222_172546_W6_run2.tsv		SIMD planning infrastructure + vector width integration
+2026-02-22T17:25:46Z	W6	234f2495	3	1.82	1.37	shape/benchmarks/tracking/snapshots/20260222_172546_W6_run3.tsv		SIMD planning infrastructure + vector width integration
+2026-02-22T17:27:17Z	W7	234f2495	1	1.82	1.38	shape/benchmarks/tracking/snapshots/20260222_172717_W7_run1.tsv		numeric kernel vectorization + strip-mining policy
+2026-02-22T17:27:17Z	W7	234f2495	2	1.82	1.39	shape/benchmarks/tracking/snapshots/20260222_172717_W7_run2.tsv		numeric kernel vectorization + strip-mining policy
+2026-02-22T17:27:17Z	W7	234f2495	3	1.82	1.38	shape/benchmarks/tracking/snapshots/20260222_172717_W7_run3.tsv		numeric kernel vectorization + strip-mining policy
+2026-02-22T17:28:46Z	W8	234f2495	1	1.81	1.37	shape/benchmarks/tracking/snapshots/20260222_172846_W8_run1.tsv		call-path redesign + selective restore on direct call
+2026-02-22T17:28:46Z	W8	234f2495	2	1.83	1.38	shape/benchmarks/tracking/snapshots/20260222_172846_W8_run2.tsv		call-path redesign + selective restore on direct call
+2026-02-22T17:28:46Z	W8	234f2495	3	1.82	1.38	shape/benchmarks/tracking/snapshots/20260222_172846_W8_run3.tsv		call-path redesign + selective restore on direct call
+2026-02-22T17:30:16Z	W9	234f2495	1	1.83	1.38	shape/benchmarks/tracking/snapshots/20260222_173016_W9_run1.tsv		typed column load inlining + Table/Queryable fusion groundwork
+2026-02-22T17:30:16Z	W9	234f2495	2	1.83	1.39	shape/benchmarks/tracking/snapshots/20260222_173016_W9_run2.tsv		typed column load inlining + Table/Queryable fusion groundwork
+2026-02-22T17:30:16Z	W9	234f2495	3	1.77	1.34	shape/benchmarks/tracking/snapshots/20260222_173016_W9_run3.tsv		typed column load inlining + Table/Queryable fusion groundwork
+2026-02-22T17:31:47Z	W10	310c7222	1	1.84	1.40	shape/benchmarks/tracking/snapshots/20260222_173147_W10_run1.tsv		correctness validation + maintainability stabilization
+2026-02-22T17:31:47Z	W10	310c7222	2	1.82	1.37	shape/benchmarks/tracking/snapshots/20260222_173147_W10_run2.tsv		correctness validation + maintainability stabilization
+2026-02-22T17:31:47Z	W10	310c7222	3	1.82	1.37	shape/benchmarks/tracking/snapshots/20260222_173147_W10_run3.tsv		correctness validation + maintainability stabilization

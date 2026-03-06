@@ -1,0 +1,14 @@
+// Minimal test
+
+// Test object creation
+let obj = { name: "test", value: 42 };
+print("Object created");
+
+// Test function with object
+function test_obj() {
+    return { action: "buy", size: 1.0 };
+}
+
+let result = test_obj();
+print("Action: " + result.action);
+print("Size: " + result.size);

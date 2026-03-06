@@ -1,0 +1,139 @@
+//! Content-Addressed VM State Primitives
+//!
+//! Provides introspection, capture, and resume of VM execution state.
+//! Every function, type, and value is content-addressed via SHA-256 hashes,
+//! enabling portable state transfer across nodes, programs, and time.
+
+/// A content-addressed function reference.
+/// The hash uniquely identifies the function's bytecode, constants, and dependencies.
+pub type FunctionRef {
+    hash: string,
+    name: string,
+    param_types: Vec<string>,
+    return_type: string,
+}
+
+/// A single stack frame — portable, content-addressed.
+/// Contains the function reference (by hash), the instruction pointer
+/// relative to that function, and captured local state.
+pub type Frame {
+    function: FunctionRef,
+    local_ip: int,
+    locals: Vec<any>,
+    upvalues: Vec<any>?,
+}
+
+/// Full execution state — a chain of frames.
+/// Captures the entire call stack plus module-level bindings.
+/// Can be serialized, transferred, and resumed on any node that
+/// has the referenced function blobs.
+pub type VmState {
+    frames: Vec<Frame>,
+    module_bindings: HashMap<string, any>,
+    timestamp: string,
+}
+
+/// Current function frame only (lightweight capture).
+pub type FrameState {
+    function: FunctionRef,
+    args: Vec<any>,
+    locals: Vec<any>,
+    upvalues: Vec<any>?,
+}
+
+/// Module-level state capture.
+pub type ModuleState {
+    bindings: HashMap<string, any>,
+    schemas: HashMap<string, string>,
+}
+
+/// Ready-to-call payload.
+/// Bundles a function reference with arguments for remote invocation.
+pub type CallPayload {
+    function: FunctionRef,
+    args: Vec<any>,
+    upvalues: Vec<any>?,
+}
+
+/// Delta between two values/states.
+/// Used for efficient state synchronization — only transfer what changed.
+pub type Delta {
+    changed: HashMap<string, any>,
+    removed: Vec<string>,
+}
+
+// ---------------------------------------------------------------------------
+// Capture primitives
+// ---------------------------------------------------------------------------
+
+/// Capture the current function's frame state.
+builtin fn capture() -> FrameState;
+
+/// Capture the full VM execution state (all frames).
+builtin fn capture_all() -> VmState;
+
+/// Capture module-level bindings and type schemas.
+builtin fn capture_module() -> ModuleState;
+
+/// Build a ready-to-call payload without executing.
+builtin fn capture_call(f: any, args: Vec<any>) -> CallPayload;
+
+// ---------------------------------------------------------------------------
+// Resume primitives
+// ---------------------------------------------------------------------------
+
+/// Resume full VM state. Does not return — execution continues
+/// from the captured point.
+builtin fn resume(vm: VmState) -> never;
+
+/// Re-enter a captured function frame and return its result.
+builtin fn resume_frame(f: FrameState) -> any;
+
+// ---------------------------------------------------------------------------
+// Content addressing
+// ---------------------------------------------------------------------------
+
+/// Compute SHA-256 hash of any value.
+builtin fn hash(value: any) -> string;
+
+/// Get the content hash of a type's schema definition.
+builtin fn schema_hash(type_name: string) -> string;
+
+/// Get a function's content hash (from its FunctionBlob).
+builtin fn fn_hash(f: any) -> string;
+
+// ---------------------------------------------------------------------------
+// Serialization
+// ---------------------------------------------------------------------------
+
+/// Serialize a value to wire format (MessagePack).
+builtin fn serialize(value: any) -> Vec<int>;
+
+/// Deserialize wire format bytes back to a value.
+builtin fn deserialize(bytes: Vec<int>) -> any;
+
+// ---------------------------------------------------------------------------
+// Diffing
+// ---------------------------------------------------------------------------
+
+/// Compute the delta between two values using content-hash trees.
+builtin fn diff(old: any, new: any) -> Delta;
+
+/// Apply a delta to a base value, producing the updated value.
+builtin fn patch(base: any, delta: Delta) -> any;
+
+// ---------------------------------------------------------------------------
+// Introspection
+// ---------------------------------------------------------------------------
+
+/// Get a reference to the calling function (one frame up).
+builtin fn caller() -> FunctionRef?;
+
+/// Get the current function's arguments as an array.
+builtin fn args() -> Vec<any>;
+
+/// Get the current scope's local variables as a map.
+builtin fn locals() -> HashMap<string, any>;
+
+/// Convenience alias for capture_all().
+builtin fn snapshot() -> VmState;

@@ -1,0 +1,8 @@
+//! Fallible reverse-conversion trait.
+//!
+//! `impl TryFrom<Source> for Target` auto-derives `TryInto<Target>`
+//! on the source type so `as?` operators work.
+
+trait TryFrom<Source> {
+    tryFrom(value: Source): Result<Self, AnyError>
+}

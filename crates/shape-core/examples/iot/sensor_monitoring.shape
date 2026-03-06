@@ -1,0 +1,80 @@
+// @test
+// @industry: iot
+// IoT example: Sensor Monitoring and Anomaly Detection
+
+// Load sensor readings
+let readings = data("sensors", { device_type: "temperature", location: "warehouse-a" })
+
+// Extract series
+let temperatures = readings |> map(|r| r.value)
+let timestamps = readings |> map(|r| r.timestamp)
+
+// Calculate statistics
+let mean_temp = temperatures.mean()
+let std_temp = temperatures.std()
+let min_temp = temperatures.min()
+let max_temp = temperatures.max()
+
+print("Temperature Statistics:")
+print("  Mean:", mean_temp)
+print("  Std Dev:", std_temp)
+print("  Min:", min_temp)
+print("  Max:", max_temp)
+
+// Define anomaly detection pattern
+function temperature_spike(reading, threshold) {
+    let baseline = readings
+        |> map(|r| r.value)
+        |> rolling(20)
+        |> mean()
+
+    return abs(reading.value - baseline[-1]) > threshold
+}
+
+// Find anomalies
+let anomaly_threshold = std_temp * 2
+let anomalies = readings.find("temperature_spike", anomaly_threshold)
+
+print("\nAnomaly Detection:")
+print("  Threshold:", anomaly_threshold)
+print("  Anomalies found:", anomalies.length())
+
+// Rolling statistics for trend analysis
+let rolling_mean = temperatures.rolling(10).mean()
+let rolling_std = temperatures.rolling(10).std()
+
+// Alert conditions
+let high_temp_threshold = 30.0
+let low_temp_threshold = 10.0
+
+let high_alerts = temperatures |> filter(|t| t > high_temp_threshold)
+let low_alerts = temperatures |> filter(|t| t < low_temp_threshold)
+
+print("\nAlerts:")
+print("  High temperature alerts:", high_alerts.length())
+print("  Low temperature alerts:", low_alerts.length())
+
+// Device health check
+function check_device_health(readings) {
+    let last_reading = readings[-1]
+    let prev_reading = readings[-2]
+
+    // Check for stale data (no change)
+    let is_stale = last_reading.value == prev_reading.value
+
+    // Check for reasonable range
+    let in_range = last_reading.value > -40 && last_reading.value < 85
+
+    return {
+        is_healthy: !is_stale && in_range,
+        is_stale: is_stale,
+        in_range: in_range,
+        last_value: last_reading.value
+    }
+}
+
+let health = check_device_health(readings)
+print("\nDevice Health:")
+print("  Healthy:", health.is_healthy)
+print("  Stale:", health.is_stale)
+print("  In Range:", health.in_range)

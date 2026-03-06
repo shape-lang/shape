@@ -1,0 +1,125 @@
+// Demonstration of Shape object/map functionality
+
+// 1. Object literals
+let person = {
+    name: "Alice",
+    age: 30,
+    balance: 1000.50
+};
+
+let trading_config = {
+    symbol: "AAPL",
+    max_position: 100,
+    stop_loss: 0.02,
+    take_profit: 0.05
+};
+
+// 2. Property access - dot notation
+let person_name = person.name;
+let max_pos = trading_config.max_position;
+
+// 3. Property access - bracket notation
+let property = "age";
+let person_age = person[property];
+
+// Dynamic property access
+let field = "stop_loss";
+let stop_loss_value = trading_config[field];
+
+// 4. Object methods
+let obj_keys = keys(person);         // ["name", "age", "balance"]
+let obj_values = values(person);     // ["Alice", 30, 1000.50]
+let obj_entries = entries(person);   // [["name", "Alice"], ["age", 30], ["balance", 1000.50]]
+let obj_size = len(person);          // 3
+
+// 5. Iterating over objects
+for key in person {
+    // key will be "name", "age", "balance"
+    let value = person[key];
+}
+
+// 6. Nested objects
+let portfolio = {
+    stocks: {
+        AAPL: 100,
+        GOOGL: 50,
+        MSFT: 75
+    },
+    cash: 10000,
+    margin_used: 0.3
+};
+
+// Accessing nested properties
+let apple_shares = portfolio.stocks.AAPL;
+let google_shares = portfolio.stocks["GOOGL"];
+
+// 7. Building objects dynamically
+function create_position(symbol, shares, entry_price) {
+    return {
+        symbol: symbol,
+        shares: shares,
+        entry_price: entry_price,
+        current_price: entry_price,  // Initialize to entry
+        pnl: 0
+    };
+}
+
+let position = create_position("TSLA", 50, 250.00);
+
+// 8. Object with array values
+let watchlist = {
+    tech: ["AAPL", "GOOGL", "MSFT", "NVDA"],
+    finance: ["JPM", "BAC", "GS"],
+    energy: ["XOM", "CVX", "COP"]
+};
+
+// Access array within object
+let tech_stocks = watchlist.tech;
+let first_tech = watchlist.tech[0];  // "AAPL"
+
+// 9. Practical example: Trade statistics
+function calculate_trade_stats(trades) {
+    let stats = {
+        total_trades: len(trades),
+        winning_trades: 0,
+        losing_trades: 0,
+        total_profit: 0,
+        total_loss: 0,
+        largest_win: 0,
+        largest_loss: 0
+    };
+    
+    for trade in trades {
+        let pnl = trade.exit_price - trade.entry_price;
+        if pnl > 0 {
+            stats.winning_trades = stats.winning_trades + 1;
+            stats.total_profit = stats.total_profit + pnl;
+            if pnl > stats.largest_win {
+                stats.largest_win = pnl;
+            }
+        } else {
+            stats.losing_trades = stats.losing_trades + 1;
+            stats.total_loss = stats.total_loss + abs(pnl);
+            if abs(pnl) > stats.largest_loss {
+                stats.largest_loss = abs(pnl);
+            }
+        }
+    }
+    
+    // Calculate win rate
+    stats.win_rate = stats.winning_trades / stats.total_trades;
+    
+    return stats;
+}
+
+// 10. Using objects in pattern matching
+let indicators = {
+    sma20: sma(20),
+    sma50: sma(50),
+    rsi: rsi(14)
+};
+
+// Use object properties in pattern conditions
+find hammer 
+where data[0].close > indicators.sma20 and indicators.rsi < 30
+last(20 candles)

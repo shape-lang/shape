@@ -1,0 +1,52 @@
+//! Infallible conversion trait used by `as Type`.
+//!
+//! Dispatch uses named impl selectors (`as <TypeName>`) so conversions are
+//! statically validated and resolved without primitive conversion tables.
+
+trait Into<Target> {
+    into(): Target
+}
+
+impl Into<number> for int as number {
+    method into() { __into_number(self) }
+}
+
+impl Into<decimal> for int as decimal {
+    method into() { __into_decimal(self) }
+}
+
+impl Into<string> for int as string {
+    method into() { __into_string(self) }
+}
+
+impl Into<bool> for int as bool {
+    method into() { __into_bool(self) }
+}
+
+impl Into<string> for number as string {
+    method into() { __into_string(self) }
+}
+
+impl Into<bool> for number as bool {
+    method into() { __into_bool(self) }
+}
+
+impl Into<string> for decimal as string {
+    method into() { __into_string(self) }
+}
+
+impl Into<int> for bool as int {
+    method into() { __into_int(self) }
+}
+
+impl Into<number> for bool as number {
+    method into() { __into_number(self) }
+}
+
+impl Into<decimal> for bool as decimal {
+    method into() { __into_decimal(self) }
+}
+
+impl Into<string> for bool as string {
+    method into() { __into_string(self) }
+}

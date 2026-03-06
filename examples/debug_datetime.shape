@@ -1,0 +1,8 @@
+// Debug datetime
+print("Start")
+// This should work:
+let x = 42
+print(x)
+// Now test datetime:
+// let dt = @"2020-01-01"
+// print(dt)

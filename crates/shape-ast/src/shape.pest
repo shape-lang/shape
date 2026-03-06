@@ -1,0 +1,1557 @@
+// Shape Grammar Definition
+// This grammar defines the complete Shape language syntax
+
+// ===== Whitespace and Comments =====
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* | block_comment }
+block_comment = _{ "/*" ~ (block_comment | (!"*/" ~ ANY))* ~ "*/" }
+
+// ===== Main Entry Point =====
+program = { SOI ~ (item_or_error ~ ";"?)* ~ EOI }
+
+// Error recovery: when an item fails to parse, consume tokens until the next
+// top-level keyword boundary so that later items can still be parsed.
+item_or_error = _{ item | item_recovery }
+item_recovery = { (!item_sync_point ~ ANY)+ }
+item_sync_point = _{ item_sync_keyword | "@" | "}" | EOI }
+item_sync_keyword = @{ ("builtin" | "function" | "fn" | "type" | "trait" | "impl" | "enum" | "mod" | "from" | "use" | "pub" | "annotation" | "let" | "var" | "const" | "extend" | "stream" | "datasource" | "query" | "async" | "comptime" | "extern") ~ !(ASCII_ALPHANUMERIC | "_") }
+
+item = {
+    import_stmt
+    | pub_item
+    | module_decl
+    | builtin_type_decl
+    | builtin_function_decl
+    | native_struct_type_def // type C Foo { ... }
+    | struct_type_def
+    | type_alias_def
+    | trait_def
+    | enum_def
+    | impl_block
+    | extend_statement
+    | optimize_statement
+    | annotation_def
+    | datasource_def
+    | query_decl
+    | comptime_block   // comptime { } at top level — before function_def to capture keyword
+    | extern_native_function_def // extern "C" fn foo(...) -> T from "lib" [as "symbol"];
+    | foreign_function_def  // fn python name(...) { ... } — must be before function_def (two idents)
+    | function_def
+    | stream_def
+    | test_def
+    | query
+    | statement
+}
+
+// ===== Module System =====
+// Module paths use `::` separators: std::core::math, mylib::submodule
+// No relative imports — dependencies are declared in shape.toml/frontmatter
+module_path = @{
+    path_segment ~ ("::" ~ path_segment)*
+}
+path_segment = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+
+import_stmt = {
+    "from" ~ module_path ~ "use" ~ "{" ~ import_item_list ~ "}" ~ ";"?    // from std::core::math use { sum }
+    | &use_word_boundary ~ "use" ~ module_path ~ "as" ~ ident ~ ";"?      // use std::core::math as math
+    | &use_word_boundary ~ "use" ~ module_path ~ ";"?                      // use std::core::math
+}
+use_word_boundary = @{ "use" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+module_decl = {
+    annotations? ~ "mod" ~ ident ~ "{" ~ (item_or_error ~ ";"?)* ~ "}"
+}
+import_item_list = { import_item ~ ("," ~ import_item)* ~ ","? }
+import_item = { 
+    ident ~ ("as" ~ ident)?   // name or name as alias
+}
+
+pub_item = {
+    "pub" ~ foreign_function_def                                     // pub fn python foo() {}
+    | "pub" ~ extern_native_function_def                             // pub extern "C" fn foo() -> T from "lib";
+    | "pub" ~ native_struct_type_def                                 // pub type C Foo { ... }
+    | "pub" ~ function_def                                           // pub fn foo() {}
+    | "pub" ~ variable_decl                                          // pub let x = 10;
+    | "pub" ~ type_alias_def                                         // pub type X = Y;
+    | "pub" ~ enum_def                                               // pub enum Foo { ... }
+    | "pub" ~ struct_type_def                                        // pub type Foo { ... }
+    | "pub" ~ trait_def                                              // pub trait Foo { ... }
+    | "pub" ~ "{" ~ export_spec_list ~ "}" ~ ";"?                   // pub { a, b as c };
+}
+
+export_spec_list = { export_spec ~ ("," ~ export_spec)* ~ ","? }
+export_spec = {
+    ident ~ ("as" ~ ident)?   // name or name as alias
+}
+
+// ===== Type Definitions =====
+// Supports meta parameter overrides: type Percent4 = Percent { decimals: 4 }
+type_alias_def = {
+    "type" ~ ident ~ type_params? ~ "=" ~ type_annotation ~ comptime_field_overrides? ~ ";"?
+}
+
+// Declaration-only builtin intrinsic types for std/core metadata.
+builtin_type_decl = {
+    "builtin" ~ "type" ~ ident ~ type_params? ~ ";"?
+}
+
+// Comptime field overrides for type aliases: { param: value, ... }
+comptime_field_overrides = {
+    "{" ~ comptime_field_override ~ ("," ~ comptime_field_override)* ~ ","? ~ "}"
+}
+
+comptime_field_override = {
+    ident ~ ":" ~ expression
+}
+
+// ===== Struct Type Definitions =====
+// Pure data types with named fields: type Point { x: number, y: number }
+// Supports generics: type Series<V, K = Timestamp> { index: Array<K>, data: Array<V> }
+struct_type_def = {
+    annotations? ~ "type" ~ ident ~ type_params? ~ "{" ~ struct_field_list? ~ "}"
+}
+
+// Native ABI type declaration:
+// type C Point { x: f64, y: f64 }
+native_struct_type_def = {
+    annotations? ~ "type" ~ extern_abi ~ ident ~ type_params? ~ "{" ~ struct_field_list? ~ "}"
+}
+
+struct_field_list = {
+    struct_field ~ (("," | NEWLINE+) ~ struct_field)* ~ ","?
+}
+
+struct_field = {
+    annotations? ~ comptime_keyword? ~ (ident | keyword) ~ ":" ~ type_annotation ~ ("=" ~ expression)?
+}
+
+comptime_keyword = { "comptime" }
+
+// Comptime block expression: comptime { statements }
+// Evaluated at compile time; the result replaces the expression with a literal.
+comptime_block = { "comptime" ~ block_expr }
+
+// Comptime for expression: comptime for field in target.fields { ... }
+// Unrolled at compile time. Each iteration generates code with the loop variable
+// bound to the concrete field descriptor.
+comptime_for_expr = { "comptime" ~ "for" ~ ident ~ "in" ~ postfix_expr ~ "{" ~ statement* ~ "}" }
+
+// Annotated expression: @annotation expr
+// Wraps any expression with a compile-time annotation.
+annotated_expr = { annotation+ ~ postfix_expr }
+
+interface_def = {
+    "interface" ~ ident ~ type_params? ~ "{" ~ interface_body ~ "}"
+}
+
+type_params = {
+    "<" ~ type_param_name ~ ("," ~ type_param_name)* ~ ">"
+}
+
+type_param_name = {
+    ident ~ (":" ~ trait_bound_list)? ~ ("=" ~ type_annotation)?
+}
+
+trait_bound_list = {
+    ident ~ ("+" ~ ident)*
+}
+
+interface_body = {
+    interface_member_list?
+}
+
+interface_member_list = {
+    interface_member ~ (interface_member_separator ~ interface_member)* ~ interface_member_separator?
+}
+
+interface_member_separator = { ";" | "," }
+
+interface_member = {
+    // Property signature
+    (ident | keyword) ~ "?"? ~ ":" ~ type_annotation
+    // Method signature
+    | (ident | keyword) ~ "?"? ~ "(" ~ type_param_list? ~ ")" ~ ":" ~ type_annotation
+    // Index signature
+    | "[" ~ ident ~ ":" ~ ("string" | "number") ~ "]" ~ ":" ~ type_annotation
+}
+
+// ===== Trait Definitions =====
+trait_def = { annotations? ~ "trait" ~ ident ~ type_params? ~ "{" ~ trait_body ~ "}" }
+
+trait_body = {
+    trait_member*
+}
+
+trait_member = {
+    // Associated type declaration: type Item; or type Item: Bound;
+    associated_type_decl
+    // Default method: method keyword with body (must be tried first)
+    | method_def
+    // Required method signature (interface-style)
+    | interface_member ~ interface_member_separator?
+}
+
+associated_type_decl = {
+    "type" ~ ident ~ (":" ~ trait_bound_list)? ~ ";"
+}
+
+// ===== Impl Blocks =====
+impl_block = {
+    "impl" ~ type_name ~ "for" ~ type_name ~ impl_name? ~ where_clause? ~ "{" ~ impl_member* ~ "}"
+}
+
+impl_member = {
+    associated_type_binding | method_def
+}
+
+impl_name = { "as" ~ ident }
+
+associated_type_binding = {
+    "type" ~ ident ~ "=" ~ type_annotation ~ ";"
+}
+
+// ===== Enum Definitions =====
+enum_def = {
+    annotations? ~ "enum" ~ ident ~ type_params? ~ "{" ~ enum_member_list ~ "}"
+}
+
+enum_member_list = {
+    enum_member ~ (enum_member_separator ~ enum_member)* ~ enum_member_separator?
+}
+
+enum_member_separator = { ";" | "," }
+
+enum_member = {
+    enum_variant_struct
+    | enum_variant_tuple
+    | enum_variant_unit
+}
+
+enum_variant_unit = { ident ~ ("=" ~ (string | number))? }
+enum_variant_tuple = { ident ~ "(" ~ type_annotation ~ ("," ~ type_annotation)* ~ ")" }
+enum_variant_struct = { ident ~ "{" ~ object_type_member_list? ~ "}" }
+
+// ===== Type Extension =====
+extend_statement = {
+    "extend" ~ type_name ~ "{" ~ method_def* ~ "}"
+}
+
+type_name = {
+    ident ~ ("<" ~ type_annotation ~ ("," ~ type_annotation)* ~ ">")?
+}
+
+method_def = {
+    "async"? ~ ("method" | "fn") ~ ident ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type? ~ "{" ~ function_body ~ "}"
+}
+
+when_clause = {
+    "when" ~ expression
+}
+
+// ===== Function Definitions =====
+function_keyword = { "function" | "fn" }
+async_keyword = { "async" }
+
+// Foreign function definition: fn <language_id> name(params) -> type { foreign_body }
+// Has TWO identifiers between fn and (, distinguishing from regular function_def.
+foreign_function_def = {
+    annotations? ~ async_keyword? ~ function_keyword
+    ~ foreign_language_id ~ ident ~ type_params?
+    ~ "(" ~ function_params? ~ ")" ~ return_type?
+    ~ "{" ~ foreign_body ~ "}"
+}
+
+// Native ABI function declaration:
+// extern "C" fn cos(x: number) -> number from "libm.so.6" [as "cos"];
+extern_native_function_def = {
+    annotations? ~ async_keyword? ~ "extern" ~ extern_abi
+    ~ function_keyword ~ ident ~ type_params?
+    ~ "(" ~ function_params? ~ ")" ~ return_type?
+    ~ extern_native_link
+    ~ ";"?
+}
+
+extern_abi = { string | ident }
+extern_native_link = { "from" ~ extern_native_library ~ ("as" ~ extern_native_symbol)? }
+extern_native_library = { string }
+extern_native_symbol = { string }
+
+// The language identifier in a foreign function (e.g., "python", "julia", "sql").
+// Must start with a letter or underscore, not a digit or special char.
+foreign_language_id = @{
+    !("(" | "{" | "<" | ASCII_DIGIT)
+    ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+// Raw body text of a foreign function. Captures everything between the outer braces,
+// handling nested braces and string literals so the parser doesn't get confused.
+foreign_body = @{ foreign_body_content* }
+foreign_body_content = @{
+    "{" ~ foreign_body_content* ~ "}"
+    | "\"" ~ (!"\"" ~ ANY | "\\\"")* ~ "\""
+    | "'" ~ (!"'" ~ ANY | "\\'")* ~ "'"
+    | !"}" ~ !"{" ~ ANY
+}
+
+function_def = {
+    annotations? ~ comptime_keyword? ~ async_keyword? ~ &function_keyword ~ function_keyword ~ ident ~ type_params? ~ "(" ~ function_params? ~ ")" ~ return_type? ~ where_clause? ~ "{" ~ function_body ~ "}"
+}
+
+// Declaration-only builtin intrinsic functions for std/core metadata.
+builtin_function_decl = {
+    "builtin" ~ function_keyword ~ ident ~ type_params? ~ "(" ~ function_params? ~ ")" ~ return_type ~ ";"?
+}
+
+where_clause = {
+    "where" ~ where_predicate ~ ("," ~ where_predicate)* ~ ","?
+}
+
+where_predicate = {
+    ident ~ ":" ~ trait_bound_list
+}
+
+annotations = { annotation+ }
+
+annotation = {
+    "@" ~ annotation_name ~ ("(" ~ annotation_args? ~ ")")?
+}
+
+// Annotation names can be identifiers OR keywords (like @strategy, @function, @export)
+annotation_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+annotation_args = {
+    expression ~ ("," ~ expression)*
+}
+
+// ===== Annotation Definitions =====
+// Define custom annotation handlers with lifecycle hooks:
+// annotation warmup(period) {
+//     on_define(fn, ctx) { ctx.registry("indicators").set(fn.name, fn); }
+//     before(fn, args, ctx) { return ctx.cache.get(key); }  // Short-circuit with cached value
+//     after(fn, args, result, ctx) { ctx.cache.set(key, result); return result; }
+//     metadata() { return { warmup_period: period }; }
+// }
+annotation_def = {
+    "annotation" ~ ident ~ "(" ~ annotation_def_params? ~ ")" ~ "{" ~ annotation_body ~ "}"
+}
+
+annotation_def_params = {
+    ident ~ ("," ~ ident)*
+}
+
+// Annotation body contains lifecycle handlers
+annotation_body = {
+    annotation_body_item*
+}
+
+annotation_body_item = {
+    annotation_targets_decl
+    | annotation_handler
+}
+
+annotation_targets_decl = {
+    "targets" ~ ":" ~ "[" ~ annotation_target_kind ~ ("," ~ annotation_target_kind)* ~ ","? ~ "]" ~ ";"?
+}
+
+annotation_target_kind = {
+    "function"
+    | "type"
+    | "module"
+    | "expression"
+    | "block"
+    | "await_expr"
+    | "binding"
+}
+
+// Lifecycle hooks for annotations
+// - on_define: Called when a function with this annotation is defined
+// - before: Called before each function invocation (can short-circuit by returning a value)
+// - after: Called after each function invocation (can transform the result)
+// - metadata: Returns static metadata for tooling/optimization
+annotation_handler = {
+    annotation_handler_kind ~ "(" ~ annotation_handler_params? ~ ")" ~ return_type? ~ block_expr
+}
+
+annotation_handler_kind = {
+    "on_define"
+    | "before"
+    | "after"
+    | "metadata"
+    | "comptime" ~ comptime_annotation_handler_phase
+}
+
+comptime_annotation_handler_phase = { "pre" | "post" }
+
+annotation_handler_params = {
+    annotation_handler_param ~ ("," ~ annotation_handler_param)*
+}
+
+annotation_handler_param = {
+    ("..." ~ ident) | ident
+}
+
+// ===== Meta Definitions =====
+// Fully generic metadata system for types
+//
+// Supports parameters, top-level methods, and nested blocks:
+//
+//   meta Candle for Series<OHLCV> default {
+//       // Parameters (any keys)
+//       style: string = "solid";
+//       decimals: number = 2;
+//
+//       // Top-level methods (any keys)
+//       format: (value) => "{value.len()} candles",
+//       validate: (value) => value.len() > 0,
+//
+//       // Nested blocks (any keys with nested methods)
+//       charts: {
+//           candle: (value) => { type: "range_bar", ... },
+//           volume: (value) => { type: "bar", ... }
+//       },
+//       export: {
+//           json: (value) => value.toJSON()
+//       }
+//   }
+//
+// Meta definition: metadata container for types
+// Simplified syntax: meta TypeName { ... }
+function_params = {
+    function_param ~ ("," ~ function_param)*
+}
+
+function_param = {
+    param_const_keyword? ~ param_ref_keyword? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ expression)?
+}
+
+param_const_keyword = { "const" }
+param_ref_keyword = { "&" ~ param_mut_keyword? }
+param_mut_keyword = @{ "mut" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+function_body = { (statement_or_error)* }
+
+// Statement-level error recovery: when a statement fails, consume tokens until the next
+// statement-level keyword boundary so that later statements can still be parsed.
+statement_or_error = _{ statement | stmt_recovery }
+stmt_recovery = { (!stmt_sync_point ~ ANY)+ }
+stmt_sync_point = _{ stmt_sync_keyword | "}" | ";" | item_sync_point }
+stmt_sync_keyword = @{ ("let" | "var" | "const" | "return" | "if" | "while" | "for") ~ !(ASCII_ALPHANUMERIC | "_") }
+return_type = { "->" ~ type_annotation }
+
+// ===== Function Expressions (Anonymous Functions) =====
+// Arrow function syntax (x => expr) has been removed.
+// Lambdas use exclusively pipe syntax: |x| expr, |x, y| x + y, || 42
+// The => operator is reserved for match arms.
+function_expr = {
+    function_keyword ~ "(" ~ function_params? ~ ")" ~ return_type? ~ "{" ~ function_body ~ "}"
+    | pipe_lambda
+}
+
+// Rust-style closure syntax: |x| x + 1, |x, y| x + y, || 42
+// Unambiguous with bitwise OR because | followed by ident (or |) at primary_expr
+// position cannot be a binary operator (no left operand).
+pipe_lambda = {
+    "|" ~ function_params? ~ "|" ~ (expression | "{" ~ function_body ~ "}")
+}
+
+// ===== Statements =====
+statement = {
+    return_stmt ~ ";"?
+    | break_stmt ~ ";"?
+    | continue_stmt ~ ";"?
+    | variable_decl ~ ";"?
+    | assignment ~ ";"?
+    | extend_statement
+    | remove_target_stmt ~ ";"?
+    | set_param_type_stmt ~ ";"?
+    | set_return_stmt ~ ";"?
+    | replace_body_stmt
+    | replace_module_stmt
+    | function_def
+    | expression_stmt ~ ";"?
+    | for_loop
+    | while_loop
+    | if_stmt
+}
+
+remove_target_stmt = { "remove" ~ "target" }
+set_param_type_stmt = { "set" ~ "param" ~ ident ~ ":" ~ type_annotation }
+set_return_stmt = { "set" ~ "return" ~ (set_return_expr_payload | type_annotation) }
+set_return_expr_payload = { "(" ~ expression ~ ")" }
+replace_body_stmt = { "replace" ~ "body" ~ (replace_body_expr_payload | ("{" ~ statement* ~ "}")) }
+replace_body_expr_payload = { "(" ~ expression ~ ")" }
+replace_module_stmt = { "replace" ~ "module" ~ replace_module_expr_payload }
+replace_module_expr_payload = { "(" ~ expression ~ ")" }
+
+return_stmt = { return_keyword ~ expression? }
+// Note: Don't use ("(" ~ expression ~ ")") - that breaks compound expressions like (a) or (b)
+// The expression parser handles parenthesized expressions via primary_expr
+if_stmt = { "if" ~ expression ~ "{" ~ statement* ~ "}" ~ else_clause? }
+else_clause = { "else" ~ ("if" ~ expression ~ "{" ~ statement* ~ "}" ~ else_clause? | "{" ~ statement* ~ "}") }
+
+// ===== Loops =====
+for_loop = { "for" ~ for_clause ~ "{" ~ statement* ~ "}" }
+for_clause = {
+    destructure_pattern ~ "in" ~ expression
+    | variable_decl ~ ";" ~ expression ~ ";" ~ expression
+}
+
+while_loop = { "while" ~ expression ~ "{" ~ statement* ~ "}" }
+break_stmt = { break_keyword }
+continue_stmt = { continue_keyword }
+
+// ===== Pattern Definitions =====
+// REMOVED: Pattern block syntax is deprecated. Use annotated functions instead.
+
+
+// ===== Stream Definitions =====
+stream_def = { "stream" ~ ident ~ "{" ~ stream_body ~ "}" }
+stream_body = {
+    stream_config?
+    ~ stream_state?
+    ~ stream_on_connect?
+    ~ stream_on_disconnect?
+    ~ stream_on_event?
+    ~ stream_on_window?
+    ~ stream_on_error?
+}
+
+stream_config = { "config" ~ "{" ~ stream_config_list? ~ "}" }
+stream_config_list = { stream_config_item ~ (";" ~ stream_config_item)* ~ ";"? }
+stream_config_item = {
+    "provider" ~ ":" ~ string
+    | "symbols" ~ ":" ~ symbol_list
+    | "timeframes" ~ ":" ~ "[" ~ timeframe ~ ("," ~ timeframe)* ~ ","? ~ "]"
+    | "buffer_size" ~ ":" ~ integer
+    | "reconnect" ~ ":" ~ boolean
+    | "reconnect_delay" ~ ":" ~ number
+}
+
+// Symbol list for stream and scan queries
+symbol_list = { 
+    ident 
+    | "[" ~ ident ~ ("," ~ ident)* ~ ","? ~ "]"
+}
+
+stream_state = { "state" ~ "{" ~ stream_state_list? ~ "}" }
+stream_state_list = { variable_decl ~ (";" ~ variable_decl)* ~ ";"? }
+
+stream_on_connect = { "on_connect" ~ "(" ~ ")" ~ "{" ~ statement* ~ "}" }
+stream_on_disconnect = { "on_disconnect" ~ "(" ~ ")" ~ "{" ~ statement* ~ "}" }
+stream_on_event = { "on_event" ~ "(" ~ ident ~ ")" ~ "{" ~ statement* ~ "}" }
+stream_on_window = { "on_window" ~ "(" ~ ident ~ "," ~ ident ~ ")" ~ "{" ~ statement* ~ "}" }
+stream_on_error = { "on_error" ~ "(" ~ ident ~ ")" ~ "{" ~ statement* ~ "}" }
+
+// ===== Data Source Declarations =====
+// datasource Name: DataSource<T> = provider("name")
+datasource_def = {
+    "datasource" ~ ident ~ ":" ~ type_annotation ~ "=" ~ expression ~ ";"?
+}
+
+// query Name: Query<T, Params> = sql(Source, "SELECT ...")
+query_decl = {
+    "query" ~ ident ~ ":" ~ type_annotation ~ "=" ~ expression ~ ";"?
+}
+
+// ===== Test Definitions =====
+test_def = { "test" ~ string ~ "{" ~ test_body ~ "}" }
+test_body = { 
+    test_setup?
+    ~ test_teardown?
+    ~ test_case+
+}
+
+test_setup = { "setup" ~ "{" ~ statement* ~ "}" }
+test_teardown = { "teardown" ~ "{" ~ statement* ~ "}" }
+
+test_case = { 
+    ("test" | "it") ~ string ~ ("->" ~ test_tags)? ~ "{" ~ test_statements ~ "}"
+}
+
+test_tags = { "[" ~ test_tag ~ ("," ~ test_tag)* ~ ","? ~ "]" }
+test_tag = { ident | string }
+
+test_statements = { (test_statement | statement)* }
+test_statement = {
+    assert_statement
+    | expect_statement
+    | should_statement
+    | test_fixture_statement
+}
+
+assert_statement = { 
+    "assert" ~ expression ~ ("," ~ string)?
+}
+
+expect_statement = {
+    "expect" ~ "(" ~ expression ~ ")" ~ "." ~ expectation_matcher
+}
+
+expectation_matcher = {
+    ("to_be" | "toBe") ~ "(" ~ expression ~ ")"
+    | ("to_equal" | "toEqual") ~ "(" ~ expression ~ ")"
+    | ("to_be_close_to" | "toBeCloseTo") ~ "(" ~ expression ~ ("," ~ number)? ~ ")"
+    | ("to_be_greater_than" | "toBeGreaterThan") ~ "(" ~ expression ~ ")"
+    | ("to_be_less_than" | "toBeLessThan") ~ "(" ~ expression ~ ")"
+    | ("to_contain" | "toContain") ~ "(" ~ expression ~ ")"
+    | ("to_be_truthy" | "toBeTruthy") ~ "(" ~ ")"
+    | ("to_be_falsy" | "toBeFalsy") ~ "(" ~ ")"
+    | ("to_throw" | "toThrow") ~ "(" ~ string? ~ ")"
+    | ("to_match_pattern" | "toMatchPattern") ~ "(" ~ ident ~ ("," ~ test_match_options)? ~ ")"
+}
+
+test_match_options = { "{" ~ test_match_option ~ ("," ~ test_match_option)* ~ ","? ~ "}" }
+test_match_option = {
+    "fuzzy" ~ ":" ~ number
+    | "timeframe" ~ ":" ~ timeframe  
+    | "symbol" ~ ":" ~ string
+}
+
+should_statement = {
+    expression ~ "should" ~ should_matcher
+}
+
+should_matcher = {
+    "be" ~ expression
+    | "equal" ~ expression
+    | "contain" ~ expression
+    | "match" ~ ident
+    | "be_close_to" ~ expression ~ ("within" ~ number)?
+}
+
+test_fixture_statement = {
+    "with_data" ~ "(" ~ expression ~ ")" ~ "{" ~ statement* ~ "}"
+    | "with_mock" ~ "(" ~ ident ~ ("," ~ expression)? ~ ")" ~ "{" ~ statement* ~ "}"
+}
+
+// ===== AI Features (Phase 3) =====
+optimize_statement = {
+    "optimize" ~ ident ~ "in" ~ param_range ~ "for" ~ metric_expr
+}
+
+param_range = {
+    "[" ~ expression ~ ".." ~ expression ~ "]"
+}
+
+metric_expr = {
+    "sharpe" | "sortino" | "return" | "drawdown" | "win_rate" | "profit_factor" | expression
+}
+
+// ===== Queries =====
+// NOTE: Query syntax is DEPRECATED in favor of method chaining.
+// Use data().window().find() instead of find_query
+// Use symbols().each() instead of scan_query
+// Use data().group_by().aggregate() instead of analyze_query
+query = {
+    with_query
+    | alert_query
+    // Note: backtest_query removed - backtest() is now a regular function call
+}
+
+// WITH clause (Common Table Expressions)
+with_query = { "with" ~ cte_list ~ inner_query }
+cte_list = { cte_def ~ ("," ~ cte_def)* }
+cte_def = { recursive_keyword? ~ ident ~ cte_columns? ~ "as" ~ "(" ~ inner_query ~ ")" }
+cte_columns = { "(" ~ ident ~ ("," ~ ident)* ~ ")" }
+recursive_keyword = { "recursive" }
+inner_query = { alert_query }
+
+// Note: backtest is now a regular function call: backtest(strategy, { config })
+// Sweep detection is done at runtime by checking for Range or numeric Array values
+
+alert_query = { "alert" ~ "when" ~ expression ~ alert_options? }
+
+pattern_ref = { ident }  // Reference to a pattern function by name
+
+metric_list = { "[" ~ ident ~ ("," ~ ident)* ~ "]" }
+param_list = { "with" ~ param ~ ("," ~ param)* }
+param = { ident ~ "=" ~ expression }
+alert_options = { "message" ~ string ~ ("webhook" ~ string)? }
+
+analysis_target = {
+    time_window
+    | pattern_ref  
+    | ident
+    | expression
+}
+
+query_where_clause = { "where" ~ expression }
+on_clause = { "on" ~ "(" ~ timeframe ~ ")" }
+group_by_clause = { "group" ~ "by" ~ group_by_list }
+having_clause = { "having" ~ expression }
+order_by_clause = { "order" ~ "by" ~ order_by_list }
+order_by_list = { order_by_item ~ ("," ~ order_by_item)* }
+order_by_item = { expression ~ sort_direction? }
+sort_direction = { "asc" | "desc" | "ASC" | "DESC" }
+limit_clause = { "limit" ~ integer }
+
+// ===== Window Functions =====
+window_function_call = {
+    window_function_name ~ "(" ~ window_function_args? ~ ")" ~ over_clause
+}
+
+window_function_name = {
+    "lag" | "lead" | "row_number" | "rank" | "dense_rank" | "ntile"
+    | "first_value" | "last_value" | "nth_value"
+    | "sum" | "avg" | "min" | "max" | "count"
+}
+
+window_function_args = {
+    expression ~ ("," ~ expression)*
+}
+
+over_clause = {
+    "over" ~ "(" ~ window_spec? ~ ")"
+}
+
+window_spec = {
+    partition_by_clause? ~ order_by_clause? ~ window_frame_clause?
+}
+
+partition_by_clause = {
+    "partition" ~ "by" ~ expression ~ ("," ~ expression)*
+}
+
+window_frame_clause = {
+    frame_type ~ frame_extent
+}
+
+frame_type = { "rows" | "range" }
+
+frame_extent = {
+    "between" ~ frame_bound ~ "and" ~ frame_bound
+    | frame_bound
+}
+
+frame_bound = {
+    "unbounded" ~ "preceding"
+    | "unbounded" ~ "following"
+    | "current" ~ "row"
+    | integer ~ "preceding"
+    | integer ~ "following"
+}
+
+// ===== JOIN Clauses =====
+join_clause = {
+    join_type? ~ "join" ~ join_source ~ join_condition?
+}
+
+join_type = {
+    "inner" | "left" ~ "outer"? | "right" ~ "outer"? | "full" ~ "outer"? | "cross"
+}
+
+join_source = {
+    ident ~ ("as" ~ ident)?
+    | "(" ~ inner_query ~ ")" ~ ("as" ~ ident)?
+}
+
+join_condition = {
+    "on" ~ expression
+    | "using" ~ "(" ~ ident ~ ("," ~ ident)* ~ ")"
+    | "within" ~ duration
+}
+
+group_by_list = { group_by_expr ~ ("," ~ group_by_expr)* }
+group_by_expr = {
+    time_interval
+    | ident
+    | expression
+}
+time_interval = { number ~ time_unit }
+
+calculate_clause = { "calculate" ~ "{" ~ calculate_list ~ "}" }
+calculate_list = { calculate_expr ~ ("," ~ calculate_expr)* ~ ","? }
+calculate_expr = { ident ~ ":" ~ aggregation_expr }
+aggregation_expr = {
+    aggregation_function ~ "(" ~ expression? ~ ")"
+    | aggregation_function
+}
+aggregation_function = {
+    "count" | "sum" | "avg" | "min" | "max" 
+    | "stddev" | "first" | "last" | "percentile"
+    | ident  // Custom aggregation function
+}
+
+// ===== Time Windows =====
+time_window = {
+    last_window
+    | between_window
+    | window_range
+    | session_window
+}
+
+last_window = { "last" ~ "(" ~ number ~ time_unit ~ ")" }
+between_window = { "between" ~ "(" ~ time_ref ~ "," ~ time_ref ~ ")" }
+window_range = { "window" ~ "(" ~ window_args ~ ")" }
+session_window = { "session" ~ "(" ~ string ~ "," ~ string ~ ")" }
+
+window_args = {
+    number ~ ("," ~ number)?
+    | timeframe
+    | time_ref ~ "," ~ time_ref
+}
+
+// ===== Expressions and Variables =====
+expression_stmt = { expression }
+
+// Variable declarations with let, var, const
+// Optional ownership_modifier (move/clone) before the initializer expression
+variable_decl = {
+    var_keyword ~ var_mut_modifier? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ ownership_modifier? ~ expression)?
+}
+
+ownership_modifier = @{ ("move" | "clone") ~ !(ASCII_ALPHANUMERIC | "_") }
+
+var_keyword = @{ ("let" | "var" | "const") ~ !(ASCII_ALPHANUMERIC | "_") }
+var_mut_modifier = @{ "mut" ~ !(ASCII_ALPHANUMERIC | "_") }
+return_keyword = @{ "return" ~ !(ASCII_ALPHANUMERIC | "_") }
+break_keyword = @{ "break" ~ !(ASCII_ALPHANUMERIC | "_") }
+continue_keyword = @{ "continue" ~ !(ASCII_ALPHANUMERIC | "_") }
+await_keyword = @{ "await" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+// Assignment with destructuring support
+assignment = { destructure_pattern ~ "=" ~ expression }
+
+// Pattern for destructuring
+destructure_pattern = {
+    destructure_decomposition_pattern
+    | destructure_rest_pattern
+    | destructure_array_pattern
+    | destructure_object_pattern
+    | destructure_ident_pattern
+}
+
+destructure_ident_pattern = { ident }
+
+destructure_array_pattern = {
+    "[" ~ (destructure_pattern ~ ("," ~ destructure_pattern)* ~ ","?)? ~ "]"
+}
+
+destructure_object_pattern = {
+    "{" ~ (destructure_object_pattern_field ~ ("," ~ destructure_object_pattern_field)* ~ ","?)? ~ "}"
+}
+
+destructure_object_pattern_field = {
+    ident ~ (":" ~ destructure_pattern)?  // key or key: pattern
+    | "..." ~ ident                       // rest pattern in object
+}
+
+destructure_rest_pattern = {
+    "..." ~ ident
+}
+
+// Decomposition pattern for extracting components from intersection types
+// Syntax: (name: Type, name: Type, ...)
+// Example: let (a: TypeA, b: TypeB) = merged_value
+destructure_decomposition_pattern = {
+    "(" ~ decomposition_binding ~ ("," ~ decomposition_binding)+ ~ ","? ~ ")"
+}
+
+decomposition_binding = {
+    ident ~ ":" ~ (type_annotation | decomposition_field_set)
+}
+
+decomposition_field_set = {
+    "{" ~ ident ~ ("," ~ ident)* ~ ","? ~ "}"
+}
+
+// Type annotations
+// Examples:
+//   Number
+//   String
+//   Vec<Number>
+type_annotation = {
+    union_type
+}
+
+union_type = {
+    intersection_type ~ ("|" ~ intersection_type)*
+}
+
+// Intersection type: Type1 + Type2 (structural merge for objects/interfaces)
+intersection_type = {
+    optional_type ~ ("+" ~ optional_type)*
+}
+
+optional_type = {
+    primary_type ~ "?"?
+}
+
+primary_type = {
+    non_array_type ~ ("[" ~ "]")*
+}
+
+non_array_type = {
+    tuple_type
+    | object_type
+    | function_type
+    | dyn_type
+    | generic_type
+    | basic_type
+    | "Vec" ~ "<" ~ type_annotation ~ ">"
+    | unit_type
+    | "(" ~ type_annotation ~ ")"
+}
+
+unit_type = { "(" ~ ")" }
+
+// Trait object type: dyn Trait1 + Trait2
+dyn_type = { "dyn" ~ ident ~ ("+" ~ ident)* }
+
+basic_type = {
+    "number"
+    | "string"
+    | "bool"
+    | "boolean"
+    | "void"
+    | "option"
+    | "timestamp"
+    | "undefined"
+    | "any"
+    | "never"
+    | "pattern"
+    | ident
+}
+
+tuple_type = {
+    "[" ~ type_annotation ~ ("," ~ type_annotation)* ~ "]"
+}
+
+object_type = {
+    "{" ~ object_type_member_list? ~ "}"
+}
+
+object_type_member_list = {
+    object_type_member ~ (object_type_separator ~ object_type_member)* ~ object_type_separator?
+}
+
+object_type_separator = { ";" | "," }
+
+object_type_member = {
+    annotations? ~ (ident | keyword) ~ "?"? ~ ":" ~ type_annotation
+}
+
+function_type = { 
+    "(" ~ type_param_list? ~ ")" ~ "=>" ~ type_annotation 
+}
+
+type_param_list = { 
+    type_param ~ ("," ~ type_param)* 
+}
+
+type_param = {
+    ident ~ "?"? ~ ":" ~ type_annotation
+    | type_annotation
+}
+
+generic_type = {
+    ident ~ "<" ~ type_annotation ~ ("," ~ type_annotation)* ~ ">"
+}
+
+expression = { assignment_expr }
+
+compound_assign_op = { "**=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "^=" | "&=" | "|=" }
+assign_op = { "=" ~ !">" }
+assignment_expr = { postfix_expr ~ (compound_assign_op | assign_op) ~ assignment_expr | pipe_expr }
+
+// Pipe operator: data |> transform |> analyze
+// Left-associative, pipes left value into right function
+// With placeholder: data |> custom_fn(_, extra_arg)
+pipe_expr = { ternary_expr ~ ("|>" ~ ternary_expr)* }
+
+ternary_expr = { null_coalesce_expr ~ ("?" ~ ternary_branch ~ ":" ~ ternary_branch)? }
+
+ternary_branch = { assignment_expr_no_range }
+
+assignment_expr_no_range = { postfix_expr ~ (compound_assign_op | assign_op) ~ assignment_expr_no_range | null_coalesce_expr_no_range }
+
+null_coalesce_expr_no_range = { context_expr_no_range ~ ("??" ~ context_expr_no_range)* }
+context_expr_no_range = { or_expr_no_range ~ ("!!" ~ or_expr_no_range)* }
+
+or_expr_no_range = { and_expr_no_range ~ (("||" | "or") ~ and_expr_no_range)* }
+and_expr_no_range = { bitwise_or_expr_no_range ~ (("&&" | "and") ~ bitwise_or_expr_no_range)* }
+bitwise_or_expr_no_range = { bitwise_xor_expr_no_range ~ ("|" ~ !"|" ~ !">" ~ bitwise_xor_expr_no_range)* }
+bitwise_xor_expr_no_range = { bitwise_and_expr_no_range ~ ("^" ~ !"=" ~ bitwise_and_expr_no_range)* }
+bitwise_and_expr_no_range = { comparison_expr_no_range ~ ("&" ~ !"&" ~ comparison_expr_no_range)* }
+
+comparison_expr_no_range = { additive_expr ~ comparison_tail_no_range* }
+comparison_tail_no_range = {
+    fuzzy_comparison_tail_no_range
+    | comparison_op ~ additive_expr
+    | "instanceof" ~ type_annotation
+}
+fuzzy_comparison_tail_no_range = { fuzzy_op ~ additive_expr ~ within_clause? }
+
+null_coalesce_expr = { context_expr ~ ("??" ~ context_expr)* }
+context_expr = { or_expr ~ ("!!" ~ or_expr)* }
+
+or_expr = { and_expr ~ (("||" | "or") ~ and_expr)* }
+and_expr = { bitwise_or_expr ~ (("&&" | "and") ~ bitwise_or_expr)* }
+bitwise_or_expr = { bitwise_xor_expr ~ ("|" ~ !"|" ~ !">" ~ bitwise_xor_expr)* }
+bitwise_xor_expr = { bitwise_and_expr ~ ("^" ~ !"=" ~ bitwise_and_expr)* }
+bitwise_and_expr = { comparison_expr ~ ("&" ~ !"&" ~ comparison_expr)* }
+
+comparison_expr = { range_expr ~ comparison_tail* }
+comparison_tail = {
+    fuzzy_comparison_tail
+    | comparison_op ~ range_expr
+    | "instanceof" ~ type_annotation
+}
+
+// Fuzzy comparison with optional tolerance: a ~= b within 0.02 or a ~= b within 2%
+fuzzy_comparison_tail = { fuzzy_op ~ range_expr ~ within_clause? }
+fuzzy_op = { "~=" | "~<" | "~>" }
+within_clause = { "within" ~ tolerance_spec }
+tolerance_spec = { number ~ "%"? }
+
+// Range expressions with Rust-style syntax
+// Supports: start..end, start..=end, ..end, ..=end, start.., ..
+range_expr = {
+    // Full bounded range: start..end or start..=end (must try before range_from)
+    additive_expr ~ range_op ~ additive_expr
+    // Half-open from start: start..
+    | additive_expr ~ ".."
+    // Range to end: ..end or ..=end
+    | range_op ~ additive_expr
+    // Full range: ..
+    | ".."
+    // Not a range - just an expression
+    | additive_expr
+}
+
+// Range operator: ..= (inclusive) must come before .. (exclusive)
+range_op = { "..=" | ".." }
+// Note: Fuzzy operators (~=, ~<, ~>) are handled by fuzzy_comparison_tail
+comparison_op = {
+    ">=" | "<=" | "==" | "!=" | ">" | "<" |
+    "approaching"    // For trend analysis
+}
+
+additive_expr = { shift_expr ~ (("+"|"-") ~ shift_expr)* }
+shift_expr = { multiplicative_expr ~ (("<<" | ">>") ~ multiplicative_expr)* }
+multiplicative_expr = { exponential_expr ~ (("*"|"/"|"%") ~ exponential_expr)* }
+exponential_expr = { unary_expr ~ ("**" ~ unary_expr)* }
+
+unary_expr = {
+    "!" ~ unary_expr
+    | "~" ~ !"=" ~ !"<" ~ !">" ~ unary_expr
+    | "-" ~ unary_expr
+    | ref_expr
+    | postfix_expr
+}
+
+// Reference expression: &expr or &mut expr
+ref_expr = { "&" ~ !"&" ~ ref_mut_keyword? ~ postfix_expr }
+ref_mut_keyword = @{ "mut" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+postfix_expr = {
+    primary_expr ~ (
+        property_access
+        | optional_property_access
+        | index_access
+        | function_call
+        | type_assertion_suffix
+        | using_impl_suffix
+        | try_operator
+    )*
+}
+
+// Try operator for Result error propagation: expr?
+// Don't match if:
+// 1. Followed by ? (would be null coalesce ??)
+// 2. Followed by expression then : (would be ternary ?:)
+try_operator = { "?" ~ !"?" ~ !ternary_lookahead }
+
+// Lookahead to detect ternary pattern: ? <expr> :
+// Match balanced delimiters until : is found
+ternary_lookahead = _{ balanced_ternary ~ ":" }
+balanced_ternary = _{
+    (
+        "(" ~ balanced_ternary ~ ")"
+        | "[" ~ balanced_ternary ~ "]"
+        | "{" ~ balanced_ternary ~ "}"
+        | !(":" | "(" | "[" | "{" | ")" | "]" | "}" | "?" | ";" | EOI) ~ ANY
+    )*
+}
+
+// Type assertion with optional comptime field overrides
+// Examples: as Number, as Percent { decimals: 4 }
+// Note: as_keyword uses atomic rule to prevent matching "as" prefix of "async" etc.
+as_keyword = @{ "as" ~ !(ASCII_ALPHANUMERIC | "_") }
+type_assertion_suffix = {
+    as_keyword ~ type_annotation ~ comptime_field_overrides?
+}
+
+// Explicit implementation selector:
+// `expr using JsonDisplay`
+using_impl_suffix = { "using" ~ ident }
+
+// Allow keywords as property names
+property_access = { "." ~ (ident | keyword) }
+optional_property_access = { "?." ~ (ident | keyword) }
+index_access = { "[" ~ index_expr ~ "]" }
+function_call = { "(" ~ arg_list? ~ ")" }
+
+index_expr = {
+    // Support both numeric indices and datetime ranges with Rust-style slice syntax
+    // arr[1..5], arr[..5], arr[1..], arr[..], arr[1..=5]
+    (datetime_range | expression) ~ (range_op ~ (datetime_range | expression)?)? ~ ("," ~ (timeframe | expression))?
+    | range_op ~ (datetime_range | expression)? ~ ("," ~ (timeframe | expression))?
+}
+
+// Function argument list with support for named arguments
+// Named args: foo(period: 10, threshold: 0.01)
+// Positional args: foo(10, 0.01)
+// Mixed: foo(10, threshold: 0.01)
+arg_list = { argument ~ ("," ~ argument)* }
+argument = { named_arg | expression }
+named_arg = { ident ~ ":" ~ expression }
+
+
+// Primary expression - object literal before block to handle { key: value } correctly
+primary_expr = {
+    duration  // Must come before literal to avoid number matching first
+    | datetime_expr
+    | literal
+    | array_literal
+    | object_literal  // Try object BEFORE block to handle { key: value }
+    | data_ref
+    | time_ref
+    | pattern_name
+    | enum_constructor_expr
+    | from_query_expr  // LINQ-style query: from x in arr where ... select ...
+    | comptime_for_expr // comptime for — before comptime_block to match "comptime for" first
+    | comptime_block   // comptime { } — before if/while/for to capture keyword early
+    | annotated_expr   // @annotation expr — before other expressions
+    | async_let_expr   // async let x = expr — before if/for to capture async keyword
+    | async_scope_expr // async scope { } — before if/for to capture async keyword
+    | if_expr
+    | while_expr
+    | for_expr
+    | loop_expr
+    | let_expr
+    | match_expr
+    | break_expr
+    | continue_expr
+    | return_expr
+    | block_expr      // Block AFTER object
+    | await_expr      // await expr — before function_expr to avoid ambiguity
+    | function_expr
+    | unit_literal     // Must come before "(" ~ expression ~ ")"
+    | "(" ~ expression ~ ")"
+    | some_expr  // Some(value) constructor for Option type
+    | temporal_nav
+    | struct_literal  // Struct literal: TypeName { field: value, ... } — before ident
+    | ident
+    | timeframe_expr
+}
+
+// Await expression: await expr | await @annotation expr | await join kind { branches }
+await_expr = {
+    await_keyword ~ annotation+ ~ postfix_expr     // await @timeout(5s) fetch()
+    | await_keyword ~ join_expr                     // await join all { f(), g() }
+    | await_keyword ~ postfix_expr                  // await fetch()
+}
+
+// Join expression: join all|race|any|settle { branch, ... }
+join_expr = {
+    "join" ~ join_kind ~ "{" ~ join_branch_list ~ "}"
+}
+
+// Join strategy
+join_kind = { "all" | "race" | "any" | "settle" }
+
+// Join branch list (comma-separated)
+join_branch_list = { join_branch ~ ("," ~ join_branch)* ~ ","? }
+
+// Join branch: optional label, optional per-branch annotations, expression
+join_branch = {
+    annotation+ ~ ident ~ ":" ~ expression    // @node("us") prices: fetch()
+    | annotation+ ~ expression                // @node("us") fetch()
+    | ident ~ ":" ~ expression                // prices: fetch()
+    | expression                              // fetch()
+}
+
+// Struct literal: TypeName { field: value, ... }
+// Uses object_fields for field syntax (same as object literals)
+struct_literal = { ident ~ "{" ~ object_fields? ~ "}" }
+
+// Enum constructor: Enum::Variant, Enum::Variant(...), Enum::Variant { ... }
+enum_constructor_expr = { enum_variant_path ~ (enum_tuple_payload | enum_struct_payload)? }
+enum_variant_path = { ident ~ "::" ~ variant_ident }
+enum_tuple_payload = { "(" ~ arg_list? ~ ")" }
+enum_struct_payload = { "{" ~ object_fields? ~ "}" }
+
+// Some expression for Option type
+some_expr = { "Some" ~ "(" ~ expression ~ ")" }
+
+// ===== If-Else Expression =====
+// Expression-form conditionals use block branches:
+//   if cond { ... } else { ... }
+// `else if ...` chains are supported recursively.
+if_expr = { "if" ~ expression ~ block_expr ~ ("else" ~ if_expr_else)? }
+if_expr_else = { if_expr | block_expr }
+
+// ===== Async Let Expression =====
+// Spawns a task and binds a future handle: `async let x = fetch()`
+async_let_expr = { "async" ~ "let" ~ ident ~ "=" ~ expression }
+
+// ===== Async Scope Expression =====
+// Cancellation boundary — on scope exit, all pending tasks are cancelled: `async scope { ... }`
+async_scope_expr = { "async" ~ "scope" ~ block_expr }
+
+// ===== While Expression =====
+while_expr = { "while" ~ expression ~ block_expr }
+
+// ===== For Expression =====
+// Supports `for x in expr { }` and `for await x in stream { }`
+for_expr = { "for" ~ "await"? ~ for_expr_clause ~ block_expr }
+for_expr_clause = {
+    pattern ~ "in" ~ expression
+}
+
+// ===== Loop Expression =====
+loop_expr = { "loop" ~ block_expr }
+
+// ===== Let Expression =====
+let_expr = { "let" ~ pattern ~ ("=" ~ expression)? ~ "in" ~ expression }
+
+// ===== Match Expression =====
+match_expr = { "match" ~ match_scrutinee ~ "{" ~ match_arm ~ (","? ~ match_arm)* ~ ","? ~ "}" }
+// Fast path for `match x { ... }` without letting `expression` greedily parse
+// `x { ... }` as a struct literal.
+match_scrutinee = { match_scrutinee_ident | expression }
+match_scrutinee_ident = { ident ~ &"{" }
+match_arm = { pattern ~ ("where" ~ expression)? ~ "=>" ~ expression }
+
+// ===== Break Expression =====
+break_expr = { "break" ~ expression? }
+
+// ===== Continue Expression =====
+continue_expr = { "continue" }
+
+// ===== Return Expression =====
+return_expr = { "return" ~ expression? }
+
+// ===== Pattern definitions for matching =====
+pattern = {
+    pattern_array
+    | pattern_object
+    | pattern_wildcard
+    | pattern_constructor
+    | pattern_literal
+    | pattern_typed
+    | pattern_identifier
+}
+
+pattern_literal = { literal }
+pattern_typed = { ident ~ ":" ~ type_annotation }
+pattern_identifier = { ident }
+pattern_array = { "[" ~ (pattern ~ ("," ~ pattern)*)? ~ "]" }
+pattern_object = { "{" ~ (pattern_field ~ ("," ~ pattern_field)*)? ~ "}" }
+pattern_field = { ident ~ (":" ~ pattern)? }
+pattern_wildcard = { "_" }
+// Variant names in qualified constructors allow keywords like Some, None, Ok, Err
+variant_ident = @{ variant_keyword | (!(keyword ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
+variant_keyword = @{ ("Some" | "None" | "Ok" | "Err") ~ !(ASCII_ALPHANUMERIC | "_") }
+
+// Allow keywords Some, None, Ok, Err as constructor names in patterns
+pattern_constructor_name = { "Some" | "Ok" | "Err" | ident }
+// Known constructor keywords that can appear without payload (None, Some, Ok, Err)
+pattern_constructor_keyword = @{ ("Some" | "None" | "Ok" | "Err") ~ !(ASCII_ALPHANUMERIC | "_") }
+pattern_constructor = {
+    pattern_qualified_constructor
+    | pattern_unqualified_constructor
+}
+pattern_qualified_constructor = { ident ~ "::" ~ variant_ident ~ pattern_constructor_payload? }
+// Constructor with payload (any name), or a known keyword without payload
+pattern_unqualified_constructor = {
+    pattern_constructor_name ~ pattern_constructor_payload
+    | pattern_constructor_keyword
+}
+pattern_constructor_payload = { pattern_constructor_tuple | pattern_constructor_struct }
+pattern_constructor_tuple = { "(" ~ (pattern ~ ("," ~ pattern)*)? ~ ")" }
+pattern_constructor_struct = { "{" ~ (pattern_field ~ ("," ~ pattern_field)*)? ~ "}" }
+
+// ===== Block Expression =====
+// Block expressions evaluate to the value of their last expression (without semicolon)
+// Expressions followed by semicolons are evaluated for side effects only
+block_expr = { "{" ~ block_items? ~ "}" }
+block_items = { 
+    // Zero or more statements (expressions/declarations with semicolons)
+    (block_statement ~ ";"?)* ~
+    // Optional final expression without semicolon (the block's value)
+    block_item?
+}
+block_statement = {
+    return_stmt
+    | variable_decl
+    | assignment
+    | extend_statement
+    | remove_target_stmt
+    | set_param_type_stmt
+    | set_return_stmt
+    | replace_body_stmt
+    | replace_module_stmt
+    | function_def
+    | expression
+}
+block_item = {
+    return_stmt
+    | variable_decl
+    | assignment
+    | extend_statement
+    | remove_target_stmt
+    | set_param_type_stmt
+    | set_return_stmt
+    | replace_body_stmt
+    | replace_module_stmt
+    | function_def
+    | expression
+}
+
+// ===== Array Literal and List Comprehension =====
+array_literal = { 
+    list_comprehension
+    | "[" ~ array_elements? ~ "]" 
+}
+array_elements = { array_element ~ ("," ~ array_element)* }
+array_element = { spread_element | expression }
+spread_element = { "..." ~ expression }
+
+// List comprehension: [expr for var in iterable if condition]
+list_comprehension = {
+    "[" ~ expression ~ comprehension_clause+ ~ "]"
+}
+
+comprehension_clause = {
+    "for" ~ destructure_pattern ~ "in" ~ expression ~ ("if" ~ expression)?
+}
+
+// ===== Object Literal =====
+// Object literals - will be prioritized in expression contexts
+object_literal = {
+    "{" ~ object_fields? ~ "}"
+}
+
+object_fields = { object_field_item ~ ("," ~ object_field_item)* ~ ","? }
+object_field_item = { object_spread | object_field }
+// Allow both identifiers and keywords as object field names
+object_field = { object_typed_field | object_value_field }
+object_field_name = { ident | keyword }
+object_typed_field = { object_field_name ~ ":" ~ type_annotation ~ "=" ~ expression }
+object_value_field = { object_field_name ~ ":" ~ expression }
+object_spread = { "..." ~ expression }
+
+// ===== Built-in Functions =====
+builtin_function = {
+    "count" | "sum" | "max" | "min" | "abs" | "sqrt" | "ln" | "stddev" | "slice" | "fold" | "cumsum" |
+    "highest" | "lowest" | "highest_index" | "lowest_index" |
+    "first" | "last" | "range" | "push" | "if" | "length" | "where" | "print" | "series" | "shift" | "resample"
+}
+
+// ===== Literals =====
+literal = {
+    decimal   // Must come before number to match "123.45D" suffix
+    | percent_literal  // Must come before number to match "5%" suffix
+    | number
+    | string
+    | boolean
+    | none_literal
+    | timeframe
+}
+
+// Percent literal: 5% → 0.05, 100% → 1.0
+percent_literal = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ "%" ~ !(ASCII_ALPHANUMERIC) }
+
+// Decimal literal for exact arithmetic (finance)
+// Uses capital D to differentiate from 'd' (days) in durations
+decimal = @{ number ~ "D" }
+
+// Must check word boundary to avoid matching "true" in "trueval" or "false" in "falsely"
+boolean = @{ ("true" | "false") ~ !(ASCII_ALPHANUMERIC | "_") }
+none_literal = @{ "None" ~ !(ASCII_ALPHANUMERIC | "_") }
+unit_literal = { "(" ~ ")" }
+
+// ===== Data References (Generic DataFrame Access) =====
+// Requires at least brackets: data[0], data[-1], data[@2024-01-01]
+// This allows "data" to be used as a regular variable name
+data_ref = {
+    "data" ~ timeframe_spec? ~ (datetime_access | index_access)
+}
+
+// Timeframe specification: (5m) or (timeframe_expr)
+timeframe_spec = {
+    "(" ~ (timeframe | expression) ~ ")"
+}
+
+// DateTime-based candle access
+datetime_access = {
+    "[" ~ datetime_range ~ ("," ~ (timeframe | expression))? ~ "]" ~ index_access?
+}
+
+// DateTime range: single datetime or a range with "to"
+datetime_range = {
+    datetime_expr ~ ("to" ~ datetime_expr)?
+}
+
+// DateTime expressions
+datetime_expr = {
+    datetime_arithmetic | datetime_primary
+}
+
+datetime_primary = {
+    "@" ~ datetime_literal
+    | "@" ~ named_time
+}
+
+datetime_arithmetic = {
+    datetime_primary ~ (datetime_op ~ duration)+
+}
+
+datetime_op = { "+" | "-" }
+
+datetime_literal = {
+    string ~ timezone?
+}
+
+timezone = {
+    ident  // Like EST, PST, UTC
+}
+
+duration = @{
+    compound_duration | simple_duration
+}
+
+simple_duration = @{
+    number_part ~ duration_unit
+}
+
+compound_duration = @{
+    simple_duration ~ (simple_duration)+
+}
+
+// Number part for durations (without @ to allow composition)
+number_part = { 
+    "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)?
+}
+
+duration_unit = {
+    "s" | "m" | "h" | "d" | "w" | "M" | "y" | "samples" |
+    "seconds" | "minutes" | "hours" | "days" | "weeks" | "months" | "years"
+}
+
+// ===== Time References =====
+time_ref = {
+    "@" ~ (quoted_time | named_time | relative_time)
+}
+
+quoted_time = { string }
+named_time = { "today" | "yesterday" | "now" }
+relative_time = { string } // Will be parsed semantically
+
+// ===== Temporal Navigation =====
+temporal_nav = {
+    back_nav
+    | forward_nav
+}
+
+back_nav = { "back" ~ "(" ~ nav_amount ~ ")" }
+forward_nav = { "forward" ~ "(" ~ nav_amount ~ ")" }
+
+nav_amount = {
+    number ~ time_unit?
+}
+
+time_unit = { "samples" | "sample" | "records" | "record" | "minutes" | "hours" | "days" | "weeks" | "months" | "minute" | "hour" | "day" | "week" | "month" }
+
+// ===== Timeframe Expressions =====
+timeframe_expr = { "on" ~ "(" ~ timeframe ~ ")" ~ "{" ~ expression ~ "}" }
+
+// ===== LINQ-Style From Query Expression =====
+// Syntax: from var in source [clauses...] select expr
+// Example: from t in trades where t.amount > 1000 order by t.date desc select t.price
+from_query_expr = {
+    "from" ~ ident ~ "in" ~ query_source_expr ~ query_clause* ~ select_query_clause
+}
+
+// Query expressions use a restricted expression syntax to avoid consuming keywords
+// We use comparison_expr which includes most operators but stops before ternary/pipe
+query_expr_inner = { comparison_expr }
+query_source_expr = { postfix_expr }
+
+query_clause = {
+    where_query_clause
+    | order_by_query_clause
+    | group_by_query_clause
+    | join_query_clause
+    | let_query_clause
+}
+
+where_query_clause = { "where" ~ query_expr_inner }
+order_by_query_clause = { "order" ~ "by" ~ order_by_spec ~ ("," ~ order_by_spec)* }
+order_by_spec = { postfix_expr ~ query_sort_direction? }
+query_sort_direction = { "asc" | "desc" }
+
+group_by_query_clause = { "group" ~ postfix_expr ~ "by" ~ postfix_expr ~ ("into" ~ ident)? }
+join_query_clause = { "join" ~ ident ~ "in" ~ postfix_expr ~ "on" ~ postfix_expr ~ "equals" ~ postfix_expr ~ ("into" ~ ident)? }
+let_query_clause = { "let" ~ ident ~ "=" ~ query_expr_inner }
+select_query_clause = { "select" ~ query_expr_inner }
+
+// ===== Pattern Names =====
+pattern_name = { "pattern::" ~ ident }
+
+// ===== Lexical Elements =====
+ident = @{ 
+    !(keyword ~ !(ASCII_ALPHANUMERIC | "_")) ~ 
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* 
+}
+
+keyword = {
+    "pub" | "import" | "from" | "use" | "as" |
+    "builtin" |
+    "let" | "var" | "const" | "mut" | "function" | "async" | "await" |
+    "if" | "else" | "for" | "while" | "match" | "return" | "break" | "continue" |
+    "true" | "false" | "null" | "None" | "Some" | "and" | "or" |
+    "find" | "all" | "analyze" | "scan" |
+    "typeof" |
+    "type" | "interface" | "trait" | "impl" | "enum" |
+    "extends" |
+    "extend" | "method" | "when" | "on" | "in" |
+    "move" | "clone" |
+    "comptime" | "datasource" | "using"
+}
+
+// Query keywords - not reserved as general identifiers since they're
+// only meaningful within from_query_expr context
+// "select", "order", "by", "asc", "desc", "group", "into", "join", "equals"
+integer = @{ "-"? ~ (hex_integer | binary_integer | octal_integer | decimal_integer) }
+hex_integer = { ("0x" | "0X") ~ ASCII_HEX_DIGIT+ ~ int_width_suffix? }
+binary_integer = { ("0b" | "0B") ~ ("0" | "1")+ ~ int_width_suffix? }
+octal_integer = { ("0o" | "0O") ~ ('0'..'7')+ ~ int_width_suffix? }
+decimal_integer = { ASCII_DIGIT+ ~ int_width_suffix? }
+int_width_suffix = { "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" }
+number = @{
+    "-"? ~ (
+        ("0x" | "0X") ~ ASCII_HEX_DIGIT+ ~ ("i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8")?
+        | ("0b" | "0B") ~ ("0" | "1")+ ~ ("i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8")?
+        | ("0o" | "0O") ~ ('0'..'7')+ ~ ("i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8")?
+        | ASCII_DIGIT+ ~ (
+            "." ~ ASCII_DIGIT+ ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+            | ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+
+            | ("i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8")
+        )?
+    )
+}
+string = @{ formatted_triple_string | formatted_simple_string | content_triple_string | content_simple_string | triple_string | simple_string }
+formatted_prefix = { "f$" | "f#" | "f" }
+content_prefix = { "c$" | "c#" | "c" }
+string_escape = { "\\\"" | "\\\\" | "\\n" | "\\t" | "\\r" | "\\{" | "\\}" | "\\$" | "\\#" }
+simple_string_char = { string_escape | !("\"") ~ ANY }
+formatted_triple_string = @{ formatted_prefix ~ "\"\"\"" ~ (!"\"\"\"" ~ ANY)* ~ "\"\"\"" }
+formatted_simple_string = @{ formatted_prefix ~ "\"" ~ simple_string_char* ~ "\"" }
+content_triple_string = @{ content_prefix ~ "\"\"\"" ~ (!"\"\"\"" ~ ANY)* ~ "\"\"\"" }
+content_simple_string = @{ content_prefix ~ "\"" ~ simple_string_char* ~ "\"" }
+triple_string = @{ "\"\"\"" ~ (!"\"\"\"" ~ ANY)* ~ "\"\"\"" }
+simple_string = @{ "\"" ~ simple_string_char* ~ "\"" }
+timeframe = @{ ASCII_DIGIT+ ~ ("s" | "m" | "h" | "d" | "w" | "M") }

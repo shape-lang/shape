@@ -1,0 +1,67 @@
+// Complex Multi-Indicator Strategy Test
+// Uses intrinsics for maximum performance
+
+function advanced_strategy() {
+    // Get close price series (this will need data loaded)
+    // For now, create test data
+    let close_prices = series([
+        4500.0, 4505.0, 4510.0, 4508.0, 4512.0,
+        4515.0, 4520.0, 4518.0, 4525.0, 4530.0,
+        4528.0, 4535.0, 4540.0, 4538.0, 4545.0,
+        4550.0, 4548.0, 4555.0, 4560.0, 4558.0,
+        4565.0, 4570.0, 4568.0, 4575.0, 4580.0,
+        4578.0, 4585.0, 4590.0, 4588.0, 4595.0
+    ]);
+
+    // Calculate indicators using intrinsics (FAST!)
+    let sma_fast = __intrinsic_rolling_mean(close_prices, 5);
+    let sma_slow = __intrinsic_rolling_mean(close_prices, 10);
+    let ema_12 = __intrinsic_ema(close_prices, 12);
+
+    // Get latest values
+    let sma_fast_val = sma_fast.last();
+    let sma_slow_val = sma_slow.last();
+    let ema_val = ema_12.last();
+    let current_price = close_prices.last();
+
+    // Complex entry logic with logical operators (Phase 2)
+    if sma_fast_val > sma_slow_val && ema_val > sma_slow_val && current_price > 4580 {
+        "buy"
+    } else if sma_fast_val < sma_slow_val {
+        "sell"
+    } else {
+        "hold"
+    }
+}
+
+// Test the strategy
+let signal = advanced_strategy();
+
+print("=== Complex Strategy Test ===");
+print("Strategy Signal:", signal);
+print("");
+
+// Test individual intrinsics
+print("=== Testing Intrinsics ===");
+let test_data = series([1.0, 2.0, 3.0, 4.0, 5.0]);
+
+let sum_val = __intrinsic_sum(test_data);
+print("Sum [1,2,3,4,5]:", sum_val, "- Expected: 15");
+
+let mean_val = __intrinsic_mean(test_data);
+print("Mean [1,2,3,4,5]:", mean_val, "- Expected: 3");
+
+let prices = series([10.0, 20.0, 30.0, 40.0, 50.0]);
+let sma3 = __intrinsic_rolling_mean(prices, 3);
+print("SMA(3) on [10,20,30,40,50]:", sma3);
+
+let ema3 = __intrinsic_ema(prices, 3);
+print("EMA(3) on [10,20,30,40,50]:", ema3);
+
+{
+    test: "complex_strategy_with_intrinsics",
+    signal: signal,
+    intrinsics_tested: 4,
+    strategy_uses_intrinsics: true,
+    status: "Complete"
+}

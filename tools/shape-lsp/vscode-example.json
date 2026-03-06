@@ -1,0 +1,48 @@
+{
+  "// VSCode Settings for Shape LSP": "",
+  "// Add this to your .vscode/settings.json or user settings": "",
+
+  "files.associations": {
+    "*.shape": "shape"
+  },
+
+  "// Option 1: Using a custom language client (requires extension development)": "",
+  "shape.languageServer": {
+    "enabled": true,
+    "path": "${workspaceFolder}/target/release/shape-lsp",
+    "args": [],
+    "trace.server": "verbose"
+  },
+
+  "// Option 2: Using Generic LSP Client extension": "",
+  "// Install: https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-mlir": "",
+  "genericLanguageServer.languageServerConfigs": {
+    "shape": {
+      "command": "${workspaceFolder}/target/release/shape-lsp",
+      "args": [],
+      "filetypes": ["shape"],
+      "initializationOptions": {},
+      "settings": {}
+    }
+  },
+
+  "// Syntax highlighting (basic) - create shape.tmLanguage.json for advanced": "",
+  "editor.tokenColorCustomizations": {
+    "[Default Dark+]": {
+      "textMateRules": [
+        {
+          "scope": "keyword.control.shape",
+          "settings": {
+            "foreground": "#C586C0"
+          }
+        },
+        {
+          "scope": "entity.name.function.shape",
+          "settings": {
+            "foreground": "#DCDCAA"
+          }
+        }
+      ]
+    }
+  }
+}

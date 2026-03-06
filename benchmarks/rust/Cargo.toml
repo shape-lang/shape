@@ -1,0 +1,10 @@
+[package]
+name = "shape-bench-rust"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "bench_all"
+path = "src/main.rs"

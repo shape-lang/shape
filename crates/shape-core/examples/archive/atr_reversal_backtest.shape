@@ -1,0 +1,299 @@
+// ATR Reversal Analysis with Backtest
+// This example shows how to analyze a pattern statistically AND backtest it with trading logic
+
+from stdlib::indicators use { atr, sma };
+
+// Trading parameters
+const RISK_REWARD_RATIO = 2.0;  // 1:2 RR
+const ATR_MULTIPLIER = 0.2;     // 20% of ATR threshold
+const STOP_LOSS_ATR = 1.0;      // Stop loss at 1x ATR
+const TAKE_PROFIT_ATR = 2.0;    // Take profit at 2x ATR (matching RR)
+
+// Pattern for aggressive moves (20%+ of ATR)
+pattern aggressive_move {
+    // Calculate the price change
+    let price_change = abs(data[0].close - data[0].open);
+    
+    // Get ATR value (14 period default)
+    let atr_value = atr();
+    
+    // Check if move is at least 20% of ATR
+    price_change >= atr_value * ATR_MULTIPLIER
+}
+
+// Enhanced pattern that includes direction
+pattern bullish_aggressive_move extends aggressive_move {
+    data[0].close > data[0].open  // Green candle
+}
+
+pattern bearish_aggressive_move extends aggressive_move {
+    data[0].close < data[0].open  // Red candle
+}
+
+// Strategy for trading reversals after aggressive moves
+strategy atr_reversal_strategy {
+    parameters {
+        risk_reward: number = 2.0;
+        atr_stop_multiplier: number = 1.0;
+        max_risk_percent: number = 1.0;  // Max 1% risk per trade
+    }
+    
+    state {
+        let in_position = false;
+        let entry_price = 0;
+        let stop_loss = 0;
+        let take_profit = 0;
+        let position_size = 0;
+    }
+    
+    on_bar(candle) {
+        // Check if we're in a position
+        if in_position {
+            // Check exit conditions
+            if candle.low <= stop_loss or candle.high >= take_profit {
+                // Exit position
+                let exit_price = candle.low <= stop_loss ? stop_loss : take_profit;
+                close_position(exit_price);
+                in_position = false;
+            }
+            return;
+        }
+        
+        // Look for entry signals
+        if match(bullish_aggressive_move) {
+            // Aggressive bullish move detected, prepare for short (reversal)
+            let current_atr = atr();
+            entry_price = candle.close;
+            stop_loss = entry_price + (current_atr * atr_stop_multiplier);
+            take_profit = entry_price - (current_atr * atr_stop_multiplier * risk_reward);
+            
+            // Calculate position size based on risk
+            let risk_per_unit = stop_loss - entry_price;
+            let account_risk = account_balance * (max_risk_percent / 100);
+            position_size = account_risk / risk_per_unit;
+            
+            // Enter short position
+            short(position_size, entry_price);
+            in_position = true;
+            
+        } else if match(bearish_aggressive_move) {
+            // Aggressive bearish move detected, prepare for long (reversal)
+            let current_atr = atr();
+            entry_price = candle.close;
+            stop_loss = entry_price - (current_atr * atr_stop_multiplier);
+            take_profit = entry_price + (current_atr * atr_stop_multiplier * risk_reward);
+            
+            // Calculate position size based on risk
+            let risk_per_unit = entry_price - stop_loss;
+            let account_risk = account_balance * (max_risk_percent / 100);
+            position_size = account_risk / risk_per_unit;
+            
+            // Enter long position
+            long(position_size, entry_price);
+            in_position = true;
+        }
+    }
+}
+
+// Analysis function that combines statistics and backtesting
+function analyze_with_backtest(start_date, end_date, initial_capital = 10000) {
+    // Part 1: Statistical Analysis
+    let stats = {
+        total_patterns: 0,
+        reversals: 0,
+        reversal_probability: 0,
+        avg_reversal_magnitude: 0,
+        time_to_reversal: [],
+        
+        // Direction-specific stats
+        bullish_moves: 0,
+        bullish_reversals: 0,
+        bearish_moves: 0,
+        bearish_reversals: 0
+    };
+    
+    // Find all aggressive moves
+    let aggressive_moves = find aggressive_move 
+        where data[0].timestamp >= start_date 
+        and data[0].timestamp <= end_date;
+    
+    // Analyze each pattern
+    for match in aggressive_moves {
+        stats.total_patterns += 1;
+        
+        // Check direction
+        let is_bullish = data[match.index].close > data[match.index].open;
+        if is_bullish {
+            stats.bullish_moves += 1;
+        } else {
+            stats.bearish_moves += 1;
+        }
+        
+        // Check for reversal in next 5 candles
+        let reversal_info = check_reversal_detailed(match.index, 5);
+        if reversal_info.reversed {
+            stats.reversals += 1;
+            stats.time_to_reversal.push(reversal_info.candles_to_reversal);
+            stats.avg_reversal_magnitude += reversal_info.magnitude;
+            
+            if is_bullish {
+                stats.bullish_reversals += 1;
+            } else {
+                stats.bearish_reversals += 1;
+            }
+        }
+    }
+    
+    // Calculate final statistics
+    if stats.total_patterns > 0 {
+        stats.reversal_probability = stats.reversals / stats.total_patterns;
+        stats.avg_reversal_magnitude = stats.avg_reversal_magnitude / stats.reversals;
+    }
+    
+    // Part 2: Backtesting
+    let backtest_result = backtest atr_reversal_strategy 
+        on timeframe 15m
+        from start_date to end_date
+        with {
+            initial_capital: initial_capital,
+            risk_reward: RISK_REWARD_RATIO,
+            atr_stop_multiplier: STOP_LOSS_ATR,
+            max_risk_percent: 1.0
+        };
+    
+    // Combine results
+    return {
+        statistics: stats,
+        backtest: backtest_result,
+        
+        // Key performance indicators
+        summary: {
+            pattern_count: stats.total_patterns,
+            reversal_rate: stats.reversal_probability * 100,
+            
+            // Trading performance
+            total_trades: backtest_result.total_trades,
+            win_rate: backtest_result.win_rate * 100,
+            profit_factor: backtest_result.profit_factor,
+            total_return: backtest_result.total_return,
+            sharpe_ratio: backtest_result.sharpe_ratio,
+            max_drawdown: backtest_result.max_drawdown,
+            
+            // Risk-adjusted metrics
+            return_per_trade: backtest_result.total_return / backtest_result.total_trades,
+            avg_risk_reward_achieved: backtest_result.avg_winner / backtest_result.avg_loser,
+            
+            // Correlation between statistics and trading
+            edge_correlation: calculate_edge_correlation(stats, backtest_result)
+        }
+    };
+}
+
+// Helper function to check reversal with details
+function check_reversal_detailed(index, max_candles) {
+    let initial_direction = data[index].close > data[index].open;
+    let initial_price = data[index].close;
+    
+    for i in range(1, max_candles + 1) {
+        if index + i >= candle_count() {
+            break;
+        }
+        
+        let current_direction = data[index + i].close > data[index + i].open;
+        
+        // Check if direction changed
+        if current_direction != initial_direction {
+            let reversal_price = data[index + i].close;
+            let magnitude = abs(reversal_price - initial_price) / initial_price;
+            
+            return {
+                reversed: true,
+                candles_to_reversal: i,
+                magnitude: magnitude
+            };
+        }
+    }
+    
+    return {
+        reversed: false,
+        candles_to_reversal: 0,
+        magnitude: 0
+    };
+}
+
+// Calculate correlation between statistical edge and trading performance
+function calculate_edge_correlation(stats, backtest) {
+    // Simple edge calculation: how much better is our win rate than random
+    let statistical_edge = stats.reversal_probability;
+    let trading_edge = backtest.win_rate;
+    
+    // If they're both high or both low, correlation is positive
+    let correlation = (statistical_edge - 0.5) * (trading_edge - 0.5);
+    
+    return {
+        statistical_edge: statistical_edge,
+        trading_edge: trading_edge,
+        correlation_score: correlation,
+        edge_quality: correlation > 0 ? "Positive" : "Negative"
+    };
+}
+
+// Example usage with output formatting
+function run_analysis() {
+    print("=== ATR Reversal Analysis & Backtest ===\n");
+    
+    let result = analyze_with_backtest("2020-01-01", "2022-12-31", 10000);
+    
+    print("STATISTICAL ANALYSIS:");
+    print("  Total Patterns Found: " + result.statistics.total_patterns);
+    print("  Reversal Probability: " + format_percent(result.statistics.reversal_probability));
+    print("  - Bullish Moves: " + result.statistics.bullish_moves + 
+          " (Reversals: " + format_percent(result.statistics.bullish_reversals / result.statistics.bullish_moves) + ")");
+    print("  - Bearish Moves: " + result.statistics.bearish_moves + 
+          " (Reversals: " + format_percent(result.statistics.bearish_reversals / result.statistics.bearish_moves) + ")");
+    print("  Average Reversal Magnitude: " + format_percent(result.statistics.avg_reversal_magnitude));
+    
+    print("\nBACKTEST RESULTS:");
+    print("  Total Trades: " + result.backtest.total_trades);
+    print("  Win Rate: " + format_percent(result.backtest.win_rate));
+    print("  Profit Factor: " + format_number(result.backtest.profit_factor, 2));
+    print("  Total Return: " + format_currency(result.backtest.total_return));
+    print("  Return %: " + format_percent(result.backtest.total_return / 10000));
+    print("  Sharpe Ratio: " + format_number(result.backtest.sharpe_ratio, 2));
+    print("  Max Drawdown: " + format_percent(result.backtest.max_drawdown));
+    
+    print("\nRISK ANALYSIS:");
+    print("  Average Risk/Reward Achieved: " + format_number(result.summary.avg_risk_reward_achieved, 2));
+    print("  Return per Trade: " + format_currency(result.summary.return_per_trade));
+    
+    print("\nEDGE ANALYSIS:");
+    print("  Statistical Edge: " + format_percent(result.summary.edge_correlation.statistical_edge));
+    print("  Trading Edge: " + format_percent(result.summary.edge_correlation.trading_edge));
+    print("  Correlation: " + result.summary.edge_correlation.edge_quality);
+    
+    // Trade distribution
+    print("\nTRADE DISTRIBUTION:");
+    print_trade_distribution(result.backtest.trades);
+}
+
+// Helper to print trade distribution
+function print_trade_distribution(trades) {
+    let distribution = analyze_trade_distribution(trades);
+    
+    print("  By Hour of Day:");
+    for hour in distribution.by_hour {
+        print("    " + hour.hour + ":00 - Trades: " + hour.count + 
+              ", Win Rate: " + format_percent(hour.win_rate));
+    }
+    
+    print("  By Day of Week:");
+    for day in distribution.by_day {
+        print("    " + day.name + " - Trades: " + day.count + 
+              ", Win Rate: " + format_percent(day.win_rate));
+    }
+}
+
+// Format helpers
+function format_percent(value) { return (value * 100).toFixed(2) + "%"; }
+function format_currency(value) { return "$" + value.toFixed(2); }
+function format_number(value, decimals) { return value.toFixed(decimals); }

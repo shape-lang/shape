@@ -1,0 +1,118 @@
+// Shape Market Data Example - Using ES Futures Data
+// This example demonstrates how to work with real market data from the market-data crate
+
+// Method 1: Using load_instrument with default data path
+// This loads ES futures data from ~/dev/finance/data/ES
+print("Method 1: Loading ES futures with default path");
+load_instrument("ES");
+set_instrument("ES");
+
+// Now we can access candle data
+print("Current candle close: " + candle[0].close);
+print("Previous candle close: " + candle[-1].close);
+
+// Method 2: Using load_instrument with custom path
+// Uncomment to use a custom data folder
+// load_instrument("ES", "/home/amd/dev/finance/analysis-suite/data/ES");
+
+// Method 3: Alternative - specify the exact data folder path
+// This loads ES futures data from a specific folder
+print("\nMethod 3: Loading with specific data folder");
+load_instrument("ES", "/home/amd/dev/finance/analysis-suite/data");
+
+// Working with the loaded data
+print("\nWorking with ES futures data:");
+
+// Calculate some basic metrics
+let body = abs(candle[0].close - candle[0].open);
+let range = candle[0].high - candle[0].low;
+let is_bullish = candle[0].close > candle[0].open;
+
+print("Candle body size: " + body);
+print("Candle range: " + range);
+print("Is bullish: " + is_bullish);
+
+// Create a series from recent candles
+// This demonstrates series operations with real data
+print("\nCreating series from recent candles:");
+let closes = series([
+    candle[-20].close, candle[-19].close, candle[-18].close, candle[-17].close,
+    candle[-16].close, candle[-15].close, candle[-14].close, candle[-13].close,
+    candle[-12].close, candle[-11].close, candle[-10].close, candle[-9].close,
+    candle[-8].close, candle[-7].close, candle[-6].close, candle[-5].close,
+    candle[-4].close, candle[-3].close, candle[-2].close, candle[-1].close,
+    candle[0].close
+]);
+
+// Calculate technical indicators on real data
+let ma5 = mean(slice(closes, 16, 21));  // Last 5 candles
+let ma20 = mean(closes);                // All 21 candles
+
+print("5-period MA: " + ma5);
+print("20-period MA: " + ma20);
+print("Price above MA20: " + (candle[0].close > ma20));
+
+// Volume analysis
+let volumes = series([
+    candle[-10].volume, candle[-9].volume, candle[-8].volume, candle[-7].volume,
+    candle[-6].volume, candle[-5].volume, candle[-4].volume, candle[-3].volume,
+    candle[-2].volume, candle[-1].volume, candle[0].volume
+]);
+
+let avg_volume = mean(volumes);
+let volume_surge = candle[0].volume > avg_volume * 1.5;
+
+print("\nVolume Analysis:");
+print("Average volume (10 periods): " + avg_volume);
+print("Current volume: " + candle[0].volume);
+print("Volume surge detected: " + volume_surge);
+
+// Pattern detection on real data
+pattern pin_bar {
+    let body = abs(candle[0].close - candle[0].open);
+    let range = candle[0].high - candle[0].low;
+    let upper_wick = candle[0].high - max(candle[0].open, candle[0].close);
+    let lower_wick = min(candle[0].open, candle[0].close) - candle[0].low;
+    
+    // Pin bar: small body with long wick
+    body < range * 0.3 and
+    (upper_wick > body * 2 or lower_wick > body * 2)
+}
+
+pattern inside_bar {
+    // Current candle is inside previous candle's range
+    candle[0].high <= candle[-1].high and
+    candle[0].low >= candle[-1].low
+}
+
+// Find patterns in the last 100 candles
+print("\nSearching for patterns in recent data:");
+find pin_bar in last(100 candles)
+find inside_bar in last(50 candles)
+
+// Advanced: Working with multiple timeframes
+// Note: This assumes you have data in different timeframes
+// You might need to resample or load different timeframe data
+
+// Example of analyzing trend
+print("\nTrend Analysis:");
+let trend_period = 50;
+let old_price = candle[-trend_period].close;
+let current_price = candle[0].close;
+let price_change = (current_price - old_price) / old_price * 100;
+
+print("Price " + trend_period + " periods ago: " + old_price);
+print("Current price: " + current_price);
+print("Change: " + price_change + "%");
+
+if price_change > 5 {
+    print("Strong uptrend detected");
+} else if price_change > 0 {
+    print("Mild uptrend");
+} else if price_change > -5 {
+    print("Mild downtrend");
+} else {
+    print("Strong downtrend detected");
+}
+
+print("\nMarket data example completed!");

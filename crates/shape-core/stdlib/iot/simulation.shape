@@ -1,0 +1,270 @@
+//! IoT Device Monitoring Simulation
+//!
+//! Wrapper functions for monitoring IoT devices using the high-performance
+//! simulation engine. Processes sensor readings and generates alerts.
+
+// ===== Single Device Monitoring =====
+
+/// Monitor a single device's sensor readings
+///
+/// @param readings - Table of sensor readings
+/// @param config - MonitoringConfig for the device
+///
+/// @returns Simulation result with final device state and alerts
+///
+/// @example
+/// let result = monitor_device(temperature_readings, {
+///     device_id: "sensor-001",
+///     thresholds: symmetric_thresholds(25.0, 5.0, 10.0),
+///     offline_timeout: 300
+/// });
+pub fn monitor_device(readings, config) {
+    let init_state = {
+        device_id: config.device_id,
+        status: "unknown",
+        last_reading: 0.0,
+        last_timestamp: 0,
+        readings_count: 0,
+        anomaly_count: 0,
+        alert_count: 0,
+        cumulative_error: 0.0,
+        uptime_seconds: 0.0,
+        // Running statistics for anomaly detection
+        running_mean: 0.0,
+        running_m2: 0.0  // For Welford's online variance algorithm
+    };
+
+    readings.simulate(
+        |reading, state, idx| {
+            let new_state = process_reading(reading, state, config, idx);
+            new_state
+        },
+        {
+            initial_state: init_state,
+            collect_results: config.collect_alerts
+        }
+    )
+}
+
+/// Process a single reading and update state
+pub fn process_reading(reading, state, config, idx) {
+    // Update reading count
+    let count = state.readings_count + 1;
+
+    // Update running mean and variance (Welford's algorithm)
+    let delta = reading.value - state.running_mean;
+    let new_mean = state.running_mean + delta / count;
+    let delta2 = reading.value - new_mean;
+    let new_m2 = state.running_m2 + delta * delta2;
+
+    // Calculate running standard deviation
+    let running_std = if count > 1 {
+        sqrt(new_m2 / (count - 1))
+    } else {
+        0.0
+    };
+
+    // Determine device status
+    let new_status = "online";
+    if reading.quality < 0.5 {
+        new_status = "degraded";
+    }
+
+    // Check thresholds if configured
+    let threshold_severity = "ok";
+    if config.thresholds != None {
+        threshold_severity = check_threshold_severity(reading.value, config.thresholds);
+    }
+
+    // Check for anomaly
+    let is_anomaly = false;
+    if count > 10 && running_std > 0 {
+        let z_score = abs(reading.value - new_mean) / running_std;
+        is_anomaly = z_score > config.anomaly_threshold;
+    }
+
+    // Update anomaly count
+    let anomaly_count = state.anomaly_count;
+    if is_anomaly {
+        anomaly_count = anomaly_count + 1;
+    }
+
+    // Generate alert if needed
+    let alert = None;
+    let alert_count = state.alert_count;
+
+    if threshold_severity == "critical" {
+        alert = {
+            severity: "critical",
+            device_id: config.device_id,
+            alert_type: "threshold",
+            message: "Critical threshold exceeded",
+            value: reading.value,
+            index: idx
+        };
+        alert_count = alert_count + 1;
+    } else if threshold_severity == "warning" {
+        alert = {
+            severity: "warning",
+            device_id: config.device_id,
+            alert_type: "threshold",
+            message: "Warning threshold exceeded",
+            value: reading.value,
+            index: idx
+        };
+        alert_count = alert_count + 1;
+    } else if is_anomaly {
+        alert = {
+            severity: "warning",
+            device_id: config.device_id,
+            alert_type: "anomaly",
+            message: "Anomalous reading detected",
+            value: reading.value,
+            index: idx
+        };
+        alert_count = alert_count + 1;
+    }
+
+    // Build new state
+    let new_state = {
+        device_id: config.device_id,
+        status: new_status,
+        last_reading: reading.value,
+        last_timestamp: reading.timestamp,
+        readings_count: count,
+        anomaly_count: anomaly_count,
+        alert_count: alert_count,
+        cumulative_error: state.cumulative_error,
+        uptime_seconds: state.uptime_seconds,
+        running_mean: new_mean,
+        running_m2: new_m2
+    };
+
+    // Return with alert if generated
+    if alert != None {
+        { state: new_state, result: alert }
+    } else {
+        new_state
+    }
+}
+
+/// Check value against thresholds and return severity level
+pub fn check_threshold_severity(value, thresholds) {
+    if value >= thresholds.high_critical || value <= thresholds.low_critical {
+        "critical"
+    } else if value >= thresholds.high_warning || value <= thresholds.low_warning {
+        "warning"
+    } else {
+        "ok"
+    }
+}
+
+// ===== Multi-Sensor Monitoring =====
+
+/// Monitor multiple correlated sensors
+///
+/// @param sensors - Object mapping sensor names to reading series
+/// @param config - Monitoring configuration
+/// @param correlation_check - Optional function to check cross-sensor correlations
+///
+/// @example
+/// let result = monitor_sensors(
+///     { temperature: temp_readings, pressure: pressure_readings },
+///     config,
+///     (ctx, state) => {
+///         // Check for dangerous temp+pressure combination
+///         if ctx.temperature > 80 && ctx.pressure > 100 {
+///             { alert: "critical", message: "Dangerous conditions" }
+///         } else {
+///             None
+///         }
+///     }
+/// );
+pub fn monitor_sensors(sensors, config, correlation_check = None) {
+    let init_state = {
+        sensor_states: {},
+        total_readings: 0,
+        total_anomalies: 0,
+        total_alerts: 0,
+        correlation_alerts: 0
+    };
+
+    simulate_correlated(
+        sensors,
+        |ctx, state, idx| {
+            let new_state = state;
+            new_state.total_readings = state.total_readings + 1;
+
+            // Check correlation if provided
+            let alert = None;
+            if correlation_check != None {
+                let check_result = correlation_check(ctx, state);
+                if check_result != None && check_result.alert != None {
+                    alert = {
+                        severity: check_result.alert,
+                        alert_type: "correlation",
+                        message: check_result.message,
+                        index: idx
+                    };
+                    new_state.correlation_alerts = state.correlation_alerts + 1;
+                    new_state.total_alerts = state.total_alerts + 1;
+                }
+            }
+
+            if alert != None {
+                { state: new_state, result: alert }
+            } else {
+                new_state
+            }
+        },
+        { initial_state: init_state }
+    )
+}
+
+// ===== Monitoring Report =====
+
+/// Generate monitoring summary report
+pub fn monitoring_report(result) {
+    let state = result.final_state;
+    let alerts = result.results;
+
+    let critical_count = 0;
+    let warning_count = 0;
+
+    for alert in alerts {
+        if alert.severity == "critical" {
+            critical_count = critical_count + 1;
+        } else if alert.severity == "warning" {
+            warning_count = warning_count + 1;
+        }
+    }
+
+    {
+        device_id: state.device_id,
+        status: state.status,
+        readings_processed: state.readings_count,
+        anomalies_detected: state.anomaly_count,
+        total_alerts: state.alert_count,
+        critical_alerts: critical_count,
+        warning_alerts: warning_count,
+        last_reading: state.last_reading,
+        mean_reading: state.running_mean
+    }
+}
+
+/// Print monitoring report
+pub fn print_monitoring_report(report) {
+    print("=== Device Monitoring Report ===");
+    print("Device: " + report.device_id);
+    print("Status: " + report.status);
+    print("");
+    print("Readings Processed: " + report.readings_processed);
+    print("Anomalies Detected: " + report.anomalies_detected);
+    print("");
+    print("Total Alerts: " + report.total_alerts);
+    print("  Critical: " + report.critical_alerts);
+    print("  Warning: " + report.warning_alerts);
+    print("");
+    print("Last Reading: " + report.last_reading);
+    print("Mean Reading: " + report.mean_reading);
+}

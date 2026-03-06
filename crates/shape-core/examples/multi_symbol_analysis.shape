@@ -1,0 +1,149 @@
+// @skip — uses method chaining on function calls (not yet in grammar)
+// Multi-Symbol Analysis Examples
+// This file demonstrates how to use Shape for analyzing multiple symbols
+
+// Example 1: Load multiple datasets
+let aapl = load_csv("data/AAPL_1h.csv", "AAPL", "1h");
+let googl = load_csv("data/GOOGL_1h.csv", "GOOGL", "1h");
+let msft = load_csv("data/MSFT_1h.csv", "MSFT", "1h");
+
+// Example 2: Align symbols using intersection mode
+// This ensures all symbols have data at the same timestamps
+let tech_aligned = align_symbols([aapl, googl, msft], "intersection");
+print("Aligned " + tech_aligned.symbols.length + " symbols with " + tech_aligned.timestamp_count + " common timestamps");
+
+// Example 3: Calculate correlation between two symbols
+let aapl_googl_corr = correlation(aapl, googl);
+print("Correlation between AAPL and GOOGL: " + aapl_googl_corr);
+
+// Example 4: Find divergences between symbols
+// Window of 20 periods for trend calculation
+let divergences = find_divergences(aapl, googl, 20);
+print("Found " + divergences.length + " divergences");
+
+// Print details of significant divergences
+for (let i = 0; i < min(5, divergences.length); i++) {
+    let div = divergences[i];
+    if (div.strength > 0.5) {
+        print("Strong divergence at index " + div.index + 
+              " - AAPL trend: " + div.trend1 + 
+              ", GOOGL trend: " + div.trend2);
+    }
+}
+
+// Example 5: Calculate pair trading spread
+// Ratio of 1.5 means AAPL = 1.5 * GOOGL
+let spread_values = spread(aapl, googl, 1.5);
+let avg_spread = average(spread_values);
+let std_spread = stdev(spread_values);
+
+print("Average spread: " + avg_spread);
+print("Spread StdDev: " + std_spread);
+
+// Example 6: Multi-symbol pattern scanning
+// First align the data
+let symbols = ["SPY", "QQQ", "IWM", "DIA"];
+let datasets = [];
+for (let sym of symbols) {
+    datasets.push(load_csv("data/" + sym + "_1d.csv", sym, "1d"));
+}
+
+let market_aligned = align_symbols(datasets, "union");
+
+// Now scan for patterns across all aligned symbols
+// (This would require additional implementation for true multi-symbol scanning)
+
+// Example 7: Correlation matrix
+function correlation_matrix(dataset_ids) {
+    let n = dataset_ids.length;
+    let matrix = {};
+    
+    for (let i = 0; i < n; i++) {
+        let row = {};
+        for (let j = 0; j < n; j++) {
+            if (i == j) {
+                row[j] = 1.0;
+            } else {
+                row[j] = correlation(dataset_ids[i], dataset_ids[j]);
+            }
+        }
+        matrix[i] = row;
+    }
+    
+    return matrix;
+}
+
+// Calculate correlation matrix for tech stocks
+let tech_stocks = [aapl, googl, msft];
+let corr_matrix = correlation_matrix(tech_stocks);
+
+// Example 8: Sector rotation analysis
+// Load sector ETFs
+let sectors = {
+    "XLK": load_csv("data/XLK_1d.csv", "XLK", "1d"), // Technology
+    "XLF": load_csv("data/XLF_1d.csv", "XLF", "1d"), // Financials
+    "XLE": load_csv("data/XLE_1d.csv", "XLE", "1d"), // Energy
+    "XLV": load_csv("data/XLV_1d.csv", "XLV", "1d"), // Healthcare
+};
+
+// Find divergences between sectors
+let tech_finance_div = find_divergences(sectors.XLK, sectors.XLF, 30);
+let energy_health_div = find_divergences(sectors.XLE, sectors.XLV, 30);
+
+// Example 9: Statistical arbitrage setup
+function find_cointegrated_pairs(datasets, threshold) {
+    let pairs = [];
+    
+    for (let i = 0; i < datasets.length; i++) {
+        for (let j = i + 1; j < datasets.length; j++) {
+            let corr = correlation(datasets[i], datasets[j]);
+            
+            // High correlation might indicate cointegration
+            if (corr > threshold) {
+                // Calculate optimal hedge ratio
+                let spread_15 = spread(datasets[i], datasets[j], 1.5);
+                let spread_20 = spread(datasets[i], datasets[j], 2.0);
+                
+                // Find ratio with minimum variance
+                let var_15 = stdev(spread_15);
+                let var_20 = stdev(spread_20);
+                
+                pairs.push({
+                    symbol1: i,
+                    symbol2: j,
+                    correlation: corr,
+                    optimal_ratio: var_15 < var_20 ? 1.5 : 2.0,
+                    spread_stdev: min(var_15, var_20)
+                });
+            }
+        }
+    }
+    
+    return pairs;
+}
+
+// Find potential pairs for statistical arbitrage
+let arb_pairs = find_cointegrated_pairs([aapl, googl, msft], 0.8);
+
+// Example 10: Market regime detection using multiple indices
+let indices = {
+    "SPY": load_csv("data/SPY_1d.csv", "SPY", "1d"),
+    "VIX": load_csv("data/VIX_1d.csv", "VIX", "1d"),
+    "TLT": load_csv("data/TLT_1d.csv", "TLT", "1d"), // Bonds
+    "GLD": load_csv("data/GLD_1d.csv", "GLD", "1d"), // Gold
+};
+
+// Align all indices
+let regime_data = align_symbols(Object.values(indices), "intersection");
+
+// Calculate correlations to detect regime
+let stock_bond_corr = correlation(indices.SPY, indices.TLT);
+let stock_vix_corr = correlation(indices.SPY, indices.VIX);
+
+if (stock_bond_corr < -0.3 && stock_vix_corr < -0.7) {
+    print("Normal market regime detected");
+} else if (stock_bond_corr > 0.3) {
+    print("Risk-off regime: Stocks and bonds moving together");
+} else {
+    print("Uncertain market regime");
+}

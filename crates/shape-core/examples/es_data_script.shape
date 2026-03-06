@@ -1,0 +1,22 @@
+// @skip — uses hash comments (# not in grammar)
+# Load ES futures data with contract rollover
+:data /home/amd/dev/finance/data ES 2020-01-01 2022-12-31
+
+# Show how many candles were loaded
+count(all candles)
+
+# Check current candle price
+data[0].close
+
+# Define a simple variable
+let threshold = 3800
+
+# Check if current price is above threshold
+data[0].close > threshold
+
+# Show last 5 candle closes
+data[0].close
+data[1].close
+data[2].close
+data[3].close
+data[4].close

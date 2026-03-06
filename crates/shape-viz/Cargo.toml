@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "shape-viz-core",
+    "shape-viz-native",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Daniel Amesberger"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+wgpu = "25.0.2"
+bytemuck = { version = "1.23.1", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0.12"
+anyhow = "1.0"
+image = "0.25"
+winit = "0.30"
+env_logger = "0.11"
+log = "0.4"

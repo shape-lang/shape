@@ -1,0 +1,255 @@
+// @skip — uses strategy{} blocks (strategies are normal functions)
+// Example: Walk-Forward Analysis of a Moving Average Strategy
+// This demonstrates how to validate strategies using walk-forward optimization
+
+from stdlib::indicators use { sma, rsi }
+from stdlib::execution use { create_backtest_cost_model }
+from stdlib::walk_forward use { run_walk_forward, quick_robustness_check }
+
+// Define a parameterized moving average strategy
+strategy ma_crossover_optimizable {
+    // Strategy parameters
+    param fast_period: number = 20
+    param slow_period: number = 50
+    param stop_loss_pct: number = 0.02
+    param position_size_pct: number = 0.1
+    
+    // State
+    let initial_capital = 100000
+    let capital = initial_capital
+    let position = null
+    let trades = []
+    let daily_returns = []
+    
+    // Cost model
+    let cost_model = create_backtest_cost_model("equity")
+    
+    // Calculate indicators
+    let fast_ma = sma(fast_period)
+    let slow_ma = sma(slow_period)
+    
+    // Track daily returns for metrics
+    let last_equity = capital
+    on candle {
+        let current_equity = capital
+        if position != null {
+            current_equity += position.shares * candle.close
+        }
+        let daily_return = (current_equity - last_equity) / last_equity
+        daily_returns.push(daily_return)
+        last_equity = current_equity
+    }
+    
+    // Entry logic
+    when fast_ma > slow_ma and fast_ma[-1] <= slow_ma[-1] and position == null {
+        let shares = floor(capital * position_size_pct / candle.close)
+        let costs = calculate_transaction_cost(shares, candle.close, "buy", cost_model)
+        
+        position = {
+            shares: shares,
+            entry_price: costs.execution_price,
+            entry_time: candle.timestamp,
+            stop_loss: costs.execution_price * (1 - stop_loss_pct),
+            costs: costs.total_cost
+        }
+        
+        capital -= (shares * costs.execution_price + costs.total_cost)
+    }
+    
+    // Exit logic
+    when (fast_ma < slow_ma or candle.low <= position.stop_loss) and position != null {
+        let exit_price = candle.close
+        if candle.low <= position.stop_loss {
+            exit_price = position.stop_loss
+        }
+        
+        let costs = calculate_transaction_cost(position.shares, exit_price, "sell", cost_model)
+        capital += (position.shares * costs.execution_price - costs.total_cost)
+        
+        let pnl = (costs.execution_price - position.entry_price) * position.shares - 
+                  position.costs - costs.total_cost
+        
+        trades.push({
+            entry_time: position.entry_time,
+            exit_time: candle.timestamp,
+            pnl: pnl,
+            return_pct: pnl / (position.entry_price * position.shares)
+        })
+        
+        position = null
+    }
+    
+    // Return performance metrics
+    on complete {
+        let total_return = (capital - initial_capital) / initial_capital
+        let sharpe = len(daily_returns) > 0 ? sharpe_ratio(daily_returns, 0) : 0
+        let max_dd = len(daily_returns) > 0 ? max_drawdown(daily_returns) : 0
+        let win_rate = len(trades) > 0 ? 
+            len(filter(trades, t => t.pnl > 0)) / len(trades) : 0
+        
+        return {
+            total_return: total_return,
+            sharpe_ratio: sharpe,
+            max_drawdown: max_dd,
+            total_trades: len(trades),
+            win_rate: win_rate,
+            profit_factor: calculate_profit_factor(trades),
+            daily_returns: daily_returns,
+            trades: trades
+        }
+    }
+}
+
+// Run walk-forward optimization
+test "Walk-forward validation of MA strategy" {
+    // Define parameter ranges to optimize
+    let parameter_ranges = {
+        fast_period: [10, 15, 20, 25, 30],
+        slow_period: [30, 40, 50, 60, 70],
+        stop_loss_pct: [0.01, 0.02, 0.03],
+        position_size_pct: [0.05, 0.1, 0.15]
+    }
+    
+    // Configure walk-forward analysis
+    let config = {
+        in_sample_ratio: 0.6,      // 60% for optimization
+        out_sample_ratio: 0.2,     // 20% for testing
+        step_ratio: 0.2,           // 20% step forward
+        min_trades_per_window: 20,
+        optimization_metric: "sharpe",
+        anchored: false
+    }
+    
+    // Run walk-forward analysis
+    let results = run_walk_forward(
+        "ma_crossover_optimizable",
+        parameter_ranges,
+        config
+    )
+    
+    print("\n=== Walk-Forward Analysis Results ===")
+    print("Total windows analyzed: ", results.summary_stats.total_windows)
+    print("Profitable windows: ", results.summary_stats.profitable_windows)
+    print("Out-of-sample win rate: ", results.summary_stats.win_rate * 100, "%")
+    print("Average out-of-sample return: ", results.summary_stats.avg_out_sample_return * 100, "%")
+    print("Robustness score: ", results.robustness_score, "/100")
+    
+    // Detailed window analysis
+    print("\n=== Window-by-Window Results ===")
+    for window in results.windows {
+        print("\nWindow ", window.window_index, ":")
+        print("  Period: ", window.out_sample_start, " to ", window.out_sample_end)
+        print("  Optimal params: fast=", window.optimal_params.fast_period, 
+              ", slow=", window.optimal_params.slow_period)
+        print("  In-sample Sharpe: ", window.in_sample_performance.sharpe_ratio)
+        print("  Out-sample Sharpe: ", window.out_sample_performance.sharpe_ratio)
+        print("  Degradation: ", window.degradation * 100, "%")
+        print("  Profitable: ", window.is_profitable)
+    }
+    
+    // Parameter stability analysis
+    print("\n=== Parameter Stability ===")
+    for param_name in keys(results.parameter_stability) {
+        let stability = results.parameter_stability[param_name]
+        print(param_name, ":")
+        print("  Most common value: ", stability.most_common)
+        print("  Unique values used: ", stability.unique_values)
+        print("  Stability score: ", stability.stability_score)
+    }
+    
+    // Overall performance
+    print("\n=== Aggregate Out-of-Sample Performance ===")
+    print("Total return: ", results.overall_performance.total_return * 100, "%")
+    print("Annualized return: ", results.overall_performance.annualized_return * 100, "%")
+    print("Sharpe ratio: ", results.overall_performance.sharpe_ratio)
+    print("Max drawdown: ", results.overall_performance.max_drawdown * 100, "%")
+    print("Total trades: ", results.overall_performance.total_trades)
+    
+    // Interpretation
+    print("\n=== Interpretation ===")
+    if results.robustness_score > 70 {
+        print("✓ Strategy shows strong robustness across different market periods")
+    } else if results.robustness_score > 50 {
+        print("⚠ Strategy shows moderate robustness, consider further testing")
+    } else {
+        print("✗ Strategy shows poor robustness, likely overfitted")
+    }
+    
+    assert(results.robustness_score > 40, 
+           "Strategy should show at least minimal robustness")
+}
+
+// Quick robustness check for a single parameter set
+test "Quick robustness check" {
+    let params = {
+        fast_period: 20,
+        slow_period: 50,
+        stop_loss_pct: 0.02,
+        position_size_pct: 0.1
+    }
+    
+    let robustness = quick_robustness_check("ma_crossover_optimizable", params)
+    
+    print("\n=== Quick Robustness Check ===")
+    print("Parameters: ", params)
+    print("Robustness score: ", robustness, "/100")
+    
+    if robustness > 70 {
+        print("✓ Parameters appear robust")
+    } else if robustness > 50 {
+        print("⚠ Parameters show moderate robustness")
+    } else {
+        print("✗ Parameters may be overfitted")
+    }
+}
+
+// Compare anchored vs rolling walk-forward
+test "Anchored vs rolling walk-forward" {
+    let parameter_ranges = {
+        fast_period: [15, 20, 25],
+        slow_period: [40, 50, 60],
+        stop_loss_pct: [0.02],
+        position_size_pct: [0.1]
+    }
+    
+    // Rolling walk-forward
+    let rolling_results = run_walk_forward(
+        "ma_crossover_optimizable",
+        parameter_ranges,
+        { anchored: false }
+    )
+    
+    // Anchored walk-forward
+    let anchored_results = run_walk_forward(
+        "ma_crossover_optimizable",
+        parameter_ranges,
+        { anchored: true }
+    )
+    
+    print("\n=== Anchored vs Rolling Comparison ===")
+    print("Rolling robustness: ", rolling_results.robustness_score)
+    print("Anchored robustness: ", anchored_results.robustness_score)
+    print("Rolling out-sample win rate: ", rolling_results.summary_stats.win_rate * 100, "%")
+    print("Anchored out-sample win rate: ", anchored_results.summary_stats.win_rate * 100, "%")
+    
+    // Generally, anchored should be more stable but potentially less adaptive
+    print("\nRecommendation: ")
+    if abs(rolling_results.robustness_score - anchored_results.robustness_score) < 10 {
+        print("Both methods show similar results - strategy is consistent")
+    } else if rolling_results.robustness_score > anchored_results.robustness_score {
+        print("Rolling window performs better - strategy benefits from adaptation")
+    } else {
+        print("Anchored window performs better - strategy benefits from more data")
+    }
+}
+
+// Helper function to calculate profit factor
+function calculate_profit_factor(trades: array) -> number {
+    let wins = filter(trades, t => t.pnl > 0)
+    let losses = filter(trades, t => t.pnl < 0)
+    
+    let total_wins = sum(wins, t => t.pnl)
+    let total_losses = abs(sum(losses, t => t.pnl))
+    
+    return total_losses > 0 ? total_wins / total_losses : total_wins > 0 ? 999 : 0
+}

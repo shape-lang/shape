@@ -1,0 +1,153 @@
+// @skip — uses strategy{} blocks (strategies are normal functions)
+// Example: Realistic backtesting with transaction costs
+// This demonstrates how to incorporate transaction costs for more realistic results
+
+from stdlib::indicators use { sma, ema }
+from stdlib::execution use { create_backtest_cost_model, apply_costs_to_trade }
+from stdlib::risk use { position_size_kelly, position_size_fixed_risk }
+
+// Strategy with realistic transaction costs
+strategy ma_crossover_with_costs {
+    // Initial capital and risk parameters
+    let initial_capital = 100000
+    let risk_per_trade = 0.02  // 2% risk per trade
+    
+    // Create a realistic cost model for equity trading
+    let cost_model = create_backtest_cost_model("equity", {
+        commission: commission_per_share(0.005),  // $0.005 per share
+        slippage: slippage_linear(2, 15),  // 2bp base + scaling with size
+        min_commission: 1.0,
+        max_commission: 100.0
+    })
+    
+    // Track performance metrics
+    let capital = initial_capital
+    let trades = []
+    let position = null
+    
+    // Calculate indicators
+    let fast_ma = sma(20)
+    let slow_ma = sma(50)
+    
+    // Market context for slippage calculation
+    let market_context = {
+        daily_volume: candle.volume * 390,  // Approximate daily from minute bars
+        volatility: 0.02  // 2% daily volatility estimate
+    }
+    
+    // Entry logic
+    when fast_ma > slow_ma and fast_ma[-1] <= slow_ma[-1] and position == null {
+        // Calculate position size based on risk
+        let stop_distance = candle.close * 0.03  // 3% stop loss
+        let shares = position_size_fixed_risk(capital, risk_per_trade, stop_distance)
+        
+        // Create trade object
+        let trade = {
+            entry_time: candle.timestamp,
+            entry_price: candle.close,
+            quantity: shares,
+            side: "long",
+            stop_loss: candle.close - stop_distance
+        }
+        
+        // Apply entry costs
+        apply_costs_to_trade(trade, cost_model, market_context)
+        
+        // Check if we can afford the trade after costs
+        let required_capital = trade.entry_price * trade.quantity + trade.total_costs
+        if required_capital <= capital {
+            position = trade
+            capital -= required_capital
+            print("Entry: ", trade.quantity, " shares at ", trade.entry_price, 
+                  " (costs: $", trade.total_costs, ")")
+        }
+    }
+    
+    // Exit logic
+    when (fast_ma < slow_ma or candle.low <= position.stop_loss) and position != null {
+        // Set exit price
+        position.exit_time = candle.timestamp
+        position.exit_price = candle.close
+        
+        // If stop loss hit, use stop price
+        if candle.low <= position.stop_loss {
+            position.exit_price = position.stop_loss
+            position.exit_reason = "stop_loss"
+        } else {
+            position.exit_reason = "signal"
+        }
+        
+        // Apply exit costs and calculate final P&L
+        apply_costs_to_trade(position, cost_model, market_context)
+        
+        // Update capital
+        capital += position.exit_price * position.quantity - position.total_costs
+        
+        // Record trade
+        trades.push(position)
+        
+        print("Exit: ", position.quantity, " shares at ", position.exit_price,
+              " Net P&L: $", position.net_pnl, " (costs: $", position.total_costs, ")")
+        
+        position = null
+    }
+    
+    // Calculate performance metrics at the end
+    on complete {
+        let total_trades = len(trades)
+        let winning_trades = filter(trades, t => t.net_pnl > 0)
+        let losing_trades = filter(trades, t => t.net_pnl <= 0)
+        
+        let gross_pnl = sum(trades, t => t.gross_pnl)
+        let total_costs = sum(trades, t => t.total_costs)
+        let net_pnl = gross_pnl - total_costs
+        
+        let final_capital = capital
+        if position != null {
+            // Mark to market open position
+            final_capital += position.quantity * candle.close
+        }
+        
+        print("\n=== Backtest Results with Transaction Costs ===")
+        print("Initial Capital: $", initial_capital)
+        print("Final Capital: $", final_capital)
+        print("Total Return: ", ((final_capital - initial_capital) / initial_capital * 100), "%")
+        print("\nTrade Statistics:")
+        print("Total Trades: ", total_trades)
+        print("Winners: ", len(winning_trades), " (", len(winning_trades) / total_trades * 100, "%)")
+        print("Losers: ", len(losing_trades), " (", len(losing_trades) / total_trades * 100, "%)")
+        print("\nP&L Analysis:")
+        print("Gross P&L: $", gross_pnl)
+        print("Total Transaction Costs: $", total_costs)
+        print("Net P&L: $", net_pnl)
+        print("Cost Impact: ", (total_costs / abs(gross_pnl) * 100), "% of gross P&L")
+        
+        // Calculate Sharpe ratio with proper daily returns
+        let daily_returns = calculate_daily_returns(trades, initial_capital)
+        let sharpe = sharpe_ratio(daily_returns, 0.02 / 252)  // 2% annual risk-free rate
+        print("\nRisk-Adjusted Returns:")
+        print("Sharpe Ratio: ", sharpe)
+        print("Max Drawdown: ", max_drawdown(trades, initial_capital), "%")
+    }
+}
+
+// Example with more aggressive cost assumptions
+strategy high_frequency_with_costs {
+    let cost_model = create_backtest_cost_model("equity", {
+        commission: commission_percentage(0.0001),  // 1bp for HFT
+        slippage: slippage_square_root(0.5),  // Square-root market impact
+        min_commission: 0.50
+    })
+    
+    // ... strategy logic ...
+}
+
+// Example with crypto costs
+strategy crypto_momentum_with_costs {
+    let cost_model = create_backtest_cost_model("crypto", {
+        commission: commission_percentage(0.001),  // 0.1% taker fee
+        slippage: slippage_fixed(10)  // 10 basis points typical for liquid pairs
+    })
+    
+    // ... strategy logic ...
+}

@@ -1,0 +1,20 @@
+// Benchmark 11: Object property access in tight loop
+type Point5D {
+    x: number,
+    y: number,
+    z: number,
+    w: number,
+    v: number
+}
+
+function object_property_loop(n: int) -> number {
+    let p = Point5D { x: 1.0, y: 2.0, z: 3.0, w: 4.0, v: 5.0 }
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + p.x + p.y + p.z + p.w + p.v
+        i = i + 1
+    }
+    return sum
+}
+print(object_property_loop(10000000))

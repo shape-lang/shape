@@ -1,0 +1,116 @@
+//! Proof-of-concept: package-level DuckDB C interop (no extension).
+//!
+//! This example demonstrates:
+//! - `extern C` declarations resolved via `[native-dependencies]`
+//! - pointer-cell out-parameter handling in pure Shape
+//! - strict schema load into `Result<Table<T>>` via Arrow C import
+//!
+//! API choice note:
+//! This PoC uses DuckDB's `duckdb_query_arrow*` family to keep the data path
+//! Arrow-native. Those symbols are currently marked deprecated upstream; a
+//! production package should migrate to the non-deprecated Arrow APIs once the
+//! same end-to-end flow is exposed.
+
+from std::core::native use {
+  ptr_new_cell,
+  ptr_free_cell,
+  ptr_read,
+  ptr_write,
+  table_from_arrow_c_typed,
+}
+
+extern C fn duckdb_open(path: string, out_db: ptr) -> i32 from "duckdb" as "duckdb_open";
+extern C fn duckdb_close(db_p: ptr) -> void from "duckdb" as "duckdb_close";
+extern C fn duckdb_connect(db: ptr, out_conn: ptr) -> i32 from "duckdb" as "duckdb_connect";
+extern C fn duckdb_disconnect(conn_p: ptr) -> void from "duckdb" as "duckdb_disconnect";
+
+extern C fn duckdb_query_arrow(conn: ptr, sql: string, out_result: ptr) -> i32 from "duckdb" as "duckdb_query_arrow";
+extern C fn duckdb_query_arrow_schema(result: ptr, out_schema: ptr) -> i32 from "duckdb" as "duckdb_query_arrow_schema";
+extern C fn duckdb_query_arrow_array(result: ptr, out_array: ptr) -> i32 from "duckdb" as "duckdb_query_arrow_array";
+extern C fn duckdb_destroy_arrow(result_p: ptr) -> void from "duckdb" as "duckdb_destroy_arrow";
+
+pub type CandleRow {
+  ts: i64,
+  open: f64,
+  high: f64,
+  low: f64,
+  close: f64,
+  volume: f64,
+}
+
+pub type DuckDbSession {
+  db: ptr,
+  conn: ptr,
+}
+
+/// Open database + connection handles.
+///
+/// PoC note: this function does not yet decode state/error codes.
+pub fn connect(path: string) -> DuckDbSession {
+  let db_cell = ptr_new_cell()
+  ptr_write(db_cell, 0)
+  duckdb_open(path, db_cell)
+  let db = ptr_read(db_cell)
+  ptr_free_cell(db_cell)
+
+  let conn_cell = ptr_new_cell()
+  ptr_write(conn_cell, 0)
+  duckdb_connect(db, conn_cell)
+  let conn = ptr_read(conn_cell)
+  ptr_free_cell(conn_cell)
+
+  { db: db, conn: conn }
+}
+
+/// Close connection + database handles.
+pub fn close(session: DuckDbSession) -> void {
+  let conn_cell = ptr_new_cell()
+  ptr_write(conn_cell, session.conn)
+  duckdb_disconnect(conn_cell)
+  ptr_free_cell(conn_cell)
+
+  let db_cell = ptr_new_cell()
+  ptr_write(db_cell, session.db)
+  duckdb_close(db_cell)
+  ptr_free_cell(db_cell)
+}
+
+/// Strict schema query path: Arrow C pointers -> `Result<Table<T>, AnyError>`.
+///
+/// `type_name` must match a registered Shape row type (e.g., "CandleRow").
+pub fn query_typed<T>(
+  session: DuckDbSession,
+  sql: string,
+  type_name: string
+) -> Result<Table<T>, AnyError> {
+  let result_cell = ptr_new_cell()
+  ptr_write(result_cell, 0)
+  duckdb_query_arrow(session.conn, sql, result_cell)
+
+  let arrow_result = ptr_read(result_cell)
+
+  let schema_cell = ptr_new_cell()
+  ptr_write(schema_cell, 0)
+  duckdb_query_arrow_schema(arrow_result, schema_cell)
+  let schema_handle = ptr_read(schema_cell)
+  let schema_ptr = ptr_read(schema_handle)
+
+  let array_cell = ptr_new_cell()
+  ptr_write(array_cell, 0)
+  duckdb_query_arrow_array(arrow_result, array_cell)
+  let array_handle = ptr_read(array_cell)
+  let array_ptr = ptr_read(array_handle)
+
+  let typed = table_from_arrow_c_typed(schema_ptr, array_ptr, type_name)
+
+  duckdb_destroy_arrow(result_cell)
+  ptr_free_cell(array_cell)
+  ptr_free_cell(schema_cell)
+  ptr_free_cell(result_cell)
+
+  typed
+}
+
+pub fn load_candles(session: DuckDbSession, sql: string) -> Result<Table<CandleRow>, AnyError> {
+  query_typed(session, sql, "CandleRow")
+}

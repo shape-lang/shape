@@ -1,0 +1,204 @@
+// ============================================================
+// Complex Multi-Indicator Strategy Demonstration
+// ============================================================
+// This demonstrates a real strategy with multiple conditions,
+// risk management, and comprehensive result analysis.
+
+// Load ES futures data
+let data = load("market_data", { symbol: "ES", from: "2023-01-01", to: "2023-03-31" })
+
+// ------------------------------------------------------------
+// Strategy Definition: Trend Following with Mean Reversion Filter
+// ------------------------------------------------------------
+// Entry conditions:
+//   - Price above 20-period SMA (trend filter)
+//   - RSI crosses above 30 (oversold bounce)
+//   - Volume above average (confirmation)
+// Exit conditions:
+//   - RSI crosses above 70 (overbought)
+//   - Price falls below SMA
+//   - Stop loss: 2%, Take profit: 6%
+
+function trend_bounce_strategy() {
+    // Get price series
+    let closes = series("close")
+    let highs = series("high")
+    let lows = series("low")
+    let volumes = series("volume")
+
+    // Calculate indicators
+    let sma_20 = sma(closes, 20)
+    let sma_50 = sma(closes, 50)
+    let rsi_14 = rsi(closes, 14)
+    let vol_sma = sma(volumes, 20)
+
+    // Current values
+    let price = closes[-1]
+    let prev_price = closes[-2]
+    let current_sma = sma_20[-1]
+    let current_rsi = rsi_14[-1]
+    let prev_rsi = rsi_14[-2]
+    let current_vol = volumes[-1]
+    let avg_vol = vol_sma[-1]
+
+    // Trend filter: price above both SMAs
+    let uptrend = price > current_sma and sma_20[-1] > sma_50[-1]
+    let downtrend = price < current_sma and sma_20[-1] < sma_50[-1]
+
+    // RSI signals
+    let rsi_oversold_cross = prev_rsi < 30 and current_rsi >= 30
+    let rsi_overbought_cross = prev_rsi < 70 and current_rsi >= 70
+    let rsi_overbought = current_rsi > 70
+
+    // Volume confirmation
+    let high_volume = current_vol > avg_vol * 1.2
+
+    // Entry signal: Trend + RSI bounce + Volume
+    let long_entry = uptrend and rsi_oversold_cross and high_volume
+
+    // Exit signals
+    let long_exit = rsi_overbought or price < current_sma
+
+    // Short entry (trend reversal)
+    let short_entry = downtrend and prev_rsi > 70 and current_rsi <= 70
+    let short_exit = current_rsi < 30 or price > current_sma
+
+    // Return signal with strength and risk levels
+    if (long_entry) {
+        return {
+            action: "buy",
+            strength: min(1.0, (avg_vol / current_vol) * 0.5 + 0.5),
+            stop_loss: price * 0.98,
+            take_profit: price * 1.06,
+            reason: "Trend bounce - RSI oversold cross with volume"
+        }
+    } else if (short_entry) {
+        return {
+            action: "short",
+            strength: 0.5,
+            stop_loss: price * 1.02,
+            take_profit: price * 0.94,
+            reason: "Trend reversal - RSI overbought cross"
+        }
+    } else if (long_exit) {
+        return { action: "exit_long", reason: "Exit signal triggered" }
+    } else if (short_exit) {
+        return { action: "exit_short", reason: "Cover signal triggered" }
+    }
+
+    return { action: "hold" }
+}
+
+// ------------------------------------------------------------
+// Run Backtest with Configuration
+// ------------------------------------------------------------
+print("=== Running Backtest ===")
+print("")
+
+let result = run_simulation({
+    strategy: "trend_bounce_strategy",
+    capital: 100000,
+    commission: 0.001,
+    slippage: 0.0005,
+    position_sizing: "fixed_fraction",
+    risk_per_trade: 0.02,
+    max_positions: 3
+})
+
+// ------------------------------------------------------------
+// REPORT: Summary Statistics
+// ------------------------------------------------------------
+print("=== PERFORMANCE SUMMARY ===")
+print("")
+print("Total Return:      " + format_percent(result.summary.total_return))
+print("Annualized Return: " + format_percent(result.summary.annualized_return))
+print("Sharpe Ratio:      " + format_number(result.summary.sharpe_ratio, 2))
+print("Sortino Ratio:     " + format_number(result.summary.sortino_ratio, 2))
+print("Max Drawdown:      " + format_percent(result.summary.max_drawdown))
+print("Win Rate:          " + format_percent(result.summary.win_rate))
+print("Profit Factor:     " + format_number(result.summary.profit_factor, 2))
+print("Total Trades:      " + result.summary.total_trades)
+print("")
+
+// ------------------------------------------------------------
+// REPORT: Equity Analysis
+// ------------------------------------------------------------
+print("=== EQUITY ANALYSIS ===")
+print("")
+print("Initial Capital:   $" + format_number(result.equity[0], 2))
+print("Final Capital:     $" + format_number(result.equity[-1], 2))
+print("Peak Capital:      $" + format_number(result.equity.max(), 2))
+print("Trough Capital:    $" + format_number(result.equity.min(), 2))
+print("")
+
+// ------------------------------------------------------------
+// REPORT: Trade Analysis
+// ------------------------------------------------------------
+print("=== TRADE ANALYSIS ===")
+print("")
+
+// Filter winning and losing trades
+let winners = result.trades.filter(|t| t.pnl > 0)
+let losers = result.trades.filter(|t| t.pnl <= 0)
+
+print("Winning Trades:    " + winners.length())
+print("Losing Trades:     " + losers.length())
+print("")
+
+// Calculate statistics on trades
+if (result.trades.length() > 0) {
+    print("Average P&L:       $" + format_number(result.trades.mean("pnl"), 2))
+    print("Average Winner:    $" + format_number(winners.mean("pnl"), 2))
+    print("Average Loser:     $" + format_number(losers.mean("pnl"), 2))
+    print("Largest Winner:    $" + format_number(winners.max("pnl"), 2))
+    print("Largest Loser:     $" + format_number(losers.min("pnl"), 2))
+    print("")
+
+    // Trade duration analysis
+    print("Avg Trade Duration: " + format_number(result.trades.mean("duration") / 3600, 1) + " hours")
+    print("")
+}
+
+// ------------------------------------------------------------
+// REPORT: Drawdown Analysis
+// ------------------------------------------------------------
+print("=== DRAWDOWN ANALYSIS ===")
+print("")
+print("Max Drawdown:      " + format_percent(result.drawdown.min()))
+print("Avg Drawdown:      " + format_percent(result.drawdown.mean()))
+print("Current Drawdown:  " + format_percent(result.drawdown[-1]))
+print("")
+
+// ------------------------------------------------------------
+// REPORT: Monthly Returns (using for-in loop)
+// ------------------------------------------------------------
+print("=== MONTHLY RETURNS ===")
+print("")
+let monthly = result.monthly_returns()
+var month_num = 1
+for month_return in monthly {
+    print("Month " + month_num + ": " + format_percent(month_return))
+    month_num = month_num + 1
+}
+print("")
+
+// ------------------------------------------------------------
+// REPORT: Risk Metrics
+// ------------------------------------------------------------
+print("=== RISK METRICS ===")
+print("")
+print("Volatility (Ann.): " + format_percent(result.returns.std() * sqrt(252)))
+print("Downside Dev:      " + format_percent(result.returns.filter(|r| r < 0).std() * sqrt(252)))
+print("VaR (95%):         " + format_percent(result.returns.percentile(5)))
+print("CVaR (95%):        " + format_percent(result.returns.filter(|r| r < result.returns.percentile(5)).mean()))
+print("")
+
+// ------------------------------------------------------------
+// Return full result object for programmatic access
+// ------------------------------------------------------------
+print("=== BACKTEST COMPLETE ===")
+print("")
+print("Full result object returned for further analysis.")
+print("Access via: result.trades, result.equity, result.returns, etc.")
+
+result

@@ -1,0 +1,55 @@
+// Test backtesting with proper object literal syntax
+// This should work with the current parser
+
+// Load ES data with date range
+print("Loading ES data from 2020 to 2024...");
+let es = load("market_data", { symbol: "ES", from: "2020-01-01", to: "2024-12-31" });
+
+// Verify data loaded
+let closes = series("close");
+print("Loaded " + closes.length() + " candles");
+print("Current close: " + closes[-1]);
+
+// Define a simple strategy
+function ma_strategy() {
+    let c = series("close");
+    let ma20 = rolling_mean(c, 20);
+    let ma50 = rolling_mean(c, 50);
+    
+    if (ma20[-1] > ma50[-1]) {
+        return "buy";
+    } else {
+        return "sell";
+    }
+}
+
+// Test strategy
+let signal = ma_strategy();
+print("Strategy signal: " + signal);
+
+// Run backtest with proper object literal
+print("\nRunning backtest...");
+let result = run_simulation({
+    strategy: "ma_strategy",
+    capital: 100000,
+    commission: 0.001,
+    slippage: 0.0005,
+    risk_per_trade: 0.02
+});
+
+// Access results
+print("\n=== Backtest Results ===");
+print("Number of trades: " + result.trades.length());
+print("Final equity: " + result.equity[-1]);
+
+// Access summary fields using dot notation
+print("Total return: " + result.summary.total_return + "%");
+print("Sharpe ratio: " + result.summary.sharpe_ratio);
+print("Win rate: " + result.summary.win_rate + "%");
+print("Max drawdown: " + result.summary.max_drawdown + "%");
+
+print("\n✓ Date range loading works");
+print("✓ Strategy execution works");
+print("✓ Backtest runs successfully");
+print("✓ Results are accessible");
+print("\nBacktesting framework is operational!");

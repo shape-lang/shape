@@ -1,0 +1,3381 @@
+//! Function and closure compilation
+
+use crate::bytecode::{Constant, Instruction, OpCode, Operand};
+use crate::executor::typed_object_ops::field_type_to_tag;
+use shape_ast::ast::{
+    DestructurePattern, Expr, FunctionDef, ObjectEntry, Span, Statement, VarKind, VariableDecl,
+};
+use shape_ast::error::{Result, ShapeError};
+use shape_runtime::type_schema::FieldType;
+use shape_value::ValueWord;
+use std::collections::{HashMap, HashSet};
+
+use super::{BytecodeCompiler, ParamPassMode};
+
+/// Display a type annotation using C-ABI convention (Vec instead of Array).
+fn cabi_type_display(ann: &shape_ast::ast::TypeAnnotation) -> String {
+    match ann {
+        shape_ast::ast::TypeAnnotation::Array(inner) => {
+            format!("Vec<{}>", cabi_type_display(inner))
+        }
+        other => other.to_type_string(),
+    }
+}
+
+impl BytecodeCompiler {
+    pub(super) fn compile_function(&mut self, func_def: &FunctionDef) -> Result<()> {
+        // Validate annotation target kinds before compilation
+        self.validate_annotation_targets(func_def)?;
+
+        let mut effective_def = func_def.clone();
+        if let Some(inferred_modes) = self
+            .inferred_param_pass_modes
+            .get(&effective_def.name)
+            .cloned()
+        {
+            for (idx, param) in effective_def.params.iter_mut().enumerate() {
+                if param.type_annotation.is_none()
+                    && param.simple_name().is_some()
+                    && inferred_modes
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(ParamPassMode::ByValue)
+                        .is_reference()
+                {
+                    param.is_reference = true;
+                }
+            }
+        }
+        let has_const_template_params = effective_def.params.iter().any(|p| p.is_const);
+        let has_specialization_bindings = self
+            .specialization_const_bindings
+            .contains_key(&effective_def.name);
+
+        // Execute comptime annotation handlers before compilation.
+        // These run at compile time and can inspect/modify the target.
+        // Template bases (functions with const parameters) skip comptime handler
+        // execution until a concrete call-site specialization binds those consts.
+        if !(has_const_template_params && !has_specialization_bindings)
+            && self.execute_comptime_handlers(&mut effective_def)?
+        {
+            self.function_defs.remove(&effective_def.name);
+            return Ok(());
+        }
+
+        // Keep the registry synchronized with the final mutated function shape.
+        // This is used by expansion/inspection tooling.
+        self.function_defs
+            .insert(effective_def.name.clone(), effective_def.clone());
+
+        // Track whether __original__ alias is active so we can clean it up.
+        let has_original_alias = self.function_aliases.contains_key("__original__");
+
+        // Check for annotation-based wrapping BEFORE compiling
+        let annotations = self.find_compiled_annotations(&effective_def);
+        if annotations.len() == 1 {
+            self.compile_wrapped_function(
+                &effective_def,
+                annotations.into_iter().next().expect("checked len == 1"),
+            )?;
+        } else if annotations.len() > 1 {
+            self.compile_chained_annotations(&effective_def, annotations)?;
+        } else {
+            self.compile_function_body(&effective_def)?;
+        }
+
+        // Clean up __original__ alias after the replacement body is compiled.
+        if has_original_alias {
+            self.function_aliases.remove("__original__");
+        }
+
+        // Runtime lifecycle hooks (`on_define`, `metadata`) are invoked at
+        // definition time by emitting top-level calls after function compilation.
+        self.emit_annotation_lifecycle_calls(&effective_def)
+    }
+
+    pub(super) fn compile_foreign_function(
+        &mut self,
+        def: &shape_ast::ast::ForeignFunctionDef,
+    ) -> Result<()> {
+        // Foreign function bodies are opaque — require explicit type annotations.
+        // Dynamic-language runtimes require Result<T> returns; native ABI
+        // declarations (`extern "C"`) do not.
+        let dynamic_language = !def.is_native_abi();
+        let type_errors = def.validate_type_annotations(dynamic_language);
+        if let Some((msg, span)) = type_errors.into_iter().next() {
+            let loc = if span.is_dummy() {
+                self.span_to_source_location(def.name_span)
+            } else {
+                self.span_to_source_location(span)
+            };
+            return Err(ShapeError::SemanticError {
+                message: msg,
+                location: Some(loc),
+            });
+        }
+        if def.is_native_abi() && def.is_async {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "extern native function '{}' cannot be async (native ABI calls are synchronous)",
+                    def.name
+                ),
+                location: Some(self.span_to_source_location(def.name_span)),
+            });
+        }
+
+        // The function slot was already registered by register_item_functions.
+        // Find its index.
+        let func_idx = self
+            .find_function(&def.name)
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!(
+                    "Internal error: foreign function '{}' not registered",
+                    def.name
+                ),
+                location: None,
+            })?;
+
+        // Create the ForeignFunctionEntry
+        let param_names: Vec<String> = def
+            .params
+            .iter()
+            .flat_map(|p| p.get_identifiers())
+            .collect();
+        let param_types: Vec<String> = def
+            .params
+            .iter()
+            .map(|p| {
+                p.type_annotation
+                    .as_ref()
+                    .map(|t| t.to_type_string())
+                    .unwrap_or_else(|| "any".to_string())
+            })
+            .collect();
+        let return_type = def.return_type.as_ref().map(|t| t.to_type_string());
+        let arg_count = def.params.len() as u16;
+
+        let native_abi = if let Some(native) = &def.native_abi {
+            let signature = self.build_native_c_signature(def)?;
+            Some(crate::bytecode::NativeAbiSpec {
+                abi: native.abi.clone(),
+                library: self.resolve_native_library_alias(&native.library),
+                symbol: native.symbol.clone(),
+                signature,
+            })
+        } else {
+            None
+        };
+
+        // Register an anonymous schema if the return type contains an inline object.
+        let return_type_schema_id = if def.is_native_abi() {
+            None
+        } else {
+            def.return_type
+                .as_ref()
+                .and_then(|ann| Self::find_object_in_annotation(ann))
+                .map(|obj_fields| {
+                    let schema_name = format!("__ffi_{}_return", def.name);
+                    // Check if already registered (e.g. from a previous compilation pass)
+                    let registry = self.type_tracker.schema_registry_mut();
+                    if let Some(existing) = registry.get(&schema_name) {
+                        return existing.id as u32;
+                    }
+                    let mut builder =
+                        shape_runtime::type_schema::TypeSchemaBuilder::new(schema_name);
+                    for f in obj_fields {
+                        let field_type = Self::type_annotation_to_field_type(&f.type_annotation);
+                        let anns: Vec<shape_runtime::type_schema::FieldAnnotation> = f
+                            .annotations
+                            .iter()
+                            .map(|a| {
+                                let args = a
+                                    .args
+                                    .iter()
+                                    .filter_map(Self::eval_annotation_arg)
+                                    .collect();
+                                shape_runtime::type_schema::FieldAnnotation {
+                                    name: a.name.clone(),
+                                    args,
+                                }
+                            })
+                            .collect();
+                        builder = builder.field_with_meta(f.name.clone(), field_type, anns);
+                    }
+                    builder.register(registry) as u32
+                })
+                .or_else(|| {
+                    // Try named type reference (e.g. Result<MyType>)
+                    def.return_type
+                        .as_ref()
+                        .and_then(|ann| Self::find_reference_in_annotation(ann))
+                        .and_then(|name| {
+                            self.type_tracker
+                                .schema_registry()
+                                .get(name)
+                                .map(|s| s.id as u32)
+                        })
+                })
+        };
+
+        let foreign_idx = self.program.foreign_functions.len() as u16;
+        let mut entry = crate::bytecode::ForeignFunctionEntry {
+            name: def.name.clone(),
+            language: def.language.clone(),
+            body_text: def.body_text.clone(),
+            param_names: param_names.clone(),
+            param_types,
+            return_type,
+            arg_count,
+            is_async: def.is_async,
+            dynamic_errors: dynamic_language,
+            return_type_schema_id,
+            content_hash: None,
+            native_abi,
+        };
+        entry.compute_content_hash();
+        self.program.foreign_functions.push(entry);
+
+        // Emit a jump over the function body so the VM doesn't fall through
+        // into the stub instructions during top-level execution.
+        let jump_over = self.emit_jump(OpCode::Jump, 0);
+
+        // Build a dedicated blob for the extern stub so content-addressed
+        // linking can resolve function-value constants without zero-hash deps.
+        let saved_blob_builder = self.current_blob_builder.take();
+        self.current_blob_builder = Some(super::FunctionBlobBuilder::new(
+            def.name.clone(),
+            self.program.current_offset(),
+            self.program.constants.len(),
+            self.program.strings.len(),
+        ));
+
+        // Record entry point of the stub function body
+        let entry_point = self.program.instructions.len();
+
+        // Emit stub function body:
+        //   LoadLocal(0), LoadLocal(1), ..., LoadLocal(N-1)
+        //   PushConst(N)  -- push arg count
+        //   CallForeign(foreign_idx)
+        //   ReturnValue
+        for i in 0..arg_count {
+            self.emit(Instruction::new(OpCode::LoadLocal, Some(Operand::Local(i))));
+        }
+
+        let arg_count_const = self
+            .program
+            .add_constant(Constant::Number(arg_count as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(arg_count_const)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::CallForeign,
+            Some(Operand::ForeignFunction(foreign_idx)),
+        ));
+        self.emit(Instruction::simple(OpCode::ReturnValue));
+
+        // Update function metadata before finalizing blob.
+        let func = &mut self.program.functions[func_idx];
+        func.entry_point = entry_point;
+        func.locals_count = arg_count;
+        let (ref_params, ref_mutates) = Self::native_param_reference_contract(def);
+        func.ref_params = ref_params;
+        func.ref_mutates = ref_mutates;
+
+        // Finalize and register the extern stub blob.
+        self.finalize_current_blob(func_idx);
+        self.current_blob_builder = saved_blob_builder;
+
+        // Patch the jump-over to land here (after the function body)
+        self.patch_jump(jump_over);
+
+        // Store the function binding so the name resolves at call sites
+        let binding_idx = self.get_or_create_module_binding(&def.name);
+        let func_const = self
+            .program
+            .add_constant(Constant::Function(func_idx as u16));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(func_const)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::StoreModuleBinding,
+            Some(Operand::ModuleBinding(binding_idx)),
+        ));
+
+        Ok(())
+    }
+
+    /// Walk a TypeAnnotation tree to find the first Object node.
+    /// Unwraps `Result<T>`, `Generic{..}`, and `Vec<T>` wrappers.
+    fn find_object_in_annotation(
+        ann: &shape_ast::ast::TypeAnnotation,
+    ) -> Option<&[shape_ast::ast::ObjectTypeField]> {
+        use shape_ast::ast::TypeAnnotation;
+        match ann {
+            TypeAnnotation::Object(fields) => Some(fields),
+            TypeAnnotation::Generic { args, .. } => {
+                // Unwrap Result<T>, Option<T>, etc. — check inner type args
+                args.iter().find_map(Self::find_object_in_annotation)
+            }
+            TypeAnnotation::Array(inner) => Self::find_object_in_annotation(inner),
+            _ => None,
+        }
+    }
+
+    /// Walk a TypeAnnotation tree to find the first Reference name.
+    /// Unwraps `Result<T>`, `Generic{..}`, and `Array<T>` wrappers.
+    fn find_reference_in_annotation(ann: &shape_ast::ast::TypeAnnotation) -> Option<&str> {
+        use shape_ast::ast::TypeAnnotation;
+        match ann {
+            TypeAnnotation::Reference(name) => Some(name.as_str()),
+            TypeAnnotation::Generic { args, .. } => {
+                args.iter().find_map(Self::find_reference_in_annotation)
+            }
+            TypeAnnotation::Array(inner) => Self::find_reference_in_annotation(inner),
+            _ => None,
+        }
+    }
+
+    pub(super) fn native_ctype_from_annotation(
+        ann: &shape_ast::ast::TypeAnnotation,
+        is_return: bool,
+    ) -> Option<String> {
+        use shape_ast::ast::TypeAnnotation;
+        match ann {
+            TypeAnnotation::Array(inner) => {
+                let elem = Self::native_slice_elem_ctype_from_annotation(inner)?;
+                Some(format!("cslice<{elem}>"))
+            }
+            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => match name.as_str() {
+                "number" | "Number" | "float" | "f64" => Some("f64".to_string()),
+                "f32" => Some("f32".to_string()),
+                "int" | "integer" | "Int" | "Integer" | "i64" => Some("i64".to_string()),
+                "i32" => Some("i32".to_string()),
+                "i16" => Some("i16".to_string()),
+                "i8" => Some("i8".to_string()),
+                "u64" => Some("u64".to_string()),
+                "u32" => Some("u32".to_string()),
+                "u16" => Some("u16".to_string()),
+                "u8" | "byte" => Some("u8".to_string()),
+                "isize" => Some("isize".to_string()),
+                "usize" => Some("usize".to_string()),
+                "char" => Some("i8".to_string()),
+                "bool" | "boolean" => Some("bool".to_string()),
+                "string" | "str" => Some("cstring".to_string()),
+                "cstring" => Some("cstring".to_string()),
+                "ptr" | "pointer" => Some("ptr".to_string()),
+                "void" if is_return => Some("void".to_string()),
+                _ => None,
+            },
+            TypeAnnotation::Void if is_return => Some("void".to_string()),
+            TypeAnnotation::Generic { name, args }
+                if (name == "Vec" || name == "CSlice" || name == "CMutSlice")
+                    && args.len() == 1 =>
+            {
+                let elem = Self::native_slice_elem_ctype_from_annotation(&args[0])?;
+                if name == "CMutSlice" {
+                    Some(format!("cmut_slice<{elem}>"))
+                } else {
+                    Some(format!("cslice<{elem}>"))
+                }
+            }
+            TypeAnnotation::Optional(inner) => {
+                let inner = Self::native_ctype_from_annotation(inner, is_return)?;
+                if inner == "cstring" {
+                    Some("cstring?".to_string())
+                } else {
+                    None
+                }
+            }
+            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
+                let inner = Self::native_ctype_from_annotation(&args[0], is_return)?;
+                if inner == "cstring" {
+                    Some("cstring?".to_string())
+                } else {
+                    None
+                }
+            }
+            TypeAnnotation::Generic { name, args }
+                if (name == "CView" || name == "CMut") && args.len() == 1 =>
+            {
+                let inner = match &args[0] {
+                    TypeAnnotation::Reference(type_name) | TypeAnnotation::Basic(type_name) => {
+                        type_name.clone()
+                    }
+                    _ => return None,
+                };
+                if name == "CView" {
+                    Some(format!("cview<{inner}>"))
+                } else {
+                    Some(format!("cmut<{inner}>"))
+                }
+            }
+            TypeAnnotation::Function { params, returns } if !is_return => {
+                let mut callback_params = Vec::with_capacity(params.len());
+                for param in params {
+                    callback_params.push(Self::native_ctype_from_annotation(
+                        &param.type_annotation,
+                        false,
+                    )?);
+                }
+                let callback_ret = Self::native_ctype_from_annotation(returns, true)?;
+                Some(format!(
+                    "callback(fn({}) -> {})",
+                    callback_params.join(", "),
+                    callback_ret
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn native_param_reference_contract(
+        def: &shape_ast::ast::ForeignFunctionDef,
+    ) -> (Vec<bool>, Vec<bool>) {
+        let mut ref_params = vec![false; def.params.len()];
+        let mut ref_mutates = vec![false; def.params.len()];
+        if !def.is_native_abi() {
+            return (ref_params, ref_mutates);
+        }
+
+        for (idx, param) in def.params.iter().enumerate() {
+            let Some(annotation) = param.type_annotation.as_ref() else {
+                continue;
+            };
+            if let Some(ctype) = Self::native_ctype_from_annotation(annotation, false)
+                && Self::native_ctype_requires_mutable_reference(&ctype)
+            {
+                ref_params[idx] = true;
+                ref_mutates[idx] = true;
+            }
+        }
+
+        (ref_params, ref_mutates)
+    }
+
+    fn native_ctype_requires_mutable_reference(ctype: &str) -> bool {
+        ctype.starts_with("cmut_slice<")
+    }
+
+    fn native_slice_elem_ctype_from_annotation(
+        ann: &shape_ast::ast::TypeAnnotation,
+    ) -> Option<String> {
+        let elem = Self::native_ctype_from_annotation(ann, false)?;
+        if Self::is_supported_native_slice_elem(&elem) {
+            Some(elem)
+        } else {
+            None
+        }
+    }
+
+    fn is_supported_native_slice_elem(ctype: &str) -> bool {
+        matches!(
+            ctype,
+            "i8" | "u8"
+                | "i16"
+                | "u16"
+                | "i32"
+                | "i64"
+                | "u32"
+                | "u64"
+                | "isize"
+                | "usize"
+                | "f32"
+                | "f64"
+                | "bool"
+                | "ptr"
+                | "cstring"
+                | "cstring?"
+        )
+    }
+
+    fn build_native_c_signature(&self, def: &shape_ast::ast::ForeignFunctionDef) -> Result<String> {
+        let mut param_types = Vec::with_capacity(def.params.len());
+        for (idx, param) in def.params.iter().enumerate() {
+            let ann = param
+                .type_annotation
+                .as_ref()
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "extern native function '{}': parameter #{} must have a type annotation",
+                        def.name, idx
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                })?;
+            let ctype = Self::native_ctype_from_annotation(ann, false).ok_or_else(|| {
+                ShapeError::SemanticError {
+                    message: format!(
+                        "extern native function '{}': unsupported parameter type '{}' for C ABI",
+                        def.name,
+                        cabi_type_display(ann)
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                }
+            })?;
+            param_types.push(ctype.to_string());
+        }
+
+        let ret_ann = def
+            .return_type
+            .as_ref()
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: format!(
+                    "extern native function '{}': explicit return type is required",
+                    def.name
+                ),
+                location: Some(self.span_to_source_location(def.name_span)),
+            })?;
+        let ret_type = Self::native_ctype_from_annotation(ret_ann, true).ok_or_else(|| {
+            ShapeError::SemanticError {
+                message: format!(
+                    "extern native function '{}': unsupported return type '{}' for C ABI",
+                    def.name,
+                    cabi_type_display(ret_ann)
+                ),
+                location: Some(self.span_to_source_location(def.name_span)),
+            }
+        })?;
+
+        Ok(format!("fn({}) -> {}", param_types.join(", "), ret_type))
+    }
+
+    fn resolve_native_library_alias(&self, requested: &str) -> String {
+        // Try [native-dependencies] lookup from project shape.toml when available.
+        // If no mapping is found, use the declared string verbatim.
+        if let Some(ref source_dir) = self.source_dir
+            && let Some(project) = shape_runtime::project::find_project_root(source_dir)
+            && let Ok(native_deps) = project.config.native_dependencies()
+            && let Some(spec) = native_deps.get(requested)
+            && let Some(resolved) = spec.resolve_for_host()
+        {
+            return resolved;
+        }
+        requested.to_string()
+    }
+
+    fn emit_annotation_lifecycle_calls(&mut self, func_def: &FunctionDef) -> Result<()> {
+        if self.current_function.is_some() {
+            return Ok(());
+        }
+        if func_def.annotations.is_empty() {
+            return Ok(());
+        }
+
+        let self_fn_idx =
+            self.find_function(&func_def.name)
+                .ok_or_else(|| ShapeError::RuntimeError {
+                    message: format!(
+                        "Internal error: function '{}' not found for annotation lifecycle dispatch",
+                        func_def.name
+                    ),
+                    location: None,
+                })? as u16;
+
+        self.emit_annotation_lifecycle_calls_for_target(
+            &func_def.annotations,
+            &func_def.name,
+            shape_ast::ast::functions::AnnotationTargetKind::Function,
+            Some(self_fn_idx),
+        )
+    }
+
+    pub(super) fn emit_annotation_lifecycle_calls_for_type(
+        &mut self,
+        type_name: &str,
+        annotations: &[shape_ast::ast::Annotation],
+    ) -> Result<()> {
+        if self.current_function.is_some() || annotations.is_empty() {
+            return Ok(());
+        }
+        self.emit_annotation_lifecycle_calls_for_target(
+            annotations,
+            type_name,
+            shape_ast::ast::functions::AnnotationTargetKind::Type,
+            Some(0),
+        )
+    }
+
+    pub(super) fn emit_annotation_lifecycle_calls_for_module(
+        &mut self,
+        module_name: &str,
+        annotations: &[shape_ast::ast::Annotation],
+        target_id: Option<u16>,
+    ) -> Result<()> {
+        if self.current_function.is_some() || annotations.is_empty() {
+            return Ok(());
+        }
+        self.emit_annotation_lifecycle_calls_for_target(
+            annotations,
+            module_name,
+            shape_ast::ast::functions::AnnotationTargetKind::Module,
+            target_id,
+        )
+    }
+
+    fn emit_annotation_lifecycle_calls_for_target(
+        &mut self,
+        annotations: &[shape_ast::ast::Annotation],
+        target_name: &str,
+        target_kind: shape_ast::ast::functions::AnnotationTargetKind,
+        target_id: Option<u16>,
+    ) -> Result<()> {
+        for ann in annotations {
+            let Some(compiled) = self.program.compiled_annotations.get(&ann.name).cloned() else {
+                continue;
+            };
+
+            if let Some(on_define_id) = compiled.on_define_handler {
+                self.emit_annotation_handler_call(
+                    on_define_id,
+                    ann,
+                    target_name,
+                    target_kind,
+                    target_id,
+                )?;
+            }
+            if let Some(metadata_id) = compiled.metadata_handler {
+                self.emit_annotation_handler_call(
+                    metadata_id,
+                    ann,
+                    target_name,
+                    target_kind,
+                    target_id,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit_annotation_handler_call(
+        &mut self,
+        handler_id: u16,
+        annotation: &shape_ast::ast::Annotation,
+        target_name: &str,
+        target_kind: shape_ast::ast::functions::AnnotationTargetKind,
+        target_id: Option<u16>,
+    ) -> Result<()> {
+        let handler = self
+            .program
+            .functions
+            .get(handler_id as usize)
+            .cloned()
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!(
+                    "Internal error: annotation handler function {} not found",
+                    handler_id
+                ),
+                location: None,
+            })?;
+        let expected_base = 1 + annotation.args.len();
+        let arity = handler.arity as usize;
+        if arity < expected_base {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "Internal error: annotation handler '{}' arity {} is smaller than required base args {}",
+                    handler.name, arity, expected_base
+                ),
+                location: None,
+            });
+        }
+
+        match target_kind {
+            shape_ast::ast::functions::AnnotationTargetKind::Function => {
+                let id = target_id.ok_or_else(|| ShapeError::RuntimeError {
+                    message: "Internal error: missing function id for annotation handler call"
+                        .to_string(),
+                    location: None,
+                })?;
+                let self_ref = self.program.add_constant(Constant::Number(id as f64));
+                self.emit(Instruction::new(
+                    OpCode::PushConst,
+                    Some(Operand::Const(self_ref)),
+                ));
+            }
+            _ => {
+                self.emit_annotation_target_descriptor(target_name, target_kind, target_id)?;
+            }
+        }
+
+        for ann_arg in &annotation.args {
+            self.compile_expr(ann_arg)?;
+        }
+
+        for param_idx in expected_base..arity {
+            let param_name = handler
+                .param_names
+                .get(param_idx)
+                .map(|s| s.as_str())
+                .unwrap_or_default();
+            match param_name {
+                "fn" | "target" => {
+                    self.emit_annotation_target_descriptor(target_name, target_kind, target_id)?
+                }
+                "ctx" => self.emit_annotation_runtime_ctx()?,
+                _ => {
+                    self.emit(Instruction::simple(OpCode::PushNull));
+                }
+            }
+        }
+
+        let ac = self.program.add_constant(Constant::Number(arity as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(ac)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::Call,
+            Some(Operand::Function(shape_value::FunctionId(handler_id))),
+        ));
+        self.record_blob_call(handler_id);
+        self.emit(Instruction::simple(OpCode::Pop));
+        Ok(())
+    }
+
+    fn annotation_target_kind_label(
+        target_kind: shape_ast::ast::functions::AnnotationTargetKind,
+    ) -> &'static str {
+        match target_kind {
+            shape_ast::ast::functions::AnnotationTargetKind::Function => "function",
+            shape_ast::ast::functions::AnnotationTargetKind::Type => "type",
+            shape_ast::ast::functions::AnnotationTargetKind::Module => "module",
+            shape_ast::ast::functions::AnnotationTargetKind::Expression => "expression",
+            shape_ast::ast::functions::AnnotationTargetKind::Block => "block",
+            shape_ast::ast::functions::AnnotationTargetKind::AwaitExpr => "await_expr",
+            shape_ast::ast::functions::AnnotationTargetKind::Binding => "binding",
+        }
+    }
+
+    fn emit_annotation_runtime_ctx(&mut self) -> Result<()> {
+        let empty_schema_id = self.type_tracker.register_inline_object_schema(&[]);
+        if empty_schema_id > u16::MAX as u32 {
+            return Err(ShapeError::RuntimeError {
+                message: "Internal error: annotation ctx schema id overflow".to_string(),
+                location: None,
+            });
+        }
+        self.emit(Instruction::new(
+            OpCode::NewTypedObject,
+            Some(Operand::TypedObjectAlloc {
+                schema_id: empty_schema_id as u16,
+                field_count: 0,
+            }),
+        ));
+        self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
+
+        let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
+            ("state", FieldType::Any),
+            ("event_log", FieldType::Array(Box::new(FieldType::Any))),
+        ]);
+        if ctx_schema_id > u16::MAX as u32 {
+            return Err(ShapeError::RuntimeError {
+                message: "Internal error: annotation ctx schema id overflow".to_string(),
+                location: None,
+            });
+        }
+        self.emit(Instruction::new(
+            OpCode::NewTypedObject,
+            Some(Operand::TypedObjectAlloc {
+                schema_id: ctx_schema_id as u16,
+                field_count: 2,
+            }),
+        ));
+        Ok(())
+    }
+
+    fn emit_annotation_target_descriptor(
+        &mut self,
+        target_name: &str,
+        target_kind: shape_ast::ast::functions::AnnotationTargetKind,
+        target_id: Option<u16>,
+    ) -> Result<()> {
+        let name_const = self
+            .program
+            .add_constant(Constant::String(target_name.to_string()));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(name_const)),
+        ));
+        let kind_const = self.program.add_constant(Constant::String(
+            Self::annotation_target_kind_label(target_kind).to_string(),
+        ));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(kind_const)),
+        ));
+        if let Some(id) = target_id {
+            let id_const = self.program.add_constant(Constant::Number(id as f64));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(id_const)),
+            ));
+        } else {
+            self.emit(Instruction::simple(OpCode::PushNull));
+        }
+
+        let fn_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
+            ("name", FieldType::String),
+            ("kind", FieldType::String),
+            ("id", FieldType::I64),
+        ]);
+        if fn_schema_id > u16::MAX as u32 {
+            return Err(ShapeError::RuntimeError {
+                message: "Internal error: annotation fn schema id overflow".to_string(),
+                location: None,
+            });
+        }
+        self.emit(Instruction::new(
+            OpCode::NewTypedObject,
+            Some(Operand::TypedObjectAlloc {
+                schema_id: fn_schema_id as u16,
+                field_count: 3,
+            }),
+        ));
+        Ok(())
+    }
+
+    /// Execute comptime annotation handlers for a function definition.
+    ///
+    /// When an annotation has a `comptime pre/post(...) { ... }` handler, self builds
+    /// a ComptimeTarget from the function definition and executes the handler body
+    /// at compile time with the target object bound to the handler parameter.
+    fn execute_comptime_handlers(&mut self, func_def: &mut FunctionDef) -> Result<bool> {
+        let mut removed = false;
+        let annotations = func_def.annotations.clone();
+
+        // Phase 1: comptime pre
+        for ann in &annotations {
+            let compiled = self.program.compiled_annotations.get(&ann.name).cloned();
+            if let Some(compiled) = compiled {
+                if let Some(handler) = compiled.comptime_pre_handler {
+                    if self.execute_function_comptime_handler(ann, &handler, func_def)? {
+                        removed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Phase 2: comptime post
+        if !removed {
+            for ann in &annotations {
+                let compiled = self.program.compiled_annotations.get(&ann.name).cloned();
+                if let Some(compiled) = compiled {
+                    if let Some(handler) = compiled.comptime_post_handler {
+                        if self.execute_function_comptime_handler(ann, &handler, func_def)? {
+                            removed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
+    }
+
+    fn execute_function_comptime_handler(
+        &mut self,
+        annotation: &shape_ast::ast::Annotation,
+        handler: &shape_ast::ast::AnnotationHandler,
+        func_def: &mut FunctionDef,
+    ) -> Result<bool> {
+        // Build the target object from the function definition
+        let target = super::comptime_target::ComptimeTarget::from_function(func_def);
+        let target_value = target.to_nanboxed();
+        let target_name = func_def.name.clone();
+        let handler_span = handler.span;
+        let const_bindings = self
+            .specialization_const_bindings
+            .get(&target_name)
+            .cloned()
+            .unwrap_or_default();
+
+        let execution = self.execute_comptime_annotation_handler(
+            annotation,
+            handler,
+            target_value,
+            &const_bindings,
+        )?;
+
+        self.process_comptime_directives_for_function(execution.directives, &target_name, func_def)
+            .map_err(|e| ShapeError::RuntimeError {
+                message: format!(
+                    "Comptime handler '{}' directive processing failed: {}",
+                    annotation.name, e
+                ),
+                location: Some(self.span_to_source_location(handler_span)),
+            })
+    }
+
+    pub(super) fn execute_comptime_annotation_handler(
+        &mut self,
+        annotation: &shape_ast::ast::Annotation,
+        handler: &shape_ast::ast::AnnotationHandler,
+        target_value: ValueWord,
+        const_bindings: &[(String, shape_value::ValueWord)],
+    ) -> Result<super::comptime::ComptimeExecutionResult> {
+        let handler_span = handler.span;
+        let extensions: Vec<_> = self
+            .extension_registry
+            .as_ref()
+            .map(|r| r.as_ref().clone())
+            .unwrap_or_default();
+        let trait_impls = self.type_inference.env.trait_impl_keys();
+        let known_type_symbols: std::collections::HashSet<String> = self
+            .struct_types
+            .keys()
+            .chain(self.type_aliases.keys())
+            .cloned()
+            .collect();
+        let mut comptime_helpers = self.collect_comptime_helpers();
+        comptime_helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
+        comptime_helpers.sort_by(|a, b| a.name.cmp(&b.name));
+        comptime_helpers.dedup_by(|a, b| a.name == b.name);
+
+        super::comptime::execute_comptime_with_annotation_handler(
+            &handler.body,
+            &handler.params,
+            target_value,
+            &annotation.args,
+            const_bindings,
+            &comptime_helpers,
+            &extensions,
+            trait_impls,
+            known_type_symbols,
+        )
+        .map_err(|e| ShapeError::RuntimeError {
+            message: format!(
+                "Comptime handler '{}' failed: {}",
+                annotation.name,
+                super::helpers::strip_error_prefix(&e)
+            ),
+            location: Some(self.span_to_source_location(handler_span)),
+        })
+    }
+
+    fn collect_scoped_helpers_for_expr(&self, expr: &Expr) -> Vec<FunctionDef> {
+        let mut pending_names = Vec::new();
+        let mut seed_names = HashSet::new();
+        Self::collect_scoped_names_in_expr(expr, &mut seed_names);
+        pending_names.extend(seed_names.into_iter());
+
+        let mut visited = HashSet::new();
+        let mut helpers = Vec::new();
+
+        while let Some(name) = pending_names.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let Some(def) = self.function_defs.get(&name) else {
+                continue;
+            };
+            helpers.push(def.clone());
+            for stmt in &def.body {
+                let mut nested = HashSet::new();
+                Self::collect_scoped_names_in_statement(stmt, &mut nested);
+                pending_names.extend(nested.into_iter().filter(|n| !visited.contains(n)));
+            }
+        }
+
+        helpers
+    }
+
+    fn collect_scoped_names_in_statement(stmt: &Statement, names: &mut HashSet<String>) {
+        match stmt {
+            Statement::Return(Some(expr), _) => Self::collect_scoped_names_in_expr(expr, names),
+            Statement::VariableDecl(decl, _) => {
+                if let Some(value) = &decl.value {
+                    Self::collect_scoped_names_in_expr(value, names);
+                }
+            }
+            Statement::Assignment(assign, _) => {
+                Self::collect_scoped_names_in_expr(&assign.value, names)
+            }
+            Statement::Expression(expr, _) => Self::collect_scoped_names_in_expr(expr, names),
+            Statement::For(loop_expr, _) => {
+                match &loop_expr.init {
+                    shape_ast::ast::ForInit::ForIn { iter, .. } => {
+                        Self::collect_scoped_names_in_expr(iter, names);
+                    }
+                    shape_ast::ast::ForInit::ForC {
+                        init,
+                        condition,
+                        update,
+                    } => {
+                        Self::collect_scoped_names_in_statement(init, names);
+                        Self::collect_scoped_names_in_expr(condition, names);
+                        Self::collect_scoped_names_in_expr(update, names);
+                    }
+                }
+                for body_stmt in &loop_expr.body {
+                    Self::collect_scoped_names_in_statement(body_stmt, names);
+                }
+            }
+            Statement::While(loop_expr, _) => {
+                Self::collect_scoped_names_in_expr(&loop_expr.condition, names);
+                for body_stmt in &loop_expr.body {
+                    Self::collect_scoped_names_in_statement(body_stmt, names);
+                }
+            }
+            Statement::If(if_stmt, _) => {
+                Self::collect_scoped_names_in_expr(&if_stmt.condition, names);
+                for body_stmt in &if_stmt.then_body {
+                    Self::collect_scoped_names_in_statement(body_stmt, names);
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    for body_stmt in else_body {
+                        Self::collect_scoped_names_in_statement(body_stmt, names);
+                    }
+                }
+            }
+            Statement::SetReturnExpr { expression, .. }
+            | Statement::ReplaceBodyExpr { expression, .. }
+            | Statement::ReplaceModuleExpr { expression, .. } => {
+                Self::collect_scoped_names_in_expr(expression, names);
+            }
+            Statement::ReplaceBody { body, .. } => {
+                for stmt in body {
+                    Self::collect_scoped_names_in_statement(stmt, names);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_scoped_names_in_expr(expr: &Expr, names: &mut HashSet<String>) {
+        match expr {
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                named_args,
+                ..
+            } => {
+                if let Expr::Identifier(namespace, _) = receiver.as_ref() {
+                    names.insert(format!("{}::{}", namespace, method));
+                }
+                Self::collect_scoped_names_in_expr(receiver, names);
+                for arg in args {
+                    Self::collect_scoped_names_in_expr(arg, names);
+                }
+                for (_, value) in named_args {
+                    Self::collect_scoped_names_in_expr(value, names);
+                }
+            }
+            Expr::FunctionCall {
+                name,
+                args,
+                named_args,
+                ..
+            } => {
+                if name.contains("::") {
+                    names.insert(name.clone());
+                }
+                for arg in args {
+                    Self::collect_scoped_names_in_expr(arg, names);
+                }
+                for (_, value) in named_args {
+                    Self::collect_scoped_names_in_expr(value, names);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                Self::collect_scoped_names_in_expr(left, names);
+                Self::collect_scoped_names_in_expr(right, names);
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::Spread(operand, _)
+            | Expr::TryOperator(operand, _)
+            | Expr::Await(operand, _)
+            | Expr::Reference { expr: operand, .. }
+            | Expr::AsyncScope(operand, _)
+            | Expr::DataRelativeAccess {
+                reference: operand, ..
+            } => {
+                Self::collect_scoped_names_in_expr(operand, names);
+            }
+            Expr::PropertyAccess { object, .. } => {
+                Self::collect_scoped_names_in_expr(object, names)
+            }
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index,
+                ..
+            } => {
+                Self::collect_scoped_names_in_expr(object, names);
+                Self::collect_scoped_names_in_expr(index, names);
+                if let Some(end) = end_index {
+                    Self::collect_scoped_names_in_expr(end, names);
+                }
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::collect_scoped_names_in_expr(condition, names);
+                Self::collect_scoped_names_in_expr(then_expr, names);
+                if let Some(else_expr) = else_expr {
+                    Self::collect_scoped_names_in_expr(else_expr, names);
+                }
+            }
+            Expr::Object(entries, _) => {
+                for entry in entries {
+                    match entry {
+                        ObjectEntry::Field { value, .. } | ObjectEntry::Spread(value) => {
+                            Self::collect_scoped_names_in_expr(value, names);
+                        }
+                    }
+                }
+            }
+            Expr::Array(values, _) => {
+                for value in values {
+                    Self::collect_scoped_names_in_expr(value, names);
+                }
+            }
+            Expr::ListComprehension(comp, _) => {
+                Self::collect_scoped_names_in_expr(&comp.element, names);
+                for clause in &comp.clauses {
+                    Self::collect_scoped_names_in_expr(&clause.iterable, names);
+                    if let Some(filter) = &clause.filter {
+                        Self::collect_scoped_names_in_expr(filter, names);
+                    }
+                }
+            }
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    match item {
+                        shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                            if let Some(value) = &decl.value {
+                                Self::collect_scoped_names_in_expr(value, names);
+                            }
+                        }
+                        shape_ast::ast::BlockItem::Assignment(assign) => {
+                            Self::collect_scoped_names_in_expr(&assign.value, names);
+                        }
+                        shape_ast::ast::BlockItem::Statement(stmt) => {
+                            Self::collect_scoped_names_in_statement(stmt, names);
+                        }
+                        shape_ast::ast::BlockItem::Expression(expr) => {
+                            Self::collect_scoped_names_in_expr(expr, names);
+                        }
+                    }
+                }
+            }
+            Expr::TypeAssertion {
+                expr,
+                meta_param_overrides,
+                ..
+            } => {
+                Self::collect_scoped_names_in_expr(expr, names);
+                if let Some(overrides) = meta_param_overrides {
+                    for value in overrides.values() {
+                        Self::collect_scoped_names_in_expr(value, names);
+                    }
+                }
+            }
+            Expr::InstanceOf { expr, .. } => Self::collect_scoped_names_in_expr(expr, names),
+            Expr::FunctionExpr { body, .. } => {
+                for stmt in body {
+                    Self::collect_scoped_names_in_statement(stmt, names);
+                }
+            }
+            Expr::If(if_expr, _) => {
+                Self::collect_scoped_names_in_expr(&if_expr.condition, names);
+                Self::collect_scoped_names_in_expr(&if_expr.then_branch, names);
+                if let Some(else_branch) = &if_expr.else_branch {
+                    Self::collect_scoped_names_in_expr(else_branch, names);
+                }
+            }
+            Expr::While(while_expr, _) => {
+                Self::collect_scoped_names_in_expr(&while_expr.condition, names);
+                Self::collect_scoped_names_in_expr(&while_expr.body, names);
+            }
+            Expr::For(for_expr, _) => {
+                Self::collect_scoped_names_in_expr(&for_expr.iterable, names);
+                Self::collect_scoped_names_in_expr(&for_expr.body, names);
+            }
+            Expr::Loop(loop_expr, _) => Self::collect_scoped_names_in_expr(&loop_expr.body, names),
+            Expr::Let(let_expr, _) => {
+                if let Some(value) = &let_expr.value {
+                    Self::collect_scoped_names_in_expr(value, names);
+                }
+                Self::collect_scoped_names_in_expr(&let_expr.body, names);
+            }
+            Expr::Assign(assign_expr, _) => {
+                Self::collect_scoped_names_in_expr(&assign_expr.target, names);
+                Self::collect_scoped_names_in_expr(&assign_expr.value, names);
+            }
+            Expr::Break(Some(value), _) | Expr::Return(Some(value), _) => {
+                Self::collect_scoped_names_in_expr(value, names);
+            }
+            Expr::Match(match_expr, _) => {
+                Self::collect_scoped_names_in_expr(&match_expr.scrutinee, names);
+                for arm in &match_expr.arms {
+                    if let Some(guard) = &arm.guard {
+                        Self::collect_scoped_names_in_expr(guard, names);
+                    }
+                    Self::collect_scoped_names_in_expr(&arm.body, names);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    Self::collect_scoped_names_in_expr(start, names);
+                }
+                if let Some(end) = end {
+                    Self::collect_scoped_names_in_expr(end, names);
+                }
+            }
+            Expr::TimeframeContext { expr, .. } | Expr::UsingImpl { expr, .. } => {
+                Self::collect_scoped_names_in_expr(expr, names);
+            }
+            Expr::SimulationCall { params, .. } => {
+                for (_, value) in params {
+                    Self::collect_scoped_names_in_expr(value, names);
+                }
+            }
+            Expr::WindowExpr(window_expr, _) => {
+                use shape_ast::ast::WindowFunction;
+
+                match &window_expr.function {
+                    WindowFunction::Lag { expr, default, .. }
+                    | WindowFunction::Lead { expr, default, .. } => {
+                        Self::collect_scoped_names_in_expr(expr, names);
+                        if let Some(default) = default {
+                            Self::collect_scoped_names_in_expr(default, names);
+                        }
+                    }
+                    WindowFunction::FirstValue(expr)
+                    | WindowFunction::LastValue(expr)
+                    | WindowFunction::Sum(expr)
+                    | WindowFunction::Avg(expr)
+                    | WindowFunction::Min(expr)
+                    | WindowFunction::Max(expr) => {
+                        Self::collect_scoped_names_in_expr(expr, names);
+                    }
+                    WindowFunction::NthValue(expr, _) => {
+                        Self::collect_scoped_names_in_expr(expr, names);
+                    }
+                    WindowFunction::Count(Some(expr)) => {
+                        Self::collect_scoped_names_in_expr(expr, names);
+                    }
+                    WindowFunction::Count(None)
+                    | WindowFunction::RowNumber
+                    | WindowFunction::Rank
+                    | WindowFunction::DenseRank
+                    | WindowFunction::Ntile(_) => {}
+                }
+
+                for expr in &window_expr.over.partition_by {
+                    Self::collect_scoped_names_in_expr(expr, names);
+                }
+                if let Some(order_by) = &window_expr.over.order_by {
+                    for (expr, _) in &order_by.columns {
+                        Self::collect_scoped_names_in_expr(expr, names);
+                    }
+                }
+            }
+            Expr::FromQuery(from_query, _) => {
+                Self::collect_scoped_names_in_expr(&from_query.source, names);
+                for clause in &from_query.clauses {
+                    match clause {
+                        shape_ast::ast::QueryClause::Where(expr) => {
+                            Self::collect_scoped_names_in_expr(expr, names);
+                        }
+                        shape_ast::ast::QueryClause::OrderBy(specs) => {
+                            for spec in specs {
+                                Self::collect_scoped_names_in_expr(&spec.key, names);
+                            }
+                        }
+                        shape_ast::ast::QueryClause::GroupBy { element, key, .. } => {
+                            Self::collect_scoped_names_in_expr(element, names);
+                            Self::collect_scoped_names_in_expr(key, names);
+                        }
+                        shape_ast::ast::QueryClause::Join {
+                            source,
+                            left_key,
+                            right_key,
+                            ..
+                        } => {
+                            Self::collect_scoped_names_in_expr(source, names);
+                            Self::collect_scoped_names_in_expr(left_key, names);
+                            Self::collect_scoped_names_in_expr(right_key, names);
+                        }
+                        shape_ast::ast::QueryClause::Let { value, .. } => {
+                            Self::collect_scoped_names_in_expr(value, names);
+                        }
+                    }
+                }
+                Self::collect_scoped_names_in_expr(&from_query.select, names);
+            }
+            Expr::StructLiteral { fields, .. } => {
+                for (_, value) in fields {
+                    Self::collect_scoped_names_in_expr(value, names);
+                }
+            }
+            Expr::Join(join_expr, _) => {
+                for branch in &join_expr.branches {
+                    Self::collect_scoped_names_in_expr(&branch.expr, names);
+                    for ann in &branch.annotations {
+                        for arg in &ann.args {
+                            Self::collect_scoped_names_in_expr(arg, names);
+                        }
+                    }
+                }
+            }
+            Expr::Annotated {
+                annotation, target, ..
+            } => {
+                for arg in &annotation.args {
+                    Self::collect_scoped_names_in_expr(arg, names);
+                }
+                Self::collect_scoped_names_in_expr(target, names);
+            }
+            Expr::AsyncLet(async_let, _) => {
+                Self::collect_scoped_names_in_expr(&async_let.expr, names)
+            }
+            Expr::Comptime(stmts, _) => {
+                for stmt in stmts {
+                    Self::collect_scoped_names_in_statement(stmt, names);
+                }
+            }
+            Expr::ComptimeFor(comptime_for, _) => {
+                Self::collect_scoped_names_in_expr(&comptime_for.iterable, names);
+                for stmt in &comptime_for.body {
+                    Self::collect_scoped_names_in_statement(stmt, names);
+                }
+            }
+            Expr::EnumConstructor { payload, .. } => match payload {
+                shape_ast::ast::EnumConstructorPayload::Unit => {}
+                shape_ast::ast::EnumConstructorPayload::Tuple(values) => {
+                    for value in values {
+                        Self::collect_scoped_names_in_expr(value, names);
+                    }
+                }
+                shape_ast::ast::EnumConstructorPayload::Struct(fields) => {
+                    for (_, value) in fields {
+                        Self::collect_scoped_names_in_expr(value, names);
+                    }
+                }
+            },
+            Expr::Literal(..)
+            | Expr::Identifier(..)
+            | Expr::DataRef(..)
+            | Expr::DataDateTimeRef(..)
+            | Expr::TimeRef(..)
+            | Expr::DateTime(..)
+            | Expr::PatternRef(..)
+            | Expr::Duration(..)
+            | Expr::Break(None, _)
+            | Expr::Return(None, _)
+            | Expr::Continue(..)
+            | Expr::Unit(..) => {}
+        }
+    }
+
+    pub(super) fn apply_comptime_extend(
+        &mut self,
+        mut extend: shape_ast::ast::ExtendStatement,
+        target_name: &str,
+    ) -> Result<()> {
+        match &mut extend.type_name {
+            shape_ast::ast::TypeName::Simple(name) if name == "target" => {
+                *name = target_name.to_string();
+            }
+            shape_ast::ast::TypeName::Generic { name, .. } if name == "target" => {
+                *name = target_name.to_string();
+            }
+            _ => {}
+        }
+
+        for method in &extend.methods {
+            let func_def = self.desugar_extend_method(method, &extend.type_name)?;
+            self.register_function(&func_def)?;
+            self.compile_function_body(&func_def)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn process_comptime_directives(
+        &mut self,
+        directives: Vec<super::comptime_builtins::ComptimeDirective>,
+        target_name: &str,
+    ) -> std::result::Result<bool, String> {
+        let mut removed = false;
+        for directive in directives {
+            match directive {
+                super::comptime_builtins::ComptimeDirective::Extend(extend) => {
+                    self.apply_comptime_extend(extend, target_name)
+                        .map_err(|e| e.to_string())?;
+                }
+                super::comptime_builtins::ComptimeDirective::RemoveTarget => {
+                    removed = true;
+                    break;
+                }
+                super::comptime_builtins::ComptimeDirective::SetParamType { .. } => {
+                    return Err(
+                        "`set param` directives are only valid when compiling function targets"
+                            .to_string(),
+                    );
+                }
+                super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {
+                    return Err(
+                        "`set return` directives are only valid when compiling function targets"
+                            .to_string(),
+                    );
+                }
+                super::comptime_builtins::ComptimeDirective::ReplaceBody { .. } => {
+                    return Err(
+                        "`replace body` directives are only valid when compiling function targets"
+                            .to_string(),
+                    );
+                }
+                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
+                    return Err(
+                        "`replace module` directives are only valid when compiling module targets"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    fn process_comptime_directives_for_function(
+        &mut self,
+        directives: Vec<super::comptime_builtins::ComptimeDirective>,
+        target_name: &str,
+        func_def: &mut FunctionDef,
+    ) -> std::result::Result<bool, String> {
+        let mut removed = false;
+        for directive in directives {
+            match directive {
+                super::comptime_builtins::ComptimeDirective::Extend(extend) => {
+                    self.apply_comptime_extend(extend, target_name)
+                        .map_err(|e| e.to_string())?;
+                }
+                super::comptime_builtins::ComptimeDirective::RemoveTarget => {
+                    removed = true;
+                    break;
+                }
+                super::comptime_builtins::ComptimeDirective::SetParamType {
+                    param_name,
+                    type_annotation,
+                } => {
+                    let maybe_param = func_def
+                        .params
+                        .iter_mut()
+                        .find(|p| p.simple_name() == Some(param_name.as_str()));
+                    let Some(param) = maybe_param else {
+                        return Err(format!(
+                            "comptime directive referenced unknown parameter '{}'",
+                            param_name
+                        ));
+                    };
+                    if let Some(existing) = &param.type_annotation {
+                        if existing != &type_annotation {
+                            return Err(format!(
+                                "cannot override explicit type of parameter '{}'",
+                                param_name
+                            ));
+                        }
+                    } else {
+                        param.type_annotation = Some(type_annotation);
+                    }
+                }
+                super::comptime_builtins::ComptimeDirective::SetReturnType { type_annotation } => {
+                    if let Some(existing) = &func_def.return_type {
+                        if existing != &type_annotation {
+                            return Err("cannot override explicit function return type annotation"
+                                .to_string());
+                        }
+                    } else {
+                        func_def.return_type = Some(type_annotation);
+                    }
+                }
+                super::comptime_builtins::ComptimeDirective::ReplaceBody { body } => {
+                    // Create a shadow function from the original body so the
+                    // replacement can call __original__ to invoke the original
+                    // implementation.
+                    let shadow_name = format!("__original__{}", func_def.name);
+                    let shadow_def = FunctionDef {
+                        name: shadow_name.clone(),
+                        name_span: func_def.name_span,
+                        params: func_def.params.clone(),
+                        return_type: func_def.return_type.clone(),
+                        body: func_def.body.clone(),
+                        type_params: func_def.type_params.clone(),
+                        annotations: Vec::new(),
+                        where_clause: None,
+                        is_async: func_def.is_async,
+                        is_comptime: func_def.is_comptime,
+                    };
+                    self.register_function(&shadow_def)
+                        .map_err(|e| e.to_string())?;
+                    self.compile_function_body(&shadow_def)
+                        .map_err(|e| e.to_string())?;
+
+                    // Register alias so __original__ resolves to the shadow function.
+                    self.function_aliases
+                        .insert("__original__".to_string(), shadow_name);
+
+                    // Inject `let args = [param1, param2, ...]` at the start of the
+                    // replacement body so the replacement can forward all arguments.
+                    let param_idents: Vec<Expr> = func_def
+                        .params
+                        .iter()
+                        .filter_map(|p| {
+                            p.simple_name()
+                                .map(|n| Expr::Identifier(n.to_string(), Span::DUMMY))
+                        })
+                        .collect();
+                    let args_decl = Statement::VariableDecl(
+                        VariableDecl {
+                            kind: VarKind::Let,
+                            is_mut: false,
+                            pattern: DestructurePattern::Identifier(
+                                "args".to_string(),
+                                Span::DUMMY,
+                            ),
+                            type_annotation: None,
+                            value: Some(Expr::Array(param_idents, Span::DUMMY)),
+                            ownership: Default::default(),
+                        },
+                        Span::DUMMY,
+                    );
+                    let mut new_body = vec![args_decl];
+                    new_body.extend(body);
+                    func_def.body = new_body;
+                }
+                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
+                    return Err(
+                        "`replace module` directives are only valid when compiling module targets"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Validate that all annotations on a function are allowed for function targets.
+    fn validate_annotation_targets(&self, func_def: &FunctionDef) -> Result<()> {
+        for ann in &func_def.annotations {
+            self.validate_annotation_target_usage(
+                ann,
+                shape_ast::ast::functions::AnnotationTargetKind::Function,
+                func_def.name_span,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Find ALL compiled annotations with before/after handlers on self function.
+    /// Returns them in declaration order (first annotation = outermost wrapper).
+    fn find_compiled_annotations(
+        &self,
+        func_def: &FunctionDef,
+    ) -> Vec<crate::bytecode::CompiledAnnotation> {
+        let mut result = Vec::new();
+        for ann in &func_def.annotations {
+            if let Some(compiled) = self.program.compiled_annotations.get(&ann.name) {
+                if compiled.before_handler.is_some() || compiled.after_handler.is_some() {
+                    result.push(compiled.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// Compile a function with multiple chained annotations.
+    ///
+    /// For `@a @b function foo(x) { body }`:
+    /// 1. Compile original body as `foo___impl`
+    /// 2. Wrap with `@b`: compile wrapper as `foo___b` calling `foo___impl`
+    /// 3. Wrap with `@a`: compile wrapper as `foo` calling `foo___b`
+    ///
+    /// Annotations are applied inside-out: last annotation wraps first.
+    fn compile_chained_annotations(
+        &mut self,
+        func_def: &FunctionDef,
+        annotations: Vec<crate::bytecode::CompiledAnnotation>,
+    ) -> Result<()> {
+        // Step 1: Compile the raw function body as {name}___impl
+        let impl_name = format!("{}___impl", func_def.name);
+        let impl_def = FunctionDef {
+            name: impl_name.clone(),
+            name_span: func_def.name_span,
+            params: func_def.params.clone(),
+            return_type: func_def.return_type.clone(),
+            body: func_def.body.clone(),
+            type_params: func_def.type_params.clone(),
+            annotations: Vec::new(),
+            where_clause: None,
+            is_async: func_def.is_async,
+            is_comptime: func_def.is_comptime,
+        };
+        self.register_function(&impl_def)?;
+        self.compile_function_body(&impl_def)?;
+
+        let mut current_impl_idx =
+            self.find_function(&impl_name)
+                .ok_or_else(|| ShapeError::RuntimeError {
+                    message: format!("Impl function '{}' not found after compilation", impl_name),
+                    location: None,
+                })? as u16;
+
+        // Step 2: Apply annotations inside-out (last annotation wraps first)
+        // For @a @b @c: wrap order is c(impl) -> b(c_wrapper) -> a(b_wrapper)
+        let reversed: Vec<_> = annotations.into_iter().rev().collect();
+        let total = reversed.len();
+
+        for (i, ann) in reversed.into_iter().enumerate() {
+            let is_last = i == total - 1;
+            let wrapper_name = if is_last {
+                // The outermost annotation gets the original function name
+                func_def.name.clone()
+            } else {
+                // Intermediate wrappers get unique names
+                format!("{}___{}", func_def.name, ann.name)
+            };
+
+            // Find the annotation arg expressions from the original function def
+            let ann_arg_exprs = func_def
+                .annotations
+                .iter()
+                .find(|a| a.name == ann.name)
+                .map(|a| a.args.clone())
+                .unwrap_or_default();
+
+            // Register the intermediate wrapper function (outermost already registered)
+            let wrapper_func_idx = if is_last {
+                self.find_function(&func_def.name)
+                    .ok_or_else(|| ShapeError::RuntimeError {
+                        message: format!("Function '{}' not found", func_def.name),
+                        location: None,
+                    })?
+            } else {
+                // Create a placeholder function entry for the intermediate wrapper
+                let wrapper_def = FunctionDef {
+                    name: wrapper_name.clone(),
+                    name_span: func_def.name_span,
+                    params: func_def.params.clone(),
+                    return_type: func_def.return_type.clone(),
+                    body: Vec::new(), // placeholder
+                    type_params: func_def.type_params.clone(),
+                    annotations: Vec::new(),
+                    is_async: func_def.is_async,
+                    is_comptime: func_def.is_comptime,
+                    where_clause: None,
+                };
+                self.register_function(&wrapper_def)?;
+                self.find_function(&wrapper_name)
+                    .expect("function was just registered")
+            };
+
+            // Compile the wrapper that wraps current_impl_idx with self annotation
+            self.compile_annotation_wrapper(
+                func_def,
+                wrapper_func_idx,
+                current_impl_idx,
+                &ann,
+                &ann_arg_exprs,
+            )?;
+
+            current_impl_idx = wrapper_func_idx as u16;
+        }
+
+        Ok(())
+    }
+
+    /// Compile a function that has a single before/after annotation hook.
+    ///
+    /// 1. Compile original body as `{name}___impl`
+    /// 2. Compile a wrapper under the original name that calls before/impl/after
+    fn compile_wrapped_function(
+        &mut self,
+        func_def: &FunctionDef,
+        compiled_ann: crate::bytecode::CompiledAnnotation,
+    ) -> Result<()> {
+        // Find the annotation on the function to get the arg expressions
+        let ann = func_def
+            .annotations
+            .iter()
+            .find(|a| a.name == compiled_ann.name)
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!("Annotation '{}' not found on function", compiled_ann.name),
+                location: None,
+            })?;
+        let ann_arg_exprs = ann.args.clone();
+
+        // Step 1: Compile original body as {name}___impl
+        let impl_name = format!("{}___impl", func_def.name);
+        let impl_def = FunctionDef {
+            name: impl_name.clone(),
+            name_span: func_def.name_span,
+            params: func_def.params.clone(),
+            return_type: func_def.return_type.clone(),
+            body: func_def.body.clone(),
+            type_params: func_def.type_params.clone(),
+            annotations: Vec::new(),
+            where_clause: None,
+            is_async: func_def.is_async,
+            is_comptime: func_def.is_comptime,
+        };
+        self.register_function(&impl_def)?;
+        self.compile_function_body(&impl_def)?;
+
+        let impl_idx = self
+            .find_function(&impl_name)
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!("Impl function '{}' not found after compilation", impl_name),
+                location: None,
+            })? as u16;
+
+        // Step 2: Compile the wrapper
+        let func_idx =
+            self.find_function(&func_def.name)
+                .ok_or_else(|| ShapeError::RuntimeError {
+                    message: format!("Function '{}' not found", func_def.name),
+                    location: None,
+                })?;
+
+        self.compile_annotation_wrapper(func_def, func_idx, impl_idx, &compiled_ann, &ann_arg_exprs)
+    }
+
+    /// Core annotation wrapper compilation.
+    ///
+    /// Emits bytecode for a wrapper function at `wrapper_func_idx` that:
+    /// - Builds args array from function params
+    /// - Calls before(self, ...ann_params, args, ctx) if present
+    /// - Calls the impl function at `impl_idx` with (possibly modified) args
+    /// - Calls after(self, ...ann_params, args, result, ctx) if present
+    /// - Returns result
+    fn compile_annotation_wrapper(
+        &mut self,
+        func_def: &FunctionDef,
+        wrapper_func_idx: usize,
+        impl_idx: u16,
+        compiled_ann: &crate::bytecode::CompiledAnnotation,
+        ann_arg_exprs: &[shape_ast::ast::Expr],
+    ) -> Result<()> {
+        let jump_over = if self.current_function.is_none() {
+            Some(self.emit_jump(OpCode::Jump, 0))
+        } else {
+            None
+        };
+
+        let saved_function = self.current_function;
+        let saved_next_local = self.next_local;
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_is_async = self.current_function_is_async;
+
+        self.current_function = Some(wrapper_func_idx);
+        self.current_function_is_async = func_def.is_async;
+        self.locals = vec![HashMap::new()];
+        self.type_tracker.clear_locals();
+        self.push_scope();
+        self.next_local = 0;
+
+        self.program.functions[wrapper_func_idx].entry_point = self.program.current_offset();
+
+        // Start blob builder for this wrapper function.
+        let saved_blob_builder = self.current_blob_builder.take();
+        let wrapper_blob_name = self.program.functions[wrapper_func_idx].name.clone();
+        self.current_blob_builder = Some(super::FunctionBlobBuilder::new(
+            wrapper_blob_name,
+            self.program.current_offset(),
+            self.program.constants.len(),
+            self.program.strings.len(),
+        ));
+
+        // Bind original function params as locals
+        for param in &func_def.params {
+            for name in param.get_identifiers() {
+                self.declare_local(&name)?;
+            }
+        }
+
+        // Declare locals for wrapper internal state
+        let args_local = self.declare_local("__args")?;
+        let result_local = self.declare_local("__result")?;
+        let ctx_local = self.declare_local("__ctx")?;
+
+        // --- Build args array from function params ---
+        for (i, _param) in func_def.params.iter().enumerate() {
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(i as u16)),
+            ));
+        }
+        self.emit(Instruction::new(
+            OpCode::NewArray,
+            Some(Operand::Count(func_def.params.len() as u16)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::StoreLocal,
+            Some(Operand::Local(args_local)),
+        ));
+
+        // --- Build ctx object: { state: {}, event_log: [] } ---
+        let empty_schema_id = self.type_tracker.register_inline_object_schema(&[]);
+        self.emit(Instruction::new(
+            OpCode::NewTypedObject,
+            Some(Operand::TypedObjectAlloc {
+                schema_id: empty_schema_id as u16,
+                field_count: 0,
+            }),
+        ));
+
+        self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
+
+        let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
+            ("state", FieldType::Any),
+            ("event_log", FieldType::Array(Box::new(FieldType::Any))),
+        ]);
+        self.emit(Instruction::new(
+            OpCode::NewTypedObject,
+            Some(Operand::TypedObjectAlloc {
+                schema_id: ctx_schema_id as u16,
+                field_count: 2,
+            }),
+        ));
+        self.emit(Instruction::new(
+            OpCode::StoreLocal,
+            Some(Operand::Local(ctx_local)),
+        ));
+
+        // --- Call before handler if present ---
+        if let Some(before_id) = compiled_ann.before_handler {
+            let fn_ref = self
+                .program
+                .add_constant(Constant::Number(wrapper_func_idx as f64));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(fn_ref)),
+            ));
+
+            for ann_arg in ann_arg_exprs {
+                self.compile_expr(ann_arg)?;
+            }
+
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(args_local)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(ctx_local)),
+            ));
+
+            let before_arg_count = 1 + ann_arg_exprs.len() + 2;
+            let before_ac = self
+                .program
+                .add_constant(Constant::Number(before_arg_count as f64));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(before_ac)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::Call,
+                Some(Operand::Function(shape_value::FunctionId(before_id))),
+            ));
+            self.record_blob_call(before_id);
+
+            let before_result = self.declare_local("__before_result")?;
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(before_result)),
+            ));
+
+            // Check if before_result is an array → replace args
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(before_result)),
+            ));
+            let one_const = self.program.add_constant(Constant::Number(1.0));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(one_const)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(crate::bytecode::BuiltinFunction::IsArray)),
+            ));
+
+            let skip_array = self.emit_jump(OpCode::JumpIfFalse, 0);
+
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(before_result)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(args_local)),
+            ));
+            let skip_obj_check = self.emit_jump(OpCode::Jump, 0);
+
+            self.patch_jump(skip_array);
+
+            // Check if before_result is an object → extract "args" and "state"
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(before_result)),
+            ));
+            let one_const2 = self.program.add_constant(Constant::Number(1.0));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(one_const2)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(crate::bytecode::BuiltinFunction::IsObject)),
+            ));
+
+            let skip_obj = self.emit_jump(OpCode::JumpIfFalse, 0);
+
+            // Strict contract: before-handler object form uses typed fields {args, state}.
+            // No generic string-key property lookup in hot paths.
+            let before_contract_schema_id =
+                self.type_tracker.register_inline_object_schema_typed(&[
+                    ("args", FieldType::Any),
+                    ("state", FieldType::Any),
+                ]);
+            if before_contract_schema_id > u16::MAX as u32 {
+                return Err(ShapeError::RuntimeError {
+                    message: "Internal error: before-handler schema id overflow".to_string(),
+                    location: None,
+                });
+            }
+            let (args_operand, state_operand) = {
+                let schema = self
+                    .type_tracker
+                    .schema_registry()
+                    .get_by_id(before_contract_schema_id)
+                    .ok_or_else(|| ShapeError::RuntimeError {
+                        message: "Internal error: missing before-handler schema".to_string(),
+                        location: None,
+                    })?;
+                let args_field =
+                    schema
+                        .get_field("args")
+                        .ok_or_else(|| ShapeError::RuntimeError {
+                            message: "Internal error: before-handler schema missing 'args'"
+                                .to_string(),
+                            location: None,
+                        })?;
+                let state_field =
+                    schema
+                        .get_field("state")
+                        .ok_or_else(|| ShapeError::RuntimeError {
+                            message: "Internal error: before-handler schema missing 'state'"
+                                .to_string(),
+                            location: None,
+                        })?;
+                if args_field.offset > u16::MAX as usize || state_field.offset > u16::MAX as usize {
+                    return Err(ShapeError::RuntimeError {
+                        message: "Internal error: before-handler field offset/index overflow"
+                            .to_string(),
+                        location: None,
+                    });
+                }
+                (
+                    Operand::TypedField {
+                        type_id: before_contract_schema_id as u16,
+                        field_idx: args_field.index as u16,
+                        field_type_tag: field_type_to_tag(&args_field.field_type),
+                    },
+                    Operand::TypedField {
+                        type_id: before_contract_schema_id as u16,
+                        field_idx: state_field.index as u16,
+                        field_type_tag: field_type_to_tag(&state_field.field_type),
+                    },
+                )
+            };
+
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(before_result)),
+            ));
+            self.emit(Instruction::new(OpCode::GetFieldTyped, Some(args_operand)));
+            self.emit(Instruction::simple(OpCode::Dup));
+            self.emit(Instruction::simple(OpCode::PushNull));
+            self.emit(Instruction::simple(OpCode::Eq));
+            let skip_args_replace = self.emit_jump(OpCode::JumpIfTrue, 0);
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(args_local)),
+            ));
+            let skip_pop_args = self.emit_jump(OpCode::Jump, 0);
+            self.patch_jump(skip_args_replace);
+            self.emit(Instruction::simple(OpCode::Pop));
+            self.patch_jump(skip_pop_args);
+
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(before_result)),
+            ));
+            self.emit(Instruction::new(OpCode::GetFieldTyped, Some(state_operand)));
+            self.emit(Instruction::simple(OpCode::Dup));
+            self.emit(Instruction::simple(OpCode::PushNull));
+            self.emit(Instruction::simple(OpCode::Eq));
+            let skip_state = self.emit_jump(OpCode::JumpIfTrue, 0);
+            self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
+            self.emit(Instruction::new(
+                OpCode::NewTypedObject,
+                Some(Operand::TypedObjectAlloc {
+                    schema_id: ctx_schema_id as u16,
+                    field_count: 2,
+                }),
+            ));
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(ctx_local)),
+            ));
+            let skip_pop_state = self.emit_jump(OpCode::Jump, 0);
+            self.patch_jump(skip_state);
+            self.emit(Instruction::simple(OpCode::Pop));
+            self.patch_jump(skip_pop_state);
+
+            self.patch_jump(skip_obj);
+            self.patch_jump(skip_obj_check);
+        }
+
+        // --- Call impl function with (possibly modified) args ---
+        for i in 0..func_def.params.len() {
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(args_local)),
+            ));
+            let idx_const = self.program.add_constant(Constant::Number(i as f64));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(idx_const)),
+            ));
+            self.emit(Instruction::simple(OpCode::GetProp));
+        }
+        let impl_ac = self
+            .program
+            .add_constant(Constant::Number(func_def.params.len() as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(impl_ac)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::Call,
+            Some(Operand::Function(shape_value::FunctionId(impl_idx))),
+        ));
+        self.record_blob_call(impl_idx);
+
+        // For void functions, the impl returns null (the implicit return sentinel).
+        // The after handler's `result` parameter would then trip the "missing
+        // required argument guard" because null is the sentinel for "parameter not
+        // provided". Replace null with Unit so the guard doesn't fire.
+        // We only do this for explicitly void functions (return_type: Void) to avoid
+        // clobbering valid return values from functions with unspecified return types.
+        if compiled_ann.after_handler.is_some() {
+            let is_explicit_void = matches!(
+                func_def.return_type,
+                Some(shape_ast::ast::TypeAnnotation::Void)
+            );
+            if is_explicit_void {
+                // Void function: always replace null with Unit
+                self.emit(Instruction::simple(OpCode::Pop));
+                self.emit_unit();
+            } else if func_def.return_type.is_none() {
+                // Unspecified return type: replace null with Unit at runtime
+                // (if the function actually returned a value, it won't be null)
+                self.emit(Instruction::simple(OpCode::Dup));
+                self.emit(Instruction::simple(OpCode::PushNull));
+                self.emit(Instruction::simple(OpCode::Eq));
+                let skip_replace = self.emit_jump(OpCode::JumpIfFalse, 0);
+                // Replace the null on stack with Unit
+                self.emit(Instruction::simple(OpCode::Pop));
+                self.emit_unit();
+                self.patch_jump(skip_replace);
+            }
+        }
+
+        // Store result
+        self.emit(Instruction::new(
+            OpCode::StoreLocal,
+            Some(Operand::Local(result_local)),
+        ));
+
+        // --- Call after handler if present ---
+        if let Some(after_id) = compiled_ann.after_handler {
+            let fn_ref = self
+                .program
+                .add_constant(Constant::Number(wrapper_func_idx as f64));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(fn_ref)),
+            ));
+
+            for ann_arg in ann_arg_exprs {
+                self.compile_expr(ann_arg)?;
+            }
+
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(args_local)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(result_local)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(ctx_local)),
+            ));
+
+            let after_arg_count = 1 + ann_arg_exprs.len() + 3;
+            let after_ac = self
+                .program
+                .add_constant(Constant::Number(after_arg_count as f64));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(after_ac)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::Call,
+                Some(Operand::Function(shape_value::FunctionId(after_id))),
+            ));
+            self.record_blob_call(after_id);
+
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(result_local)),
+            ));
+        }
+
+        // Return the result
+        self.emit(Instruction::new(
+            OpCode::LoadLocal,
+            Some(Operand::Local(result_local)),
+        ));
+        self.emit(Instruction::simple(OpCode::ReturnValue));
+
+        // Update function locals count
+        self.program.functions[wrapper_func_idx].locals_count = self.next_local;
+        self.capture_function_local_storage_hints(wrapper_func_idx);
+
+        // Finalize blob and restore the parent blob builder.
+        self.finalize_current_blob(wrapper_func_idx);
+        self.current_blob_builder = saved_blob_builder;
+
+        // Restore state
+        self.pop_scope();
+        self.locals = saved_locals;
+        self.current_function = saved_function;
+        self.current_function_is_async = saved_is_async;
+        self.next_local = saved_next_local;
+
+        if let Some(jump_addr) = jump_over {
+            self.patch_jump(jump_addr);
+        }
+
+        Ok(())
+    }
+
+    /// Core function body compilation (shared by normal functions and ___impl functions)
+    fn compile_function_body(&mut self, func_def: &FunctionDef) -> Result<()> {
+        // Find function index
+        let func_idx = self
+            .program
+            .functions
+            .iter()
+            .position(|f| f.name == func_def.name)
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!("Function not found: {}", func_def.name),
+                location: None,
+            })?;
+
+        // If compiling at top-level (not inside another function), emit a jump over the function body
+        // This prevents the VM from falling through into function code during normal execution
+        let jump_over = if self.current_function.is_none() {
+            Some(self.emit_jump(OpCode::Jump, 0))
+        } else {
+            None
+        };
+
+        // Save current state
+        let saved_function = self.current_function;
+        let saved_next_local = self.next_local;
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_is_async = self.current_function_is_async;
+        let saved_ref_locals = std::mem::take(&mut self.ref_locals);
+        let saved_exclusive_ref_locals = std::mem::take(&mut self.exclusive_ref_locals);
+        let saved_comptime_mode = self.comptime_mode;
+        let saved_drop_locals = std::mem::take(&mut self.drop_locals);
+        let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
+        let saved_param_locals = std::mem::take(&mut self.param_locals);
+
+        // Set up isolated locals for function compilation
+        self.current_function = Some(func_idx);
+        self.current_function_is_async = func_def.is_async;
+
+        // If this is a `comptime fn`, mark the compilation context as comptime
+        // so that calls to other `comptime fn` functions within the body are allowed.
+        if func_def.is_comptime {
+            self.comptime_mode = true;
+        }
+        self.locals = vec![HashMap::new()];
+        self.type_tracker.clear_locals(); // Clear local type info for new function
+        self.borrow_checker.reset(); // Reset borrow checker for new function scope
+        self.ref_locals.clear();
+        self.exclusive_ref_locals.clear();
+        self.immutable_locals.clear();
+        self.param_locals.clear();
+        self.push_scope();
+        self.push_drop_scope();
+        self.next_local = 0;
+
+        // Reset expression-level tracking to prevent stale values from previous
+        // function compilations leaking into parameter binding
+        self.last_expr_schema = None;
+        self.last_expr_numeric_type = None;
+        self.last_expr_type_info = None;
+
+        // Set function entry point (AFTER the jump instruction)
+        self.program.functions[func_idx].entry_point = self.program.current_offset();
+
+        // Start blob builder for this function (snapshot global pool sizes).
+        let saved_blob_builder = self.current_blob_builder.take();
+        self.current_blob_builder = Some(super::FunctionBlobBuilder::new(
+            func_def.name.clone(),
+            self.program.current_offset(),
+            self.program.constants.len(),
+            self.program.strings.len(),
+        ));
+
+        // Bind parameters as locals - destructure each parameter value
+        // Parameters arrive in local slots 0, 1, 2, ... from caller
+        for (idx, param) in func_def.params.iter().enumerate() {
+            // Load parameter value from its slot
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(idx as u16)),
+            ));
+            // Destructure into bindings (self declares locals and binds them)
+            self.compile_destructure_pattern(&param.pattern)?;
+
+            // Propagate parameter type annotations into local type tracker so
+            // dot-access compiles to typed field ops (no runtime property fallback).
+            if let Some(name) = param.pattern.as_identifier() {
+                if let Some(local_idx) = self.resolve_local(name) {
+                    if let Some(type_ann) = &param.type_annotation {
+                        match type_ann {
+                            shape_ast::ast::TypeAnnotation::Object(fields) => {
+                                let field_refs: Vec<&str> =
+                                    fields.iter().map(|f| f.name.as_str()).collect();
+                                let schema_id =
+                                    self.type_tracker.register_inline_object_schema(&field_refs);
+                                let schema_name = self
+                                    .type_tracker
+                                    .schema_registry()
+                                    .get_by_id(schema_id)
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_else(|| format!("__anon_{}", schema_id));
+                                let info = crate::type_tracking::VariableTypeInfo::known(
+                                    schema_id,
+                                    schema_name,
+                                );
+                                self.type_tracker.set_local_type(local_idx, info);
+                            }
+                            _ => {
+                                if let Some(type_name) =
+                                    Self::tracked_type_name_from_annotation(type_ann)
+                                {
+                                    self.set_local_type_info(local_idx, &type_name);
+                                }
+                            }
+                        }
+                        self.try_track_datatable_type(type_ann, local_idx, true)?;
+                    } else {
+                        // Mark as a param local with inferred type (no explicit annotation).
+                        // storage_hint_for_expr will not trust these for typed Add emission.
+                        self.param_locals.insert(local_idx);
+                        let inferred_type_name = self
+                            .inferred_param_type_hints
+                            .get(&func_def.name)
+                            .and_then(|hints| hints.get(idx))
+                            .and_then(|hint| hint.clone());
+                        if let Some(type_name) = inferred_type_name {
+                            self.set_local_type_info(local_idx, &type_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Mark reference parameters in ref_locals so identifier/assignment compilation
+        // emits DerefLoad/DerefStore/SetIndexRef instead of LoadLocal/StoreLocal/SetLocalIndex.
+        for (idx, param) in func_def.params.iter().enumerate() {
+            if param.is_reference {
+                self.ref_locals.insert(idx as u16);
+                if param.is_mut_reference {
+                    self.exclusive_ref_locals.insert(idx as u16);
+                }
+            }
+        }
+
+        // If self is a DataTable closure, tag the first user parameter as RowView
+        if let Some((schema_id, type_name)) = self.closure_row_schema.take() {
+            let row_param_slot = func_def
+                .params
+                .first()
+                .and_then(|param| param.pattern.as_identifier())
+                .and_then(|name| self.resolve_local(name))
+                .unwrap_or_else(|| self.program.functions[func_idx].captures_count);
+
+            self.type_tracker.set_local_type(
+                row_param_slot,
+                crate::type_tracking::VariableTypeInfo::row_view(schema_id, type_name),
+            );
+        }
+
+        // Parameter defaults: only check parameters that have a default value.
+        // Required parameters are guaranteed to have a real value from the caller
+        // (arity is enforced at call sites), so no unit-check is needed for them.
+        for (idx, param) in func_def.params.iter().enumerate() {
+            if let Some(default_expr) = &param.default_value {
+                // Check if the caller omitted this argument (sent unit sentinel)
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(idx as u16)),
+                ));
+                self.emit_unit();
+                self.emit(Instruction::simple(OpCode::Eq));
+
+                let skip_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
+
+                // Caller omitted this arg — fill in the default value
+                self.compile_expr(default_expr)?;
+                self.emit(Instruction::new(
+                    OpCode::StoreLocal,
+                    Some(Operand::Local(idx as u16)),
+                ));
+
+                self.patch_jump(skip_jump);
+            }
+        }
+
+        // Compile function body with implicit return support
+        let body_len = func_def.body.len();
+        for (idx, stmt) in func_def.body.iter().enumerate() {
+            let is_last = idx == body_len - 1;
+
+            // Check if the last statement is an expression - if so, use implicit return
+            if is_last {
+                match stmt {
+                    Statement::Expression(expr, _) => {
+                        // Compile expression and keep value on stack for implicit return
+                        self.compile_expr(expr)?;
+                        // Emit drops for function-level locals before returning
+                        let total_scopes = self.drop_locals.len();
+                        if total_scopes > 0 {
+                            self.emit_drops_for_early_exit(total_scopes)?;
+                        }
+                        self.emit(Instruction::simple(OpCode::ReturnValue));
+                        // Skip the fallback return below since we've already returned
+                        // Update function locals count
+                        self.program.functions[func_idx].locals_count = self.next_local;
+                        self.capture_function_local_storage_hints(func_idx);
+                        // Finalize blob builder and store completed blob
+                        self.finalize_current_blob(func_idx);
+                        self.current_blob_builder = saved_blob_builder;
+                        // Restore state
+                        self.drop_locals = saved_drop_locals;
+                        self.boxed_locals = saved_boxed_locals;
+                        self.param_locals = saved_param_locals;
+                        self.pop_scope();
+                        self.locals = saved_locals;
+                        self.current_function = saved_function;
+                        self.current_function_is_async = saved_is_async;
+                        self.next_local = saved_next_local;
+                        self.ref_locals = saved_ref_locals;
+                        self.exclusive_ref_locals = saved_exclusive_ref_locals.clone();
+                        self.comptime_mode = saved_comptime_mode;
+                        // Patch the jump-over instruction if we emitted one
+                        if let Some(jump_addr) = jump_over {
+                            self.patch_jump(jump_addr);
+                        }
+                        return Ok(());
+                    }
+                    Statement::Return(_, _) => {
+                        // Explicit return - compile normally, it will handle its own return
+                        self.compile_statement(stmt)?;
+                        // After an explicit return, we still need the fallback below for
+                        // control flow that might skip the return (though rare)
+                    }
+                    _ => {
+                        // Other statement types - compile normally
+                        self.compile_statement(stmt)?;
+                    }
+                }
+            } else {
+                self.compile_statement(stmt)?;
+            }
+        }
+
+        // Emit drops for function-level locals before implicit null return
+        let total_scopes = self.drop_locals.len();
+        if total_scopes > 0 {
+            self.emit_drops_for_early_exit(total_scopes)?;
+        }
+
+        // Implicit return null if no explicit return and last stmt wasn't an expression
+        self.emit(Instruction::simple(OpCode::PushNull));
+        self.emit(Instruction::simple(OpCode::ReturnValue));
+
+        // Update function locals count
+        self.program.functions[func_idx].locals_count = self.next_local;
+        self.capture_function_local_storage_hints(func_idx);
+
+        // Finalize blob builder and store completed blob
+        self.finalize_current_blob(func_idx);
+        self.current_blob_builder = saved_blob_builder;
+
+        // Restore state
+        self.drop_locals = saved_drop_locals;
+        self.boxed_locals = saved_boxed_locals;
+        self.pop_scope();
+        self.locals = saved_locals;
+        self.current_function = saved_function;
+        self.current_function_is_async = saved_is_async;
+        self.next_local = saved_next_local;
+        self.ref_locals = saved_ref_locals;
+        self.exclusive_ref_locals = saved_exclusive_ref_locals;
+        self.comptime_mode = saved_comptime_mode;
+
+        // Patch the jump-over instruction if we emitted one
+        if let Some(jump_addr) = jump_over {
+            self.patch_jump(jump_addr);
+        }
+
+        Ok(())
+    }
+
+    // Compile a statement
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bytecode::Constant;
+    use crate::compiler::BytecodeCompiler;
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::ValueWord;
+
+    fn eval(code: &str) -> ValueWord {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.execute(None).expect("execution failed").clone()
+    }
+
+    fn compiles(code: &str) -> Result<crate::bytecode::BytecodeProgram, String> {
+        let program =
+            shape_ast::parser::parse_program(code).map_err(|e| format!("parse: {}", e))?;
+        let compiler = BytecodeCompiler::new();
+        compiler
+            .compile(&program)
+            .map_err(|e| format!("compile: {}", e))
+    }
+
+    #[test]
+    fn test_const_param_requires_compile_time_constant_argument() {
+        let code = r#"
+            function connect(const conn_str: string) {
+                conn_str
+            }
+            let value = "duckdb://local.db"
+            connect(value)
+        "#;
+        let err = compiles(code).expect_err("non-constant argument for const param should fail");
+        assert!(
+            err.contains("declared `const` and requires a compile-time constant argument"),
+            "Expected const argument diagnostic, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_const_template_skips_comptime_until_specialized() {
+        let code = r#"
+            annotation schema_connect() {
+                comptime post(target, ctx) {
+                    // `uri` is a const template parameter and is only bound on specialization.
+                    if uri == "duckdb://analytics.db" {
+                        set return int
+                    } else {
+                        set return int
+                    }
+                }
+            }
+
+            @schema_connect()
+            function connect(const uri) {
+                1
+            }
+        "#;
+        let _ = compiles(code).expect("template base should compile without specialization");
+    }
+
+    #[test]
+    fn test_const_template_specialization_binds_const_values() {
+        let code = r#"
+            annotation schema_connect() {
+                comptime post(target, ctx) {
+                    if uri == "duckdb://analytics.db" {
+                        set return int
+                    } else {
+                        set return int
+                    }
+                }
+            }
+
+            @schema_connect()
+            function connect(const uri) {
+                1
+            }
+
+            let a = connect("duckdb://analytics.db")
+            let b = connect("duckdb://other.db")
+        "#;
+        let bytecode = compiles(code).expect("const specialization should compile");
+        let specialization_count = bytecode
+            .functions
+            .iter()
+            .filter(|f| f.name.starts_with("connect__const_"))
+            .count();
+        assert_eq!(
+            specialization_count, 2,
+            "expected one specialization per distinct const argument"
+        );
+    }
+
+    #[test]
+    fn test_comptime_before_cannot_override_explicit_param_type() {
+        let code = r#"
+            annotation force_string() {
+                comptime pre(target, ctx) {
+                    set param x: string
+                }
+            }
+            @force_string()
+            function foo(x: int) {
+                x
+            }
+        "#;
+        let err = compiles(code).expect_err("explicit param type override should fail");
+        assert!(
+            err.contains("cannot override explicit type of parameter 'x'"),
+            "Expected explicit param override error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_comptime_after_cannot_override_explicit_return_type() {
+        let code = r#"
+            annotation force_string_return() {
+                comptime post(target, ctx) {
+                    set return string
+                }
+            }
+            @force_string_return()
+            function foo() -> int {
+                1
+            }
+        "#;
+        let err = compiles(code).expect_err("explicit return type override should fail");
+        assert!(
+            err.contains("cannot override explicit function return type annotation"),
+            "Expected explicit return override error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_comptime_after_receives_annotation_args() {
+        let code = r#"
+            annotation set_return_type_from_annotation(type_name) {
+                comptime post(target, ctx, ty) {
+                    if ty == "int" {
+                        set return int
+                    } else {
+                        set return string
+                    }
+                }
+            }
+            @set_return_type_from_annotation("int")
+            fn foo() {
+                1
+            }
+            foo()
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result.as_number_coerce().expect("Expected numeric result"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn test_comptime_after_variadic_annotation_args() {
+        let code = r#"
+            annotation variadic_schema() {
+                comptime post(target, ctx, ...config) {
+                    set return int
+                }
+            }
+            @variadic_schema(1, "x", true)
+            fn foo() {
+                1
+            }
+            foo()
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result.as_number_coerce().expect("Expected numeric result"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn test_comptime_after_arg_arity_errors() {
+        let missing_arg = r#"
+            annotation needs_arg() {
+                comptime post(target, ctx, config) {
+                    target.name
+                }
+            }
+            @needs_arg()
+            fn foo() { 1 }
+        "#;
+        let err = compiles(missing_arg).expect_err("missing annotation arg should fail");
+        assert!(
+            err.contains("missing annotation argument for comptime handler parameter 'config'"),
+            "unexpected error: {}",
+            err
+        );
+
+        let too_many = r#"
+            annotation one_arg() {
+                comptime post(target, ctx, config) {
+                    target.name
+                }
+            }
+            @one_arg(1, 2)
+            fn foo() { 1 }
+        "#;
+        let err = compiles(too_many).expect_err("too many annotation args should fail");
+        assert!(
+            err.contains("too many annotation arguments"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_comptime_after_can_replace_function_body() {
+        let code = r#"
+            annotation synthesize_body() {
+                comptime post(target, ctx) {
+                    replace body {
+                        return 42
+                    }
+                }
+            }
+            @synthesize_body()
+            function foo() {
+            }
+            foo()
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result
+                .as_number_coerce()
+                .expect("Expected 42 from synthesized body"),
+            42.0
+        );
+    }
+
+    #[test]
+    fn test_comptime_after_can_replace_function_body_from_expr() {
+        let code = r#"
+            comptime fn body_src() {
+                "return 7"
+            }
+
+            annotation synthesize_body_expr() {
+                comptime post(target, ctx) {
+                    replace body (body_src())
+                }
+            }
+            @synthesize_body_expr()
+            function foo() {
+            }
+            foo()
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result
+                .as_number_coerce()
+                .expect("Expected 7 from synthesized body"),
+            7.0
+        );
+    }
+
+    #[test]
+    fn test_comptime_handler_extend_generates_method() {
+        // A comptime handler using direct `extend` should register generated methods.
+        let code = r#"
+            annotation add_method() {
+                targets: [type]
+                comptime post(target, ctx) {
+                    extend Number {
+                        method doubled() { self * 2.0 }
+                    }
+                }
+            }
+
+            @add_method()
+            type Marker { x: int }
+
+            (5.0).doubled()
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result.as_number_coerce().expect("Expected Number(10.0)"),
+            10.0
+        );
+    }
+
+    #[test]
+    fn test_comptime_handler_extend_method_executes() {
+        // Verify the generated extend method actually runs correctly
+        let code = r#"
+            annotation auto_extend() {
+                targets: [type]
+                comptime post(target, ctx) {
+                    extend Number {
+                        method tripled() { self * 3.0 }
+                    }
+                }
+            }
+            @auto_extend()
+            type Marker { x: int }
+            (10.0).tripled()
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result.as_number_coerce().expect("Expected Number(30.0)"),
+            30.0
+        );
+    }
+
+    #[test]
+    fn test_comptime_handler_non_object_result_ignored() {
+        // Handler values are ignored unless explicit directives are emitted.
+        let code = r#"
+            annotation no_op() {
+                comptime post(target, ctx) {
+                    "just a string"
+                }
+            }
+            @no_op()
+            function my_func(x) {
+                return x + 1.0
+            }
+            my_func(5.0)
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result.as_number_coerce().expect("Expected Number(6.0)"),
+            6.0
+        );
+    }
+
+    #[test]
+    fn test_legacy_action_object_not_processed() {
+        // Legacy action-object return values are intentionally ignored.
+        let code = r#"
+            annotation legacy() {
+                comptime post(target, ctx) {
+                    { action: "extend", source: "method doubled() { return self * 2.0 }", type: "Number" }
+                }
+            }
+            @legacy()
+            function placeholder() { 0 }
+            (5.0).doubled()
+        "#;
+        let result = compiles(code).expect("legacy action object should not fail compilation");
+        let has_doubled = result
+            .functions
+            .iter()
+            .any(|f| f.name.ends_with("::doubled"));
+        assert!(
+            !has_doubled,
+            "Legacy action-object return should not generate methods"
+        );
+    }
+
+    #[test]
+    fn test_comptime_handler_extend_multiple_methods() {
+        // A comptime handler can emit multiple methods in one extend block.
+        let code = r#"
+            annotation math_ops() {
+                targets: [type]
+                comptime post(target, ctx) {
+                    extend Number {
+                        method add_ten() { self + 10.0 }
+                        method sub_ten() { self - 10.0 }
+                    }
+                }
+            }
+            @math_ops()
+            type Marker { x: int }
+            let a = (25.0).add_ten()
+            let b = (25.0).sub_ten()
+            a + b
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result.as_number_coerce().expect("Expected Number(50.0)"),
+            50.0
+        );
+    }
+
+    #[test]
+    fn test_expression_annotation_comptime_handler_executes() {
+        // Expression-level annotation should run comptime handler and process extend directives.
+        let code = r#"
+            annotation expr_extend() {
+                targets: [expression]
+                comptime post(target, ctx) {
+                    extend Number {
+                        method quadrupled() { self * 4.0 }
+                    }
+                }
+            }
+
+            let x = @expr_extend() 2.0
+            x.quadrupled()
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result.as_number_coerce().expect("Expected Number(8.0)"),
+            8.0
+        );
+    }
+
+    #[test]
+    fn test_expression_annotation_target_validation() {
+        // Type-only annotation applied to an expression should fail with a target error.
+        let code = r#"
+            annotation only_type() {
+                targets: [type]
+                comptime post(target, ctx) {
+                    target.kind
+                }
+            }
+
+            let x = @only_type() 1
+        "#;
+        let err = compiles(code).expect_err("type-only annotation on expression should fail");
+        assert!(
+            err.contains("cannot be applied to a expression"),
+            "Expected expression target error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_expression_annotation_rejects_definition_lifecycle_hooks() {
+        let code = r#"
+            annotation info() {
+                metadata(target, ctx) {
+                    target.kind
+                }
+            }
+
+            let x = @info() 1
+        "#;
+        let err =
+            compiles(code).expect_err("definition-time lifecycle hooks on expression should fail");
+        assert!(
+            err.contains("definition-time lifecycle hooks"),
+            "Expected definition-time lifecycle target error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_await_annotation_target_validation() {
+        // Await-only annotation should compile in await context.
+        let ok_code = r#"
+            annotation only_await() {
+                targets: [await_expr]
+                comptime post(target, ctx) {
+                    target.kind
+                }
+            }
+
+            async function ready() {
+                return 1
+            }
+
+            async function run() {
+                await @only_await() ready()
+                return 1
+            }
+        "#;
+        assert!(
+            compiles(ok_code).is_ok(),
+            "await annotation should be accepted in await context"
+        );
+
+        // The same await-only annotation on a plain expression must fail.
+        let bad_code = r#"
+            annotation only_await() {
+                targets: [await_expr]
+                comptime post(target, ctx) {
+                    target.kind
+                }
+            }
+
+            let x = @only_await() 1
+        "#;
+        let err = compiles(bad_code).expect_err("await-only annotation on expression should fail");
+        assert!(
+            err.contains("cannot be applied to a expression"),
+            "Expected expression target error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_direct_extend_target_on_type_via_comptime_handler() {
+        // Direct `extend target { ... }` should work without action-object indirection.
+        let code = r#"
+            annotation add_sum() {
+                targets: [type]
+                comptime post(target, ctx) {
+                    extend target {
+                        method sum() {
+                            self.x + self.y
+                        }
+                    }
+                }
+            }
+
+            @add_sum()
+            type Point { x: int, y: int }
+
+            Point { x: 2, y: 3 }.sum()
+        "#;
+        let result = eval(code);
+        assert_eq!(result.as_number_coerce().expect("Expected 5"), 5.0);
+    }
+
+    #[test]
+    fn test_direct_remove_target_on_expression() {
+        // `remove target` on an expression target should replace the expression with null.
+        let code = r#"
+            annotation drop_expr() {
+                targets: [expression]
+                comptime post(target, ctx) {
+                    remove target
+                }
+            }
+
+            let x = @drop_expr() 123
+            x
+        "#;
+        let result = eval(code);
+        assert!(
+            result.is_none(),
+            "Expected None after remove target, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_replace_body_original_calls_original_function() {
+        // __original__ should call the original function body from a replacement body.
+        let code = r#"
+            annotation wrap() {
+                comptime post(target, ctx) {
+                    replace body {
+                        return __original__(5) + 100
+                    }
+                }
+            }
+            @wrap()
+            function add_ten(x) {
+                return x + 10
+            }
+            add_ten(0)
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result
+                .as_number_coerce()
+                .expect("Expected 115 from __original__ call"),
+            115.0,
+        );
+    }
+
+    #[test]
+    fn test_replace_body_args_contains_function_parameters() {
+        // `args` should be an array of the function's parameters in the replacement body.
+        let code = r#"
+            annotation with_args() {
+                comptime post(target, ctx) {
+                    replace body {
+                        return args.len()
+                    }
+                }
+            }
+            @with_args()
+            function three_params(a, b, c) {
+                return 0
+            }
+            three_params(10, 20, 30)
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result
+                .as_number_coerce()
+                .expect("Expected 3 from args.len()"),
+            3.0,
+        );
+    }
+
+    #[test]
+    fn test_replace_body_original_with_no_params() {
+        // __original__ should work even with zero-parameter functions.
+        let code = r#"
+            annotation add_one() {
+                comptime post(target, ctx) {
+                    replace body {
+                        return __original__() + 1
+                    }
+                }
+            }
+            @add_one()
+            function get_value() {
+                return 41
+            }
+            get_value()
+        "#;
+        let result = eval(code);
+        assert_eq!(
+            result
+                .as_number_coerce()
+                .expect("Expected 42 from __original__() + 1"),
+            42.0,
+        );
+    }
+
+    #[test]
+    fn test_content_addressed_program_has_main_and_functions() {
+        let code = r#"
+            function add(a, b) { a + b }
+            function mul(a, b) { a * b }
+            let x = add(2, 3)
+            mul(x, 4)
+        "#;
+        let bytecode = compiles(code).expect("should compile");
+        let ca = bytecode
+            .content_addressed
+            .expect("content_addressed program should be Some");
+
+        // Should have at least __main__, add, and mul blobs
+        assert!(
+            ca.function_store.len() >= 3,
+            "Expected at least 3 blobs (__main__, add, mul), got {}",
+            ca.function_store.len()
+        );
+
+        // Entry should be set (non-zero hash)
+        assert_ne!(
+            ca.entry,
+            crate::bytecode::FunctionHash::ZERO,
+            "Entry hash should not be zero"
+        );
+
+        // Entry should be in the function store
+        assert!(
+            ca.function_store.contains_key(&ca.entry),
+            "Entry hash should be present in function_store"
+        );
+
+        // Check that each blob has a non-zero content hash
+        for (hash, blob) in &ca.function_store {
+            assert_ne!(
+                *hash,
+                crate::bytecode::FunctionHash::ZERO,
+                "Blob '{}' should have non-zero hash",
+                blob.name
+            );
+            assert_eq!(
+                *hash, blob.content_hash,
+                "Blob '{}' key should match its content_hash",
+                blob.name
+            );
+            assert!(
+                !blob.instructions.is_empty(),
+                "Blob '{}' should have instructions",
+                blob.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_content_addressed_blob_has_local_pools() {
+        let code = r#"
+            function greet(name) { "hello " + name }
+            greet("world")
+        "#;
+        let bytecode = compiles(code).expect("should compile");
+        let ca = bytecode
+            .content_addressed
+            .expect("content_addressed program should be Some");
+
+        // Find the greet blob
+        let greet_blob = ca
+            .function_store
+            .values()
+            .find(|b| b.name == "greet")
+            .expect("greet blob should exist");
+
+        assert_eq!(greet_blob.arity, 1);
+        assert_eq!(greet_blob.param_names, vec!["name".to_string()]);
+        // Should have at least one string in its local pool ("hello ")
+        assert!(
+            !greet_blob.strings.is_empty() || !greet_blob.constants.is_empty(),
+            "greet blob should have local constants or strings"
+        );
+    }
+
+    #[test]
+    fn test_content_addressed_stable_hash() {
+        // Compiling the same code twice should produce the same content hashes
+        let code = r#"
+            function double(x) { x * 2 }
+            double(21)
+        "#;
+        let bytecode1 = compiles(code).expect("should compile");
+        let bytecode2 = compiles(code).expect("should compile");
+
+        let ca1 = bytecode1.content_addressed.expect("should have ca1");
+        let ca2 = bytecode2.content_addressed.expect("should have ca2");
+
+        // Find the double blob in both
+        let double1 = ca1
+            .function_store
+            .values()
+            .find(|b| b.name == "double")
+            .expect("double blob in ca1");
+        let double2 = ca2
+            .function_store
+            .values()
+            .find(|b| b.name == "double")
+            .expect("double blob in ca2");
+
+        assert_eq!(
+            double1.content_hash, double2.content_hash,
+            "Same code should produce same content hash"
+        );
+    }
+
+    #[test]
+    fn test_extern_c_signature_supports_callback_and_nullable_cstring() {
+        let code = r#"
+            extern C fn walk(
+                root: Option<string>,
+                on_entry: (path: ptr, data: ptr) => i32
+            ) -> Option<string> from "libwalk";
+        "#;
+        let bytecode = compiles(code).expect("should compile");
+        assert_eq!(bytecode.foreign_functions.len(), 1);
+        let entry = &bytecode.foreign_functions[0];
+        let native = entry
+            .native_abi
+            .as_ref()
+            .expect("extern C binding should carry native ABI metadata");
+        assert_eq!(
+            native.signature,
+            "fn(cstring?, callback(fn(ptr, ptr) -> i32)) -> cstring?"
+        );
+    }
+
+    #[test]
+    fn test_extern_c_signature_maps_vec_to_native_slice() {
+        let code = r#"
+            extern C fn hash_bytes(data: Vec<byte>) -> u64 from "libhash";
+            extern C fn split_words(data: Vec<Option<string>>) -> Vec<Option<string>> from "libhash";
+        "#;
+        let bytecode = compiles(code).expect("should compile");
+        assert_eq!(bytecode.foreign_functions.len(), 2);
+        let hash = bytecode.foreign_functions[0]
+            .native_abi
+            .as_ref()
+            .expect("extern C function should carry native ABI metadata");
+        assert_eq!(hash.signature, "fn(cslice<u8>) -> u64");
+        let split = bytecode.foreign_functions[1]
+            .native_abi
+            .as_ref()
+            .expect("extern C function should carry native ABI metadata");
+        assert_eq!(split.signature, "fn(cslice<cstring?>) -> cslice<cstring?>");
+    }
+
+    #[test]
+    fn test_extern_c_cmut_slice_param_marks_ref_mutate_contract() {
+        let code = r#"
+            extern C fn hash_bytes(data: Vec<byte>) -> u64 from "libhash";
+            extern C fn mutate_bytes(data: CMutSlice<byte>) -> void from "libhash";
+        "#;
+        let bytecode = compiles(code).expect("should compile");
+        let hash_fn = bytecode
+            .functions
+            .iter()
+            .find(|func| func.name == "hash_bytes")
+            .expect("hash_bytes function should exist");
+        assert_eq!(hash_fn.ref_params, vec![false]);
+        assert_eq!(hash_fn.ref_mutates, vec![false]);
+
+        let mutate_fn = bytecode
+            .functions
+            .iter()
+            .find(|func| func.name == "mutate_bytes")
+            .expect("mutate_bytes function should exist");
+        assert_eq!(mutate_fn.ref_params, vec![true]);
+        assert_eq!(mutate_fn.ref_mutates, vec![true]);
+    }
+
+    #[test]
+    fn test_extern_c_signature_rejects_nested_vec_type() {
+        let code = r#"
+            extern C fn bad(data: Vec<Vec<byte>>) -> i32 from "libbad";
+        "#;
+        let err = compiles(code).expect_err("nested Vec native slice should be rejected");
+        assert!(err.contains("unsupported parameter type 'Vec<Vec<byte>>'"));
+    }
+
+    #[test]
+    fn test_extern_c_call_targets_stub_then_call_foreign() {
+        let code = r#"
+            extern C fn cos_c(x: f64) -> f64 from "libm.so.6" as "cos";
+            let value = cos_c(0.0)
+            value
+        "#;
+        let bytecode = compiles(code).expect("should compile");
+        let cos_idx = bytecode
+            .functions
+            .iter()
+            .position(|f| f.name == "cos_c")
+            .expect("cos_c function should exist") as u16;
+        let mut saw_call_value = false;
+        for ip in 0..bytecode.instructions.len() {
+            let instr = bytecode.instructions[ip];
+            if instr.opcode == crate::bytecode::OpCode::CallValue {
+                saw_call_value = true;
+            }
+        }
+        assert!(
+            saw_call_value,
+            "top-level should invoke function values through CallValue"
+        );
+
+        let cos = &bytecode.functions[cos_idx as usize];
+        let stub_instrs = &bytecode.instructions[cos.entry_point..];
+        assert!(
+            stub_instrs
+                .iter()
+                .take(8)
+                .any(|i| i.opcode == crate::bytecode::OpCode::CallForeign),
+            "foreign stub should contain CallForeign opcode near its entry"
+        );
+        let ca = bytecode
+            .content_addressed
+            .as_ref()
+            .expect("content-addressed program should exist");
+        let cos_hash = *ca
+            .function_store
+            .iter()
+            .find(|(_, blob)| blob.name == "cos_c")
+            .map(|(hash, _)| hash)
+            .expect("cos_c blob should exist");
+        let main_blob = ca
+            .function_store
+            .values()
+            .find(|blob| blob.name == "__main__")
+            .expect("__main__ blob should exist");
+        assert!(
+            main_blob.dependencies.contains(&cos_hash),
+            "__main__ blob must depend on cos_c hash so function constants remap correctly"
+        );
+        let has_dep_function_constant = main_blob
+            .constants
+            .iter()
+            .any(|c| matches!(c, Constant::Function(0)));
+        assert!(
+            has_dep_function_constant,
+            "__main__ constants should store function references as dependency-local indices"
+        );
+    }
+
+    #[test]
+    fn test_duckdb_package_style_arrow_import_compiles() {
+        let code = r#"
+            extern C fn duckdb_query_arrow(conn: ptr, sql: string, out_result: ptr) -> i32 from "duckdb";
+            extern C fn duckdb_query_arrow_schema(result: ptr, out_schema: ptr) -> i32 from "duckdb";
+            extern C fn duckdb_query_arrow_array(result: ptr, out_array: ptr) -> i32 from "duckdb";
+            extern C fn duckdb_destroy_arrow(result_p: ptr) -> void from "duckdb" as "duckdb_destroy_arrow";
+
+            type CandleRow {
+                ts: i64,
+                close: f64,
+            }
+
+            fn query_typed(conn: ptr, sql: string) -> Result<Table<CandleRow>, AnyError> {
+                let result_cell = __native_ptr_new_cell()
+                __native_ptr_write_ptr(result_cell, 0)
+                duckdb_query_arrow(conn, sql, result_cell)
+                let arrow_result = __native_ptr_read_ptr(result_cell)
+
+                let schema_cell = __native_ptr_new_cell()
+                __native_ptr_write_ptr(schema_cell, 0)
+                duckdb_query_arrow_schema(arrow_result, schema_cell)
+                let schema_handle = __native_ptr_read_ptr(schema_cell)
+                let schema_ptr = __native_ptr_read_ptr(schema_handle)
+
+                let array_cell = __native_ptr_new_cell()
+                __native_ptr_write_ptr(array_cell, 0)
+                duckdb_query_arrow_array(arrow_result, array_cell)
+                let array_handle = __native_ptr_read_ptr(array_cell)
+                let array_ptr = __native_ptr_read_ptr(array_handle)
+
+                let typed: Result<Table<CandleRow>, AnyError> =
+                    __native_table_from_arrow_c_typed(schema_ptr, array_ptr, "CandleRow")
+
+                duckdb_destroy_arrow(result_cell)
+                __native_ptr_free_cell(array_cell)
+                __native_ptr_free_cell(schema_cell)
+                __native_ptr_free_cell(result_cell)
+
+                typed
+            }
+        "#;
+        compiles(code).expect("duckdb package-style native code should compile");
+    }
+}
