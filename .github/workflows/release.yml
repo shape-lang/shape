@@ -122,6 +122,8 @@ jobs:
             shape-viz-core
             shape-lsp
             shape-cli
+            shape-ext-python
+            shape-ext-typescript
           )
           for crate in "${crates[@]}"; do
             echo "::group::Publishing $crate"

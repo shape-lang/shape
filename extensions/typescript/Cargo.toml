@@ -6,7 +6,6 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shape TypeScript language runtime extension (V8 via deno_core)"
-publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
