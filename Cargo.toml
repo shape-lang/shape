@@ -78,7 +78,7 @@ ordered-float = { version = "3.9", features = ["serde"] }
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tungstenite = "0.24"
 tokio-tungstenite = "0.24"
 
