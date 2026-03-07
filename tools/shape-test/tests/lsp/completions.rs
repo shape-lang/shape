@@ -382,6 +382,45 @@ fn test_lsp_completion_trait_bound_suggests_trait() {
         .expect_completion("Sortable");
 }
 
+// == Resilient parsing: completions on incomplete code =======================
+
+#[test]
+fn completions_after_dot_on_array_via_resilient_parse() {
+    // `x.` makes parse_program fail; resilient parser recovers `let x = [1,2,3]`
+    let code = "let x = [1, 2, 3]\nx.";
+    ShapeTest::new(code)
+        .at(pos(1, 2))
+        .expect_completion("map")
+        .expect_completion("filter")
+        .expect_completion("len");
+}
+
+#[test]
+fn completions_after_dot_on_string_via_resilient_parse() {
+    let code = "let s = \"hello\"\ns.";
+    ShapeTest::new(code)
+        .at(pos(1, 2))
+        .expect_completion("len")
+        .expect_completion("trim")
+        .expect_completion("split");
+}
+
+#[test]
+fn completions_after_dot_on_number_via_resilient_parse() {
+    let code = "let n = 42\nn.";
+    ShapeTest::new(code)
+        .at(pos(1, 2))
+        .expect_completion("abs");
+}
+
+#[test]
+fn completions_empty_code_still_returns_keywords() {
+    // Regression: empty input must not break with resilient fallback
+    ShapeTest::new("")
+        .at(pos(0, 0))
+        .expect_completion_any_of(&["let", "fn", "function"]);
+}
+
 // == Signature help deep (from programs_lsp_completeness) ====================
 
 #[test]
