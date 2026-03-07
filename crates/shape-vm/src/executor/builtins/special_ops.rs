@@ -606,6 +606,11 @@ impl VirtualMachine {
             _ => ChartType::Line,
         };
 
+        // Handle DataTable (Table<T>) directly via columnar access
+        if let Some(dt) = value.as_datatable() {
+            return self.chart_from_datatable(dt, chart_type, x_column, y_columns);
+        }
+
         // Extract rows from the value (should be an array of typed objects)
         let rows = value
             .as_any_array()
@@ -697,6 +702,79 @@ impl VirtualMachine {
             echarts_options: None,
             interactive: true,
         })))
+    }
+
+    /// Build a chart directly from a DataTable's columnar data.
+    fn chart_from_datatable(
+        &self,
+        dt: &std::sync::Arc<DataTable>,
+        chart_type: shape_value::content::ChartType,
+        x_column: String,
+        y_columns: Vec<String>,
+    ) -> Result<ValueWord, VMError> {
+        use shape_value::content::{ChartSeries, ChartSpec, ContentNode};
+
+        let col_names = dt.column_names();
+        let num_rows = dt.row_count();
+
+        let x_col = if x_column.is_empty() {
+            col_names.first().cloned().unwrap_or_default()
+        } else {
+            x_column
+        };
+
+        let y_cols: Vec<String> = if y_columns.is_empty() {
+            col_names
+                .iter()
+                .filter(|n| *n != &x_col)
+                .cloned()
+                .collect()
+        } else {
+            y_columns
+        };
+
+        // Read x values as f64
+        let x_vals: Vec<f64> = Self::read_column_as_f64(dt, &x_col, num_rows);
+
+        let series: Vec<ChartSeries> = y_cols
+            .iter()
+            .map(|y_col| {
+                let y_vals = Self::read_column_as_f64(dt, y_col, num_rows);
+                let data: Vec<(f64, f64)> = x_vals
+                    .iter()
+                    .zip(y_vals.iter())
+                    .map(|(&x, &y)| (x, y))
+                    .collect();
+                ChartSeries {
+                    label: y_col.clone(),
+                    data,
+                    color: None,
+                }
+            })
+            .collect();
+
+        Ok(ValueWord::from_content(ContentNode::Chart(ChartSpec {
+            chart_type,
+            series,
+            title: None,
+            x_label: Some(x_col),
+            y_label: None,
+            width: None,
+            height: None,
+            echarts_options: None,
+            interactive: true,
+        })))
+    }
+
+    /// Read a DataTable column as f64 values, coercing int columns.
+    fn read_column_as_f64(dt: &DataTable, col: &str, num_rows: usize) -> Vec<f64> {
+        if let Some(arr) = dt.get_f64_column(col) {
+            (0..num_rows).map(|i| arr.value(i)).collect()
+        } else if let Some(arr) = dt.get_i64_column(col) {
+            (0..num_rows).map(|i| arr.value(i) as f64).collect()
+        } else {
+            (0..num_rows).map(|i| i as f64).collect()
+        }
     }
 
     /// Extract field name→value map from a typed object row.
