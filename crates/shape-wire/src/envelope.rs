@@ -164,6 +164,11 @@ impl ValueEnvelope {
                 TypeInfo::primitive("PrintResult"),
                 TypeRegistry::default_for_primitives(),
             ),
+
+            WireValue::Content(_) => (
+                TypeInfo::primitive("Content"),
+                TypeRegistry::default_for_primitives(),
+            ),
         }
     }
 

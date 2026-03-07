@@ -69,6 +69,7 @@ pub fn format_value(
         } => format_range(start, end, *inclusive),
         WireValue::FunctionRef { name } => Ok(format!("<function {}>", name)),
         WireValue::PrintResult(result) => Ok(result.rendered.clone()),
+        WireValue::Content(node) => Ok(format!("{}", node)),
     }
 }
 

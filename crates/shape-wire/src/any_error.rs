@@ -435,6 +435,7 @@ fn brief_value(value: &WireValue) -> String {
         WireValue::Range { .. } => "<range>".to_string(),
         WireValue::Table(t) => format!("<table {}x{}>", t.row_count, t.column_count),
         WireValue::PrintResult(pr) => pr.rendered.clone(),
+        WireValue::Content(node) => format!("<content:{}>", node),
     }
 }
 

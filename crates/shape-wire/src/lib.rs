@@ -44,3 +44,6 @@ pub use render::{
     render_wire_html, render_wire_terminal,
 };
 pub use value::{DurationUnit, WireColumn, WireTable, WireValue};
+
+/// Re-export content types used in `WireValue::Content`.
+pub use shape_value::content::{self as content, ContentNode};

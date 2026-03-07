@@ -97,6 +97,9 @@ pub enum WireValue {
 
     /// Print result with structured spans
     PrintResult(crate::print_result::WirePrintResult),
+
+    /// Structured content node for rich rendering
+    Content(shape_value::content::ContentNode),
 }
 
 /// Wire format for table data
@@ -214,6 +217,7 @@ impl WireValue {
             WireValue::Range { .. } => "Range",
             WireValue::FunctionRef { .. } => "Function",
             WireValue::PrintResult(_) => "PrintResult",
+            WireValue::Content(_) => "Content",
         }
     }
 }

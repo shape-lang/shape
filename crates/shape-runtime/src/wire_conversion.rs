@@ -522,7 +522,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
         HeapValue::PriorityQueue(d) => {
             WireValue::Array(d.items.iter().map(|v| nb_to_wire(v, ctx)).collect())
         }
-        HeapValue::Content(node) => WireValue::String(format!("{}", node)),
+        HeapValue::Content(node) => WireValue::Content(node.as_ref().clone()),
         HeapValue::Instant(t) => WireValue::String(format!("<instant:{:?}>", t.elapsed())),
         HeapValue::IoHandle(data) => {
             let status = if data.is_open() { "open" } else { "closed" };
@@ -580,12 +580,33 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
     }
 }
 
+/// Extracted content with multiple render targets.
+pub struct ExtractedContent {
+    /// The raw ContentNode (for re-rendering on other targets or wire serialization)
+    pub content_node: shape_value::content::ContentNode,
+    /// JSON renderer output
+    pub content_json: serde_json::Value,
+    /// HTML renderer output
+    pub content_html: String,
+    /// Terminal renderer output (ANSI)
+    pub content_terminal: String,
+}
+
 /// If the ValueWord value is a Content node, render it as JSON, HTML, and terminal strings.
 ///
 /// Returns `(content_json, content_html, content_terminal)` — all `None` if the value is not Content.
 pub fn nb_extract_content(
     nb: &ValueWord,
 ) -> (Option<serde_json::Value>, Option<String>, Option<String>) {
+    let extracted = nb_extract_content_full(nb);
+    match extracted {
+        Some(e) => (Some(e.content_json), Some(e.content_html), Some(e.content_terminal)),
+        None => (None, None, None),
+    }
+}
+
+/// Extract content with full detail including the raw ContentNode.
+pub fn nb_extract_content_full(nb: &ValueWord) -> Option<ExtractedContent> {
     use crate::content_renderer::ContentRenderer;
 
     // Check if value is already a Content node
@@ -603,20 +624,23 @@ pub fn nb_extract_content(
             None
         };
 
-    if let Some(ref node) = node {
-        let json_renderer = crate::renderers::json::JsonRenderer;
-        let html_renderer = crate::renderers::html::HtmlRenderer::new();
-        let terminal_renderer = crate::renderers::terminal::TerminalRenderer::new();
+    let node = node?;
 
-        let json_str = json_renderer.render(node);
-        let json_value = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
-        let html_str = html_renderer.render(node);
-        let terminal_str = terminal_renderer.render(node);
+    let json_renderer = crate::renderers::json::JsonRenderer;
+    let html_renderer = crate::renderers::html::HtmlRenderer::new();
+    let terminal_renderer = crate::renderers::terminal::TerminalRenderer::new();
 
-        (Some(json_value), Some(html_str), Some(terminal_str))
-    } else {
-        (None, None, None)
-    }
+    let json_str = json_renderer.render(&node);
+    let content_json = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
+    let content_html = html_renderer.render(&node);
+    let content_terminal = terminal_renderer.render(&node);
+
+    Some(ExtractedContent {
+        content_node: node,
+        content_json,
+        content_html,
+        content_terminal,
+    })
 }
 
 /// Convert a WireValue to a ValueWord value without ValueWord intermediate.
@@ -766,6 +790,10 @@ pub fn wire_to_nb(wire: &WireValue) -> ValueWord {
         WireValue::PrintResult(result) => {
             // Convert back as rendered string (same as wire_to_value)
             ValueWord::from_string(Arc::new(result.rendered.clone()))
+        }
+
+        WireValue::Content(node) => {
+            ValueWord::from_heap_value(HeapValue::Content(Box::new(node.clone())))
         }
     }
 }
