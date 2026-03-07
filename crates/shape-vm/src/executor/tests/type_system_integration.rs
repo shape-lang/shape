@@ -1172,3 +1172,38 @@ let t = [1, 2], [3, 4]
     let err = format!("{:?}", result.unwrap_err());
     assert!(err.contains("Table<T>"), "error should mention Table<T>: {}", err);
 }
+
+#[test]
+fn test_table_row_literal_chart() {
+    // Integration test: table row literal → chart format spec
+    let source = r#"
+type MonthlySales { month: int, revenue: number, profit: number }
+
+let data: Table<MonthlySales> =
+    [1, 42.0, 18.0],
+    [2, 58.0, 25.0],
+    [3, 65.0, 31.0],
+    [4, 51.0, 22.0],
+    [5, 73.0, 35.0],
+    [6, 89.0, 42.0]
+
+c"{data: chart(bar), x(month), y(revenue, profit)}"
+"#;
+    let result = compile_and_execute(source).unwrap();
+    let content = result.as_content().expect("expected Content value");
+    match content {
+        shape_value::content::ContentNode::Chart(spec) => {
+            assert_eq!(spec.chart_type, shape_value::content::ChartType::Bar);
+            assert_eq!(spec.x_label.as_deref(), Some("month"));
+            assert_eq!(spec.series.len(), 2);
+            assert_eq!(spec.series[0].label, "revenue");
+            assert_eq!(spec.series[1].label, "profit");
+            assert_eq!(spec.series[0].data.len(), 6);
+            assert_eq!(spec.series[0].data[0], (1.0, 42.0));
+            assert_eq!(spec.series[0].data[5], (6.0, 89.0));
+            assert_eq!(spec.series[1].data[0], (1.0, 18.0));
+            assert_eq!(spec.series[1].data[5], (6.0, 42.0));
+        }
+        _ => panic!("expected Chart variant, got {:?}", content),
+    }
+}
