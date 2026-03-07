@@ -46,6 +46,18 @@ impl VirtualMachine {
     ) -> Result<ValueWord, VMError> {
         let mut rendered = String::new();
 
+        // Render Content HTML for Content values (for host adapters like the playground)
+        if ctx.is_some() {
+            for nb in &args {
+                let (_, html, _) = shape_runtime::wire_conversion::nb_extract_content(nb);
+                if let Some(html) = html {
+                    if let Some(ref mut c) = ctx {
+                        c.output_adapter_mut().print_content_html(html);
+                    }
+                }
+            }
+        }
+
         for (arg_idx, nb) in args.iter().enumerate() {
             if arg_idx > 0 {
                 rendered.push(' ');

@@ -22,6 +22,10 @@ pub trait OutputAdapter: Send + Sync {
     /// The value to return from print() (Unit for scripts, PrintResult for REPL)
     fn print(&mut self, result: PrintResult) -> ValueWord;
 
+    /// Handle Content HTML from printing a Content value.
+    /// Default implementation does nothing (terminal adapters don't need HTML).
+    fn print_content_html(&mut self, _html: String) {}
+
     /// Clone the adapter (for trait object cloning)
     fn clone_box(&self) -> Box<dyn OutputAdapter>;
 }
@@ -114,9 +118,11 @@ impl OutputAdapter for MockAdapter {
 ///
 /// Captures rendered print output into shared state so the host can
 /// surface it in API responses without scraping stdout.
+/// Also captures Content HTML when Content values are printed.
 #[derive(Debug, Clone, Default)]
 pub struct SharedCaptureAdapter {
     captured: Arc<Mutex<Vec<String>>>,
+    content_html: Arc<Mutex<Vec<String>>>,
 }
 
 impl SharedCaptureAdapter {
@@ -138,6 +144,21 @@ impl SharedCaptureAdapter {
             v.clear();
         }
     }
+
+    /// Push Content HTML captured from print(content_value).
+    pub fn push_content_html(&self, html: String) {
+        if let Ok(mut v) = self.content_html.lock() {
+            v.push(html);
+        }
+    }
+
+    /// Get all captured Content HTML fragments.
+    pub fn content_html(&self) -> Vec<String> {
+        self.content_html
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl OutputAdapter for SharedCaptureAdapter {
@@ -146,6 +167,10 @@ impl OutputAdapter for SharedCaptureAdapter {
             v.push(result.rendered.clone());
         }
         ValueWord::none()
+    }
+
+    fn print_content_html(&mut self, html: String) {
+        self.push_content_html(html);
     }
 
     fn clone_box(&self) -> Box<dyn OutputAdapter> {
