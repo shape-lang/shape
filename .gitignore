@@ -2,9 +2,9 @@
 /target/
 **/target/
 
-# Generated extension artifacts
-/extensions/
-extensions/*.so
+# Generated extension artifacts (.so / .dylib)
+**/*.so
+**/*.dylib
 
 # Node / frontend
 **/node_modules/
