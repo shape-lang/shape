@@ -95,3 +95,69 @@ fn fstring_hash_raw() {
     )
     .expect_string("raw 5");
 }
+
+// =========================================================================
+// Regression: nested strings inside {}-interpolation blocks
+// Bug: f"text: {fn("arg")}" caused the grammar to terminate the f-string at
+// the inner `"`, producing a bad parse error with wrong line attribution.
+// =========================================================================
+
+#[test]
+fn fstring_nested_string_literal_in_interpolation() {
+    // A string literal inside {} should be parsed as part of the expression,
+    // not terminate the outer f-string.
+    ShapeTest::new(
+        r#"
+        f"value: {"nested"}"
+    "#,
+    )
+    .expect_parse_ok()
+    .expect_string("value: nested");
+}
+
+#[test]
+fn fstring_nested_string_in_function_call() {
+    // The exact pattern from the error-handling playground example.
+    ShapeTest::new(
+        r#"
+        let result = Err("oops")
+        f"Err: {result}"
+    "#,
+    )
+    .expect_parse_ok();
+}
+
+#[test]
+fn fstring_nested_string_as_call_arg() {
+    // Nested string used as a direct argument inside the interpolation.
+    ShapeTest::new(
+        r#"
+        fn greet(name: str) -> str { f"Hello, {name}!" }
+        f"msg: {greet("world")}"
+    "#,
+    )
+    .expect_parse_ok()
+    .expect_string("msg: Hello, world!");
+}
+
+#[test]
+fn fstring_nested_err_with_string_arg() {
+    // Regression: this exact snippet produced a bad error and wrong line number.
+    ShapeTest::new(
+        r#"
+        print(f"Err: {Err("oops")}")
+    "#,
+    )
+    .expect_parse_ok();
+}
+
+#[test]
+fn cstring_nested_string_in_interpolation() {
+    // c-strings share the same grammar fix — nested quotes should work there too.
+    ShapeTest::new(
+        r#"
+        c"label: {"value"}"
+    "#,
+    )
+    .expect_parse_ok();
+}
