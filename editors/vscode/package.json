@@ -2,7 +2,7 @@
   "name": "shape-lang",
   "displayName": "Shape Language",
   "description": "Language support for Shape - syntax highlighting and LSP integration",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "shape-lang",
   "author": "Daniel Amesberger",
   "license": "MIT",
@@ -14,15 +14,22 @@
     "vscode": "^1.75.0"
   },
   "icon": "icons/shape-icon.png",
-  "categories": ["Programming Languages"],
+  "categories": [
+    "Programming Languages"
+  ],
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
       {
         "id": "shape",
-        "aliases": ["Shape", "shape"],
-        "extensions": [".shape"],
+        "aliases": [
+          "Shape",
+          "shape"
+        ],
+        "extensions": [
+          ".shape"
+        ],
         "configuration": "./language-configuration.json",
         "icon": {
           "light": "./icons/shape-icon.png",
@@ -43,10 +50,11 @@
     "vscode-languageserver-protocol": "^3.17.0"
   },
   "devDependencies": {
+    "@types/node": "^25.3.5",
     "@types/vscode": "^1.75.0",
-    "typescript": "^5.3.0",
     "@vscode/vsce": "^2.22.0",
-    "ovsx": "^0.9.0"
+    "ovsx": "^0.9.0",
+    "typescript": "^5.3.0"
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
