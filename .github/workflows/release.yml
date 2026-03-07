@@ -1,4 +1,4 @@
-name: Release CLI
+name: Release
 
 on:
   push:
@@ -73,7 +73,7 @@ jobs:
             dist/${{ matrix.artifact }}.tar.gz
             dist/${{ matrix.artifact }}.sha256
 
-  publish:
+  publish-github:
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -90,3 +90,55 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+
+  publish-crates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Publish in dependency order with retry logic for index propagation
+          crates=(
+            shape-macros
+            shape-gc
+            shape-abi-v1
+            shape-ast
+            shape-value
+            shape-wire
+            shape-runtime
+            shape-vm
+            shape-jit
+            shape-viz-core
+            shape-lsp
+            shape-cli
+          )
+          for crate in "${crates[@]}"; do
+            echo "Publishing $crate..."
+            # Retry up to 3 times with a delay to allow crates.io index to update
+            for attempt in 1 2 3; do
+              if cargo publish -p "$crate" --no-verify 2>&1; then
+                echo "$crate published successfully"
+                break
+              else
+                if [ "$attempt" -lt 3 ]; then
+                  echo "Attempt $attempt failed for $crate, waiting 30s for index propagation..."
+                  sleep 30
+                else
+                  echo "Failed to publish $crate after 3 attempts"
+                  exit 1
+                fi
+              fi
+            done
+            # Wait for crates.io index to propagate before publishing dependents
+            sleep 15
+          done

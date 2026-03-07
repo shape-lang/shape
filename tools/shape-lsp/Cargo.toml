@@ -12,10 +12,10 @@ default = []
 
 [dependencies]
 # Shape crates for parsing and semantic analysis
-shape-ast = { version = "0.1.0", path = "../../crates/shape-ast" }
-shape-runtime = { version = "0.1.0", path = "../../crates/shape-runtime" }
-shape-vm = { version = "0.1.0", path = "../../crates/shape-vm" }
-shape-wire = { version = "0.1.0", path = "../../crates/shape-wire" }
+shape-ast = { version = "0.1.1", path = "../../crates/shape-ast" }
+shape-runtime = { version = "0.1.1", path = "../../crates/shape-runtime" }
+shape-vm = { version = "0.1.1", path = "../../crates/shape-vm" }
+shape-wire = { version = "0.1.1", path = "../../crates/shape-wire" }
 
 # LSP protocol implementation (community-maintained fork)
 tower-lsp-server = "0.23"

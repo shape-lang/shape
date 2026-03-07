@@ -7,13 +7,13 @@ license.workspace = true
 publish = false
 
 [dependencies]
-shape-lsp = { version = "0.1.0", path = "../shape-lsp" }
+shape-lsp = { version = "0.1.1", path = "../shape-lsp" }
 shape-ast = { workspace = true }
 shape-vm = { workspace = true }
-shape-jit = { version = "0.1.0", path = "../../crates/shape-jit" }
+shape-jit = { version = "0.1.1", path = "../../crates/shape-jit" }
 shape-value = { workspace = true }
-shape-runtime = { version = "0.1.0", path = "../../crates/shape-runtime" }
-shape-wire = { version = "0.1.0", path = "../../crates/shape-wire" }
+shape-runtime = { version = "0.1.1", path = "../../crates/shape-runtime" }
+shape-wire = { version = "0.1.1", path = "../../crates/shape-wire" }
 serde_json = { workspace = true }
 tower-lsp-server = "0.23"
 walkdir = "2.5"

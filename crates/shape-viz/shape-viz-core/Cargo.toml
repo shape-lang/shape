@@ -1,6 +1,6 @@
 [package]
 name = "shape-viz-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Core charting library with GPU-accelerated rendering for time series visualization"
 license = "MIT OR Apache-2.0"
@@ -42,7 +42,7 @@ ahash = "0.8"
 smallvec = "1.13"
 
 # Wire protocol for data exchange
-shape-wire = { version = "0.1.0", path = "../../shape-wire" }
+shape-wire = { version = "0.1.1", path = "../../shape-wire" }
 
 [features]
 default = ["text-rendering"]
