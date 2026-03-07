@@ -5,6 +5,8 @@ use crate::type_tracking::VariableTypeInfo;
 use shape_ast::ast::Expr;
 use shape_ast::error::Result;
 
+use shape_runtime::type_system::Type;
+
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
@@ -372,11 +374,21 @@ impl BytecodeCompiler {
         use shape_runtime::type_system::exhaustiveness;
 
         // Try to infer scrutinee type
-        // If this fails (e.g., undefined variable), skip exhaustiveness checking
-        // This is a temporary measure until full type inference integration is complete
+        // If this fails (e.g., undefined variable), fall back to parameter type annotations
         let scrutinee_type = match self.infer_expr_type(&match_expr.scrutinee) {
             Ok(t) => t,
-            Err(_) => return Ok(()), // Skip exhaustiveness check if type inference fails
+            Err(_) => {
+                // Fallback: if scrutinee is a parameter with a type annotation, use it
+                if let shape_ast::ast::Expr::Identifier(name, _) = &*match_expr.scrutinee {
+                    if let Some(ty) = self.lookup_param_type_annotation(name) {
+                        ty
+                    } else {
+                        return Ok(());
+                    }
+                } else {
+                    return Ok(());
+                }
+            }
         };
 
         // Check exhaustiveness for closed types (enums, unions).
@@ -414,6 +426,18 @@ impl BytecodeCompiler {
             }),
             _ => Ok(()), // Exhaustive or not applicable
         }
+    }
+
+    /// Look up a parameter's type annotation from the current function's parameter list.
+    fn lookup_param_type_annotation(&self, name: &str) -> Option<Type> {
+        for param in &self.current_function_params {
+            if param.pattern.as_identifier() == Some(name) {
+                if let Some(ann) = &param.type_annotation {
+                    return Some(Type::Concrete(ann.clone()));
+                }
+            }
+        }
+        None
     }
 }
 

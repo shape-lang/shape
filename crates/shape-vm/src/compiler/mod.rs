@@ -602,6 +602,11 @@ pub struct BytecodeCompiler {
     /// Maps alias (e.g., `__original__`) to actual function name (e.g., `__original__myFunc`).
     /// Set before compiling a replacement body and cleared after.
     pub(crate) function_aliases: HashMap<String, String>,
+
+    /// Parameters of the function currently being compiled.
+    /// Used by match exhaustiveness checking to fall back to type annotations
+    /// when the type inference engine cannot resolve a parameter's type.
+    pub(crate) current_function_params: Vec<shape_ast::ast::FunctionParameter>,
 }
 
 impl Default for BytecodeCompiler {

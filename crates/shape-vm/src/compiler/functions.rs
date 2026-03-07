@@ -2220,6 +2220,10 @@ impl BytecodeCompiler {
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
         let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
         let saved_param_locals = std::mem::take(&mut self.param_locals);
+        let saved_function_params = std::mem::replace(
+            &mut self.current_function_params,
+            func_def.params.clone(),
+        );
 
         // Set up isolated locals for function compilation
         self.current_function = Some(func_idx);
@@ -2399,6 +2403,7 @@ impl BytecodeCompiler {
                         self.drop_locals = saved_drop_locals;
                         self.boxed_locals = saved_boxed_locals;
                         self.param_locals = saved_param_locals;
+                        self.current_function_params = saved_function_params;
                         self.pop_scope();
                         self.locals = saved_locals;
                         self.current_function = saved_function;
@@ -2450,6 +2455,7 @@ impl BytecodeCompiler {
         // Restore state
         self.drop_locals = saved_drop_locals;
         self.boxed_locals = saved_boxed_locals;
+        self.current_function_params = saved_function_params;
         self.pop_scope();
         self.locals = saved_locals;
         self.current_function = saved_function;

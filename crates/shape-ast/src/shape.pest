@@ -1221,7 +1221,7 @@ loop_expr = { "loop" ~ block_expr }
 let_expr = { "let" ~ pattern ~ ("=" ~ expression)? ~ "in" ~ expression }
 
 // ===== Match Expression =====
-match_expr = { "match" ~ match_scrutinee ~ "{" ~ match_arm ~ (","? ~ match_arm)* ~ ","? ~ "}" }
+match_expr = { "match" ~ match_scrutinee ~ "{" ~ (match_arm ~ (","? ~ match_arm)* ~ ","?)? ~ "}" }
 // Fast path for `match x { ... }` without letting `expression` greedily parse
 // `x { ... }` as a struct literal.
 match_scrutinee = { match_scrutinee_ident | expression }

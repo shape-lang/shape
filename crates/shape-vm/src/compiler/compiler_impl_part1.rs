@@ -92,6 +92,7 @@ impl BytecodeCompiler {
             function_hashes_by_id: Vec::new(),
             blob_cache: None,
             function_aliases: HashMap::new(),
+            current_function_params: Vec::new(),
         }
     }
 

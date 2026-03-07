@@ -691,6 +691,13 @@ impl BytecodeCompiler {
                 ));
 
                 self.last_expr_schema = Some(schema_id);
+                self.last_expr_numeric_type = None;
+                self.last_expr_type_info = Some(
+                    crate::type_tracking::VariableTypeInfo::known(
+                        schema_id,
+                        runtime_type_name.clone(),
+                    ),
+                );
                 Ok(())
             }
             None => Err(ShapeError::SemanticError {

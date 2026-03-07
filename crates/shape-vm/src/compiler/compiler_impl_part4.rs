@@ -278,9 +278,9 @@ impl BytecodeCompiler {
         }
 
         let (inferred_ref_params, inferred_ref_mutates, inferred_param_type_hints) =
-            Self::infer_reference_model(&analysis_program);
+            Self::infer_reference_model(&program);
         self.inferred_param_pass_modes = Self::build_param_pass_mode_map(
-            &analysis_program,
+            &program,
             &inferred_ref_params,
             &inferred_ref_mutates,
         );
