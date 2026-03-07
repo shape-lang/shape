@@ -6,15 +6,22 @@ pub fn default_extensions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".shape").join("extensions"))
 }
 
-pub async fn run_ext_install(name: String) -> Result<()> {
+/// Known first-party extensions that follow the shape-ext-<name> convention.
+const KNOWN_EXTENSIONS: &[(&str, &str)] = &[
+    ("python", "Python interop via PyO3"),
+    ("typescript", "TypeScript/JS interop via V8 (deno_core)"),
+];
+
+pub async fn run_ext_install(name: String, version: Option<String>) -> Result<()> {
     let crate_name = format!("shape-ext-{name}");
     let lib_name = crate_name.replace('-', "_");
+    let version_spec = version.as_deref().unwrap_or("*");
 
     let ext_dir =
         default_extensions_dir().context("could not determine home directory")?;
     std::fs::create_dir_all(&ext_dir)?;
 
-    println!("Installing extension '{name}' (crate: {crate_name})...");
+    println!("Installing extension '{name}' (crate: {crate_name} {version_spec})...");
 
     // Temp build directory
     let build_dir = std::env::temp_dir().join(format!("shape-ext-build-{name}"));
@@ -37,7 +44,7 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
-{crate_name} = "*"
+{crate_name} = "{version_spec}"
 "#
     );
     std::fs::write(build_dir.join("Cargo.toml"), &cargo_toml)?;
@@ -93,42 +100,54 @@ path = "lib.rs"
 }
 
 pub async fn run_ext_list() -> Result<()> {
-    let ext_dir = match default_extensions_dir() {
-        Some(d) if d.is_dir() => d,
-        _ => {
-            println!("No extensions installed.");
-            return Ok(());
-        }
-    };
+    // Installed extensions
+    let ext_dir = default_extensions_dir();
+    let mut installed: Vec<String> = Vec::new();
 
-    let mut found = false;
-    let mut entries: Vec<_> = std::fs::read_dir(&ext_dir)?
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    entries.sort();
+    if let Some(ref dir) = ext_dir {
+        if dir.is_dir() {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)?
+                .flatten()
+                .map(|e| e.path())
+                .collect();
+            entries.sort();
 
-    for path in entries {
-        if is_shared_lib(&path) {
-            if !found {
-                println!("Installed extensions:");
-                found = true;
+            for path in entries {
+                if is_shared_lib(&path) {
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?");
+                    let display_name = stem
+                        .strip_prefix("libshape_ext_")
+                        .or_else(|| stem.strip_prefix("shape_ext_"))
+                        .unwrap_or(stem);
+                    installed.push(display_name.to_string());
+                }
             }
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?");
-            let display_name = stem
-                .strip_prefix("libshape_ext_")
-                .or_else(|| stem.strip_prefix("shape_ext_"))
-                .unwrap_or(stem);
-            println!("  {display_name:20} {}", path.display());
         }
     }
 
-    if !found {
-        println!("No extensions installed.");
+    println!("Installed:");
+    if installed.is_empty() {
+        println!("  (none)");
+    } else {
+        for name in &installed {
+            println!("  {name}");
+        }
     }
+
+    println!();
+    println!("Available (install with `shape ext install <name>`):");
+    for (name, desc) in KNOWN_EXTENSIONS {
+        let status = if installed.iter().any(|n| n == name) {
+            " [installed]"
+        } else {
+            ""
+        };
+        println!("  {name:20} {desc}{status}");
+    }
+
     Ok(())
 }
 

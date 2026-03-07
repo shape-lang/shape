@@ -1464,34 +1464,36 @@ fn configured_extensions_from_lsp_value(
     options: Option<&serde_json::Value>,
     workspace_root: Option<&std::path::Path>,
 ) -> Vec<crate::foreign_lsp::ConfiguredExtensionSpec> {
-    let Some(options) = options else {
-        return Vec::new();
-    };
-
     let mut specs = Vec::new();
-    collect_configured_extensions_from_array(
-        options.get("alwaysLoadExtensions"),
-        workspace_root,
-        &mut specs,
-    );
-    collect_configured_extensions_from_array(
-        options.get("always_load_extensions"),
-        workspace_root,
-        &mut specs,
-    );
 
-    if let Some(shape) = options.get("shape") {
+    if let Some(options) = options {
         collect_configured_extensions_from_array(
-            shape.get("alwaysLoadExtensions"),
+            options.get("alwaysLoadExtensions"),
             workspace_root,
             &mut specs,
         );
         collect_configured_extensions_from_array(
-            shape.get("always_load_extensions"),
+            options.get("always_load_extensions"),
             workspace_root,
             &mut specs,
         );
+
+        if let Some(shape) = options.get("shape") {
+            collect_configured_extensions_from_array(
+                shape.get("alwaysLoadExtensions"),
+                workspace_root,
+                &mut specs,
+            );
+            collect_configured_extensions_from_array(
+                shape.get("always_load_extensions"),
+                workspace_root,
+                &mut specs,
+            );
+        }
     }
+
+    // Auto-discover globally installed extensions from ~/.shape/extensions/
+    collect_global_extensions(&mut specs);
 
     let mut seen = HashSet::new();
     specs
@@ -1506,6 +1508,45 @@ fn configured_extensions_from_lsp_value(
             seen.insert(key)
         })
         .collect()
+}
+
+fn collect_global_extensions(out: &mut Vec<crate::foreign_lsp::ConfiguredExtensionSpec>) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let ext_dir = home.join(".shape").join("extensions");
+    if !ext_dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&ext_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_lib = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| ext == "so" || ext == "dylib" || ext == "dll")
+            .unwrap_or(false);
+        if !is_lib {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| {
+                s.strip_prefix("libshape_ext_")
+                    .or_else(|| s.strip_prefix("shape_ext_"))
+                    .unwrap_or(s)
+                    .to_string()
+            })
+            .unwrap_or_else(|| "extension".to_string());
+        out.push(crate::foreign_lsp::ConfiguredExtensionSpec {
+            name,
+            path,
+            config: serde_json::json!({}),
+        });
+    }
 }
 
 fn collect_configured_extensions_from_array(

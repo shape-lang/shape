@@ -278,8 +278,11 @@ pub enum ExtAction {
     Install {
         /// Extension name (e.g. 'python', 'typescript')
         name: String,
+        /// Version requirement (e.g. '0.1.0', '>=0.2'). Defaults to latest.
+        #[arg(long, default_value = None)]
+        version: Option<String>,
     },
-    /// List installed extensions
+    /// List installed and available extensions
     List,
     /// Remove an installed extension
     Remove {

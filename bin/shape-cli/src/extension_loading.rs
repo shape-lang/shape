@@ -153,9 +153,10 @@ pub fn collect_startup_specs(
 
     let mut cli_specs = Vec::new();
     for path in cli_extensions {
+        let resolved = resolve_extension_path(path);
         cli_specs.push(ExtensionSpec {
             name: None,
-            path: path.clone(),
+            path: resolved,
             config: serde_json::json!({}),
             source: ExtensionSource::CliFlag,
         });
@@ -206,6 +207,40 @@ pub fn register_extension_capability_modules(
         executor.register_extension(module);
     }
     count
+}
+
+/// Resolve a bare extension name (e.g. "python") to its .so path in
+/// ~/.shape/extensions/. If the path already has a path separator or a shared
+/// library extension, return it as-is.
+fn resolve_extension_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    let has_separator = s.contains('/') || s.contains('\\');
+    let has_lib_ext = path
+        .extension()
+        .map(|ext| ext == "so" || ext == "dylib" || ext == "dll")
+        .unwrap_or(false);
+
+    if has_separator || has_lib_ext {
+        return path.to_path_buf();
+    }
+
+    // Treat as a bare name — resolve to ~/.shape/extensions/libshape_ext_<name>.so
+    if let Some(ext_dir) = crate::commands::ext_cmd::default_extensions_dir() {
+        let lib_name = format!("shape_ext_{}", s);
+        let so_filename = format!(
+            "{}{}{}",
+            std::env::consts::DLL_PREFIX,
+            lib_name,
+            std::env::consts::DLL_SUFFIX,
+        );
+        let candidate = ext_dir.join(&so_filename);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Fall through to original path (will produce an error at load time)
+    path.to_path_buf()
 }
 
 fn collect_shared_libs_from_dir(dir: &Path, specs: &mut Vec<ExtensionSpec>) {

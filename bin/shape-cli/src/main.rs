@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
         (Some(Commands::Ext { action }), _) => {
             use cli_args::ExtAction;
             match action {
-                ExtAction::Install { name } => run_ext_install(name).await?,
+                ExtAction::Install { name, version } => run_ext_install(name, version).await?,
                 ExtAction::List => run_ext_list().await?,
                 ExtAction::Remove { name } => run_ext_remove(name).await?,
             }
