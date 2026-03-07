@@ -786,6 +786,192 @@ impl VirtualMachine {
 
         Ok(accumulator)
     }
+
+    /// MakeTableFromRows: build a TypedTable from inline row values.
+    ///
+    /// Args: [schema_id, row_count, field_count, val1, val2, ..., valN]
+    /// where N = row_count * field_count.
+    /// Values are in row-major order (all fields of row 0, then row 1, etc.).
+    pub(in crate::executor) fn builtin_make_table_from_rows(
+        &mut self,
+        args: Vec<ValueWord>,
+    ) -> Result<ValueWord, VMError> {
+        use arrow_array::RecordBatch;
+        use arrow_schema::{Field, Schema};
+        use shape_value::datatable::DataTableBuilder;
+        use std::sync::Arc;
+
+        if args.len() < 3 {
+            return Err(VMError::RuntimeError(
+                "MakeTableFromRows requires at least 3 args (schema_id, row_count, field_count)"
+                    .to_string(),
+            ));
+        }
+
+        let schema_id = args[0]
+            .as_i64()
+            .ok_or_else(|| VMError::RuntimeError("schema_id must be int".to_string()))?
+            as u32;
+        let row_count = args[1]
+            .as_i64()
+            .ok_or_else(|| VMError::RuntimeError("row_count must be int".to_string()))?
+            as usize;
+        let field_count = args[2]
+            .as_i64()
+            .ok_or_else(|| VMError::RuntimeError("field_count must be int".to_string()))?
+            as usize;
+
+        let expected_vals = row_count * field_count;
+        if args.len() != 3 + expected_vals {
+            return Err(VMError::RuntimeError(format!(
+                "MakeTableFromRows: expected {} values ({} rows × {} fields), got {}",
+                expected_vals,
+                row_count,
+                field_count,
+                args.len() - 3
+            )));
+        }
+
+        // Look up the schema to get field names and types
+        let schema = self
+            .program
+            .type_schema_registry
+            .get_by_id(schema_id)
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "MakeTableFromRows: unknown schema ID {}",
+                    schema_id
+                ))
+            })?;
+
+        if schema.fields.len() != field_count {
+            return Err(VMError::RuntimeError(format!(
+                "MakeTableFromRows: schema has {} fields but field_count is {}",
+                schema.fields.len(),
+                field_count
+            )));
+        }
+
+        let type_name = schema.name.clone();
+        let values = &args[3..];
+
+        // Build Arrow columns from the row-major values
+        let mut arrow_fields = Vec::with_capacity(field_count);
+        let mut columns: Vec<arrow_array::ArrayRef> = Vec::with_capacity(field_count);
+
+        for col_idx in 0..field_count {
+            let field_def = &schema.fields[col_idx];
+            let field_name = &field_def.name;
+
+            // Collect all values for this column across rows
+            let col_values: Vec<&ValueWord> = (0..row_count)
+                .map(|row_idx| &values[row_idx * field_count + col_idx])
+                .collect();
+
+            // Determine Arrow type from schema field type
+            use shape_runtime::type_schema::FieldType;
+            match &field_def.field_type {
+                FieldType::I64 => {
+                    let arr: Vec<i64> = col_values
+                        .iter()
+                        .map(|v| v.as_i64().unwrap_or(0))
+                        .collect();
+                    arrow_fields
+                        .push(Field::new(field_name.clone(), DataType::Int64, false));
+                    columns.push(Arc::new(Int64Array::from(arr)) as arrow_array::ArrayRef);
+                }
+                FieldType::F64 => {
+                    let arr: Vec<f64> = col_values
+                        .iter()
+                        .map(|v| {
+                            v.as_f64()
+                                .or_else(|| v.as_i64().map(|i| i as f64))
+                                .unwrap_or(0.0)
+                        })
+                        .collect();
+                    arrow_fields
+                        .push(Field::new(field_name.clone(), DataType::Float64, false));
+                    columns.push(Arc::new(Float64Array::from(arr)) as arrow_array::ArrayRef);
+                }
+                FieldType::Bool => {
+                    let arr: Vec<bool> = col_values
+                        .iter()
+                        .map(|v| v.as_bool().unwrap_or(false))
+                        .collect();
+                    arrow_fields
+                        .push(Field::new(field_name.clone(), DataType::Boolean, false));
+                    columns.push(Arc::new(BooleanArray::from(arr)) as arrow_array::ArrayRef);
+                }
+                FieldType::Decimal => {
+                    // Decimal stored as f64 in table columns
+                    let arr: Vec<f64> = col_values
+                        .iter()
+                        .map(|v| {
+                            v.as_f64()
+                                .or_else(|| v.as_i64().map(|i| i as f64))
+                                .unwrap_or(0.0)
+                        })
+                        .collect();
+                    arrow_fields
+                        .push(Field::new(field_name.clone(), DataType::Float64, false));
+                    columns.push(Arc::new(Float64Array::from(arr)) as arrow_array::ArrayRef);
+                }
+                FieldType::Timestamp => {
+                    let arr: Vec<i64> = col_values
+                        .iter()
+                        .map(|v| v.as_i64().unwrap_or(0))
+                        .collect();
+                    arrow_fields
+                        .push(Field::new(field_name.clone(), DataType::Int64, false));
+                    columns.push(Arc::new(Int64Array::from(arr)) as arrow_array::ArrayRef);
+                }
+                FieldType::I8 | FieldType::U8 | FieldType::I16 | FieldType::U16
+                | FieldType::I32 | FieldType::U32 | FieldType::U64 => {
+                    // Width-typed integers stored as i64
+                    let arr: Vec<i64> = col_values
+                        .iter()
+                        .map(|v| v.as_i64().unwrap_or(0))
+                        .collect();
+                    arrow_fields
+                        .push(Field::new(field_name.clone(), DataType::Int64, false));
+                    columns.push(Arc::new(Int64Array::from(arr)) as arrow_array::ArrayRef);
+                }
+                FieldType::String | FieldType::Object(_) | FieldType::Any | FieldType::Array(_) => {
+                    let arr: Vec<String> = col_values
+                        .iter()
+                        .map(|v| {
+                            if let Some(s) = v.as_str() {
+                                s.to_string()
+                            } else if let Some(i) = v.as_i64() {
+                                i.to_string()
+                            } else if let Some(f) = v.as_f64() {
+                                f.to_string()
+                            } else {
+                                String::new()
+                            }
+                        })
+                        .collect();
+                    arrow_fields
+                        .push(Field::new(field_name.clone(), DataType::Utf8, false));
+                    columns.push(Arc::new(StringArray::from(arr)) as arrow_array::ArrayRef);
+                }
+            }
+        }
+
+        let arrow_schema = Arc::new(Schema::new(arrow_fields));
+        let batch = RecordBatch::try_new(arrow_schema, columns).map_err(|e| {
+            VMError::RuntimeError(format!("MakeTableFromRows: failed to create RecordBatch: {}", e))
+        })?;
+
+        let dt = DataTable::with_type_name(batch, type_name)
+            .with_schema_id(schema_id);
+        let table = Arc::new(dt);
+
+        Ok(ValueWord::from_heap_value(HeapValue::TypedTable {
+            schema_id: schema_id as u64,
+            table,
+        }))
+    }
 }
 
 // render_content_ansi removed — ContentNode rendering now delegated to

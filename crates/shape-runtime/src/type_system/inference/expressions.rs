@@ -147,6 +147,11 @@ impl TypeInferenceEngine {
                 }
             }
 
+            Expr::TableRows(_, _) => {
+                // Table row literals — type inference not yet implemented
+                Ok(Type::Concrete(TypeAnnotation::Any))
+            }
+
             Expr::Object(entries, _) => {
                 use shape_ast::ast::ObjectEntry;
                 let mut field_types = Vec::new();

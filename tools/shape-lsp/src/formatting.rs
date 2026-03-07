@@ -465,7 +465,9 @@ pub fn format_document(text: &str, options: &FormattingOptions) -> Vec<TextEdit>
     let tokens = tokenize(text);
     let protected_ranges = collect_foreign_body_ranges(text);
     let protected_lines = collect_protected_lines(text, &protected_ranges);
-    reindent(&tokens, text, &config, &protected_lines, &protected_ranges)
+    let mut edits = reindent(&tokens, text, &config, &protected_lines, &protected_ranges);
+    edits.extend(align_table_row_columns(text));
+    edits
 }
 
 /// Format a range within a document
@@ -948,6 +950,179 @@ fn make_indent_to_column(column: usize, config: &FormatConfig) -> String {
     }
 }
 
+// ─── Table row column alignment ─────────────────────────────────────────────
+
+/// Detect consecutive lines that are table row brackets (`[a, b, c],`)
+/// and emit TextEdits to align each column to the same width across all rows.
+fn align_table_row_columns(text: &str) -> Vec<TextEdit> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut edits = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        // Find runs of consecutive table-row lines
+        if let Some(row) = parse_table_row_line(lines[i]) {
+            let group_start = i;
+            let mut group: Vec<(usize, Vec<TableCell>)> = vec![(i, row)];
+            i += 1;
+            while i < lines.len() {
+                if let Some(row) = parse_table_row_line(lines[i]) {
+                    group.push((i, row));
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Only align if there are 2+ rows
+            if group.len() < 2 {
+                continue;
+            }
+
+            // Compute max column count and max width per column
+            let max_cols = group.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
+            let mut col_widths = vec![0usize; max_cols];
+            for (_, cells) in &group {
+                for (j, cell) in cells.iter().enumerate() {
+                    col_widths[j] = col_widths[j].max(cell.trimmed_len);
+                }
+            }
+
+            // Emit edits: for each cell, replace the whitespace region after the value
+            // with the correct amount of padding
+            for (line_idx, cells) in &group {
+                for (j, cell) in cells.iter().enumerate() {
+                    if j >= max_cols {
+                        break;
+                    }
+                    let target_width = col_widths[j];
+                    let padding_needed = target_width - cell.trimmed_len;
+
+                    // Current whitespace after the trimmed value
+                    let current_trailing = cell.content_end_col - cell.trimmed_end_col;
+
+                    if padding_needed != current_trailing {
+                        edits.push(TextEdit {
+                            range: Range {
+                                start: Position {
+                                    line: *line_idx as u32,
+                                    character: cell.trimmed_end_col as u32,
+                                },
+                                end: Position {
+                                    line: *line_idx as u32,
+                                    character: cell.content_end_col as u32,
+                                },
+                            },
+                            new_text: " ".repeat(padding_needed),
+                        });
+                    }
+                }
+            }
+
+            let _ = group_start; // suppress unused warning
+        } else {
+            i += 1;
+        }
+    }
+
+    edits
+}
+
+struct TableCell {
+    /// Length of the trimmed cell content (no leading/trailing whitespace)
+    trimmed_len: usize,
+    /// Column where trimmed content ends
+    trimmed_end_col: usize,
+    /// Column where the cell region ends (before comma or `]`)
+    content_end_col: usize,
+}
+
+/// Try to parse a line as a table row: `[a, b, c],` or `[a, b, c]`
+/// (possibly with leading whitespace and `= ` prefix on first row).
+/// Returns the cells if the line matches.
+fn parse_table_row_line(line: &str) -> Option<Vec<TableCell>> {
+    let trimmed = line.trim();
+
+    // Find the bracket content: must start with `[` (possibly after `= `)
+    let bracket_content = if let Some(rest) = trimmed.strip_prefix('[') {
+        rest
+    } else if let Some(idx) = trimmed.find("= [") {
+        &trimmed[idx + 3..]
+    } else {
+        return None;
+    };
+
+    // Must end with `]` or `],`
+    let inner = if let Some(rest) = bracket_content.strip_suffix("],") {
+        rest
+    } else if let Some(rest) = bracket_content.strip_suffix(']') {
+        rest
+    } else {
+        return None;
+    };
+
+    // Find the start column of `[` in the original line
+    let bracket_pos = line.find('[')? + 1; // column after `[`
+
+    // Split by commas, respecting string literals
+    let elements = split_respecting_strings(inner);
+    if elements.is_empty() {
+        return None;
+    }
+
+    let mut cells = Vec::new();
+    let mut col = bracket_pos;
+
+    for (i, elem) in elements.iter().enumerate() {
+        let trimmed_elem = elem.trim();
+        let leading_ws = elem.len() - elem.trim_start().len();
+        let trimmed_start_col = col + leading_ws;
+        let trimmed_end_col = trimmed_start_col + trimmed_elem.len();
+        let content_end_col = col + elem.len();
+
+        cells.push(TableCell {
+            trimmed_len: trimmed_elem.len(),
+            trimmed_end_col,
+            content_end_col,
+        });
+
+        // Advance past this element + the comma separator
+        col = content_end_col;
+        if i < elements.len() - 1 {
+            col += 1; // for the `,`
+        }
+    }
+
+    Some(cells)
+}
+
+/// Split a string by top-level commas, respecting string literals.
+fn split_respecting_strings(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let bytes = s.as_bytes();
+
+    for i in 0..bytes.len() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match bytes[i] {
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b',' if !in_string => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1414,5 +1589,35 @@ fn shape_fn() {
 
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "                ");
+    }
+
+    #[test]
+    fn test_align_table_row_columns() {
+        let source = "    [1, 100, 60, \"jan\"],\n    [2, 1200, 70, \"feb\"],\n";
+        let edits = align_table_row_columns(source);
+        let result = apply_edits(source, &edits);
+        // "100" is 3 chars, "1200" is 4 chars → first row's second col gets padded
+        assert_eq!(
+            result,
+            "    [1, 100 , 60, \"jan\"],\n    [2, 1200, 70, \"feb\"],\n"
+        );
+    }
+
+    #[test]
+    fn test_align_table_row_columns_strings() {
+        let source = "    [1, \"short\"],\n    [2, \"much longer\"],\n";
+        let edits = align_table_row_columns(source);
+        let result = apply_edits(source, &edits);
+        assert_eq!(
+            result,
+            "    [1, \"short\"      ],\n    [2, \"much longer\"],\n"
+        );
+    }
+
+    #[test]
+    fn test_align_table_row_columns_no_change_when_single_row() {
+        let source = "    [1, 100, 60],\n";
+        let edits = align_table_row_columns(source);
+        assert!(edits.is_empty(), "Single row should not produce alignment edits");
     }
 }

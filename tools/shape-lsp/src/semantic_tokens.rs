@@ -1888,6 +1888,9 @@ impl<'a> Visitor for TokenCollector<'a> {
             Expr::Reference { .. } => {
                 // Reference expressions (&expr) - no special token highlighting needed
             }
+            Expr::TableRows(..) => {
+                // Table row literals — child expressions visited by the walker
+            }
         }
         true // Continue visiting children
     }

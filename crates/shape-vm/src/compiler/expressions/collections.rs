@@ -786,6 +786,132 @@ impl BytecodeCompiler {
 
         Ok(())
     }
+
+    /// Compile a table row literal: `[a, b, c], [d, e, f]`
+    ///
+    /// Requires a `Table<T>` type annotation to resolve the struct type T.
+    /// Each row's positional elements are mapped to T's fields in declaration order.
+    /// Emits: push schema_id, row_count, field_count, then all field values row-major,
+    /// then CallBuiltin MakeTableFromRows.
+    pub(crate) fn compile_table_rows(
+        &mut self,
+        rows: &[Vec<shape_ast::ast::Expr>],
+        type_annotation: &Option<shape_ast::ast::TypeAnnotation>,
+        span: shape_ast::ast::Span,
+    ) -> Result<()> {
+        use crate::bytecode::BuiltinFunction;
+        use shape_ast::ast::TypeAnnotation;
+
+        // Extract Table<T> annotation → inner type name
+        let inner_type_name = match type_annotation {
+            Some(TypeAnnotation::Generic { name, args }) if name == "Table" && args.len() == 1 => {
+                match &args[0] {
+                    TypeAnnotation::Reference(t) | TypeAnnotation::Basic(t) => t.clone(),
+                    _ => {
+                        return Err(ShapeError::SemanticError {
+                            message: "Table row literal requires a concrete type parameter, e.g. Table<MyType>".to_string(),
+                            location: Some(self.span_to_source_location(span)),
+                        });
+                    }
+                }
+            }
+            _ => {
+                return Err(ShapeError::SemanticError {
+                    message: "table row literal `[...], [...]` requires a `Table<T>` type annotation".to_string(),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+        };
+
+        // Look up the struct type to get field names and schema
+        let struct_info = self.struct_types.get(&inner_type_name).cloned();
+        let (field_names, _type_def_span) = match struct_info {
+            Some(info) => info,
+            None => {
+                return Err(ShapeError::SemanticError {
+                    message: format!("unknown type '{}' in Table<{}>", inner_type_name, inner_type_name),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+        };
+
+        let field_count = field_names.len();
+
+        // Validate row widths
+        for (i, row) in rows.iter().enumerate() {
+            if row.len() != field_count {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "row {} has {} values but type '{}' has {} fields ({})",
+                        i + 1,
+                        row.len(),
+                        inner_type_name,
+                        field_count,
+                        field_names.join(", ")
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+        }
+
+        // Look up schema ID
+        let schema_id = self
+            .type_tracker
+            .schema_registry()
+            .get(&inner_type_name)
+            .map(|s| s.id)
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: format!("no schema registered for type '{}'", inner_type_name),
+                location: Some(self.span_to_source_location(span)),
+            })?;
+
+        let row_count = rows.len();
+
+        // Emit args: schema_id, row_count, field_count (as constants)
+        let sid_const = self.program.add_constant(Constant::Int(schema_id as i64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(sid_const)),
+        ));
+        let rc_const = self.program.add_constant(Constant::Int(row_count as i64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(rc_const)),
+        ));
+        let fc_const = self.program.add_constant(Constant::Int(field_count as i64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(fc_const)),
+        ));
+
+        // Emit all field values in row-major order
+        for row in rows {
+            for elem in row {
+                self.compile_expr_as_value_or_placeholder(elem)?;
+            }
+        }
+
+        // Call MakeTableFromRows builtin
+        // Convention: push arg_count as constant, then BuiltinCall
+        let total_args = 3 + row_count * field_count;
+        let ac_const = self.program.add_constant(Constant::Number(total_args as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(ac_const)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::MakeTableFromRows)),
+        ));
+
+        self.last_expr_schema = None;
+        self.last_expr_type_info = Some(super::super::VariableTypeInfo::named(
+            format!("Table<{}>", inner_type_name),
+        ));
+        self.last_expr_numeric_type = None;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

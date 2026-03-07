@@ -1116,3 +1116,59 @@ c"{data: chart(line), x(x), y(revenue, cost)}"
         _ => panic!("expected Chart variant, got {:?}", content),
     }
 }
+
+// ===== Table Row Literal Tests =====
+
+#[test]
+fn test_table_row_literal_basic() {
+    let source = r#"
+type Record { id: int, value: int, name: string }
+let t: Table<Record> = [1, 100, "alpha"], [2, 200, "beta"], [3, 300, "gamma"]
+t.count()
+"#;
+    let result = compile_and_execute(source).expect("should compile and run");
+    // count() returns the number of rows
+    assert_eq!(result.as_i64().or(result.as_f64().map(|f| f as i64)), Some(3));
+}
+
+#[test]
+fn test_table_row_literal_filter() {
+    let source = r#"
+type SalesRow { month: int, revenue: int }
+let t: Table<SalesRow> = [1, 42], [2, 58], [3, 65], [4, 51]
+let filtered = t.filter(|row| row.revenue > 50)
+filtered.count()
+"#;
+    let result = compile_and_execute(source).expect("should compile and run");
+    // Rows with revenue > 50: month=2(58), month=3(65), month=4(51) → 3 rows
+    assert_eq!(result.as_i64().or(result.as_f64().map(|f| f as i64)), Some(3));
+}
+
+#[test]
+fn test_table_row_literal_wrong_column_count() {
+    let source = r#"
+type Pair { a: int, b: int }
+let t: Table<Pair> = [1, 2, 3], [4, 5, 6]
+"#;
+    let program = parse_program(source).unwrap();
+    let mut compiler = BytecodeCompiler::new();
+    compiler.set_source(source);
+    let result = compiler.compile(&program);
+    assert!(result.is_err(), "should error on column count mismatch");
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(err.contains("3 values") && err.contains("2 fields"), "error should mention count mismatch: {}", err);
+}
+
+#[test]
+fn test_table_row_literal_no_annotation() {
+    let source = r#"
+let t = [1, 2], [3, 4]
+"#;
+    let program = parse_program(source).unwrap();
+    let mut compiler = BytecodeCompiler::new();
+    compiler.set_source(source);
+    let result = compiler.compile(&program);
+    assert!(result.is_err(), "should error without Table<T> annotation");
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(err.contains("Table<T>"), "error should mention Table<T>: {}", err);
+}

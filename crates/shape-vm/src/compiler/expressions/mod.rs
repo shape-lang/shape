@@ -68,7 +68,8 @@ fn get_expr_span(expr: &Expr) -> Option<Span> {
         | Expr::AsyncScope(_, span)
         | Expr::Comptime(_, span)
         | Expr::ComptimeFor(_, span)
-        | Expr::Reference { span, .. } => Some(*span),
+        | Expr::Reference { span, .. }
+        | Expr::TableRows(_, span) => Some(*span),
     }
 }
 
@@ -1020,6 +1021,13 @@ impl BytecodeCompiler {
                     }),
                 }
             }
+
+            // Table row literals — compiled via compile_table_rows() in the VariableDecl handler.
+            // If we reach here, it means TableRows appeared outside a let binding context.
+            Expr::TableRows(_, span) => Err(ShapeError::SemanticError {
+                message: "table row literal `[...], [...]` can only be used as a variable initializer with a `Table<T>` type annotation".to_string(),
+                location: Some(self.span_to_source_location(*span)),
+            }),
         }
     }
 

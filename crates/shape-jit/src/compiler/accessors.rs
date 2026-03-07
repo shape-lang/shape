@@ -493,6 +493,8 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::Clamp,
     BuiltinFunction::IsNaN,
     BuiltinFunction::IsFinite,
+    // Table construction
+    BuiltinFunction::MakeTableFromRows,
 ];
 
 fn vm_only_opcode_reason(_opcode: OpCode) -> Option<&'static str> {

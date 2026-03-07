@@ -84,6 +84,9 @@ pub fn parse_variable_decl(pair: Pair<Rule>) -> Result<VariableDecl> {
             Rule::expression => {
                 value = Some(expressions::parse_expression(pair)?);
             }
+            Rule::table_row_init => {
+                value = Some(parse_table_row_init(pair)?);
+            }
             _ => {}
         }
     }
@@ -96,6 +99,34 @@ pub fn parse_variable_decl(pair: Pair<Rule>) -> Result<VariableDecl> {
         value,
         ownership,
     })
+}
+
+/// Parse a table row initializer: `[a, b], [c, d], ...`
+/// Each bracket group becomes one row (Vec<Expr>).
+fn parse_table_row_init(pair: Pair<Rule>) -> Result<crate::ast::Expr> {
+    use crate::ast::{Expr, Span};
+    let span = pair_span(&pair);
+    let mut rows = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::array_elements => {
+                let mut elements = Vec::new();
+                for elem_pair in inner.into_inner() {
+                    if elem_pair.as_rule() == Rule::array_element {
+                        let mut elem_inner = elem_pair.into_inner();
+                        if let Some(elem) = elem_inner.next() {
+                            elements.push(expressions::parse_expression(elem)?);
+                        }
+                    }
+                }
+                rows.push(elements);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(Expr::TableRows(rows, Span::new(span.start, span.end)))
 }
 
 /// Parse a pattern for destructuring

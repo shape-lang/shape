@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use crate::util::offset_to_position;
 use shape_ast::ast::expr_helpers::ComptimeForExpr;
-use shape_ast::ast::{Expr, FunctionDef, Item, Program, Span, Spanned, Statement, VariableDecl};
+use shape_ast::ast::{
+    Expr, FunctionDef, Item, Program, Span, Spanned, Statement, TypeAnnotation, VariableDecl,
+};
 use shape_ast::parser::parse_program;
 use shape_runtime::visitor::{Visitor, walk_program};
 use tower_lsp_server::ls_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range};
@@ -366,6 +368,86 @@ impl<'a> HintContext<'a> {
         }
     }
 
+    /// Collect parameter-style hints for table row literals.
+    /// Shows struct field names before each positional element in `[a, b, c], [d, e, f]`
+    /// when the variable has a `Table<T>` type annotation.
+    fn collect_table_row_hints(&mut self, decl: &VariableDecl) {
+        if !self.config.show_parameter_hints {
+            return;
+        }
+
+        // Check if the init expression is TableRows
+        let rows = match &decl.value {
+            Some(Expr::TableRows(rows, _)) => rows,
+            _ => return,
+        };
+
+        // Extract inner type name from Table<T> annotation
+        let inner_type = match &decl.type_annotation {
+            Some(TypeAnnotation::Generic { name, args }) if name == "Table" => {
+                args.first().and_then(|a| a.as_simple_name()).map(String::from)
+            }
+            _ => None,
+        };
+        let inner_type = match inner_type {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Find struct field names from the program
+        let field_names: Vec<String> = self
+            .program
+            .items
+            .iter()
+            .find_map(|item| {
+                if let Item::StructType(struct_def, _) = item {
+                    if struct_def.name == inner_type {
+                        Some(
+                            struct_def
+                                .fields
+                                .iter()
+                                .filter(|f| !f.is_comptime)
+                                .map(|f| f.name.clone())
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        if field_names.is_empty() {
+            return;
+        }
+
+        // Emit parameter hints for each element in each row
+        for row in rows {
+            for (i, elem) in row.iter().enumerate() {
+                if let Some(field_name) = field_names.get(i) {
+                    let elem_span = elem.span();
+                    if !elem_span.is_dummy() {
+                        let position = offset_to_position(self.text, elem_span.start);
+                        if is_in_range(position, self.range) {
+                            self.hints.push(InlayHint {
+                                position,
+                                label: InlayHintLabel::String(format!("{}:", field_name)),
+                                kind: Some(InlayHintKind::PARAMETER),
+                                text_edits: None,
+                                tooltip: None,
+                                padding_left: Some(false),
+                                padding_right: Some(true),
+                                data: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn collect_parameter_hints(&mut self, args: &[Expr], func_name: &str) {
         if func_name == "print" {
             return;
@@ -409,7 +491,10 @@ impl<'a> HintContext<'a> {
 impl<'a> Visitor for HintContext<'a> {
     fn visit_item(&mut self, item: &Item) -> bool {
         match item {
-            Item::VariableDecl(decl, _) => self.collect_variable_type_hint(decl),
+            Item::VariableDecl(decl, _) => {
+                self.collect_variable_type_hint(decl);
+                self.collect_table_row_hints(decl);
+            }
             Item::Function(func_def, _) => self.collect_function_type_hints(func_def),
             _ => {}
         }
@@ -420,6 +505,7 @@ impl<'a> Visitor for HintContext<'a> {
         // Handle variable declarations at the statement level
         if let Statement::VariableDecl(decl, _) = stmt {
             self.collect_variable_type_hint(decl);
+            self.collect_table_row_hints(decl);
         }
         true // Continue visiting children
     }
@@ -1067,6 +1153,42 @@ let s = foo("hi")
             "Should not show type hint when annotation exists, got: {:?}",
             type_labels
         );
+    }
+
+    #[test]
+    fn test_table_row_literal_field_hints() {
+        let code = r#"type FinRecord {
+  month: int,
+  revenue: number,
+  profit: number,
+  note: string
+}
+let t: Table<FinRecord> = [1, 100.0, 60.0, "jan"], [2, 120.0, 70.0, "feb"]
+"#;
+        let config = InlayHintConfig::default();
+        let hints = get_inlay_hints(code, full_range(), &config, None);
+        let param_hints: Vec<String> = hints
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::PARAMETER))
+            .map(|h| match &h.label {
+                InlayHintLabel::String(s) => s.clone(),
+                _ => "non-string".to_string(),
+            })
+            .collect();
+        // Should have 8 parameter hints (4 fields x 2 rows)
+        assert_eq!(
+            param_hints.len(),
+            8,
+            "Expected 8 parameter hints for 2 rows x 4 fields, got: {:?}",
+            param_hints
+        );
+        assert_eq!(param_hints[0], "month:");
+        assert_eq!(param_hints[1], "revenue:");
+        assert_eq!(param_hints[2], "profit:");
+        assert_eq!(param_hints[3], "note:");
+        // Second row repeats
+        assert_eq!(param_hints[4], "month:");
+        assert_eq!(param_hints[7], "note:");
     }
 
     #[test]

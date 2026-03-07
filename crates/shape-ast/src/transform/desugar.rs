@@ -459,6 +459,13 @@ fn desugar_expr(expr: &mut Expr) {
             }
         }
         Expr::Reference { expr: inner, .. } => desugar_expr(inner),
+        Expr::TableRows(rows, _) => {
+            for row in rows {
+                for elem in row {
+                    desugar_expr(elem);
+                }
+            }
+        }
     }
 }
 

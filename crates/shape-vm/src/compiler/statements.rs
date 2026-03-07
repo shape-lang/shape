@@ -3065,11 +3065,23 @@ impl BytecodeCompiler {
                 // Compile initializer — register the variable even if the initializer fails,
                 // to prevent cascading "Undefined variable" errors on later references.
                 let init_err = if let Some(init_expr) = &var_decl.value {
-                    match self.compile_expr(init_expr) {
-                        Ok(()) => None,
-                        Err(e) => {
-                            self.emit(Instruction::simple(OpCode::PushNull));
-                            Some(e)
+                    // Special handling: Table row literal syntax
+                    // `let t: Table<T> = [a, b], [c, d]` → compile as table construction
+                    if let Expr::TableRows(rows, tr_span) = init_expr {
+                        match self.compile_table_rows(rows, &var_decl.type_annotation, *tr_span) {
+                            Ok(()) => None,
+                            Err(e) => {
+                                self.emit(Instruction::simple(OpCode::PushNull));
+                                Some(e)
+                            }
+                        }
+                    } else {
+                        match self.compile_expr(init_expr) {
+                            Ok(()) => None,
+                            Err(e) => {
+                                self.emit(Instruction::simple(OpCode::PushNull));
+                                Some(e)
+                            }
                         }
                     }
                 } else {

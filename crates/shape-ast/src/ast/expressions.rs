@@ -271,6 +271,11 @@ pub enum Expr {
         is_mutable: bool,
         span: Span,
     },
+
+    /// Table row literal: `[a, b, c], [d, e, f]`
+    /// Used with `let t: Table<T> = [row1], [row2], ...` syntax.
+    /// Each inner Vec<Expr> is one row's positional field values.
+    TableRows(Vec<Vec<Expr>>, Span),
 }
 
 impl Expr {
@@ -351,6 +356,7 @@ impl Spanned for Expr {
             Expr::Comptime(_, span) => *span,
             Expr::ComptimeFor(_, span) => *span,
             Expr::Reference { span, .. } => *span,
+            Expr::TableRows(_, span) => *span,
         }
     }
 }

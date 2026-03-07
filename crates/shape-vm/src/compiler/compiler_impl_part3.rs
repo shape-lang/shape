@@ -163,6 +163,13 @@ impl BytecodeCompiler {
                     visit_expr!(item);
                 }
             }
+            Expr::TableRows(rows, _) => {
+                for row in rows {
+                    for elem in row {
+                        visit_expr!(elem);
+                    }
+                }
+            }
             Expr::Object(entries, _) => {
                 for entry in entries {
                     match entry {

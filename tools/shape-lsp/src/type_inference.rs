@@ -241,6 +241,7 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
         Expr::Comptime(_, _) => None,
         Expr::ComptimeFor(_, _) => None,
         Expr::Reference { expr: inner, .. } => infer_expr_type_with_env(inner, env),
+        Expr::TableRows(..) => Some("Table".to_string()),
     }
 }
 

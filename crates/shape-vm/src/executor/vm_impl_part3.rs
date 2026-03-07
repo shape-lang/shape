@@ -771,6 +771,13 @@ impl VirtualMachine {
                     self.push_vw(result)?;
                 }
 
+                // Table construction
+                BuiltinFunction::MakeTableFromRows => {
+                    let args = self.pop_builtin_args()?;
+                    let result = self.builtin_make_table_from_rows(args)?;
+                    self.push_vw(result)?;
+                }
+
                 // Json navigation helpers
                 BuiltinFunction::JsonObjectGet => {
                     let args = self.pop_builtin_args()?;

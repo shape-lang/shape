@@ -1361,6 +1361,13 @@ impl BytecodeCompiler {
                     }
                 }
             },
+            Expr::TableRows(rows, _) => {
+                for row in rows {
+                    for elem in row {
+                        Self::collect_scoped_names_in_expr(elem, names);
+                    }
+                }
+            }
             Expr::Literal(..)
             | Expr::Identifier(..)
             | Expr::DataRef(..)

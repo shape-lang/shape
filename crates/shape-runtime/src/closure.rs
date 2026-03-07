@@ -498,6 +498,13 @@ impl EnvironmentAnalyzer {
                     self.analyze_expr(elem);
                 }
             }
+            Expr::TableRows(rows, _) => {
+                for row in rows {
+                    for elem in row {
+                        self.analyze_expr(elem);
+                    }
+                }
+            }
             Expr::ListComprehension(comp, _) => {
                 // Analyze the element expression in a new scope
                 self.enter_scope();

@@ -797,8 +797,12 @@ expression_stmt = { expression }
 // Variable declarations with let, var, const
 // Optional ownership_modifier (move/clone) before the initializer expression
 variable_decl = {
-    var_keyword ~ var_mut_modifier? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ ownership_modifier? ~ expression)?
+    var_keyword ~ var_mut_modifier? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ ownership_modifier? ~ (table_row_init | expression))?
 }
+
+// Table row literal initializer: [a, b, c], [d, e, f], ...
+// Must have 2+ bracket groups to disambiguate from plain array expressions.
+table_row_init = { "[" ~ array_elements ~ "]" ~ ("," ~ "[" ~ array_elements ~ "]")+ }
 
 ownership_modifier = @{ ("move" | "clone") ~ !(ASCII_ALPHANUMERIC | "_") }
 

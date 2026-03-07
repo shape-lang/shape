@@ -686,6 +686,13 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
                 }
             }
         }
+        Expr::TableRows(rows, _span) => {
+            for row in rows {
+                for elem in row {
+                    walk_expr(visitor, elem);
+                }
+            }
+        }
         Expr::ListComprehension(comp, span) => {
             if visitor.visit_expr_list_comprehension(expr, *span) {
                 walk_expr(visitor, &comp.element);
