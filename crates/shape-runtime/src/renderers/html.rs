@@ -214,6 +214,27 @@ fn build_echarts_option(spec: &ChartSpec, type_name: &str) -> String {
 
     let chart_type = type_name.to_lowercase();
 
+    // Bar/histogram charts use category xAxis; line/scatter/area use value xAxis
+    let use_category = matches!(chart_type.as_str(), "bar" | "histogram");
+
+    // Extract x-axis categories from first series (all series share the same x values)
+    let categories: Vec<serde_json::Value> = if use_category && !spec.series.is_empty() {
+        spec.series[0]
+            .data
+            .iter()
+            .map(|(x, _)| {
+                // Format x nicely: drop ".0" for whole numbers
+                if x.fract() == 0.0 {
+                    serde_json::json!(*x as i64)
+                } else {
+                    serde_json::json!(x)
+                }
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
     // Build series array
     let series: Vec<serde_json::Value> = if spec.series.is_empty() {
         vec![serde_json::json!({"type": chart_type, "data": []})]
@@ -221,17 +242,29 @@ fn build_echarts_option(spec: &ChartSpec, type_name: &str) -> String {
         spec.series
             .iter()
             .map(|s| {
-                let data: Vec<serde_json::Value> = s
-                    .data
-                    .iter()
-                    .map(|(x, y)| serde_json::json!([x, y]))
-                    .collect();
-                serde_json::json!({
-                    "name": s.label,
-                    "type": chart_type,
-                    "data": data,
-                    "smooth": false,
-                })
+                if use_category {
+                    // Category chart: series data is just y values
+                    let data: Vec<serde_json::Value> =
+                        s.data.iter().map(|(_, y)| serde_json::json!(y)).collect();
+                    serde_json::json!({
+                        "name": s.label,
+                        "type": chart_type,
+                        "data": data,
+                    })
+                } else {
+                    // Value chart: series data is [x, y] pairs
+                    let data: Vec<serde_json::Value> = s
+                        .data
+                        .iter()
+                        .map(|(x, y)| serde_json::json!([x, y]))
+                        .collect();
+                    serde_json::json!({
+                        "name": s.label,
+                        "type": chart_type,
+                        "data": data,
+                        "smooth": false,
+                    })
+                }
             })
             .collect()
     };
@@ -246,17 +279,32 @@ fn build_echarts_option(spec: &ChartSpec, type_name: &str) -> String {
         option["title"] = serde_json::json!({"text": t, "textStyle": {"color": "#ccc", "fontSize": 14}});
     }
 
+    // xAxis: category for bar/histogram, value for others
+    let x_axis_type = if use_category { "category" } else { "value" };
+    let mut x_axis = serde_json::json!({
+        "type": x_axis_type,
+        "axisLabel": {"color": "#888"},
+        "axisLine": {"lineStyle": {"color": "#555"}},
+    });
+    if use_category && !categories.is_empty() {
+        x_axis["data"] = serde_json::json!(categories);
+    }
     if let Some(ref xl) = spec.x_label {
-        option["xAxis"] = serde_json::json!({"type": "value", "name": xl, "nameTextStyle": {"color": "#888"}, "axisLabel": {"color": "#888"}, "axisLine": {"lineStyle": {"color": "#555"}}});
-    } else {
-        option["xAxis"] = serde_json::json!({"type": "value", "axisLabel": {"color": "#888"}, "axisLine": {"lineStyle": {"color": "#555"}}});
+        x_axis["name"] = serde_json::json!(xl);
+        x_axis["nameTextStyle"] = serde_json::json!({"color": "#888"});
     }
+    option["xAxis"] = x_axis;
 
+    let mut y_axis = serde_json::json!({
+        "type": "value",
+        "axisLabel": {"color": "#888"},
+        "splitLine": {"lineStyle": {"color": "#333"}},
+    });
     if let Some(ref yl) = spec.y_label {
-        option["yAxis"] = serde_json::json!({"type": "value", "name": yl, "nameTextStyle": {"color": "#888"}, "axisLabel": {"color": "#888"}, "splitLine": {"lineStyle": {"color": "#333"}}});
-    } else {
-        option["yAxis"] = serde_json::json!({"type": "value", "axisLabel": {"color": "#888"}, "splitLine": {"lineStyle": {"color": "#333"}}});
+        y_axis["name"] = serde_json::json!(yl);
+        y_axis["nameTextStyle"] = serde_json::json!({"color": "#888"});
     }
+    option["yAxis"] = y_axis;
 
     if spec.series.len() > 1 {
         option["legend"] = serde_json::json!({"show": true, "textStyle": {"color": "#ccc"}});
