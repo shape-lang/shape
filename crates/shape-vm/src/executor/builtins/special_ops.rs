@@ -606,8 +606,11 @@ impl VirtualMachine {
             _ => ChartType::Line,
         };
 
-        // Handle DataTable (Table<T>) directly via columnar access
-        if let Some(dt) = value.as_datatable() {
+        // Handle DataTable / TypedTable (Table<T>) directly via columnar access
+        let dt_ref = value.as_datatable().or_else(|| {
+            value.as_typed_table().map(|(_, t)| t)
+        });
+        if let Some(dt) = dt_ref {
             return self.chart_from_datatable(dt, chart_type, x_column, y_columns);
         }
 
