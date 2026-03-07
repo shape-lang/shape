@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "shape")]
+#[command(name = "shape", version)]
 #[command(about = "Shape - A programming language for data analysis and simulation", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
