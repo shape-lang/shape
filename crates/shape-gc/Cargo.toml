@@ -1,6 +1,6 @@
 [package]
 name = "shape-gc"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 description = "Garbage collection infrastructure for the Shape runtime"
 license = "MIT OR Apache-2.0"
