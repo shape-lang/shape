@@ -4,10 +4,12 @@
 //! supports styled text, tables, code blocks, charts, key-value pairs, and
 //! fragments (compositions of multiple nodes).
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A structured content node — the output of Content.render()
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentNode {
     /// Styled text with spans
     Text(StyledText),
@@ -26,34 +28,46 @@ pub enum ContentNode {
     Fragment(Vec<ContentNode>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StyledText {
     pub spans: Vec<StyledSpan>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StyledSpan {
     pub text: String,
     pub style: Style,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Style {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fg: Option<Color>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bg: Option<Color>,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub bold: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub italic: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub underline: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub dim: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+fn is_false(v: &bool) -> bool {
+    !v
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Color {
     Named(NamedColor),
     Rgb(u8, u8, u8),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NamedColor {
     Red,
     Green,
@@ -65,21 +79,26 @@ pub enum NamedColor {
     Default,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContentTable {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<ContentNode>>,
     pub border: BorderStyle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rows: Option<usize>,
     /// Column type hints: "string", "number", "date", etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_types: Option<Vec<String>>,
     /// Total row count before truncation (for display: "showing 50 of 1000").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_rows: Option<usize>,
     /// Whether interactive renderers should enable column sorting.
+    #[serde(default)]
     pub sortable: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BorderStyle {
     Rounded,
     Sharp,
@@ -95,22 +114,40 @@ impl Default for BorderStyle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+// ========== Chart types ==========
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChartSpec {
     pub chart_type: ChartType,
-    pub series: Vec<ChartSeries>,
+    /// Data channels populated by typed builder methods (.x(), .y(), .open(), etc.)
+    pub channels: Vec<ChartChannel>,
+    /// Categorical x-axis labels (bar charts, box plots)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_categories: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<usize>,
     /// Full ECharts option JSON override (injected by chart detection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echarts_options: Option<serde_json::Value>,
     /// Whether this chart should be rendered interactively (default true).
+    #[serde(default = "default_true")]
     pub interactive: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChartType {
     Line,
     Bar,
@@ -118,14 +155,111 @@ pub enum ChartType {
     Area,
     Candlestick,
     Histogram,
+    BoxPlot,
+    Heatmap,
+    Bubble,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChartSeries {
+/// A named data channel in a chart (e.g. "x", "y", "open", "high", "low", "close").
+///
+/// Channel names are internal — Shape users call typed methods like `.x()`, `.y()`,
+/// never write string keys directly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChartChannel {
+    /// Role name — set by builder method, never by user (e.g. "x", "y", "open")
+    pub name: String,
+    /// Display label
     pub label: String,
-    pub data: Vec<(f64, f64)>,
+    /// Extracted numeric data
+    pub values: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<Color>,
 }
+
+impl ChartType {
+    /// Returns the channel names required for this chart type.
+    pub fn required_channels(&self) -> &[&str] {
+        match self {
+            ChartType::Line | ChartType::Area => &["x", "y"],
+            ChartType::Bar => &["y"],
+            ChartType::Scatter => &["x", "y"],
+            ChartType::Candlestick => &["x", "open", "high", "low", "close"],
+            ChartType::BoxPlot => &["x", "min", "q1", "median", "q3", "max"],
+            ChartType::Histogram => &["values"],
+            ChartType::Heatmap => &["x", "y", "value"],
+            ChartType::Bubble => &["x", "y", "size"],
+        }
+    }
+}
+
+impl ChartSpec {
+    /// Get a channel by role name.
+    pub fn channel(&self, name: &str) -> Option<&ChartChannel> {
+        self.channels.iter().find(|c| c.name == name)
+    }
+
+    /// Get all channels with a given role name (e.g. multiple "y" channels).
+    pub fn channels_by_name(&self, name: &str) -> Vec<&ChartChannel> {
+        self.channels.iter().filter(|c| c.name == name).collect()
+    }
+
+    /// Number of data points (from the first channel).
+    pub fn data_len(&self) -> usize {
+        self.channels.first().map(|c| c.values.len()).unwrap_or(0)
+    }
+}
+
+// ========== Backward compatibility ==========
+
+/// Backward-compatible type alias. New code should use `ChartChannel` directly.
+pub type ChartSeries = ChartChannel;
+
+/// Helper to create a ChartSpec from legacy series data (Vec<(f64, f64)> pairs).
+///
+/// Converts old-style `ChartSeries { label, data: Vec<(f64, f64)>, color }` into
+/// channel-based representation with "x" and "y" channels.
+impl ChartSpec {
+    pub fn from_series(
+        chart_type: ChartType,
+        series: Vec<(String, Vec<(f64, f64)>, Option<Color>)>,
+    ) -> Self {
+        let mut channels = Vec::new();
+        if let Some(first) = series.first() {
+            // x channel from first series
+            let x_values: Vec<f64> = first.1.iter().map(|(x, _)| *x).collect();
+            channels.push(ChartChannel {
+                name: "x".to_string(),
+                label: "x".to_string(),
+                values: x_values,
+                color: None,
+            });
+        }
+        // y channels from each series
+        for (label, data, color) in &series {
+            let y_values: Vec<f64> = data.iter().map(|(_, y)| *y).collect();
+            channels.push(ChartChannel {
+                name: "y".to_string(),
+                label: label.clone(),
+                values: y_values,
+                color: color.clone(),
+            });
+        }
+        ChartSpec {
+            chart_type,
+            channels,
+            x_categories: None,
+            title: None,
+            x_label: None,
+            y_label: None,
+            width: None,
+            height: None,
+            echarts_options: None,
+            interactive: true,
+        }
+    }
+}
+
+// ========== ContentNode helpers ==========
 
 impl ContentNode {
     /// Create a plain text node.
@@ -339,7 +473,8 @@ mod tests {
 
         let chart = ContentNode::Chart(ChartSpec {
             chart_type: ChartType::Line,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: Some("My Chart".into()),
             x_label: None,
             y_label: None,
@@ -352,7 +487,8 @@ mod tests {
 
         let chart_no_title = ContentNode::Chart(ChartSpec {
             chart_type: ChartType::Bar,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: None,
             x_label: None,
             y_label: None,
@@ -533,5 +669,108 @@ mod tests {
     #[test]
     fn test_border_style_default() {
         assert_eq!(BorderStyle::default(), BorderStyle::Rounded);
+    }
+
+    #[test]
+    fn test_chart_spec_channel_helpers() {
+        let spec = ChartSpec {
+            chart_type: ChartType::Line,
+            channels: vec![
+                ChartChannel {
+                    name: "x".into(),
+                    label: "Time".into(),
+                    values: vec![1.0, 2.0, 3.0],
+                    color: None,
+                },
+                ChartChannel {
+                    name: "y".into(),
+                    label: "Price".into(),
+                    values: vec![10.0, 20.0, 30.0],
+                    color: None,
+                },
+                ChartChannel {
+                    name: "y".into(),
+                    label: "Volume".into(),
+                    values: vec![100.0, 200.0, 300.0],
+                    color: None,
+                },
+            ],
+            x_categories: None,
+            title: None,
+            x_label: None,
+            y_label: None,
+            width: None,
+            height: None,
+            echarts_options: None,
+            interactive: true,
+        };
+        assert_eq!(spec.channel("x").unwrap().label, "Time");
+        assert_eq!(spec.channels_by_name("y").len(), 2);
+        assert_eq!(spec.data_len(), 3);
+    }
+
+    #[test]
+    fn test_chart_type_required_channels() {
+        assert_eq!(ChartType::Line.required_channels(), &["x", "y"]);
+        assert_eq!(
+            ChartType::Candlestick.required_channels(),
+            &["x", "open", "high", "low", "close"]
+        );
+        assert_eq!(ChartType::Bar.required_channels(), &["y"]);
+        assert_eq!(ChartType::Histogram.required_channels(), &["values"]);
+    }
+
+    #[test]
+    fn test_chart_spec_from_series() {
+        let spec = ChartSpec::from_series(
+            ChartType::Line,
+            vec![
+                ("Revenue".to_string(), vec![(1.0, 100.0), (2.0, 200.0)], None),
+            ],
+        );
+        assert_eq!(spec.channels.len(), 2); // x + y
+        assert_eq!(spec.channel("x").unwrap().values, vec![1.0, 2.0]);
+        assert_eq!(spec.channels_by_name("y")[0].label, "Revenue");
+        assert_eq!(spec.channels_by_name("y")[0].values, vec![100.0, 200.0]);
+    }
+
+    #[test]
+    fn test_content_node_serde_roundtrip() {
+        let node = ContentNode::Chart(ChartSpec {
+            chart_type: ChartType::Line,
+            channels: vec![ChartChannel {
+                name: "y".into(),
+                label: "Price".into(),
+                values: vec![1.0, 2.0],
+                color: Some(Color::Named(NamedColor::Red)),
+            }],
+            x_categories: None,
+            title: Some("Test".into()),
+            x_label: None,
+            y_label: None,
+            width: None,
+            height: None,
+            echarts_options: None,
+            interactive: true,
+        });
+        let json = serde_json::to_string(&node).unwrap();
+        let roundtrip: ContentNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(node, roundtrip);
+    }
+
+    #[test]
+    fn test_content_table_serde_roundtrip() {
+        let node = ContentNode::Table(ContentTable {
+            headers: vec!["A".into()],
+            rows: vec![vec![ContentNode::plain("1")]],
+            border: BorderStyle::Rounded,
+            max_rows: None,
+            column_types: None,
+            total_rows: None,
+            sortable: false,
+        });
+        let json = serde_json::to_string(&node).unwrap();
+        let roundtrip: ContentNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(node, roundtrip);
     }
 }

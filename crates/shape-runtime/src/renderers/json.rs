@@ -166,14 +166,7 @@ fn render_table(table: &ContentTable) -> String {
 }
 
 fn render_chart(spec: &ChartSpec) -> String {
-    let chart_type = match spec.chart_type {
-        shape_value::content::ChartType::Line => "\"line\"",
-        shape_value::content::ChartType::Bar => "\"bar\"",
-        shape_value::content::ChartType::Scatter => "\"scatter\"",
-        shape_value::content::ChartType::Area => "\"area\"",
-        shape_value::content::ChartType::Candlestick => "\"candlestick\"",
-        shape_value::content::ChartType::Histogram => "\"histogram\"",
-    };
+    let chart_type = chart_type_json_str(spec.chart_type);
 
     let title = spec
         .title
@@ -181,11 +174,14 @@ fn render_chart(spec: &ChartSpec) -> String {
         .map(|t| json_string(t))
         .unwrap_or_else(|| "null".to_string());
 
+    let y_count = spec.channels_by_name("y").len();
+
     let mut parts = vec![
-        format!("\"type\":\"chart\""),
+        "\"type\":\"chart\"".to_string(),
         format!("\"chart_type\":{}", chart_type),
         format!("\"title\":{}", title),
-        format!("\"series_count\":{}", spec.series.len()),
+        format!("\"channel_count\":{}", spec.channels.len()),
+        format!("\"series_count\":{}", y_count),
     ];
 
     if let Some(ref xl) = spec.x_label {
@@ -196,6 +192,21 @@ fn render_chart(spec: &ChartSpec) -> String {
     }
 
     format!("{{{}}}", parts.join(","))
+}
+
+fn chart_type_json_str(ct: shape_value::content::ChartType) -> &'static str {
+    use shape_value::content::ChartType;
+    match ct {
+        ChartType::Line => "\"line\"",
+        ChartType::Bar => "\"bar\"",
+        ChartType::Scatter => "\"scatter\"",
+        ChartType::Area => "\"area\"",
+        ChartType::Candlestick => "\"candlestick\"",
+        ChartType::Histogram => "\"histogram\"",
+        ChartType::BoxPlot => "\"boxplot\"",
+        ChartType::Heatmap => "\"heatmap\"",
+        ChartType::Bubble => "\"bubble\"",
+    }
 }
 
 fn json_string(s: &str) -> String {
@@ -314,7 +325,8 @@ mod tests {
     fn test_chart_json() {
         let chart = ContentNode::Chart(shape_value::content::ChartSpec {
             chart_type: shape_value::content::ChartType::Bar,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: Some("Sales".into()),
             x_label: None,
             y_label: None,

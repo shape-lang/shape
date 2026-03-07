@@ -117,10 +117,13 @@ pub fn content_chart(args: &[ValueWord]) -> Result<ValueWord> {
         "area" => ChartType::Area,
         "candlestick" => ChartType::Candlestick,
         "histogram" => ChartType::Histogram,
+        "boxplot" | "box_plot" => ChartType::BoxPlot,
+        "heatmap" => ChartType::Heatmap,
+        "bubble" => ChartType::Bubble,
         other => {
             return Err(ShapeError::RuntimeError {
                 message: format!(
-                    "Unknown chart type '{}'. Expected: line, bar, scatter, area, candlestick, histogram",
+                    "Unknown chart type '{}'. Expected: line, bar, scatter, area, candlestick, histogram, boxplot, heatmap, bubble",
                     other
                 ),
                 location: None,
@@ -130,7 +133,8 @@ pub fn content_chart(args: &[ValueWord]) -> Result<ValueWord> {
 
     Ok(ValueWord::from_content(ContentNode::Chart(ChartSpec {
         chart_type,
-        series: vec![],
+        channels: vec![],
+        x_categories: None,
         title: None,
         x_label: None,
         y_label: None,
@@ -322,7 +326,8 @@ pub fn border_named(name: &str) -> Result<ValueWord> {
 /// Returns a ValueWord string tag that content builders accept as chart type args.
 pub fn chart_type_named(name: &str) -> Result<ValueWord> {
     match name.to_lowercase().as_str() {
-        "line" | "bar" | "scatter" | "area" | "candlestick" | "histogram" => {}
+        "line" | "bar" | "scatter" | "area" | "candlestick" | "histogram" | "boxplot"
+        | "heatmap" | "bubble" => {}
         _ => {
             return Err(ShapeError::RuntimeError {
                 message: format!("Unknown chart type '{}'", name),
@@ -394,7 +399,7 @@ mod tests {
         match node {
             ContentNode::Chart(spec) => {
                 assert_eq!(spec.chart_type, ChartType::Line);
-                assert!(spec.series.is_empty());
+                assert!(spec.channels.is_empty());
             }
             _ => panic!("expected Chart"),
         }

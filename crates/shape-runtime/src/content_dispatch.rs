@@ -39,16 +39,42 @@ pub mod adapters {
     pub const PLAIN: &str = "Plain";
 }
 
-/// Render a ValueWord value as a ContentNode using built-in Content dispatch.
+/// Optional user-defined Content impl resolver.
+///
+/// When set, `render_as_content` calls this function before falling through to
+/// built-in dispatch. If the resolver returns `Some(node)`, that node is used.
+/// The resolver is typically set by the VM executor to check for user-defined
+/// `impl Content for MyType { fn render(self) -> ContentNode }` blocks.
+pub type UserContentResolver = dyn Fn(&ValueWord) -> Option<ContentNode> + Send + Sync;
+
+static USER_CONTENT_RESOLVER: std::sync::OnceLock<Box<UserContentResolver>> =
+    std::sync::OnceLock::new();
+
+/// Register a user-defined Content trait resolver.
+///
+/// Called by the VM during initialization to enable user-implementable Content trait.
+pub fn set_user_content_resolver(resolver: Box<UserContentResolver>) {
+    let _ = USER_CONTENT_RESOLVER.set(resolver);
+}
+
+/// Render a ValueWord value as a ContentNode using Content dispatch.
 ///
 /// Dispatch order:
 /// 1. If value IS a ContentNode → return as-is
-/// 2. If value type has a built-in Content impl → produce structured output
-/// 3. Else → Display fallback → ContentNode::plain(display_string)
+/// 2. If a user-defined Content impl exists → call user's render()
+/// 3. If value type has a built-in Content impl → produce structured output
+/// 4. Else → Display fallback → ContentNode::plain(display_string)
 pub fn render_as_content(value: &ValueWord) -> ContentNode {
     // Fast path: already a content node
     if let Some(node) = value.as_content() {
         return node.clone();
+    }
+
+    // Check for user-defined Content impl
+    if let Some(resolver) = USER_CONTENT_RESOLVER.get() {
+        if let Some(node) = resolver(value) {
+            return node;
+        }
     }
 
     match value.tag() {
@@ -71,14 +97,30 @@ pub fn render_as_content(value: &ValueWord) -> ContentNode {
 ///
 /// The `caps` parameter provides renderer capabilities so the Content impl
 /// can adapt output (e.g., use ANSI codes only when `caps.ansi` is true).
+/// Optional adapter-specific Content resolver.
+pub type UserContentForResolver =
+    dyn Fn(&ValueWord, &str, &RendererCapabilities) -> Option<ContentNode> + Send + Sync;
+
+static USER_CONTENT_FOR_RESOLVER: std::sync::OnceLock<Box<UserContentForResolver>> =
+    std::sync::OnceLock::new();
+
+/// Register a user-defined ContentFor<Adapter> resolver.
+pub fn set_user_content_for_resolver(resolver: Box<UserContentForResolver>) {
+    let _ = USER_CONTENT_FOR_RESOLVER.set(resolver);
+}
+
 pub fn render_as_content_for(
     value: &ValueWord,
-    _adapter: &str,
-    _caps: &RendererCapabilities,
+    adapter: &str,
+    caps: &RendererCapabilities,
 ) -> ContentNode {
-    // Currently all adapter-specific dispatch falls through to generic Content.
-    // When user-defined ContentFor<Adapter> impls are supported at the VM level,
-    // this function will check for a registered ContentFor impl first.
+    // Check for user-defined ContentFor<Adapter> impl
+    if let Some(resolver) = USER_CONTENT_FOR_RESOLVER.get() {
+        if let Some(node) = resolver(value, adapter, caps) {
+            return node;
+        }
+    }
+    // Fall through to generic Content dispatch
     render_as_content(value)
 }
 

@@ -42,8 +42,8 @@ pub mod value;
 pub use aligned_vec::AlignedVec;
 pub use closure::Closure;
 pub use content::{
-    BorderStyle, ChartSeries, ChartSpec, ChartType, Color, ContentNode, ContentTable, NamedColor,
-    Style, StyledSpan, StyledText,
+    BorderStyle, ChartChannel, ChartSeries, ChartSpec, ChartType, Color, ContentNode,
+    ContentTable, NamedColor, Style, StyledSpan, StyledText,
 };
 pub use context::{ErrorLocation, LocatedVMError, VMContext, VMError};
 pub use datatable::{ColumnPtrs, DataTable, DataTableBuilder};

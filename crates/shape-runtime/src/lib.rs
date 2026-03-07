@@ -25,6 +25,7 @@ pub mod builtin_metadata;
 pub mod closure;
 pub mod code_search;
 pub mod columnar_aggregations;
+pub mod chart_detect;
 pub mod const_eval;
 pub mod content_builders;
 pub mod content_dispatch;

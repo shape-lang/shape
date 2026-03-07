@@ -11,7 +11,7 @@
 
 use shape_ast::error::{Result, ShapeError};
 use shape_value::ValueWord;
-use shape_value::content::{BorderStyle, ChartSeries, Color, ContentNode, NamedColor};
+use shape_value::content::{BorderStyle, ChartChannel, Color, ContentNode, NamedColor};
 
 /// Look up and call a content method by name.
 ///
@@ -168,29 +168,39 @@ fn handle_series(receiver: ValueWord, args: Vec<ValueWord>) -> Result<ValueWord>
     let node = extract_content(&receiver)?;
     let label = require_string_arg(&args, 0, "series")?;
     // Second arg: data as array of [x, y] pairs
-    let data = if let Some(view) = args.get(1).and_then(|nb| nb.as_any_array()) {
+    let mut x_values = Vec::new();
+    let mut y_values = Vec::new();
+    if let Some(view) = args.get(1).and_then(|nb| nb.as_any_array()) {
         let arr = view.to_generic();
-        arr.iter()
-            .filter_map(|item| {
-                if let Some(inner) = item.as_any_array() {
-                    let inner = inner.to_generic();
-                    if inner.len() >= 2 {
-                        let x = inner[0].as_number_coerce()?;
-                        let y = inner[1].as_number_coerce()?;
-                        return Some((x, y));
+        for item in arr.iter() {
+            if let Some(inner) = item.as_any_array() {
+                let inner = inner.to_generic();
+                if inner.len() >= 2 {
+                    if let (Some(x), Some(y)) =
+                        (inner[0].as_number_coerce(), inner[1].as_number_coerce())
+                    {
+                        x_values.push(x);
+                        y_values.push(y);
                     }
                 }
-                None
-            })
-            .collect()
-    } else {
-        vec![]
-    };
+            }
+        }
+    }
     match node {
         ContentNode::Chart(mut spec) => {
-            spec.series.push(ChartSeries {
+            // Add x channel if not already present
+            if spec.channel("x").is_none() && !x_values.is_empty() {
+                spec.channels.push(ChartChannel {
+                    name: "x".to_string(),
+                    label: "x".to_string(),
+                    values: x_values,
+                    color: None,
+                });
+            }
+            spec.channels.push(ChartChannel {
+                name: "y".to_string(),
                 label,
-                data,
+                values: y_values,
                 color: None,
             });
             Ok(ValueWord::from_content(ContentNode::Chart(spec)))
@@ -422,7 +432,8 @@ mod tests {
         use shape_value::content::{ChartSpec, ChartType};
         let chart = ContentNode::Chart(ChartSpec {
             chart_type: ChartType::Line,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: None,
             x_label: None,
             y_label: None,
@@ -445,7 +456,8 @@ mod tests {
         use shape_value::content::{ChartSpec, ChartType};
         let chart = ContentNode::Chart(ChartSpec {
             chart_type: ChartType::Bar,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: None,
             x_label: None,
             y_label: None,
@@ -468,7 +480,8 @@ mod tests {
         use shape_value::content::{ChartSpec, ChartType};
         let chart = ContentNode::Chart(ChartSpec {
             chart_type: ChartType::Line,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: None,
             x_label: None,
             y_label: None,
@@ -491,7 +504,8 @@ mod tests {
         use shape_value::content::{ChartSpec, ChartType};
         let chart = ContentNode::Chart(ChartSpec {
             chart_type: ChartType::Line,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: None,
             x_label: None,
             y_label: None,
@@ -515,9 +529,13 @@ mod tests {
         let content = result.as_content().unwrap();
         match content {
             ContentNode::Chart(spec) => {
-                assert_eq!(spec.series.len(), 1);
-                assert_eq!(spec.series[0].label, "Sales");
-                assert_eq!(spec.series[0].data, vec![(1.0, 10.0), (2.0, 20.0)]);
+                // x channel + y channel = 2 channels
+                assert_eq!(spec.channels.len(), 2);
+                assert_eq!(spec.channel("x").unwrap().values, vec![1.0, 2.0]);
+                let y = spec.channels_by_name("y");
+                assert_eq!(y.len(), 1);
+                assert_eq!(y[0].label, "Sales");
+                assert_eq!(y[0].values, vec![10.0, 20.0]);
             }
             _ => panic!("expected Chart"),
         }

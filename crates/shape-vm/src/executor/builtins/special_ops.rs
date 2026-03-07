@@ -584,7 +584,7 @@ impl VirtualMachine {
         &mut self,
         args: Vec<ValueWord>,
     ) -> Result<ValueWord, VMError> {
-        use shape_value::content::{ChartSeries, ChartSpec, ChartType, ContentNode};
+        use shape_value::content::{ChartChannel, ChartSpec, ChartType, ContentNode};
 
         if args.len() < 4 {
             return Err(VMError::RuntimeError(
@@ -639,7 +639,8 @@ impl VirtualMachine {
         if rows.is_empty() {
             return Ok(ValueWord::from_content(ContentNode::Chart(ChartSpec {
                 chart_type,
-                series: vec![],
+                channels: vec![],
+                x_categories: None,
                 title: None,
                 x_label: if x_column.is_empty() {
                     None
@@ -681,34 +682,50 @@ impl VirtualMachine {
             y_columns
         };
 
-        // Build series: one series per y column
-        let mut series: Vec<ChartSeries> = Vec::with_capacity(y_cols.len());
+        // Build channels: x channel + one y channel per y column
+        let mut channels: Vec<ChartChannel> = Vec::new();
+
+        // Extract x values from rows
+        let mut x_values: Vec<f64> = Vec::with_capacity(rows.len());
+        for (row_idx, row) in rows.iter().enumerate() {
+            let row_map = self.extract_row_fields(row);
+            let x_val = row_map
+                .as_ref()
+                .and_then(|m| m.get(&x_col))
+                .and_then(|v| v.as_number_coerce())
+                .unwrap_or(row_idx as f64);
+            x_values.push(x_val);
+        }
+        channels.push(ChartChannel {
+            name: "x".to_string(),
+            label: x_col.clone(),
+            values: x_values,
+            color: None,
+        });
+
         for y_col in &y_cols {
-            let mut data: Vec<(f64, f64)> = Vec::with_capacity(rows.len());
-            for (row_idx, row) in rows.iter().enumerate() {
+            let mut y_values: Vec<f64> = Vec::with_capacity(rows.len());
+            for row in rows.iter() {
                 let row_map = self.extract_row_fields(row);
-                let x_val = row_map
-                    .as_ref()
-                    .and_then(|m| m.get(&x_col))
-                    .and_then(|v| v.as_number_coerce())
-                    .unwrap_or(row_idx as f64);
                 let y_val = row_map
                     .as_ref()
                     .and_then(|m| m.get(y_col.as_str()))
                     .and_then(|v| v.as_number_coerce())
                     .unwrap_or(0.0);
-                data.push((x_val, y_val));
+                y_values.push(y_val);
             }
-            series.push(ChartSeries {
+            channels.push(ChartChannel {
+                name: "y".to_string(),
                 label: y_col.clone(),
-                data,
+                values: y_values,
                 color: None,
             });
         }
 
         Ok(ValueWord::from_content(ContentNode::Chart(ChartSpec {
             chart_type,
-            series,
+            channels,
+            x_categories: None,
             title: None,
             x_label: Some(x_col),
             y_label: None,
@@ -727,7 +744,7 @@ impl VirtualMachine {
         x_column: String,
         y_columns: Vec<String>,
     ) -> Result<ValueWord, VMError> {
-        use shape_value::content::{ChartSeries, ChartSpec, ContentNode};
+        use shape_value::content::{ChartChannel, ChartSpec, ContentNode};
 
         let col_names = dt.column_names();
         let num_rows = dt.row_count();
@@ -748,29 +765,33 @@ impl VirtualMachine {
             y_columns
         };
 
-        // Read x values as f64
-        let x_vals: Vec<f64> = Self::read_column_as_f64(dt, &x_col, num_rows);
+        // Build channels
+        let mut channels: Vec<ChartChannel> = Vec::new();
 
-        let series: Vec<ChartSeries> = y_cols
-            .iter()
-            .map(|y_col| {
-                let y_vals = Self::read_column_as_f64(dt, y_col, num_rows);
-                let data: Vec<(f64, f64)> = x_vals
-                    .iter()
-                    .zip(y_vals.iter())
-                    .map(|(&x, &y)| (x, y))
-                    .collect();
-                ChartSeries {
-                    label: y_col.clone(),
-                    data,
-                    color: None,
-                }
-            })
-            .collect();
+        // x channel
+        let x_vals: Vec<f64> = Self::read_column_as_f64(dt, &x_col, num_rows);
+        channels.push(ChartChannel {
+            name: "x".to_string(),
+            label: x_col.clone(),
+            values: x_vals,
+            color: None,
+        });
+
+        // y channels
+        for y_col in &y_cols {
+            let y_vals = Self::read_column_as_f64(dt, y_col, num_rows);
+            channels.push(ChartChannel {
+                name: "y".to_string(),
+                label: y_col.clone(),
+                values: y_vals,
+                color: None,
+            });
+        }
 
         Ok(ValueWord::from_content(ContentNode::Chart(ChartSpec {
             chart_type,
-            series,
+            channels,
+            x_categories: None,
             title: None,
             x_label: Some(x_col),
             y_label: None,

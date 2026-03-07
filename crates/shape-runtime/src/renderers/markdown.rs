@@ -113,20 +113,27 @@ fn render_code(language: Option<&str>, source: &str) -> String {
 
 fn render_chart(spec: &ChartSpec) -> String {
     let title = spec.title.as_deref().unwrap_or("untitled");
-    let type_name = match spec.chart_type {
-        shape_value::content::ChartType::Line => "Line",
-        shape_value::content::ChartType::Bar => "Bar",
-        shape_value::content::ChartType::Scatter => "Scatter",
-        shape_value::content::ChartType::Area => "Area",
-        shape_value::content::ChartType::Candlestick => "Candlestick",
-        shape_value::content::ChartType::Histogram => "Histogram",
-    };
+    let type_name = chart_type_display_name(spec.chart_type);
+    let y_count = spec.channels_by_name("y").len();
     format!(
         "*[{} Chart: {} ({} series)]*\n",
-        type_name,
-        title,
-        spec.series.len()
+        type_name, title, y_count
     )
+}
+
+fn chart_type_display_name(ct: shape_value::content::ChartType) -> &'static str {
+    use shape_value::content::ChartType;
+    match ct {
+        ChartType::Line => "Line",
+        ChartType::Bar => "Bar",
+        ChartType::Scatter => "Scatter",
+        ChartType::Area => "Area",
+        ChartType::Candlestick => "Candlestick",
+        ChartType::Histogram => "Histogram",
+        ChartType::BoxPlot => "BoxPlot",
+        ChartType::Heatmap => "Heatmap",
+        ChartType::Bubble => "Bubble",
+    }
 }
 
 fn render_key_value(pairs: &[(String, ContentNode)]) -> String {
@@ -242,7 +249,8 @@ mod tests {
     fn test_chart_placeholder_md() {
         let chart = ContentNode::Chart(shape_value::content::ChartSpec {
             chart_type: shape_value::content::ChartType::Line,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: Some("Revenue".into()),
             x_label: None,
             y_label: None,

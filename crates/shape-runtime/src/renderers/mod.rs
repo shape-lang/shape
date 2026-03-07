@@ -8,6 +8,7 @@ pub mod json;
 pub mod markdown;
 pub mod plain;
 pub mod terminal;
+pub mod terminal_chart;
 
 #[cfg(test)]
 mod cross_renderer_tests {

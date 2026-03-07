@@ -1077,13 +1077,14 @@ c"{data: chart(bar), x(month), y(sales)}"
         shape_value::content::ContentNode::Chart(spec) => {
             assert_eq!(spec.chart_type, shape_value::content::ChartType::Bar);
             assert_eq!(spec.x_label.as_deref(), Some("month"));
-            assert_eq!(spec.series.len(), 1);
-            assert_eq!(spec.series[0].label, "sales");
-            assert_eq!(spec.series[0].data.len(), 3);
-            // month values: 1, 2, 3 — y values: 42, 58, 65
-            assert_eq!(spec.series[0].data[0], (1.0, 42.0));
-            assert_eq!(spec.series[0].data[1], (2.0, 58.0));
-            assert_eq!(spec.series[0].data[2], (3.0, 65.0));
+            let y_channels = spec.channels_by_name("y");
+            assert_eq!(y_channels.len(), 1);
+            assert_eq!(y_channels[0].label, "sales");
+            assert_eq!(y_channels[0].values.len(), 3);
+            // x values: 1, 2, 3 — y values: 42, 58, 65
+            let x_ch = spec.channel("x").unwrap();
+            assert_eq!(x_ch.values, vec![1.0, 2.0, 3.0]);
+            assert_eq!(y_channels[0].values, vec![42.0, 58.0, 65.0]);
         }
         _ => panic!("expected Chart variant, got {:?}", content),
     }
@@ -1105,13 +1106,14 @@ c"{data: chart(line), x(x), y(revenue, cost)}"
     match content {
         shape_value::content::ContentNode::Chart(spec) => {
             assert_eq!(spec.chart_type, shape_value::content::ChartType::Line);
-            assert_eq!(spec.series.len(), 2);
-            assert_eq!(spec.series[0].label, "revenue");
-            assert_eq!(spec.series[1].label, "cost");
-            assert_eq!(spec.series[0].data[0], (1.0, 100.0));
-            assert_eq!(spec.series[0].data[1], (2.0, 120.0));
-            assert_eq!(spec.series[1].data[0], (1.0, 60.0));
-            assert_eq!(spec.series[1].data[1], (2.0, 70.0));
+            let y_channels = spec.channels_by_name("y");
+            assert_eq!(y_channels.len(), 2);
+            assert_eq!(y_channels[0].label, "revenue");
+            assert_eq!(y_channels[1].label, "cost");
+            let x_ch = spec.channel("x").unwrap();
+            assert_eq!(x_ch.values, vec![1.0, 2.0]);
+            assert_eq!(y_channels[0].values, vec![100.0, 120.0]);
+            assert_eq!(y_channels[1].values, vec![60.0, 70.0]);
         }
         _ => panic!("expected Chart variant, got {:?}", content),
     }
@@ -1195,14 +1197,18 @@ c"{data: chart(bar), x(month), y(revenue, profit)}"
         shape_value::content::ContentNode::Chart(spec) => {
             assert_eq!(spec.chart_type, shape_value::content::ChartType::Bar);
             assert_eq!(spec.x_label.as_deref(), Some("month"));
-            assert_eq!(spec.series.len(), 2);
-            assert_eq!(spec.series[0].label, "revenue");
-            assert_eq!(spec.series[1].label, "profit");
-            assert_eq!(spec.series[0].data.len(), 6);
-            assert_eq!(spec.series[0].data[0], (1.0, 42.0));
-            assert_eq!(spec.series[0].data[5], (6.0, 89.0));
-            assert_eq!(spec.series[1].data[0], (1.0, 18.0));
-            assert_eq!(spec.series[1].data[5], (6.0, 42.0));
+            let y_channels = spec.channels_by_name("y");
+            assert_eq!(y_channels.len(), 2);
+            assert_eq!(y_channels[0].label, "revenue");
+            assert_eq!(y_channels[1].label, "profit");
+            assert_eq!(y_channels[0].values.len(), 6);
+            let x_ch = spec.channel("x").unwrap();
+            assert_eq!(x_ch.values[0], 1.0);
+            assert_eq!(x_ch.values[5], 6.0);
+            assert_eq!(y_channels[0].values[0], 42.0);
+            assert_eq!(y_channels[0].values[5], 89.0);
+            assert_eq!(y_channels[1].values[0], 18.0);
+            assert_eq!(y_channels[1].values[5], 42.0);
         }
         _ => panic!("expected Chart variant, got {:?}", content),
     }

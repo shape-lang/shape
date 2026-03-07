@@ -174,14 +174,8 @@ fn render_code(language: Option<&str>, source: &str) -> String {
 
 fn render_chart(spec: &ChartSpec, interactive: bool) -> String {
     let title = spec.title.as_deref().unwrap_or("untitled");
-    let type_name = match spec.chart_type {
-        shape_value::content::ChartType::Line => "Line",
-        shape_value::content::ChartType::Bar => "Bar",
-        shape_value::content::ChartType::Scatter => "Scatter",
-        shape_value::content::ChartType::Area => "Area",
-        shape_value::content::ChartType::Candlestick => "Candlestick",
-        shape_value::content::ChartType::Histogram => "Histogram",
-    };
+    let type_name = chart_type_display_name(spec.chart_type);
+    let y_count = spec.channels_by_name("y").len();
     if interactive {
         // Build ECharts option JSON for client-side hydration
         let echarts_json = build_echarts_option(spec, type_name);
@@ -198,10 +192,25 @@ fn render_chart(spec: &ChartSpec, interactive: bool) -> String {
         format!(
             "<div class=\"chart\" data-type=\"{}\" data-series=\"{}\">[{} Chart: {}]</div>",
             type_name.to_lowercase(),
-            spec.series.len(),
+            y_count,
             type_name,
             html_escape(title)
         )
+    }
+}
+
+fn chart_type_display_name(ct: shape_value::content::ChartType) -> &'static str {
+    use shape_value::content::ChartType;
+    match ct {
+        ChartType::Line => "Line",
+        ChartType::Bar => "Bar",
+        ChartType::Scatter => "Scatter",
+        ChartType::Area => "Area",
+        ChartType::Candlestick => "Candlestick",
+        ChartType::Histogram => "Histogram",
+        ChartType::BoxPlot => "BoxPlot",
+        ChartType::Heatmap => "Heatmap",
+        ChartType::Bubble => "Bubble",
     }
 }
 
@@ -217,49 +226,61 @@ fn build_echarts_option(spec: &ChartSpec, type_name: &str) -> String {
     // Bar/histogram charts use category xAxis; line/scatter/area use value xAxis
     let use_category = matches!(chart_type.as_str(), "bar" | "histogram");
 
-    // Extract x-axis categories from first series (all series share the same x values)
-    let categories: Vec<serde_json::Value> = if use_category && !spec.series.is_empty() {
-        spec.series[0]
-            .data
-            .iter()
-            .map(|(x, _)| {
-                // Format x nicely: drop ".0" for whole numbers
-                if x.fract() == 0.0 {
-                    serde_json::json!(*x as i64)
-                } else {
-                    serde_json::json!(x)
-                }
-            })
-            .collect()
+    // Get x channel data and y channels
+    let x_channel = spec.channel("x");
+    let y_channels = spec.channels_by_name("y");
+
+    // Extract x-axis categories from x channel
+    let categories: Vec<serde_json::Value> = if use_category {
+        if let Some(ref cats) = spec.x_categories {
+            cats.iter().map(|c| serde_json::json!(c)).collect()
+        } else if let Some(xc) = x_channel {
+            xc.values
+                .iter()
+                .map(|x| {
+                    if x.fract() == 0.0 {
+                        serde_json::json!(*x as i64)
+                    } else {
+                        serde_json::json!(x)
+                    }
+                })
+                .collect()
+        } else {
+            vec![]
+        }
     } else {
         vec![]
     };
 
-    // Build series array
-    let series: Vec<serde_json::Value> = if spec.series.is_empty() {
+    // Build ECharts series array from y channels
+    let series: Vec<serde_json::Value> = if y_channels.is_empty() {
         vec![serde_json::json!({"type": chart_type, "data": []})]
     } else {
-        spec.series
+        y_channels
             .iter()
-            .map(|s| {
+            .map(|yc| {
                 if use_category {
-                    // Category chart: series data is just y values
                     let data: Vec<serde_json::Value> =
-                        s.data.iter().map(|(_, y)| serde_json::json!(y)).collect();
+                        yc.values.iter().map(|y| serde_json::json!(y)).collect();
                     serde_json::json!({
-                        "name": s.label,
+                        "name": yc.label,
                         "type": chart_type,
                         "data": data,
                     })
                 } else {
-                    // Value chart: series data is [x, y] pairs
-                    let data: Vec<serde_json::Value> = s
-                        .data
+                    // Pair x and y values
+                    let x_vals = x_channel.map(|xc| &xc.values[..]).unwrap_or(&[]);
+                    let data: Vec<serde_json::Value> = yc
+                        .values
                         .iter()
-                        .map(|(x, y)| serde_json::json!([x, y]))
+                        .enumerate()
+                        .map(|(i, y)| {
+                            let x = x_vals.get(i).copied().unwrap_or(i as f64);
+                            serde_json::json!([x, y])
+                        })
                         .collect();
                     serde_json::json!({
-                        "name": s.label,
+                        "name": yc.label,
                         "type": chart_type,
                         "data": data,
                         "smooth": false,
@@ -306,7 +327,7 @@ fn build_echarts_option(spec: &ChartSpec, type_name: &str) -> String {
     }
     option["yAxis"] = y_axis;
 
-    if spec.series.len() > 1 {
+    if y_channels.len() > 1 {
         option["legend"] = serde_json::json!({"show": true, "textStyle": {"color": "#ccc"}});
     }
 
@@ -447,7 +468,8 @@ mod tests {
     fn test_html_chart() {
         let chart = ContentNode::Chart(shape_value::content::ChartSpec {
             chart_type: shape_value::content::ChartType::Bar,
-            series: vec![],
+            channels: vec![],
+            x_categories: None,
             title: Some("Sales".into()),
             x_label: None,
             y_label: None,
