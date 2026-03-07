@@ -32,9 +32,9 @@ use commands::{
 async fn main() -> Result<()> {
     env_logger::init();
 
-    initialize_shared_runtime().context("failed to initialize shared runtime")?;
-
     let cli = Cli::parse();
+
+    initialize_shared_runtime().context("failed to initialize shared runtime")?;
 
     if cli.expand && cli.file.is_none() && cli.command.is_none() {
         anyhow::bail!("--expand requires a script file: shape <file.shape> --expand");
