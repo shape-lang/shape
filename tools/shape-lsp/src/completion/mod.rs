@@ -38,9 +38,12 @@ use crate::grammar_completion::get_grammar_completions;
 use crate::module_cache::ModuleCache;
 use crate::symbols::{SymbolKind, extract_symbols, symbols_to_completions};
 use crate::trait_lookup::resolve_trait_definition;
-use crate::type_inference::{extract_struct_fields, extract_type_methods, unified_metadata};
+use crate::type_inference::{
+    MethodCompletionInfo, extract_struct_fields, extract_type_methods, unified_metadata,
+};
 use crate::util::position_to_offset;
 use shape_ast::ast::{Item, MethodDef, Program, Span, Statement, TypeName};
+use shape_ast::parse_program_resilient;
 use shape_ast::parser::parse_program;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -100,78 +103,40 @@ pub fn get_completions_with_context(
         named_impls,
         receiver_type_at_cursor,
     ) = if let Ok(mut program) = parse_program(text) {
-        // Desugar query syntax before analysis
-        shape_ast::transform::desugar_program(&mut program);
-        let symbols = extract_symbols(&program);
-        let mut inferred_types =
-            infer_types_with_context(&program, current_file, workspace_root, Some(text));
-        if let Some(types) = inferred_types.as_mut() {
-            let param_types = infer_param_types(&program, types);
-            types.extend(param_types);
-        }
-
-        // Discover annotations from the program
-        let mut ann_discovery = AnnotationDiscovery::new();
-        ann_discovery.discover_from_program(&program);
-        if let (Some(cache), Some(file_path)) = (module_cache, current_file) {
-            ann_discovery.discover_from_imports_with_cache(
-                &program,
-                file_path,
-                cache,
-                workspace_root,
-            );
-        } else {
-            ann_discovery.discover_from_imports(&program);
-        }
-
-        // Extract struct type fields for property completions
-        let fields = extract_struct_fields(&program);
-
-        // Extract methods from impl/extend/trait blocks
-        let mut impl_meths = extract_type_methods(&program);
-        let mut named_impl_names: Vec<String> = program
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Impl(impl_block, _) => impl_block.impl_name.clone(),
-                _ => None,
-            })
-            .collect();
-        named_impl_names.sort();
-        named_impl_names.dedup();
-
-        // Merge methods from extension .shape sources (e.g., duckdb.shape, openapi.shape)
-        for (type_name, ext_methods) in imports::extension_type_methods() {
-            let entry = impl_meths.entry(type_name).or_default();
-            for m in ext_methods {
-                if !entry.iter().any(|existing| existing.name == m.name) {
-                    entry.push(m);
-                }
-            }
-        }
-
-        (
-            symbols.clone(),
-            Some(symbols),
-            inferred_types,
-            ann_discovery,
-            fields,
-            impl_meths,
-            named_impl_names,
-            cursor_offset.and_then(|offset| receiver_type_for_offset(&program, offset)),
+        analyze_parsed_program(
+            &mut program,
+            module_cache,
+            current_file,
+            workspace_root,
+            text,
+            cursor_offset,
         )
     } else {
-        // If parsing fails, use cached symbols from last successful parse
-        (
-            cached_symbols.to_vec(),
-            None,
-            None,
-            AnnotationDiscovery::new(),
-            HashMap::new(),
-            HashMap::new(),
-            extract_named_impl_names_fallback(text),
-            None,
-        )
+        // Strict parse failed — try resilient parse for partial recovery
+        let partial = parse_program_resilient(text);
+        if !partial.items.is_empty() {
+            let mut program = partial.into_program();
+            analyze_parsed_program(
+                &mut program,
+                module_cache,
+                current_file,
+                workspace_root,
+                text,
+                cursor_offset,
+            )
+        } else {
+            // No items recovered — fall back to cached state
+            (
+                cached_symbols.to_vec(),
+                None,
+                None,
+                AnnotationDiscovery::new(),
+                HashMap::new(),
+                HashMap::new(),
+                extract_named_impl_names_fallback(text),
+                None,
+            )
+        }
     };
 
     let mut type_context = updated_types
@@ -434,6 +399,87 @@ fn named_impl_selector_completions(named_impls: &[String]) -> Vec<CompletionItem
             ..Default::default()
         })
         .collect()
+}
+
+/// Shared analysis for a parsed program (used by both strict and resilient parse paths).
+#[allow(clippy::type_complexity)]
+fn analyze_parsed_program(
+    program: &mut Program,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+    workspace_root: Option<&Path>,
+    text: &str,
+    cursor_offset: Option<usize>,
+) -> (
+    Vec<crate::symbols::SymbolInfo>,
+    Option<Vec<crate::symbols::SymbolInfo>>,
+    Option<HashMap<String, String>>,
+    AnnotationDiscovery,
+    HashMap<String, Vec<(String, String)>>,
+    HashMap<String, Vec<MethodCompletionInfo>>,
+    Vec<String>,
+    Option<String>,
+) {
+    // Desugar query syntax before analysis
+    shape_ast::transform::desugar_program(program);
+    let symbols = extract_symbols(program);
+    let mut inferred_types =
+        infer_types_with_context(program, current_file, workspace_root, Some(text));
+    if let Some(types) = inferred_types.as_mut() {
+        let param_types = infer_param_types(program, types);
+        types.extend(param_types);
+    }
+
+    // Discover annotations from the program
+    let mut ann_discovery = AnnotationDiscovery::new();
+    ann_discovery.discover_from_program(program);
+    if let (Some(cache), Some(file_path)) = (module_cache, current_file) {
+        ann_discovery.discover_from_imports_with_cache(
+            program,
+            file_path,
+            cache,
+            workspace_root,
+        );
+    } else {
+        ann_discovery.discover_from_imports(program);
+    }
+
+    // Extract struct type fields for property completions
+    let fields = extract_struct_fields(program);
+
+    // Extract methods from impl/extend/trait blocks
+    let mut impl_meths = extract_type_methods(program);
+    let mut named_impl_names: Vec<String> = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Impl(impl_block, _) => impl_block.impl_name.clone(),
+            _ => None,
+        })
+        .collect();
+    named_impl_names.sort();
+    named_impl_names.dedup();
+
+    // Merge methods from extension .shape sources (e.g., duckdb.shape, openapi.shape)
+    for (type_name, ext_methods) in imports::extension_type_methods() {
+        let entry = impl_meths.entry(type_name).or_default();
+        for m in ext_methods {
+            if !entry.iter().any(|existing| existing.name == m.name) {
+                entry.push(m);
+            }
+        }
+    }
+
+    (
+        symbols.clone(),
+        Some(symbols),
+        inferred_types,
+        ann_discovery,
+        fields,
+        impl_meths,
+        named_impl_names,
+        cursor_offset.and_then(|offset| receiver_type_for_offset(program, offset)),
+    )
 }
 
 fn extract_named_impl_names_fallback(text: &str) -> Vec<String> {
