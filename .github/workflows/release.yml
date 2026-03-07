@@ -128,17 +128,22 @@ jobs:
           for crate in "${crates[@]}"; do
             echo "::group::Publishing $crate"
             for attempt in 1 2 3; do
-              if cargo publish -p "$crate" --no-verify 2>&1; then
+              output=$(cargo publish -p "$crate" --no-verify 2>&1) && {
                 echo "$crate published successfully"
                 break
+              }
+              if echo "$output" | grep -q "already exists"; then
+                echo "$crate already published, skipping"
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "Attempt $attempt failed, waiting 30s for index propagation..."
+                echo "$output"
+                sleep 30
               else
-                if [ "$attempt" -lt 3 ]; then
-                  echo "Attempt $attempt failed, waiting 30s for index propagation..."
-                  sleep 30
-                else
-                  echo "::error::Failed to publish $crate after 3 attempts"
-                  exit 1
-                fi
+                echo "$output"
+                echo "::error::Failed to publish $crate after 3 attempts"
+                exit 1
               fi
             done
             echo "::endgroup::"
