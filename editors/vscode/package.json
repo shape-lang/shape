@@ -1,0 +1,57 @@
+{
+  "name": "shape-lang",
+  "displayName": "Shape Language",
+  "description": "Language support for Shape - syntax highlighting and LSP integration",
+  "version": "0.1.0",
+  "publisher": "shape-lang",
+  "author": "Daniel Amesberger",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shape-lang/shape"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "icon": "icons/shape-icon.png",
+  "categories": ["Programming Languages"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "shape",
+        "aliases": ["Shape", "shape"],
+        "extensions": [".shape"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/shape-icon.png",
+          "dark": "./icons/shape-icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "shape",
+        "scopeName": "source.shape",
+        "path": "./syntaxes/shape.tmLanguage.json"
+      }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0",
+    "vscode-languageserver-protocol": "^3.17.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0",
+    "ovsx": "^0.9.0"
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  }
+}
