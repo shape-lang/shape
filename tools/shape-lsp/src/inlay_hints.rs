@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use crate::type_inference::simplify_result_type;
 use crate::util::offset_to_position;
 use shape_ast::ast::expr_helpers::ComptimeForExpr;
 use shape_ast::ast::{
@@ -270,9 +271,10 @@ impl<'a> HintContext<'a> {
             if let Some(hint_offset) = self.return_hint_offset(func_def) {
                 let position = offset_to_position(self.text, hint_offset);
                 if is_in_range(position, self.range) {
+                    let display_type = simplify_result_type(return_type);
                     self.hints.push(InlayHint {
                         position,
-                        label: InlayHintLabel::String(format!("-> {}", return_type)),
+                        label: InlayHintLabel::String(format!("-> {}", display_type)),
                         kind: Some(InlayHintKind::TYPE),
                         text_edits: None,
                         tooltip: None,

@@ -195,11 +195,6 @@ fn get_hover_for_word(
         return Some(hover);
     }
 
-    // Check if it's a built-in type
-    if let Some(hover) = get_type_hover(word) {
-        return Some(hover);
-    }
-
     // Check if it's a module namespace (extension or local `mod`)
     if let Some(hover) = get_module_hover(text, word) {
         return Some(hover);
@@ -220,12 +215,18 @@ fn get_hover_for_word(
         return Some(hover);
     }
 
-    // Check if it's a user-defined symbol
+    // Check user-defined symbols BEFORE builtin types — prevents false matches
+    // from type aliases (e.g., "double" → "float", "record" → "object")
     if let Some(hover) = get_typed_match_pattern_hover(text, word, position) {
         return Some(hover);
     }
 
     if let Some(hover) = get_user_symbol_hover_at(text, word, position) {
+        return Some(hover);
+    }
+
+    // Check if it's a built-in type (after user symbols, to avoid alias collisions)
+    if let Some(hover) = get_type_hover(word) {
         return Some(hover);
     }
 
@@ -2348,7 +2349,8 @@ fn build_function_signature_from_inference(
         FuncKind::Foreign(f) => format!("fn {} {}({})", f.language, func_name, params.join(", ")),
     };
     if let Some(ret) = return_str {
-        sig.push_str(&format!(" -> {}", ret));
+        let display = crate::type_inference::simplify_result_type(&ret);
+        sig.push_str(&format!(" -> {}", display));
     }
 
     Some(sig)
@@ -2922,21 +2924,28 @@ fn get_property_access_hover(text: &str, hovered_word: &str, position: Position)
 
     impl<'a> Visitor for PropertyAccessFinder<'a> {
         fn visit_expr(&mut self, expr: &Expr) -> bool {
-            let Expr::PropertyAccess {
-                object,
-                property,
-                span,
-                ..
-            } = expr
-            else {
-                return true;
+            // Extract (object, property, span) from PropertyAccess or MethodCall
+            let (object, property, span) = match expr {
+                Expr::PropertyAccess {
+                    object,
+                    property,
+                    span,
+                    ..
+                } => (object.as_ref(), property.as_str(), *span),
+                Expr::MethodCall {
+                    receiver,
+                    method,
+                    span,
+                    ..
+                } => (receiver.as_ref(), method.as_str(), *span),
+                _ => return true,
             };
 
-            if property != self.hovered_word || !span_contains_offset(*span, self.offset) {
+            if property != self.hovered_word || !span_contains_offset(span, self.offset) {
                 return true;
             }
 
-            let Expr::Identifier(object_name, _) = object.as_ref() else {
+            let Expr::Identifier(object_name, _) = object else {
                 return true;
             };
 
@@ -2947,7 +2956,7 @@ fn get_property_access_hover(text: &str, hovered_word: &str, position: Position)
                 .map(|(best_len, _, _)| len < *best_len)
                 .unwrap_or(true)
             {
-                self.best = Some((len, object_name.clone(), property.clone()));
+                self.best = Some((len, object_name.clone(), property.to_string()));
             }
             true
         }

@@ -1697,6 +1697,28 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
     result
 }
 
+/// Simplify `Result<T, E>` to `Result<T>` for display.
+/// The error type is usually `AnyError` or a union — hiding it keeps hints concise.
+pub fn simplify_result_type(ty: &str) -> String {
+    let Some(inner) = ty.strip_prefix("Result<").and_then(|s| s.strip_suffix('>')) else {
+        return ty.to_string();
+    };
+    // Find the comma separating T from E, respecting nested angle brackets
+    let mut depth = 0;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                let ok_type = inner[..i].trim();
+                return format!("Result<{}>", ok_type);
+            }
+            _ => {}
+        }
+    }
+    ty.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
