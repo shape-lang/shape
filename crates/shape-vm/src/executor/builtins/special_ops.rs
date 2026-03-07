@@ -565,6 +565,196 @@ impl VirtualMachine {
         Ok(ValueWord::from_content(styled))
     }
 
+    /// MakeContentChartFromValue: create a chart ContentNode from a table/array value
+    ///
+    /// Args: [value, chart_type_str, x_column_str, y_count, y_col1, y_col2, ...]
+    pub(in crate::executor) fn builtin_make_content_chart_from_value(
+        &mut self,
+        args: Vec<ValueWord>,
+    ) -> Result<ValueWord, VMError> {
+        use shape_value::content::{ChartSeries, ChartSpec, ChartType, ContentNode};
+
+        if args.len() < 4 {
+            return Err(VMError::RuntimeError(
+                "MakeContentChartFromValue requires at least 4 args".to_string(),
+            ));
+        }
+
+        let value = &args[0];
+        let chart_type_str = args[1]
+            .as_str()
+            .ok_or_else(|| VMError::RuntimeError("chart type must be a string".to_string()))?;
+        let x_column = args[2].as_str().unwrap_or("").to_string();
+        let y_count = args[3]
+            .as_i64()
+            .or_else(|| args[3].as_number_coerce().map(|n| n as i64))
+            .unwrap_or(0) as usize;
+
+        let mut y_columns: Vec<String> = Vec::with_capacity(y_count);
+        for i in 0..y_count {
+            if let Some(s) = args.get(4 + i).and_then(|a| a.as_str()) {
+                y_columns.push(s.to_string());
+            }
+        }
+
+        let chart_type = match chart_type_str.to_lowercase().as_str() {
+            "line" => ChartType::Line,
+            "bar" => ChartType::Bar,
+            "scatter" => ChartType::Scatter,
+            "area" => ChartType::Area,
+            "histogram" => ChartType::Histogram,
+            _ => ChartType::Line,
+        };
+
+        // Extract rows from the value (should be an array of typed objects)
+        let rows = value
+            .as_any_array()
+            .ok_or_else(|| {
+                VMError::RuntimeError(
+                    "chart format spec requires an array value (e.g., Table<T>)".to_string(),
+                )
+            })?
+            .to_generic();
+
+        if rows.is_empty() {
+            return Ok(ValueWord::from_content(ContentNode::Chart(ChartSpec {
+                chart_type,
+                series: vec![],
+                title: None,
+                x_label: if x_column.is_empty() {
+                    None
+                } else {
+                    Some(x_column)
+                },
+                y_label: None,
+                width: None,
+                height: None,
+                echarts_options: None,
+                interactive: true,
+            })));
+        }
+
+        // Get field names from the first row's schema, or fall back to hashmap keys
+        let field_map = self.extract_row_field_names(&rows[0])?;
+
+        // If no x/y columns specified, try to auto-detect
+        let x_col = if x_column.is_empty() {
+            // Use first string/date column as x, or first column
+            field_map
+                .iter()
+                .find(|(_, v)| v.as_str().is_some())
+                .or_else(|| field_map.iter().next())
+                .map(|(k, _)| k.clone())
+                .unwrap_or_default()
+        } else {
+            x_column
+        };
+
+        let y_cols: Vec<String> = if y_columns.is_empty() {
+            // Use all numeric columns except x as y series
+            field_map
+                .iter()
+                .filter(|(k, v)| *k != &x_col && v.as_number_coerce().is_some())
+                .map(|(k, _)| k.clone())
+                .collect()
+        } else {
+            y_columns
+        };
+
+        // Build series: one series per y column
+        let mut series: Vec<ChartSeries> = Vec::with_capacity(y_cols.len());
+        for y_col in &y_cols {
+            let mut data: Vec<(f64, f64)> = Vec::with_capacity(rows.len());
+            for (row_idx, row) in rows.iter().enumerate() {
+                let row_map = self.extract_row_fields(row);
+                let x_val = row_map
+                    .as_ref()
+                    .and_then(|m| m.get(&x_col))
+                    .and_then(|v| v.as_number_coerce())
+                    .unwrap_or(row_idx as f64);
+                let y_val = row_map
+                    .as_ref()
+                    .and_then(|m| m.get(y_col.as_str()))
+                    .and_then(|v| v.as_number_coerce())
+                    .unwrap_or(0.0);
+                data.push((x_val, y_val));
+            }
+            series.push(ChartSeries {
+                label: y_col.clone(),
+                data,
+                color: None,
+            });
+        }
+
+        Ok(ValueWord::from_content(ContentNode::Chart(ChartSpec {
+            chart_type,
+            series,
+            title: None,
+            x_label: Some(x_col),
+            y_label: None,
+            width: None,
+            height: None,
+            echarts_options: None,
+            interactive: true,
+        })))
+    }
+
+    /// Extract field name→value map from a typed object row.
+    fn extract_row_field_names(
+        &self,
+        row: &ValueWord,
+    ) -> Result<std::collections::HashMap<String, ValueWord>, VMError> {
+        use crate::executor::objects::object_creation::read_slot_nb;
+
+        if let Some((schema_id, slots, heap_mask)) = row.as_typed_object() {
+            let sid = schema_id as u32;
+            if let Some(schema) = self.lookup_schema(sid) {
+                let mut map =
+                    std::collections::HashMap::with_capacity(schema.fields.len());
+                for field_def in &schema.fields {
+                    let val = read_slot_nb(
+                        slots,
+                        field_def.index as usize,
+                        heap_mask,
+                        Some(&field_def.field_type),
+                    );
+                    map.insert(field_def.name.clone(), val);
+                }
+                return Ok(map);
+            }
+        }
+        // Fall back to runtime schema
+        shape_runtime::type_schema::typed_object_to_hashmap_nb(row)
+            .ok_or_else(|| VMError::RuntimeError("Cannot extract fields from row".to_string()))
+    }
+
+    /// Extract fields from a row (uses VM schema or runtime fallback).
+    fn extract_row_fields(
+        &self,
+        row: &ValueWord,
+    ) -> Option<std::collections::HashMap<String, ValueWord>> {
+        use crate::executor::objects::object_creation::read_slot_nb;
+
+        if let Some((schema_id, slots, heap_mask)) = row.as_typed_object() {
+            let sid = schema_id as u32;
+            if let Some(schema) = self.lookup_schema(sid) {
+                let mut map =
+                    std::collections::HashMap::with_capacity(schema.fields.len());
+                for field_def in &schema.fields {
+                    let val = read_slot_nb(
+                        slots,
+                        field_def.index as usize,
+                        heap_mask,
+                        Some(&field_def.field_type),
+                    );
+                    map.insert(field_def.name.clone(), val);
+                }
+                return Some(map);
+            }
+        }
+        shape_runtime::type_schema::typed_object_to_hashmap_nb(row)
+    }
+
     /// ControlFold: Fold operation with accumulator
     pub(in crate::executor) fn builtin_control_fold(
         &mut self,

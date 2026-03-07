@@ -1058,3 +1058,61 @@ fn test_bug1_type_annotated_value_not_wrapped() {
         "Type-annotated int should not be a heap value (no TypeAnnotatedValue wrapper)"
     );
 }
+
+#[test]
+fn test_content_chart_from_table_value() {
+    // Test that c"{data: chart(bar), x(month), y(sales)}" creates a Chart ContentNode
+    let source = r#"
+type SalesRecord { month: int, sales: int }
+let data = [
+    SalesRecord { month: 1, sales: 42 },
+    SalesRecord { month: 2, sales: 58 },
+    SalesRecord { month: 3, sales: 65 }
+]
+c"{data: chart(bar), x(month), y(sales)}"
+"#;
+    let result = compile_and_execute(source).unwrap();
+    let content = result.as_content().expect("expected Content value");
+    match content {
+        shape_value::content::ContentNode::Chart(spec) => {
+            assert_eq!(spec.chart_type, shape_value::content::ChartType::Bar);
+            assert_eq!(spec.x_label.as_deref(), Some("month"));
+            assert_eq!(spec.series.len(), 1);
+            assert_eq!(spec.series[0].label, "sales");
+            assert_eq!(spec.series[0].data.len(), 3);
+            // month values: 1, 2, 3 — y values: 42, 58, 65
+            assert_eq!(spec.series[0].data[0], (1.0, 42.0));
+            assert_eq!(spec.series[0].data[1], (2.0, 58.0));
+            assert_eq!(spec.series[0].data[2], (3.0, 65.0));
+        }
+        _ => panic!("expected Chart variant, got {:?}", content),
+    }
+}
+
+#[test]
+fn test_content_chart_from_table_multi_y() {
+    // Test multiple y columns
+    let source = r#"
+type FinRecord { x: int, revenue: int, cost: int }
+let data = [
+    FinRecord { x: 1, revenue: 100, cost: 60 },
+    FinRecord { x: 2, revenue: 120, cost: 70 }
+]
+c"{data: chart(line), x(x), y(revenue, cost)}"
+"#;
+    let result = compile_and_execute(source).unwrap();
+    let content = result.as_content().expect("expected Content value");
+    match content {
+        shape_value::content::ContentNode::Chart(spec) => {
+            assert_eq!(spec.chart_type, shape_value::content::ChartType::Line);
+            assert_eq!(spec.series.len(), 2);
+            assert_eq!(spec.series[0].label, "revenue");
+            assert_eq!(spec.series[1].label, "cost");
+            assert_eq!(spec.series[0].data[0], (1.0, 100.0));
+            assert_eq!(spec.series[0].data[1], (2.0, 120.0));
+            assert_eq!(spec.series[1].data[0], (1.0, 60.0));
+            assert_eq!(spec.series[1].data[1], (2.0, 70.0));
+        }
+        _ => panic!("expected Chart variant, got {:?}", content),
+    }
+}

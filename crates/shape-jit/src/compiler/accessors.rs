@@ -464,10 +464,17 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::JoinExecute,
     // Reflection (1)
     BuiltinFunction::Reflect,
-    // Content (3)
+    // Content (3 + 6 constructors)
     BuiltinFunction::MakeContentText,
     BuiltinFunction::MakeContentFragment,
     BuiltinFunction::ApplyContentStyle,
+    BuiltinFunction::MakeContentChartFromValue,
+    BuiltinFunction::ContentChart,
+    BuiltinFunction::ContentTextCtor,
+    BuiltinFunction::ContentTableCtor,
+    BuiltinFunction::ContentCodeCtor,
+    BuiltinFunction::ContentKvCtor,
+    BuiltinFunction::ContentFragmentCtor,
     // DateTime (4)
     BuiltinFunction::DateTimeNow,
     BuiltinFunction::DateTimeUtc,

@@ -42,6 +42,16 @@ impl TypeInferenceEngine {
                         None
                     }
                 })
+                .or_else(|| {
+                    // Recognize built-in namespace identifiers that have static
+                    // constructor methods (e.g. DateTime.now(), Content.chart()).
+                    match name.as_str() {
+                        "DateTime" | "Content" => {
+                            Some(Type::Concrete(TypeAnnotation::Reference(name.clone())))
+                        }
+                        _ => None,
+                    }
+                })
                 .ok_or_else(|| {
                     self.register_undefined_variable_origin(name, *span);
                     TypeError::UndefinedVariable(name.clone())

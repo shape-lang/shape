@@ -91,6 +91,16 @@ pub enum InterpolationFormatSpec {
     ContentStyle(ContentFormatSpec),
 }
 
+/// Chart type hint for content format spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChartTypeSpec {
+    Line,
+    Bar,
+    Scatter,
+    Area,
+    Histogram,
+}
+
 /// Content-string format specification for rich terminal/HTML output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFormatSpec {
@@ -104,6 +114,12 @@ pub struct ContentFormatSpec {
     pub border: Option<BorderStyleSpec>,
     pub max_rows: Option<usize>,
     pub align: Option<AlignSpec>,
+    /// Chart type hint: render the value as a chart instead of text.
+    pub chart_type: Option<ChartTypeSpec>,
+    /// Column name to use as x-axis data.
+    pub x_column: Option<String>,
+    /// Column names to use as y-axis series.
+    pub y_columns: Vec<String>,
 }
 
 impl Default for ContentFormatSpec {
@@ -119,6 +135,9 @@ impl Default for ContentFormatSpec {
             border: None,
             max_rows: None,
             align: None,
+            chart_type: None,
+            x_column: None,
+            y_columns: vec![],
         }
     }
 }
@@ -560,10 +579,24 @@ pub fn parse_content_format_spec(raw_spec: &str) -> Result<ContentFormatSpec> {
                 "align" => {
                     spec.align = Some(parse_align_spec(inner)?);
                 }
+                "chart" => {
+                    spec.chart_type = Some(parse_chart_type_spec(inner)?);
+                }
+                "x" => {
+                    spec.x_column = Some(inner.to_string());
+                }
+                "y" => {
+                    // y(col) or y(col1, col2, ...)
+                    spec.y_columns = inner
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
                 other => {
                     return Err(ShapeError::RuntimeError {
                         message: format!(
-                            "Unknown content format key '{}'. Supported: fg, bg, bold, italic, underline, dim, fixed, border, max_rows, align.",
+                            "Unknown content format key '{}'. Supported: fg, bg, bold, italic, underline, dim, fixed, border, max_rows, align, chart, x, y.",
                             other
                         ),
                         location: None,
@@ -633,6 +666,23 @@ fn parse_border_style_spec(s: &str) -> Result<BorderStyleSpec> {
         _ => Err(ShapeError::RuntimeError {
             message: format!(
                 "Unknown border style '{}'. Expected: rounded, sharp, heavy, double, minimal, none.",
+                s
+            ),
+            location: None,
+        }),
+    }
+}
+
+fn parse_chart_type_spec(s: &str) -> Result<ChartTypeSpec> {
+    match s.trim().to_lowercase().as_str() {
+        "line" => Ok(ChartTypeSpec::Line),
+        "bar" => Ok(ChartTypeSpec::Bar),
+        "scatter" => Ok(ChartTypeSpec::Scatter),
+        "area" => Ok(ChartTypeSpec::Area),
+        "histogram" => Ok(ChartTypeSpec::Histogram),
+        _ => Err(ShapeError::RuntimeError {
+            message: format!(
+                "Unknown chart type '{}'. Expected: line, bar, scatter, area, histogram.",
                 s
             ),
             location: None,
@@ -1161,6 +1211,49 @@ mod tests {
         if let Some(InterpolationFormatSpec::ContentStyle(cs)) = spec {
             assert_eq!(cs.fg, Some(ColorSpec::Named(NamedContentColor::Red)));
             assert!(cs.bold);
+        }
+    }
+
+    #[test]
+    fn parse_content_format_spec_chart_type() {
+        let spec = parse_content_format_spec("chart(bar)").unwrap();
+        assert_eq!(spec.chart_type, Some(ChartTypeSpec::Bar));
+    }
+
+    #[test]
+    fn parse_content_format_spec_chart_with_axes() {
+        let spec = parse_content_format_spec("chart(line), x(month), y(revenue, profit)").unwrap();
+        assert_eq!(spec.chart_type, Some(ChartTypeSpec::Line));
+        assert_eq!(spec.x_column, Some("month".to_string()));
+        assert_eq!(spec.y_columns, vec!["revenue", "profit"]);
+    }
+
+    #[test]
+    fn parse_content_format_spec_chart_single_y() {
+        let spec = parse_content_format_spec("chart(scatter), x(date), y(price)").unwrap();
+        assert_eq!(spec.chart_type, Some(ChartTypeSpec::Scatter));
+        assert_eq!(spec.x_column, Some("date".to_string()));
+        assert_eq!(spec.y_columns, vec!["price"]);
+    }
+
+    #[test]
+    fn parse_content_format_spec_chart_invalid_type() {
+        let err = parse_content_format_spec("chart(pie)").unwrap_err();
+        assert!(err.to_string().contains("Unknown chart type"));
+    }
+
+    #[test]
+    fn split_content_chart_format_spec() {
+        let (expr, spec) =
+            split_expression_and_content_format_spec("data:chart(bar), x(month), y(sales)")
+                .unwrap();
+        assert_eq!(expr, "data");
+        if let Some(InterpolationFormatSpec::ContentStyle(cs)) = spec {
+            assert_eq!(cs.chart_type, Some(ChartTypeSpec::Bar));
+            assert_eq!(cs.x_column, Some("month".to_string()));
+            assert_eq!(cs.y_columns, vec!["sales"]);
+        } else {
+            panic!("expected ContentStyle");
         }
     }
 }

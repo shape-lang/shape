@@ -183,12 +183,14 @@ fn render_chart(spec: &ChartSpec, interactive: bool) -> String {
         shape_value::content::ChartType::Histogram => "Histogram",
     };
     if interactive {
-        // Emit data-echarts attribute for client-side hydration
+        // Build ECharts option JSON for client-side hydration
+        let echarts_json = build_echarts_option(spec, type_name);
+        let escaped_json = html_escape(&echarts_json);
         format!(
-            "<div class=\"chart\" data-echarts=\"true\" data-type=\"{}\" data-series=\"{}\" data-title=\"{}\">[{} Chart: {}]</div>",
+            "<div class=\"chart\" data-echarts=\"true\" data-type=\"{}\" data-title=\"{}\" data-chart-options=\"{}\">[{} Chart: {}]</div>",
             type_name.to_lowercase(),
-            spec.series.len(),
             html_escape(title),
+            escaped_json,
             type_name,
             html_escape(title)
         )
@@ -201,6 +203,68 @@ fn render_chart(spec: &ChartSpec, interactive: bool) -> String {
             html_escape(title)
         )
     }
+}
+
+/// Build an ECharts option JSON string from a ChartSpec.
+fn build_echarts_option(spec: &ChartSpec, type_name: &str) -> String {
+    // If echarts_options is already set, use it directly
+    if let Some(ref opts) = spec.echarts_options {
+        return serde_json::to_string(opts).unwrap_or_default();
+    }
+
+    let chart_type = type_name.to_lowercase();
+
+    // Build series array
+    let series: Vec<serde_json::Value> = if spec.series.is_empty() {
+        vec![serde_json::json!({"type": chart_type, "data": []})]
+    } else {
+        spec.series
+            .iter()
+            .map(|s| {
+                let data: Vec<serde_json::Value> = s
+                    .data
+                    .iter()
+                    .map(|(x, y)| serde_json::json!([x, y]))
+                    .collect();
+                serde_json::json!({
+                    "name": s.label,
+                    "type": chart_type,
+                    "data": data,
+                    "smooth": false,
+                })
+            })
+            .collect()
+    };
+
+    let mut option = serde_json::json!({
+        "tooltip": {"trigger": "axis"},
+        "series": series,
+        "backgroundColor": "transparent",
+    });
+
+    if let Some(ref t) = spec.title {
+        option["title"] = serde_json::json!({"text": t, "textStyle": {"color": "#ccc", "fontSize": 14}});
+    }
+
+    if let Some(ref xl) = spec.x_label {
+        option["xAxis"] = serde_json::json!({"type": "value", "name": xl, "nameTextStyle": {"color": "#888"}, "axisLabel": {"color": "#888"}, "axisLine": {"lineStyle": {"color": "#555"}}});
+    } else {
+        option["xAxis"] = serde_json::json!({"type": "value", "axisLabel": {"color": "#888"}, "axisLine": {"lineStyle": {"color": "#555"}}});
+    }
+
+    if let Some(ref yl) = spec.y_label {
+        option["yAxis"] = serde_json::json!({"type": "value", "name": yl, "nameTextStyle": {"color": "#888"}, "axisLabel": {"color": "#888"}, "splitLine": {"lineStyle": {"color": "#333"}}});
+    } else {
+        option["yAxis"] = serde_json::json!({"type": "value", "axisLabel": {"color": "#888"}, "splitLine": {"lineStyle": {"color": "#333"}}});
+    }
+
+    if spec.series.len() > 1 {
+        option["legend"] = serde_json::json!({"show": true, "textStyle": {"color": "#ccc"}});
+    }
+
+    option["grid"] = serde_json::json!({"left": "10%", "right": "10%", "bottom": "10%", "top": "15%"});
+
+    serde_json::to_string(&option).unwrap_or_default()
 }
 
 fn render_key_value(pairs: &[(String, ContentNode)], interactive: bool) -> String {

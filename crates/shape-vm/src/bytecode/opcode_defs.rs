@@ -1035,6 +1035,22 @@ pub enum BuiltinFunction {
     MakeContentFragment,
     /// Apply a ContentFormatSpec (encoded as ints/bools on stack) to a ContentNode
     ApplyContentStyle,
+    /// Create a chart ContentNode from a table/array value using column specs
+    MakeContentChartFromValue,
+
+    // Content namespace constructors
+    /// Content.chart(type_str) — create a chart ContentNode
+    ContentChart,
+    /// Content.text(str) — create a plain text ContentNode
+    ContentTextCtor,
+    /// Content.table(headers, rows) — create a table ContentNode
+    ContentTableCtor,
+    /// Content.code(language, source) — create a code block ContentNode
+    ContentCodeCtor,
+    /// Content.kv(pairs) — create a key-value ContentNode
+    ContentKvCtor,
+    /// Content.fragment(parts) — create a fragment ContentNode
+    ContentFragmentCtor,
 
     // DateTime constructors
     /// DateTime.now() — current local time as DateTime<FixedOffset>
@@ -1268,10 +1284,17 @@ impl BuiltinFunction {
             // Join/Reflect (2)
             BuiltinFunction::JoinExecute,
             BuiltinFunction::Reflect,
-            // Content (3)
+            // Content (3 + 6 constructors)
             BuiltinFunction::MakeContentText,
             BuiltinFunction::MakeContentFragment,
             BuiltinFunction::ApplyContentStyle,
+            BuiltinFunction::MakeContentChartFromValue,
+            BuiltinFunction::ContentChart,
+            BuiltinFunction::ContentTextCtor,
+            BuiltinFunction::ContentTableCtor,
+            BuiltinFunction::ContentCodeCtor,
+            BuiltinFunction::ContentKvCtor,
+            BuiltinFunction::ContentFragmentCtor,
             // DateTime (4)
             BuiltinFunction::DateTimeNow,
             BuiltinFunction::DateTimeUtc,

@@ -644,6 +644,49 @@ impl VirtualMachine {
                     let result = self.builtin_apply_content_style(args)?;
                     self.push_vw(result)?;
                 }
+                BuiltinFunction::MakeContentChartFromValue => {
+                    let args = self.pop_builtin_args()?;
+                    let result = self.builtin_make_content_chart_from_value(args)?;
+                    self.push_vw(result)?;
+                }
+
+                // Content namespace constructors
+                BuiltinFunction::ContentChart => {
+                    let args = self.pop_builtin_args()?;
+                    let result = shape_runtime::content_builders::content_chart(&args)
+                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
+                    self.push_vw(result)?;
+                }
+                BuiltinFunction::ContentTextCtor => {
+                    let args = self.pop_builtin_args()?;
+                    let result = shape_runtime::content_builders::content_text(&args)
+                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
+                    self.push_vw(result)?;
+                }
+                BuiltinFunction::ContentTableCtor => {
+                    let args = self.pop_builtin_args()?;
+                    let result = shape_runtime::content_builders::content_table(&args)
+                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
+                    self.push_vw(result)?;
+                }
+                BuiltinFunction::ContentCodeCtor => {
+                    let args = self.pop_builtin_args()?;
+                    let result = shape_runtime::content_builders::content_code(&args)
+                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
+                    self.push_vw(result)?;
+                }
+                BuiltinFunction::ContentKvCtor => {
+                    let args = self.pop_builtin_args()?;
+                    let result = shape_runtime::content_builders::content_kv(&args)
+                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
+                    self.push_vw(result)?;
+                }
+                BuiltinFunction::ContentFragmentCtor => {
+                    let args = self.pop_builtin_args()?;
+                    let result = shape_runtime::content_builders::content_fragment(&args)
+                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
+                    self.push_vw(result)?;
+                }
 
                 // DateTime constructor builtins
                 BuiltinFunction::DateTimeNow => {

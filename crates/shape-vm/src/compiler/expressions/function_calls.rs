@@ -1078,12 +1078,18 @@ impl BytecodeCompiler {
         // DateTime static constructor methods: DateTime.now(), DateTime.utc(),
         // DateTime.parse(str), DateTime.from_epoch(ms)
         if let Expr::Identifier(name, _) = receiver {
-            if name == "DateTime" {
-                let builtin = match method {
-                    "now" => Some(BuiltinFunction::DateTimeNow),
-                    "utc" => Some(BuiltinFunction::DateTimeUtc),
-                    "parse" => Some(BuiltinFunction::DateTimeParse),
-                    "from_epoch" => Some(BuiltinFunction::DateTimeFromEpoch),
+            if name == "DateTime" || name == "Content" {
+                let builtin = match (name.as_str(), method) {
+                    ("DateTime", "now") => Some(BuiltinFunction::DateTimeNow),
+                    ("DateTime", "utc") => Some(BuiltinFunction::DateTimeUtc),
+                    ("DateTime", "parse") => Some(BuiltinFunction::DateTimeParse),
+                    ("DateTime", "from_epoch") => Some(BuiltinFunction::DateTimeFromEpoch),
+                    ("Content", "chart") => Some(BuiltinFunction::ContentChart),
+                    ("Content", "text") => Some(BuiltinFunction::ContentTextCtor),
+                    ("Content", "table") => Some(BuiltinFunction::ContentTableCtor),
+                    ("Content", "code") => Some(BuiltinFunction::ContentCodeCtor),
+                    ("Content", "kv") => Some(BuiltinFunction::ContentKvCtor),
+                    ("Content", "fragment") => Some(BuiltinFunction::ContentFragmentCtor),
                     _ => None,
                 };
                 if let Some(bf) = builtin {

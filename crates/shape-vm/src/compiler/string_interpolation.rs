@@ -8,9 +8,9 @@ use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::InterpolationMode;
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::interpolation::{
-    ColorSpec, ContentFormatSpec, FormatAlignment, FormatColor, InterpolationFormatSpec,
-    InterpolationPart, NamedContentColor, parse_content_interpolation_with_mode,
-    parse_interpolation_with_mode,
+    ChartTypeSpec, ColorSpec, ContentFormatSpec, FormatAlignment, FormatColor,
+    InterpolationFormatSpec, InterpolationPart, NamedContentColor,
+    parse_content_interpolation_with_mode, parse_interpolation_with_mode,
 };
 pub use shape_ast::interpolation::{has_interpolation, has_interpolation_with_mode};
 
@@ -266,6 +266,15 @@ impl BytecodeCompiler {
                     })?;
                     self.compile_expr(&expr)?;
 
+                    // Check if this has a chart spec — if so, use the chart-from-value path
+                    // instead of the normal string→text→style path
+                    if let Some(InterpolationFormatSpec::ContentStyle(ref spec)) = format_spec {
+                        if spec.chart_type.is_some() {
+                            self.emit_content_chart_from_value_args(spec)?;
+                            continue;
+                        }
+                    }
+
                     // Convert value to string first (ToString builtin)
                     let count = self.program.add_constant(Constant::Number(1.0));
                     self.emit(Instruction::new(
@@ -366,6 +375,65 @@ impl BytecodeCompiler {
             OpCode::PushConst,
             Some(Operand::Const(dim)),
         ));
+
+        Ok(())
+    }
+
+    /// Emit args for MakeContentChartFromValue builtin.
+    ///
+    /// Stack layout: [value, chart_type_str, x_column_str, y_columns_count, y_col1, y_col2, ...]
+    /// The value is already on the stack from compile_expr.
+    fn emit_content_chart_from_value_args(&mut self, spec: &ContentFormatSpec) -> Result<()> {
+        // chart_type string
+        let chart_type_str = match spec.chart_type {
+            Some(ChartTypeSpec::Line) => "line",
+            Some(ChartTypeSpec::Bar) => "bar",
+            Some(ChartTypeSpec::Scatter) => "scatter",
+            Some(ChartTypeSpec::Area) => "area",
+            Some(ChartTypeSpec::Histogram) => "histogram",
+            None => "line",
+        };
+        let ct = self
+            .program
+            .add_constant(Constant::String(chart_type_str.to_string()));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(ct)),
+        ));
+
+        // x_column string (or empty string if not specified)
+        let x_col = spec.x_column.as_deref().unwrap_or("");
+        let xc = self
+            .program
+            .add_constant(Constant::String(x_col.to_string()));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(xc)),
+        ));
+
+        // y_columns count
+        let y_count = self
+            .program
+            .add_constant(Constant::Int(spec.y_columns.len() as i64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(y_count)),
+        ));
+
+        // y column names
+        for y_col in &spec.y_columns {
+            let yc = self
+                .program
+                .add_constant(Constant::String(y_col.clone()));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(yc)),
+            ));
+        }
+
+        // Total args: 1 (value) + 1 (chart_type) + 1 (x_col) + 1 (y_count) + N (y_cols)
+        let total_args = 4 + spec.y_columns.len();
+        self.emit_content_builtin(BuiltinFunction::MakeContentChartFromValue, total_args)?;
 
         Ok(())
     }
