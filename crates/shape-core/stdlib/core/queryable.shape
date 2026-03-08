@@ -24,10 +24,22 @@
 //! SQL backends share `shape_runtime::query_builder::filter_to_sql()`.
 //! See extensions/QUERY_COOKBOOK.md for the full extension authoring guide.
 
+/// Uniform query-building interface for lazily executed data sources.
+///
+/// `Queryable` is intentionally narrower than `std::core::iterable::Iterable`:
+/// it captures pushdown-friendly operations that can be translated into native
+/// backend execution plans.
+///
+/// @see std::core::iterable::Iterable
 trait Queryable<T> {
+    /// Return a query filtered by `predicate`.
     filter(predicate): any,
+    /// Project each row with `transform`.
     map(transform): any,
+    /// Apply backend ordering by `column` and `direction`.
     orderBy(column, direction): any,
+    /// Restrict the result set to at most `n` rows.
     limit(n): any,
+    /// Execute the query and materialize the result.
     execute(): any
 }

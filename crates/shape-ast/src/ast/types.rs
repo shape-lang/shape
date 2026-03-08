@@ -1,6 +1,8 @@
 //! Type system definitions for Shape AST
 
+use super::DocComment;
 use super::functions::Annotation;
+use super::span::Span;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,6 +144,10 @@ pub struct FunctionParam {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeParam {
     pub name: String,
+    #[serde(default)]
+    pub span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     /// Default type argument: `T = int`
     pub default_type: Option<TypeAnnotation>,
     /// Trait bounds: `T: Comparable + Displayable`
@@ -159,6 +165,7 @@ pub struct WherePredicate {
 impl PartialEq for TypeParam {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
+            && self.doc_comment == other.doc_comment
             && self.default_type == other.default_type
             && self.trait_bounds == other.trait_bounds
     }
@@ -167,6 +174,8 @@ impl PartialEq for TypeParam {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeAliasDef {
     pub name: String,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub type_annotation: TypeAnnotation,
     /// Meta parameter overrides: type Percent4 = Percent { decimals: 4 }
@@ -176,6 +185,8 @@ pub struct TypeAliasDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceDef {
     pub name: String,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub members: Vec<InterfaceMember>,
 }
@@ -187,6 +198,10 @@ pub enum InterfaceMember {
         name: String,
         optional: bool,
         type_annotation: TypeAnnotation,
+        #[serde(default)]
+        span: Span,
+        #[serde(default)]
+        doc_comment: Option<DocComment>,
     },
     /// Method signature
     Method {
@@ -196,18 +211,46 @@ pub enum InterfaceMember {
         return_type: TypeAnnotation,
         /// Whether this is an async method
         is_async: bool,
+        #[serde(default)]
+        span: Span,
+        #[serde(default)]
+        doc_comment: Option<DocComment>,
     },
     /// Index signature
     IndexSignature {
         param_name: String,
         param_type: String, // "string" or "number"
         return_type: TypeAnnotation,
+        #[serde(default)]
+        span: Span,
+        #[serde(default)]
+        doc_comment: Option<DocComment>,
     },
+}
+
+impl InterfaceMember {
+    pub fn span(&self) -> Span {
+        match self {
+            InterfaceMember::Property { span, .. }
+            | InterfaceMember::Method { span, .. }
+            | InterfaceMember::IndexSignature { span, .. } => *span,
+        }
+    }
+
+    pub fn doc_comment(&self) -> Option<&DocComment> {
+        match self {
+            InterfaceMember::Property { doc_comment, .. }
+            | InterfaceMember::Method { doc_comment, .. }
+            | InterfaceMember::IndexSignature { doc_comment, .. } => doc_comment.as_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnumDef {
     pub name: String,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub members: Vec<EnumMember>,
     /// Annotations applied to the enum (e.g., `@with_label() enum Color { ... }`)
@@ -219,6 +262,10 @@ pub struct EnumDef {
 pub struct EnumMember {
     pub name: String,
     pub kind: EnumMemberKind,
+    #[serde(default)]
+    pub span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,7 +295,29 @@ pub enum TraitMember {
     AssociatedType {
         name: String,
         bounds: Vec<TypeAnnotation>,
+        #[serde(default)]
+        span: Span,
+        #[serde(default)]
+        doc_comment: Option<DocComment>,
     },
+}
+
+impl TraitMember {
+    pub fn span(&self) -> Span {
+        match self {
+            TraitMember::Required(member) => member.span(),
+            TraitMember::Default(method) => method.span,
+            TraitMember::AssociatedType { span, .. } => *span,
+        }
+    }
+
+    pub fn doc_comment(&self) -> Option<&DocComment> {
+        match self {
+            TraitMember::Required(member) => member.doc_comment(),
+            TraitMember::Default(method) => method.doc_comment.as_ref(),
+            TraitMember::AssociatedType { doc_comment, .. } => doc_comment.as_ref(),
+        }
+    }
 }
 
 /// A concrete binding for an associated type inside an `impl` block:
@@ -272,6 +341,8 @@ pub struct AssociatedTypeBinding {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraitDef {
     pub name: String,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub members: Vec<TraitMember>,
     /// Annotations applied to the trait (e.g., `@documented("...") trait Foo { ... }`)
@@ -316,10 +387,14 @@ pub struct ExtendStatement {
     pub methods: Vec<MethodDef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MethodDef {
     /// Method name
     pub name: String,
+    #[serde(default)]
+    pub span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     /// Method parameters
     pub params: Vec<super::functions::FunctionParameter>,
     /// Optional when clause for conditional method definitions
@@ -330,6 +405,18 @@ pub struct MethodDef {
     pub body: Vec<super::statements::Statement>,
     /// Whether this is an async method
     pub is_async: bool,
+}
+
+impl PartialEq for MethodDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.doc_comment == other.doc_comment
+            && self.params == other.params
+            && self.when_clause == other.when_clause
+            && self.return_type == other.return_type
+            && self.body == other.body
+            && self.is_async == other.is_async
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -356,6 +443,8 @@ pub enum TypeName {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructTypeDef {
     pub name: String,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub fields: Vec<StructField>,
     /// Annotations applied to the struct (e.g., `@derive_debug type Foo { ... }`)
@@ -390,6 +479,21 @@ pub struct StructField {
     pub annotations: Vec<Annotation>,
     pub is_comptime: bool,
     pub name: String,
+    #[serde(default)]
+    pub span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_annotation: TypeAnnotation,
     pub default_value: Option<super::expressions::Expr>,
+}
+
+impl PartialEq for StructField {
+    fn eq(&self, other: &Self) -> bool {
+        self.annotations == other.annotations
+            && self.is_comptime == other.is_comptime
+            && self.name == other.name
+            && self.doc_comment == other.doc_comment
+            && self.type_annotation == other.type_annotation
+            && self.default_value == other.default_value
+    }
 }

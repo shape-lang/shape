@@ -6,6 +6,7 @@ use super::functions::{Annotation, ForeignFunctionDef, FunctionDef};
 use super::program::Item;
 use super::span::Span;
 use super::types::{EnumDef, InterfaceDef, StructTypeDef, TraitDef};
+use super::DocComment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportStmt {
@@ -66,6 +67,8 @@ pub struct ExportSpec {
 pub struct ModuleDecl {
     pub name: String,
     pub name_span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub annotations: Vec<Annotation>,
     pub items: Vec<Item>,
 }

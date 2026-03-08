@@ -115,6 +115,7 @@ pub fn parse_annotation_def(pair: Pair<Rule>) -> Result<AnnotationDef> {
     Ok(AnnotationDef {
         name,
         name_span,
+        doc_comment: None,
         params,
         allowed_targets,
         handlers,

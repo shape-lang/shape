@@ -4,6 +4,9 @@
 // for that period. It was developed by J. Welles Wilder Jr.
 
 // Need one extra candle for true range calculation
+/// Compute ATR from the implicit `candle` series in candle-scoped indicator code.
+///
+/// @see std::finance::indicators::volatility::atr
 pub @warmup(period + 1) fn atr_candle(period = 14) {
     // Calculate True Range for each candle
     let tr_values = []
@@ -42,7 +45,7 @@ pub @warmup(period + 1) fn atr_candle(period = 14) {
     return atr_value
 }
 
-// ATR-based support/resistance levels
+/// Build ATR-based upper and lower bands around the current close.
 pub @warmup(period + 1) fn atr_bands(period = 14, multiplier = 2.0) {
     let atr_value = atr_candle(period)
     
@@ -60,7 +63,7 @@ pub @warmup(period + 1) fn atr_bands(period = 14, multiplier = 2.0) {
     }
 }
 
-// ATR percentage of price
+/// Express ATR as a percentage of the current close.
 pub @warmup(period + 1) fn atr_percent(period = 14) {
     let atr_value = atr_candle(period)
     

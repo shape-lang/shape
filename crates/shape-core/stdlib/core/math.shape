@@ -3,10 +3,12 @@
 
 // ===== Basic Statistics =====
 
+/// Compute the sum of all values in `series`.
 pub fn sum(series) {
     __intrinsic_sum(series)
 }
 
+/// Compute the arithmetic mean of `series`.
 pub fn mean(series) {
     __intrinsic_mean(series)
 }
@@ -16,34 +18,45 @@ pub fn mean(series) {
 // - Multiple arguments: numbers - finds min/max among them
 // The builtin intrinsics are used internally via __intrinsic_min/__intrinsic_max
 
+/// Compute the standard deviation of `series`.
 pub fn std(series) {
     __intrinsic_std(series)
 }
 
+/// Compute the variance of `series`.
 pub fn variance(series) {
     __intrinsic_variance(series)
 }
 
 // ===== Advanced Statistics =====
 
+/// Compute the Pearson correlation between two series.
 pub fn correlation(series_a, series_b) {
     __intrinsic_correlation(series_a, series_b)
 }
 
+/// Compute the covariance between two series.
 pub fn covariance(series_a, series_b) {
     __intrinsic_covariance(series_a, series_b)
 }
 
+/// Return the `p` percentile of `series`.
 pub fn percentile(series, p) {
     __intrinsic_percentile(series, p)
 }
 
+/// Return the median of `series`.
 pub fn median(series) {
     __intrinsic_median(series)
 }
 
 // ===== Derived Functions =====
 
+/// Return the coefficient of variation for `series`.
+///
+/// @returns `std(series) / mean(series)` when the mean is non-zero, otherwise `None`.
+/// @see std::core::math::std
+/// @see std::core::math::mean
 pub fn coefficient_of_variation(series) {
     let std_val = __intrinsic_std(series);
     let mean_val = __intrinsic_mean(series);
@@ -55,10 +68,15 @@ pub fn coefficient_of_variation(series) {
     }
 }
 
+/// Return the difference between the maximum and minimum values in `series`.
 pub fn spread(series) {
     __intrinsic_max(series) - __intrinsic_min(series)
 }
 
+/// Standardize `series` into z-scores.
+///
+/// @see std::core::math::mean
+/// @see std::core::math::std
 pub fn zscore(series) {
     let mean_val = __intrinsic_mean(series);
     let std_val = __intrinsic_std(series);
@@ -70,6 +88,7 @@ pub fn zscore(series) {
 // Note: map, filter, reduce are built into the language
 // but can use intrinsics for large arrays:
 
+/// Map `fn` across `array`, switching to an intrinsic parallel path for large inputs.
 pub fn parallel_map(array, fn) {
     if array.len() > 1000 {
         __intrinsic_map(array, fn)  // Parallel!
@@ -78,6 +97,7 @@ pub fn parallel_map(array, fn) {
     }
 }
 
+/// Filter `array` with `predicate`, switching to an intrinsic parallel path for large inputs.
 pub fn parallel_filter(array, predicate) {
     if array.len() > 1000 {
         __intrinsic_filter(array, predicate)  // Parallel!

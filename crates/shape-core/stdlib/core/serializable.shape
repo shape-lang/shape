@@ -2,6 +2,7 @@
 // Types implementing Serializable can be converted to/from byte arrays,
 // enabling snapshot persistence, wire transfer, and distributed computing.
 
+/// Convert values to and from a stable byte representation.
 trait Serializable {
     /// Serialize self value to a byte array
     to_bytes(self): Vec<byte>

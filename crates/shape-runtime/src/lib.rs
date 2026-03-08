@@ -685,6 +685,7 @@ impl Runtime {
                     self.process_program_items(
                         &Program {
                             items: vec![item.clone()],
+                            docs: shape_ast::ast::ProgramDocs::default(),
                         },
                         ctx,
                         None,
@@ -706,6 +707,7 @@ impl Runtime {
             self.process_program_items(
                 &Program {
                     items: vec![item.clone()],
+                    docs: shape_ast::ast::ProgramDocs::default(),
                 },
                 &mut ctx,
                 None,

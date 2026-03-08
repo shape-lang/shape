@@ -4,6 +4,7 @@
 //! 1. Current file AST (fast path)
 //! 2. Importable modules via ModuleCache (stdlib/project modules)
 
+use crate::doc_render::render_doc_comment;
 use crate::module_cache::ModuleCache;
 use shape_ast::ast::{Item, Program, Span, TraitDef};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use std::path::{Path, PathBuf};
 pub struct ResolvedTraitDef {
     pub trait_def: TraitDef,
     pub span: Span,
+    pub documentation: Option<String>,
     pub source_path: Option<PathBuf>,
     pub source_text: Option<String>,
     pub import_path: Option<String>,
@@ -30,6 +32,10 @@ pub fn resolve_trait_definition(
                 return Some(ResolvedTraitDef {
                     trait_def: trait_def.clone(),
                     span: *span,
+                    documentation: program
+                        .docs
+                        .comment_for_span(*span)
+                        .map(|comment| render_doc_comment(program, comment, None, None, None)),
                     source_path: None,
                     source_text: None,
                     import_path: None,
@@ -61,6 +67,19 @@ pub fn resolve_trait_definition(
                     return Some(ResolvedTraitDef {
                         trait_def: trait_def.clone(),
                         span: *span,
+                        documentation: module_info
+                            .program
+                            .docs
+                            .comment_for_span(*span)
+                            .map(|comment| {
+                                render_doc_comment(
+                                    &module_info.program,
+                                    comment,
+                                    Some(cache),
+                                    Some(&module_info.path),
+                                    workspace_root,
+                                )
+                            }),
                         source_text: std::fs::read_to_string(&module_info.path).ok(),
                         source_path: Some(module_info.path.clone()),
                         import_path: Some(import_path),

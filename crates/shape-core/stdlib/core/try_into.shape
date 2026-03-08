@@ -3,7 +3,11 @@
 //! Dispatch uses named impl selectors (`as <TypeName>`) so conversions are
 //! statically validated and resolved without primitive conversion tables.
 
+/// Define a fallible conversion from `Self` into `Target`.
+///
+/// @see std::core::try_from::TryFrom
 trait TryInto<Target> {
+    /// Attempt to convert `self` into `Target`.
     tryInto(): Result<Target, AnyError>
 }
 

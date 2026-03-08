@@ -172,6 +172,7 @@ pub fn parse_function_def(pair: Pair<Rule>) -> Result<FunctionDef> {
     Ok(FunctionDef {
         name,
         name_span,
+        doc_comment: None,
         type_params,
         params,
         return_type,
@@ -229,6 +230,7 @@ pub fn parse_builtin_function_decl(pair: Pair<Rule>) -> Result<BuiltinFunctionDe
     Ok(BuiltinFunctionDecl {
         name,
         name_span,
+        doc_comment: None,
         type_params,
         params,
         return_type,
@@ -296,6 +298,7 @@ pub fn parse_foreign_function_def(pair: Pair<Rule>) -> Result<ForeignFunctionDef
         language_span,
         name,
         name_span,
+        doc_comment: None,
         type_params,
         params,
         return_type,
@@ -397,6 +400,7 @@ pub fn parse_extern_native_function_def(pair: Pair<Rule>) -> Result<ForeignFunct
         language_span: abi_span,
         name,
         name_span,
+        doc_comment: None,
         type_params,
         params,
         return_type,

@@ -3,7 +3,12 @@
 //! Dispatch uses named impl selectors (`as <TypeName>`) so conversions are
 //! statically validated and resolved without primitive conversion tables.
 
+/// Define an infallible conversion from `Self` into `Target`.
+///
+/// @see std::core::from::From
+/// @see std::core::try_into::TryInto
 trait Into<Target> {
+    /// Convert `self` into `Target` without failure.
     into(): Target
 }
 

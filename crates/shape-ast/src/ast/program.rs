@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::data_sources::{DataSourceDecl, QueryDecl};
+use super::docs::DocComment;
+use super::docs::ProgramDocs;
 use super::expressions::Expr;
 use super::functions::{AnnotationDef, ForeignFunctionDef, FunctionDef, FunctionParameter};
 use super::modules::{ExportStmt, ImportStmt, ModuleDecl};
@@ -20,6 +22,8 @@ use super::types::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
     pub items: Vec<Item>,
+    #[serde(default)]
+    pub docs: ProgramDocs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +131,8 @@ pub struct Assignment {
 pub struct BuiltinTypeDecl {
     pub name: String,
     pub name_span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
 }
 
@@ -135,6 +141,8 @@ pub struct BuiltinTypeDecl {
 pub struct BuiltinFunctionDecl {
     pub name: String,
     pub name_span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub params: Vec<FunctionParameter>,
     pub return_type: TypeAnnotation,

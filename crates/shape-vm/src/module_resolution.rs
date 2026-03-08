@@ -339,7 +339,10 @@ impl BytecodeExecutor {
                 }
             }
         }
-        Ok(Program { items })
+        Ok(Program {
+            items,
+            docs: shape_ast::ast::ProgramDocs::default(),
+        })
     }
 }
 
@@ -349,7 +352,10 @@ mod tests {
 
     #[test]
     fn test_prepend_prelude_items_injects_definitions() {
-        let mut program = Program { items: vec![] };
+        let mut program = Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        };
         prepend_prelude_items(&mut program);
         // The prelude should inject definitions from stdlib modules
         assert!(
@@ -379,7 +385,10 @@ mod tests {
 
     #[test]
     fn test_prepend_prelude_items_idempotent() {
-        let mut program = Program { items: vec![] };
+        let mut program = Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        };
         prepend_prelude_items(&mut program);
         let count_after_first = program.items.len();
         // Calling again should not add more items (user items are at end,
@@ -421,7 +430,10 @@ mod tests {
     #[test]
     fn test_prelude_injects_math_trig_definitions() {
         // Verify that prepend_prelude_items includes math_trig function definitions
-        let mut program = Program { items: vec![] };
+        let mut program = Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        };
         prepend_prelude_items(&mut program);
 
         // Check that the prelude injected some function definitions from math_trig

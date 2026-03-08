@@ -4,6 +4,7 @@ use super::expressions::Expr;
 use super::span::Span;
 use super::statements::Statement;
 use super::types::TypeAnnotation;
+use super::DocComment;
 use serde::{Deserialize, Serialize};
 // Re-export TypeParam from types to avoid duplication
 pub use super::types::TypeParam;
@@ -12,6 +13,8 @@ pub use super::types::TypeParam;
 pub struct FunctionDef {
     pub name: String,
     pub name_span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub params: Vec<FunctionParameter>,
     pub return_type: Option<TypeAnnotation>,
@@ -36,6 +39,8 @@ pub struct ForeignFunctionDef {
     pub language_span: Span,
     pub name: String,
     pub name_span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub params: Vec<FunctionParameter>,
     pub return_type: Option<TypeAnnotation>,
@@ -205,6 +210,8 @@ impl Annotation {
 pub struct AnnotationDef {
     pub name: String,
     pub name_span: Span,
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
     /// Annotation parameters (e.g., `period` in `@warmup(period)`)
     pub params: Vec<FunctionParameter>,
     /// Optional explicit target restrictions from `targets: [...]`.

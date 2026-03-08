@@ -795,15 +795,20 @@ fn test_exhaustiveness_check_missing_variant() {
     // Create enum: enum Status { Active, Inactive }
     let enum_def = EnumDef {
         name: "Status".to_string(),
+        doc_comment: None,
         type_params: None,
         members: vec![
             EnumMember {
                 name: "Active".to_string(),
                 kind: EnumMemberKind::Unit { value: None },
+                span,
+                doc_comment: None,
             },
             EnumMember {
                 name: "Inactive".to_string(),
                 kind: EnumMemberKind::Unit { value: None },
+                span,
+                doc_comment: None,
             },
         ],
         annotations: vec![],
@@ -858,6 +863,7 @@ fn test_exhaustiveness_check_missing_variant() {
                 span.clone(),
             ),
         ],
+        docs: shape_ast::ast::ProgramDocs::default(),
     };
 
     let mut engine = TypeInferenceEngine::new();

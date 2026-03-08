@@ -21,7 +21,12 @@ pub struct PartialProgram {
 impl PartialProgram {
     /// Convert to a standard Program (dropping parse issue info).
     pub fn into_program(self) -> Program {
-        Program { items: self.items }
+        let mut program = Program {
+            items: self.items,
+            docs: crate::ast::ProgramDocs::default(),
+        };
+        program.docs = crate::parser::docs::build_program_docs(&program);
+        program
     }
 
     /// Whether the parse was completely successful (no issues).

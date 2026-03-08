@@ -4,7 +4,7 @@
 from std::core::utils::rolling use { rolling_sum }
 from std::core::utils::vector use { select }
 
-// On-Balance Volume (OBV)
+/// Compute on-balance volume.
 pub @warmup(1) fn obv(close, volume) {
     let prev_close = __intrinsic_shift(close, 1);
     
@@ -20,7 +20,9 @@ pub @warmup(1) fn obv(close, volume) {
     __intrinsic_cumsum(signed_volume)
 }
 
-// Volume Weighted Average Price (VWAP)
+/// Compute cumulative or rolling VWAP depending on `period`.
+///
+/// @note `period = 0` selects cumulative VWAP from the start of the series.
 pub @warmup(period) fn vwap(price, volume, period = 0) {
     // Standard VWAP is cumulative from start of data (period=0 or omitted)
     // Rolling VWAP uses a window.
@@ -41,7 +43,7 @@ pub @warmup(period) fn vwap(price, volume, period = 0) {
     }
 }
 
-// Accumulation/Distribution Line (A/D)
+/// Compute the accumulation/distribution line.
 pub @warmup(1) fn ad(high, low, close, volume) {
     // Money Flow Multiplier = ((Close - Low) - (High - Close)) / (High - Low)
     // MFM = (2*Close - Low - High) / (High - Low)

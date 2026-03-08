@@ -835,8 +835,15 @@ fn test_doc_comment_line() {
 /// This is a doc comment
 function foo() { return 1 }
 "#;
-    let items = parse_program_helper(content).expect("doc comment should be ignored by parser");
-    assert_eq!(items.len(), 1);
+    let program = parse_program(content).expect("doc comment should parse");
+    assert_eq!(program.items.len(), 1);
+    assert_eq!(
+        program
+            .docs
+            .comment_for_path("foo")
+            .map(|doc| doc.summary.as_str()),
+        Some("This is a doc comment")
+    );
 }
 
 #[test]
@@ -845,9 +852,9 @@ fn test_doc_comment_block() {
 /** This is a block doc comment */
 function foo() { return 1 }
 "#;
-    let items =
-        parse_program_helper(content).expect("block doc comment should be ignored by parser");
-    assert_eq!(items.len(), 1);
+    let program = parse_program(content).expect("block doc comment should be parsed as comment");
+    assert_eq!(program.items.len(), 1);
+    assert!(program.docs.comment_for_path("foo").is_none());
 }
 
 #[test]

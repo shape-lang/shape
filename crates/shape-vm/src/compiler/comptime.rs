@@ -132,6 +132,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                 FunctionDef {
                     name: (*name).to_string(),
                     name_span: Span::DUMMY,
+                    doc_comment: None,
                     params,
                     return_type,
                     body: vec![Statement::Return(Some(body_expr), Span::DUMMY)],
@@ -202,6 +203,7 @@ pub(crate) fn execute_comptime(
     let func_def = FunctionDef {
         name: func_name.clone(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         params: Vec::new(),
         return_type: None,
         body,
@@ -229,7 +231,10 @@ pub(crate) fn execute_comptime(
         },
         Span::DUMMY,
     ));
-    let program = Program { items };
+    let program = Program {
+        items,
+        docs: shape_ast::ast::ProgramDocs::default(),
+    };
 
     compile_and_execute_comptime_program(
         &program,
@@ -517,6 +522,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     let func_def = FunctionDef {
         name: func_name.clone(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         params,
         return_type: None,
         body: vec![Statement::Return(Some(handler_body.clone()), Span::DUMMY)],
@@ -564,7 +570,10 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         },
         Span::DUMMY,
     ));
-    let program = Program { items };
+    let program = Program {
+        items,
+        docs: shape_ast::ast::ProgramDocs::default(),
+    };
 
     compile_and_execute_comptime_program(
         &program,
@@ -1219,6 +1228,7 @@ mod tests {
         let func = FunctionDef {
             name: "greet".to_string(),
             name_span: Span::DUMMY,
+            doc_comment: None,
             params: vec![FunctionParameter {
                 pattern: DestructurePattern::Identifier("name".to_string(), Span::DUMMY),
                 is_const: false,

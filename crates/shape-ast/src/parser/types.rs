@@ -6,13 +6,13 @@
 //! - Generic types and union types
 //! - Optional types
 
-use crate::ast::TypeAnnotation;
+use crate::ast::{Span, TypeAnnotation};
 use crate::error::{Result, ShapeError};
 use crate::parser::string_literals::parse_string_literal;
 use pest::iterators::Pair;
 use std::collections::HashMap;
 
-use super::{Rule, pair_location};
+use super::{Rule, pair_location, pair_span};
 
 /// Parse a type annotation
 pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
@@ -267,11 +267,64 @@ pub fn parse_type_param(pair: Pair<Rule>) -> Result<crate::ast::FunctionParam> {
     }
 }
 
+fn unwrap_documented_pair<'a>(
+    pair: Pair<'a, Rule>,
+    documented_rule: Rule,
+    inner_rule: Rule,
+    context: &'static str,
+) -> Result<(Option<crate::ast::DocComment>, Pair<'a, Rule>)> {
+    if pair.as_rule() == inner_rule {
+        return Ok((None, pair));
+    }
+
+    if pair.as_rule() != documented_rule {
+        return Err(ShapeError::ParseError {
+            message: format!("expected {}", context),
+            location: Some(pair_location(&pair)),
+        });
+    }
+
+    let pair_loc = pair_location(&pair);
+    let mut inner = pair.into_inner();
+    let mut doc_comment = None;
+    let mut item = inner.next().ok_or_else(|| ShapeError::ParseError {
+        message: format!("expected {}", context),
+        location: Some(pair_loc.clone()),
+    })?;
+
+    if item.as_rule() == Rule::doc_comment {
+        doc_comment = Some(super::docs::parse_doc_comment(item));
+        item = inner.next().ok_or_else(|| ShapeError::ParseError {
+            message: format!("expected {} after doc comment", context),
+            location: Some(pair_loc.clone()),
+        })?;
+    }
+
+    if item.as_rule() != inner_rule {
+        return Err(ShapeError::ParseError {
+            message: format!("expected {}", context),
+            location: Some(pair_location(&item)),
+        });
+    }
+
+    Ok((doc_comment, item))
+}
+
 pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>> {
     let pair_loc = pair_location(&pair);
     let mut params = Vec::new();
     for param_pair in pair.into_inner() {
-        if param_pair.as_rule() == Rule::type_param_name {
+        if matches!(
+            param_pair.as_rule(),
+            Rule::documented_type_param_name | Rule::type_param_name
+        ) {
+            let (doc_comment, param_pair) = unwrap_documented_pair(
+                param_pair,
+                Rule::documented_type_param_name,
+                Rule::type_param_name,
+                "type parameter",
+            )?;
+            let param_span = pair_span(&param_pair);
             let mut param_inner = param_pair.into_inner();
             let name_pair = param_inner.next().ok_or_else(|| ShapeError::ParseError {
                 message: "expected type parameter name".to_string(),
@@ -297,6 +350,8 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
             }
             params.push(crate::ast::TypeParam {
                 name,
+                span: param_span,
+                doc_comment,
                 default_type,
                 trait_bounds,
             });
@@ -340,6 +395,7 @@ pub fn parse_builtin_type_decl(pair: Pair<Rule>) -> Result<crate::ast::BuiltinTy
     Ok(crate::ast::BuiltinTypeDecl {
         name,
         name_span,
+        doc_comment: None,
         type_params,
     })
 }
@@ -442,7 +498,10 @@ pub fn parse_struct_type_def(pair: Pair<Rule>) -> Result<crate::ast::StructTypeD
             }
             Rule::struct_field_list => {
                 for field_pair in part.into_inner() {
-                    if field_pair.as_rule() == Rule::struct_field {
+                    if matches!(
+                        field_pair.as_rule(),
+                        Rule::documented_struct_field | Rule::struct_field
+                    ) {
                         fields.push(parse_struct_field(field_pair)?);
                     }
                 }
@@ -453,6 +512,7 @@ pub fn parse_struct_type_def(pair: Pair<Rule>) -> Result<crate::ast::StructTypeD
 
     Ok(crate::ast::StructTypeDef {
         name,
+        doc_comment: None,
         type_params,
         fields,
         annotations,
@@ -489,7 +549,10 @@ pub fn parse_native_struct_type_def(pair: Pair<Rule>) -> Result<crate::ast::Stru
             }
             Rule::struct_field_list => {
                 for field_pair in part.into_inner() {
-                    if field_pair.as_rule() == Rule::struct_field {
+                    if matches!(
+                        field_pair.as_rule(),
+                        Rule::documented_struct_field | Rule::struct_field
+                    ) {
                         fields.push(parse_struct_field(field_pair)?);
                     }
                 }
@@ -520,6 +583,7 @@ pub fn parse_native_struct_type_def(pair: Pair<Rule>) -> Result<crate::ast::Stru
 
     Ok(crate::ast::StructTypeDef {
         name,
+        doc_comment: None,
         type_params,
         fields,
         annotations,
@@ -531,7 +595,14 @@ pub fn parse_native_struct_type_def(pair: Pair<Rule>) -> Result<crate::ast::Stru
 ///
 /// Grammar: `annotations? ~ comptime_keyword? ~ ident ~ ":" ~ type_annotation ~ ("=" ~ expression)?`
 fn parse_struct_field(pair: Pair<Rule>) -> Result<crate::ast::StructField> {
+    let (doc_comment, pair) = unwrap_documented_pair(
+        pair,
+        Rule::documented_struct_field,
+        Rule::struct_field,
+        "struct field",
+    )?;
     let pair_loc = pair_location(&pair);
+    let span = pair_span(&pair);
     let mut inner = pair.into_inner();
 
     let mut annotations = vec![];
@@ -580,6 +651,8 @@ fn parse_struct_field(pair: Pair<Rule>) -> Result<crate::ast::StructField> {
         annotations,
         is_comptime,
         name,
+        span,
+        doc_comment,
         type_annotation,
         default_value,
     })
@@ -626,6 +699,7 @@ pub fn parse_type_alias_def(pair: Pair<Rule>) -> Result<crate::ast::TypeAliasDef
 
     Ok(crate::ast::TypeAliasDef {
         name,
+        doc_comment: None,
         type_params,
         type_annotation,
         meta_param_overrides,
@@ -637,7 +711,7 @@ pub fn parse_type_alias_def(pair: Pair<Rule>) -> Result<crate::ast::TypeAliasDef
 /// Grammar: `"enum" ~ ident ~ type_params? ~ "{" ~ enum_member_list? ~ "}"`
 pub fn parse_enum_def(pair: Pair<Rule>) -> Result<crate::ast::EnumDef> {
     let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
+    let inner = pair.into_inner();
 
     let mut annotations = Vec::new();
     let mut name = String::new();
@@ -659,12 +733,15 @@ pub fn parse_enum_def(pair: Pair<Rule>) -> Result<crate::ast::EnumDef> {
             }
             Rule::enum_member_list => {
                 for member_pair in part.into_inner() {
-                    if member_pair.as_rule() == Rule::enum_member {
+                    if matches!(
+                        member_pair.as_rule(),
+                        Rule::documented_enum_member | Rule::enum_member
+                    ) {
                         members.push(parse_enum_member(member_pair)?);
                     }
                 }
             }
-            Rule::enum_member => {
+            Rule::documented_enum_member | Rule::enum_member => {
                 members.push(parse_enum_member(part)?);
             }
             _ => {}
@@ -680,6 +757,7 @@ pub fn parse_enum_def(pair: Pair<Rule>) -> Result<crate::ast::EnumDef> {
 
     Ok(crate::ast::EnumDef {
         name,
+        doc_comment: None,
         type_params,
         members,
         annotations,
@@ -687,7 +765,14 @@ pub fn parse_enum_def(pair: Pair<Rule>) -> Result<crate::ast::EnumDef> {
 }
 
 fn parse_enum_member(pair: Pair<Rule>) -> Result<crate::ast::EnumMember> {
+    let (doc_comment, pair) = unwrap_documented_pair(
+        pair,
+        Rule::documented_enum_member,
+        Rule::enum_member,
+        "enum member",
+    )?;
     let pair_loc = pair_location(&pair);
+    let span = pair_span(&pair);
     let inner = pair
         .into_inner()
         .next()
@@ -734,6 +819,8 @@ fn parse_enum_member(pair: Pair<Rule>) -> Result<crate::ast::EnumMember> {
             Ok(crate::ast::EnumMember {
                 name,
                 kind: crate::ast::EnumMemberKind::Unit { value },
+                span,
+                doc_comment,
             })
         }
         Rule::enum_variant_tuple => {
@@ -752,6 +839,8 @@ fn parse_enum_member(pair: Pair<Rule>) -> Result<crate::ast::EnumMember> {
             Ok(crate::ast::EnumMember {
                 name,
                 kind: crate::ast::EnumMemberKind::Tuple(fields),
+                span,
+                doc_comment,
             })
         }
         Rule::enum_variant_struct => {
@@ -774,6 +863,8 @@ fn parse_enum_member(pair: Pair<Rule>) -> Result<crate::ast::EnumMember> {
             Ok(crate::ast::EnumMember {
                 name,
                 kind: crate::ast::EnumMemberKind::Struct(fields),
+                span,
+                doc_comment,
             })
         }
         _ => Err(ShapeError::ParseError {
@@ -813,6 +904,7 @@ pub fn parse_interface_def(pair: Pair<Rule>) -> Result<crate::ast::InterfaceDef>
 
     Ok(crate::ast::InterfaceDef {
         name,
+        doc_comment: None,
         type_params,
         members,
     })
@@ -862,6 +954,7 @@ pub fn parse_trait_def(pair: Pair<Rule>) -> Result<crate::ast::TraitDef> {
 
     Ok(crate::ast::TraitDef {
         name,
+        doc_comment: None,
         type_params,
         members,
         annotations,
@@ -876,24 +969,51 @@ fn parse_trait_body(pair: Pair<Rule>) -> Result<Vec<crate::ast::TraitMember>> {
             continue;
         }
 
-        // Each trait_member is a method_def (default), interface_member (required),
-        // or associated_type_decl
-        for inner in trait_member.into_inner() {
-            match inner.as_rule() {
-                Rule::associated_type_decl => {
-                    let (name, bounds) = parse_associated_type_decl(inner)?;
-                    members.push(crate::ast::TraitMember::AssociatedType { name, bounds });
-                }
-                Rule::method_def => {
-                    let method = parse_method_def_shared(inner)?;
-                    members.push(crate::ast::TraitMember::Default(method));
-                }
-                Rule::interface_member => {
-                    let im = parse_interface_member(inner)?;
-                    members.push(crate::ast::TraitMember::Required(im));
-                }
-                _ => {} // skip separators etc.
+        let mut member_inner = trait_member.into_inner();
+        let mut doc_comment = None;
+        let mut inner = member_inner.next().ok_or_else(|| ShapeError::ParseError {
+            message: "expected trait member".to_string(),
+            location: None,
+        })?;
+
+        if inner.as_rule() == Rule::doc_comment {
+            doc_comment = Some(super::docs::parse_doc_comment(inner));
+            inner = member_inner.next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected trait member after doc comment".to_string(),
+                location: None,
+            })?;
+        }
+
+        if inner.as_rule() == Rule::trait_member_core {
+            inner = inner.into_inner().next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected trait member".to_string(),
+                location: None,
+            })?;
+        }
+
+        match inner.as_rule() {
+            Rule::associated_type_decl => {
+                let (name, bounds, span) = parse_associated_type_decl(inner)?;
+                members.push(crate::ast::TraitMember::AssociatedType {
+                    name,
+                    bounds,
+                    span,
+                    doc_comment,
+                });
             }
+            Rule::method_def => {
+                let mut method = parse_method_def_shared(inner)?;
+                method.doc_comment = doc_comment;
+                members.push(crate::ast::TraitMember::Default(method));
+            }
+            Rule::interface_member | Rule::documented_interface_member => {
+                let mut im = parse_interface_member(inner)?;
+                if let Some(doc_comment) = doc_comment {
+                    attach_interface_member_doc_comment(&mut im, doc_comment);
+                }
+                members.push(crate::ast::TraitMember::Required(im));
+            }
+            _ => {}
         }
     }
 
@@ -901,7 +1021,8 @@ fn parse_trait_body(pair: Pair<Rule>) -> Result<Vec<crate::ast::TraitMember>> {
 }
 
 /// Parse `type Item;` or `type Item: Bound1 + Bound2;`
-fn parse_associated_type_decl(pair: Pair<Rule>) -> Result<(String, Vec<TypeAnnotation>)> {
+fn parse_associated_type_decl(pair: Pair<Rule>) -> Result<(String, Vec<TypeAnnotation>, Span)> {
+    let span = pair_span(&pair);
     let mut inner = pair.into_inner();
 
     let name_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
@@ -921,7 +1042,7 @@ fn parse_associated_type_decl(pair: Pair<Rule>) -> Result<(String, Vec<TypeAnnot
         }
     }
 
-    Ok((name, bounds))
+    Ok((name, bounds, span))
 }
 
 /// Shared parser for method_def rule, used by extend, impl, and trait bodies
@@ -930,6 +1051,7 @@ pub(crate) fn parse_method_def_shared(pair: Pair<Rule>) -> Result<crate::ast::ty
 
     // Detect optional "async" prefix from the raw text
     let is_async = pair.as_str().trim_start().starts_with("async");
+    let span = pair_span(&pair);
 
     let mut md_inner = pair.into_inner();
 
@@ -974,6 +1096,8 @@ pub(crate) fn parse_method_def_shared(pair: Pair<Rule>) -> Result<crate::ast::ty
 
     Ok(MethodDef {
         name,
+        span,
+        doc_comment: None,
         params,
         when_clause,
         return_type,
@@ -987,7 +1111,10 @@ fn parse_interface_body(pair: Pair<Rule>) -> Result<Vec<crate::ast::InterfaceMem
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::interface_member_list {
             for member in inner.into_inner() {
-                if member.as_rule() == Rule::interface_member {
+                if matches!(
+                    member.as_rule(),
+                    Rule::documented_interface_member | Rule::interface_member
+                ) {
                     members.push(parse_interface_member(member)?);
                 }
             }
@@ -997,12 +1124,19 @@ fn parse_interface_body(pair: Pair<Rule>) -> Result<Vec<crate::ast::InterfaceMem
 }
 
 fn parse_interface_member(pair: Pair<Rule>) -> Result<crate::ast::InterfaceMember> {
+    let (doc_comment, pair) = unwrap_documented_pair(
+        pair,
+        Rule::documented_interface_member,
+        Rule::interface_member,
+        "interface member",
+    )?;
     let pair_loc = pair_location(&pair);
     let raw = pair.as_str();
     let trimmed = raw.trim_start();
+    let span = pair_span(&pair);
 
     if trimmed.starts_with('[') {
-        return parse_interface_index_signature(pair, trimmed);
+        return parse_interface_index_signature(pair, trimmed, doc_comment);
     }
 
     let mut inner = pair.into_inner();
@@ -1040,12 +1174,16 @@ fn parse_interface_member(pair: Pair<Rule>) -> Result<crate::ast::InterfaceMembe
             params,
             return_type: type_annotation,
             is_async: false,
+            span,
+            doc_comment,
         })
     } else {
         Ok(crate::ast::InterfaceMember::Property {
             name,
             optional,
             type_annotation,
+            span,
+            doc_comment,
         })
     }
 }
@@ -1068,8 +1206,10 @@ fn parse_interface_member_kind(raw: &str, name: &str) -> (bool, bool) {
 fn parse_interface_index_signature(
     pair: Pair<Rule>,
     raw: &str,
+    doc_comment: Option<crate::ast::DocComment>,
 ) -> Result<crate::ast::InterfaceMember> {
     let pair_loc = pair_location(&pair);
+    let span = pair_span(&pair);
     let mut inner = pair.into_inner();
     let name_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
         message: "expected index signature parameter name".to_string(),
@@ -1099,7 +1239,22 @@ fn parse_interface_index_signature(
         param_name,
         param_type,
         return_type,
+        span,
+        doc_comment,
     })
+}
+
+fn attach_interface_member_doc_comment(
+    member: &mut crate::ast::InterfaceMember,
+    doc_comment: crate::ast::DocComment,
+) {
+    match member {
+        crate::ast::InterfaceMember::Property { doc_comment: slot, .. }
+        | crate::ast::InterfaceMember::Method { doc_comment: slot, .. }
+        | crate::ast::InterfaceMember::IndexSignature {
+            doc_comment: slot, ..
+        } => *slot = Some(doc_comment),
+    }
 }
 
 fn parse_index_signature_param_type(raw: &str) -> Option<String> {

@@ -3,8 +3,11 @@
 
 // ===== Whitespace and Comments =====
 WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
-COMMENT = _{ "//" ~ (!"\n" ~ ANY)* | block_comment }
+COMMENT = _{ line_comment | block_comment }
+line_comment = _{ "//" ~ !"/" ~ (!"\n" ~ ANY)* }
 block_comment = _{ "/*" ~ (block_comment | (!"*/" ~ ANY))* ~ "*/" }
+doc_comment = { doc_comment_line+ }
+doc_comment_line = @{ "///" ~ (!NEWLINE ~ ANY)* }
 
 // ===== Main Entry Point =====
 program = { SOI ~ (item_or_error ~ ";"?)* ~ EOI }
@@ -17,6 +20,10 @@ item_sync_point = _{ item_sync_keyword | "@" | "}" | EOI }
 item_sync_keyword = @{ ("builtin" | "function" | "fn" | "type" | "trait" | "impl" | "enum" | "mod" | "from" | "use" | "pub" | "annotation" | "let" | "var" | "const" | "extend" | "stream" | "datasource" | "query" | "async" | "comptime" | "extern") ~ !(ASCII_ALPHANUMERIC | "_") }
 
 item = {
+    doc_comment? ~ item_core
+}
+
+item_core = {
     import_stmt
     | pub_item
     | module_decl
@@ -25,6 +32,7 @@ item = {
     | native_struct_type_def // type C Foo { ... }
     | struct_type_def
     | type_alias_def
+    | interface_def
     | trait_def
     | enum_def
     | impl_block
@@ -75,6 +83,7 @@ pub_item = {
     | "pub" ~ type_alias_def                                         // pub type X = Y;
     | "pub" ~ enum_def                                               // pub enum Foo { ... }
     | "pub" ~ struct_type_def                                        // pub type Foo { ... }
+    | "pub" ~ interface_def                                          // pub interface Foo { ... }
     | "pub" ~ trait_def                                              // pub trait Foo { ... }
     | "pub" ~ "{" ~ export_spec_list ~ "}" ~ ";"?                   // pub { a, b as c };
 }
@@ -118,7 +127,11 @@ native_struct_type_def = {
 }
 
 struct_field_list = {
-    struct_field ~ (("," | NEWLINE+) ~ struct_field)* ~ ","?
+    documented_struct_field ~ (("," | NEWLINE+) ~ documented_struct_field)* ~ ","?
+}
+
+documented_struct_field = {
+    doc_comment? ~ struct_field
 }
 
 struct_field = {
@@ -145,7 +158,11 @@ interface_def = {
 }
 
 type_params = {
-    "<" ~ type_param_name ~ ("," ~ type_param_name)* ~ ">"
+    "<" ~ documented_type_param_name ~ ("," ~ documented_type_param_name)* ~ ">"
+}
+
+documented_type_param_name = {
+    doc_comment? ~ type_param_name
 }
 
 type_param_name = {
@@ -161,10 +178,14 @@ interface_body = {
 }
 
 interface_member_list = {
-    interface_member ~ (interface_member_separator ~ interface_member)* ~ interface_member_separator?
+    documented_interface_member ~ (interface_member_separator ~ documented_interface_member)* ~ interface_member_separator?
 }
 
 interface_member_separator = { ";" | "," }
+
+documented_interface_member = {
+    doc_comment? ~ interface_member
+}
 
 interface_member = {
     // Property signature
@@ -183,6 +204,10 @@ trait_body = {
 }
 
 trait_member = {
+    doc_comment? ~ trait_member_core
+}
+
+trait_member_core = {
     // Associated type declaration: type Item; or type Item: Bound;
     associated_type_decl
     // Default method: method keyword with body (must be tried first)
@@ -216,10 +241,14 @@ enum_def = {
 }
 
 enum_member_list = {
-    enum_member ~ (enum_member_separator ~ enum_member)* ~ enum_member_separator?
+    documented_enum_member ~ (enum_member_separator ~ documented_enum_member)* ~ enum_member_separator?
 }
 
 enum_member_separator = { ";" | "," }
+
+documented_enum_member = {
+    doc_comment? ~ enum_member
+}
 
 enum_member = {
     enum_variant_struct

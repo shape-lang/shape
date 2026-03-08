@@ -1,20 +1,33 @@
 //! Physics Types
 
+/// Particle state for simple Newtonian simulations.
 pub type Particle = {
+    /// Position vector `[x, y, z]`.
     position: [number, number, number];
+    /// Velocity vector `[vx, vy, vz]`.
     velocity: [number, number, number];
+    /// Particle mass.
     mass: number;
 };
 
+/// State of a one-dimensional spring-mass oscillator.
 pub type OscillatorState = {
+    /// Displacement from equilibrium.
     x: number;
+    /// Velocity.
     v: number;
 };
 
+/// State of a ballistic projectile in two dimensions.
 pub type ProjectileState = {
+    /// Horizontal position.
     x: number;
+    /// Vertical position.
     y: number;
+    /// Horizontal velocity.
     vx: number;
+    /// Vertical velocity.
     vy: number;
+    /// Elapsed simulation time.
     t: number;
 };

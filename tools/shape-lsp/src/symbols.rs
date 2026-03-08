@@ -2,6 +2,7 @@
 //!
 //! Extracts user-defined symbols (variables, functions, patterns) for completion.
 
+use crate::doc_render::render_doc_comment;
 use shape_ast::ast::{
     DestructurePattern, ExportItem, Item, Program, Span, TypeAnnotation, VarKind,
 };
@@ -81,6 +82,13 @@ pub enum SymbolKind {
     Type,
 }
 
+fn rendered_doc_for_span(program: &Program, span: Span) -> Option<String> {
+    program
+        .docs
+        .comment_for_span(span)
+        .map(|comment| render_doc_comment(program, comment, None, None, None))
+}
+
 /// Extract all symbols from a parsed program
 pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
     let mut symbols = Vec::new();
@@ -136,7 +144,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     });
                 }
             }
-            Item::Function(func_def, _) => {
+            Item::Function(func_def, span) => {
                 // Extract function name and signature (including & for reference params)
                 let params: Vec<String> = func_def
                     .params
@@ -157,7 +165,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     .collect();
 
                 let signature = format!("{}({})", func_def.name, params.join(", "));
-                let doc = build_function_documentation(&annotations);
+                let doc = rendered_doc_for_span(program, *span);
 
                 symbols.push(SymbolInfo {
                     name: func_def.name.clone(),
@@ -168,57 +176,57 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     annotations,
                 });
             }
-            Item::TypeAlias(type_alias, _) => {
+            Item::TypeAlias(type_alias, span) => {
                 symbols.push(SymbolInfo {
                     name: type_alias.name.clone(),
                     kind: SymbolKind::Type,
                     detail: Some("type alias".to_string()),
-                    documentation: None,
+                    documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
                 });
             }
-            Item::StructType(struct_def, _) => {
+            Item::StructType(struct_def, span) => {
                 symbols.push(SymbolInfo {
                     name: struct_def.name.clone(),
                     kind: SymbolKind::Type,
                     detail: Some("type".to_string()),
-                    documentation: None,
+                    documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
                 });
             }
-            Item::Interface(interface, _) => {
+            Item::Interface(interface, span) => {
                 symbols.push(SymbolInfo {
                     name: interface.name.clone(),
                     kind: SymbolKind::Type,
                     detail: Some("interface".to_string()),
-                    documentation: None,
+                    documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
                 });
             }
-            Item::Trait(trait_def, _) => {
+            Item::Trait(trait_def, span) => {
                 symbols.push(SymbolInfo {
                     name: trait_def.name.clone(),
                     kind: SymbolKind::Type,
                     detail: Some("trait".to_string()),
-                    documentation: None,
+                    documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
                 });
             }
-            Item::Enum(enum_def, _) => {
+            Item::Enum(enum_def, span) => {
                 symbols.push(SymbolInfo {
                     name: enum_def.name.clone(),
                     kind: SymbolKind::Type,
                     detail: Some("enum".to_string()),
-                    documentation: None,
+                    documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
                 });
             }
-            Item::ForeignFunction(foreign_fn, _) => {
+            Item::ForeignFunction(foreign_fn, span) => {
                 let params: Vec<String> = foreign_fn
                     .params
                     .iter()
@@ -254,12 +262,12 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     name: foreign_fn.name.clone(),
                     kind: SymbolKind::Function,
                     detail: Some(signature),
-                    documentation: None,
+                    documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations,
                 });
             }
-            Item::Export(export_stmt, _) => {
+            Item::Export(export_stmt, span) => {
                 // Extract symbols from exported items
                 match &export_stmt.item {
                     ExportItem::Function(func_def) => {
@@ -276,7 +284,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             .collect();
 
                         let signature = format!("{}({})", func_def.name, params.join(", "));
-                        let doc = build_function_documentation(&annotations);
+                        let doc = rendered_doc_for_span(program, *span);
 
                         symbols.push(SymbolInfo {
                             name: func_def.name.clone(),
@@ -292,7 +300,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             name: enum_def.name.clone(),
                             kind: SymbolKind::Type,
                             detail: Some("enum".to_string()),
-                            documentation: None,
+                            documentation: rendered_doc_for_span(program, *span),
                             type_annotation: None,
                             annotations: vec![],
                         });
@@ -302,7 +310,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             name: struct_def.name.clone(),
                             kind: SymbolKind::Type,
                             detail: Some("struct".to_string()),
-                            documentation: None,
+                            documentation: rendered_doc_for_span(program, *span),
                             type_annotation: None,
                             annotations: vec![],
                         });
@@ -312,7 +320,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             name: interface_def.name.clone(),
                             kind: SymbolKind::Type,
                             detail: Some("interface".to_string()),
-                            documentation: None,
+                            documentation: rendered_doc_for_span(program, *span),
                             type_annotation: None,
                             annotations: vec![],
                         });
@@ -329,15 +337,6 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
     }
 
     symbols
-}
-
-/// Build documentation string for functions with annotations (generic)
-fn build_function_documentation(annotations: &[String]) -> Option<String> {
-    if annotations.is_empty() {
-        return None;
-    }
-    let parts: Vec<String> = annotations.iter().map(|a| format!("`@{}`", a)).collect();
-    Some(parts.join(", "))
 }
 
 /// Extract name from a destructure pattern (simplified — returns first binding only)
@@ -525,7 +524,7 @@ function doji(candle) {
             name: "my_strategy".to_string(),
             kind: SymbolKind::Function,
             detail: Some("my_strategy(row, ctx)".to_string()),
-            documentation: Some("`@strategy`".to_string()),
+            documentation: None,
             type_annotation: None,
             annotations: vec!["strategy".to_string()],
         }];

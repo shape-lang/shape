@@ -1068,7 +1068,7 @@ fn test_trait_with_associated_type() {
             assert_eq!(trait_def.name, "Iterator");
             assert_eq!(trait_def.members.len(), 2);
             match &trait_def.members[0] {
-                crate::ast::TraitMember::AssociatedType { name, bounds } => {
+                crate::ast::TraitMember::AssociatedType { name, bounds, .. } => {
                     assert_eq!(name, "Item");
                     assert!(bounds.is_empty());
                 }
@@ -1092,7 +1092,7 @@ fn test_trait_with_bounded_associated_type() {
         crate::ast::Item::Trait(trait_def, _) => {
             assert_eq!(trait_def.name, "Container");
             match &trait_def.members[0] {
-                crate::ast::TraitMember::AssociatedType { name, bounds } => {
+                crate::ast::TraitMember::AssociatedType { name, bounds, .. } => {
                     assert_eq!(name, "Item");
                     assert_eq!(bounds.len(), 2);
                 }

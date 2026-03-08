@@ -2,10 +2,12 @@
 //!
 //! Dynamically discovers user-defined annotations from AST and imported modules.
 
+use crate::doc_render::render_doc_comment;
 use crate::module_cache::ModuleCache;
-use shape_ast::ast::{AnnotationDef, Item, Program, Span};
+use shape_ast::ast::{AnnotationDef, DocComment, Item, Program, Span};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Discovers annotations from program AST and imports
 #[derive(Debug, Clone, Default)]
@@ -21,10 +23,11 @@ pub struct AnnotationDiscovery {
 pub struct AnnotationInfo {
     pub name: String,
     pub params: Vec<String>,
-    pub description: String,
+    pub doc_comment: Option<DocComment>,
     pub location: Span,
     /// Source file where the annotation is defined (None for local annotations)
     pub source_file: Option<std::path::PathBuf>,
+    source_program: Option<Arc<Program>>,
 }
 
 impl AnnotationDiscovery {
@@ -46,14 +49,11 @@ impl AnnotationDiscovery {
     fn add_local_annotation(&mut self, ann_def: &AnnotationDef) {
         let info = AnnotationInfo {
             name: ann_def.name.clone(),
-            params: ann_def
-                .params
-                .iter()
-                .flat_map(|p| p.get_identifiers())
-                .collect(),
-            description: extract_doc_comment(ann_def),
+            params: annotation_param_names(ann_def),
+            doc_comment: ann_def.doc_comment.clone(),
             location: ann_def.name_span,
             source_file: None, // Local annotations are in the current file
+            source_program: None,
         };
 
         self.local_annotations.insert(ann_def.name.clone(), info);
@@ -88,7 +88,10 @@ impl AnnotationDiscovery {
                         current_file,
                         workspace_root,
                     ) {
-                        self.discover_from_module_program(&module_info.program, &module_info.path);
+                        self.discover_from_module_program(
+                            module_info.program.clone(),
+                            &module_info.path,
+                        );
                     }
                 }
             }
@@ -104,20 +107,21 @@ impl AnnotationDiscovery {
     }
 
     /// Discover annotations from an already-loaded module program
-    fn discover_from_module_program(&mut self, program: &Program, source_path: &std::path::Path) {
+    fn discover_from_module_program(
+        &mut self,
+        program: Arc<Program>,
+        source_path: &std::path::Path,
+    ) {
         for item in &program.items {
             if let Item::AnnotationDef(ann_def, _span) = item {
                 // Add the annotation to imported_annotations
                 let info = AnnotationInfo {
                     name: ann_def.name.clone(),
-                    params: ann_def
-                        .params
-                        .iter()
-                        .flat_map(|p| p.get_identifiers())
-                        .collect(),
-                    description: extract_doc_comment(ann_def),
+                    params: annotation_param_names(ann_def),
+                    doc_comment: ann_def.doc_comment.clone(),
                     location: ann_def.name_span,
                     source_file: Some(source_path.to_path_buf()),
+                    source_program: Some(program.clone()),
                 };
                 self.imported_annotations.insert(ann_def.name.clone(), info);
             }
@@ -145,43 +149,31 @@ impl AnnotationDiscovery {
     }
 }
 
-/// Extract documentation comment from annotation definition
-///
-/// Generates a description from the annotation's structure:
-/// name, parameters, and which lifecycle handlers it defines.
-fn extract_doc_comment(ann_def: &AnnotationDef) -> String {
-    let mut parts = Vec::new();
+pub fn render_annotation_documentation(
+    info: &AnnotationInfo,
+    local_program: Option<&Program>,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+    workspace_root: Option<&Path>,
+) -> Option<String> {
+    let comment = info.doc_comment.as_ref()?;
+    let program = info.source_program.as_deref().or(local_program)?;
+    let source_file = info.source_file.as_deref().or(current_file);
+    Some(render_doc_comment(
+        program,
+        comment,
+        module_cache,
+        source_file,
+        workspace_root,
+    ))
+}
 
-    // Describe parameters
-    if !ann_def.params.is_empty() {
-        let param_names: Vec<String> = ann_def
-            .params
-            .iter()
-            .flat_map(|p| p.get_identifiers())
-            .collect();
-        if !param_names.is_empty() {
-            parts.push(format!("Parameters: {}", param_names.join(", ")));
-        }
-    }
-
-    // Describe handlers
-    let handler_names: Vec<&str> = ann_def
-        .handlers
+fn annotation_param_names(ann_def: &AnnotationDef) -> Vec<String> {
+    ann_def
+        .params
         .iter()
-        .map(|h| match h.handler_type {
-            shape_ast::ast::AnnotationHandlerType::OnDefine => "on_define",
-            shape_ast::ast::AnnotationHandlerType::Before => "before",
-            shape_ast::ast::AnnotationHandlerType::After => "after",
-            shape_ast::ast::AnnotationHandlerType::Metadata => "metadata",
-            shape_ast::ast::AnnotationHandlerType::ComptimePre => "comptime pre",
-            shape_ast::ast::AnnotationHandlerType::ComptimePost => "comptime post",
-        })
-        .collect();
-    if !handler_names.is_empty() {
-        parts.push(format!("Handlers: {}", handler_names.join(", ")));
-    }
-
-    parts.join(". ")
+        .flat_map(|p| p.get_identifiers())
+        .collect()
 }
 
 #[cfg(test)]
@@ -192,7 +184,10 @@ mod tests {
     fn test_discover_no_hardcoded_annotations() {
         // Annotations are now discovered from imports, not hardcoded
         let mut discovery = AnnotationDiscovery::new();
-        discovery.discover_from_imports(&Program { items: vec![] });
+        discovery.discover_from_imports(&Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        });
 
         // With no imports, no annotations should be defined
         assert!(!discovery.is_defined("strategy"));
@@ -205,7 +200,10 @@ mod tests {
     fn test_all_annotations_empty_without_imports() {
         // Without imports, annotation list should be empty
         let mut discovery = AnnotationDiscovery::new();
-        discovery.discover_from_imports(&Program { items: vec![] });
+        discovery.discover_from_imports(&Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        });
 
         let all = discovery.all_annotations();
         assert_eq!(all.len(), 0);
@@ -221,7 +219,10 @@ mod tests {
         let current_file = PathBuf::from("/test/file.shape");
 
         // Without actual module imports, no annotations should be discovered
-        let program = Program { items: vec![] };
+        let program = Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        };
         discovery.discover_from_imports_with_cache(&program, &current_file, &module_cache, None);
 
         // Annotations are now defined in stdlib, not hardcoded

@@ -15,6 +15,7 @@ fn test_pattern_function_registration() {
     let pattern_func = FunctionDef {
         name: "test_pattern".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: None,
@@ -39,6 +40,7 @@ fn test_pattern_function_registration() {
 
     let program = Program {
         items: vec![Item::Function(pattern_func, Span::DUMMY)],
+        docs: ProgramDocs::default(),
     };
 
     let result = analyzer.analyze(&program);
@@ -56,6 +58,7 @@ fn test_duplicate_function_detection() {
     let func1 = FunctionDef {
         name: "duplicate".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: None,
@@ -72,6 +75,7 @@ fn test_duplicate_function_detection() {
     let func2 = FunctionDef {
         name: "duplicate".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: None,
@@ -90,6 +94,7 @@ fn test_duplicate_function_detection() {
             Item::Function(func1, Span::DUMMY),
             Item::Function(func2, Span::DUMMY),
         ],
+        docs: ProgramDocs::default(),
     };
 
     // Duplicate function names should trigger an error
@@ -108,6 +113,7 @@ fn test_duplicate_function_with_mutual_recursion_present() {
     let is_even = FunctionDef {
         name: "is_even".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: None,
@@ -124,6 +130,7 @@ fn test_duplicate_function_with_mutual_recursion_present() {
     let is_odd = FunctionDef {
         name: "is_odd".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: None,
@@ -140,6 +147,7 @@ fn test_duplicate_function_with_mutual_recursion_present() {
     let is_even_dup = FunctionDef {
         name: "is_even".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: None,
@@ -159,6 +167,7 @@ fn test_duplicate_function_with_mutual_recursion_present() {
             Item::Function(is_odd, Span::DUMMY),
             Item::Function(is_even_dup, Span::DUMMY),
         ],
+        docs: ProgramDocs::default(),
     };
 
     // Must reject: is_even is defined twice, even though mutual recursion pre-registration is active
@@ -196,6 +205,7 @@ fn test_variable_definition_and_usage() {
                 Span::DUMMY,
             ),
         ],
+        docs: ProgramDocs::default(),
     };
 
     assert!(analyzer.analyze(&program).is_ok());
@@ -210,6 +220,7 @@ fn test_undefined_variable_detection() {
             Expr::Identifier("undefined_var".to_string(), Span::DUMMY),
             Span::DUMMY,
         )],
+        docs: ProgramDocs::default(),
     };
 
     assert!(analyzer.analyze(&program).is_err());
@@ -229,6 +240,7 @@ fn test_function_call_validation() {
 
     let program1 = Program {
         items: vec![Item::Expression(valid_call, Span::DUMMY)],
+        docs: ProgramDocs::default(),
     };
 
     assert!(analyzer.analyze(&program1).is_ok());
@@ -243,6 +255,7 @@ fn test_function_call_validation() {
 
     let program2 = Program {
         items: vec![Item::Expression(invalid_call, Span::DUMMY)],
+        docs: ProgramDocs::default(),
     };
 
     assert!(analyzer.analyze(&program2).is_err());
@@ -257,6 +270,7 @@ fn test_function_call_validation() {
 
     let program3 = Program {
         items: vec![Item::Expression(wrong_args, Span::DUMMY)],
+        docs: ProgramDocs::default(),
     };
 
     assert!(analyzer.analyze(&program3).is_err());
@@ -347,6 +361,7 @@ fn test_function_return_type() {
     let func_with_return = FunctionDef {
         name: "get_value".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: Some(TypeAnnotation::Basic("Number".to_string())),
@@ -362,6 +377,7 @@ fn test_function_return_type() {
 
     let program = Program {
         items: vec![Item::Function(func_with_return, Span::DUMMY)],
+        docs: ProgramDocs::default(),
     };
 
     assert!(analyzer.analyze(&program).is_ok());
@@ -388,6 +404,7 @@ fn test_comptime_block_allows_build_config_builtin() {
             )],
             Span::DUMMY,
         )],
+        docs: ProgramDocs::default(),
     };
 
     assert!(
@@ -410,6 +427,7 @@ fn test_expression_type_checking() {
 
     let program = Program {
         items: vec![Item::Expression(bool_expr, Span::DUMMY)],
+        docs: ProgramDocs::default(),
     };
 
     assert!(analyzer.analyze(&program).is_ok());
@@ -429,6 +447,7 @@ fn test_multi_error_collects_all_errors() {
     let func1 = FunctionDef {
         name: "dup_a".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: None,
@@ -447,6 +466,7 @@ fn test_multi_error_collects_all_errors() {
     let func2 = FunctionDef {
         name: "dup_b".to_string(),
         name_span: Span::DUMMY,
+        doc_comment: None,
         type_params: None,
         params: vec![],
         return_type: None,
@@ -469,6 +489,7 @@ fn test_multi_error_collects_all_errors() {
             Item::Function(func2, Span::DUMMY),
             Item::Function(func2_dup, Span::DUMMY),
         ],
+        docs: ProgramDocs::default(),
     };
 
     let result = analyzer.analyze(&program);
@@ -505,6 +526,7 @@ fn test_single_error_not_wrapped() {
             Expr::Identifier("nonexistent".to_string(), Span::DUMMY),
             Span::DUMMY,
         )],
+        docs: ProgramDocs::default(),
     };
 
     let result = analyzer.analyze(&program);

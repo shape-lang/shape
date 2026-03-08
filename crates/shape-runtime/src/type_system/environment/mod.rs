@@ -15,7 +15,7 @@ pub use registry::{RecordField, RecordSchema, TraitImplEntry, TypeAliasEntry};
 use super::*;
 use evolution::EvolutionRegistry;
 use registry::TypeRegistry;
-use shape_ast::ast::{EnumDef, Expr, InterfaceDef, ObjectTypeField, TraitDef, TypeAnnotation};
+use shape_ast::ast::{EnumDef, Expr, InterfaceDef, ObjectTypeField, Span, TraitDef, TypeAnnotation};
 use std::collections::{HashMap, HashSet};
 
 /// A field that was hoisted from a property assignment (e.g., `a.b = 2` hoists field `b` to variable `a`)
@@ -214,6 +214,7 @@ impl TypeEnvironment {
 
         let content_trait = TraitDef {
             name: "Content".to_string(),
+            doc_comment: None,
             type_params: None,
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "render".to_string(),
@@ -225,6 +226,8 @@ impl TypeEnvironment {
                 }],
                 return_type: TypeAnnotation::Basic("ContentNode".to_string()),
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -253,8 +256,11 @@ impl TypeEnvironment {
         use shape_ast::ast::TypeParam;
         let content_for_trait = TraitDef {
             name: "ContentFor".to_string(),
+            doc_comment: None,
             type_params: Some(vec![TypeParam {
                 name: "Adapter".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
                 default_type: None,
                 trait_bounds: vec![],
             }]),
@@ -275,6 +281,8 @@ impl TypeEnvironment {
                 ],
                 return_type: TypeAnnotation::Basic("ContentNode".to_string()),
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -289,6 +297,7 @@ impl TypeEnvironment {
 
         let drop_trait = TraitDef {
             name: "Drop".to_string(),
+            doc_comment: None,
             type_params: None,
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "drop".to_string(),
@@ -300,6 +309,8 @@ impl TypeEnvironment {
                 }],
                 return_type: TypeAnnotation::Basic("void".to_string()),
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -322,8 +333,11 @@ impl TypeEnvironment {
 
         let into_trait = TraitDef {
             name: "Into".to_string(),
+            doc_comment: None,
             type_params: Some(vec![TypeParam {
                 name: "Target".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
                 default_type: None,
                 trait_bounds: vec![],
             }]),
@@ -333,6 +347,8 @@ impl TypeEnvironment {
                 params: vec![],
                 return_type: TypeAnnotation::Reference("Target".to_string()),
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -348,8 +364,11 @@ impl TypeEnvironment {
 
         let try_into_trait = TraitDef {
             name: "TryInto".to_string(),
+            doc_comment: None,
             type_params: Some(vec![TypeParam {
                 name: "Target".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
                 default_type: None,
                 trait_bounds: vec![],
             }]),
@@ -365,6 +384,8 @@ impl TypeEnvironment {
                     ],
                 },
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -380,8 +401,11 @@ impl TypeEnvironment {
 
         let iterable_trait = TraitDef {
             name: "Iterable".to_string(),
+            doc_comment: None,
             type_params: Some(vec![TypeParam {
                 name: "T".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
                 default_type: None,
                 trait_bounds: vec![],
             }]),
@@ -398,6 +422,8 @@ impl TypeEnvironment {
                     args: vec![TypeAnnotation::Reference("T".to_string())],
                 },
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -449,6 +475,7 @@ impl TypeEnvironment {
         ] {
             let trait_def = TraitDef {
                 name: trait_name.to_string(),
+                doc_comment: None,
                 type_params: None,
                 members: vec![TraitMember::Required(InterfaceMember::Method {
                     name: method_name.to_string(),
@@ -456,6 +483,8 @@ impl TypeEnvironment {
                     params: vec![self_param.clone(), other_param.clone()],
                     return_type: TypeAnnotation::Basic("Self".to_string()),
                     is_async: false,
+                    span: Span::DUMMY,
+                    doc_comment: None,
                 })],
                 annotations: vec![],
             };
@@ -465,6 +494,7 @@ impl TypeEnvironment {
         // Unary operator trait: Neg
         let neg_trait = TraitDef {
             name: "Neg".to_string(),
+            doc_comment: None,
             type_params: None,
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "neg".to_string(),
@@ -472,6 +502,8 @@ impl TypeEnvironment {
                 params: vec![self_param.clone()],
                 return_type: TypeAnnotation::Basic("Self".to_string()),
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -480,6 +512,7 @@ impl TypeEnvironment {
         // Eq trait: eq(self, other) -> bool
         let eq_trait = TraitDef {
             name: "Eq".to_string(),
+            doc_comment: None,
             type_params: None,
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "eq".to_string(),
@@ -487,6 +520,8 @@ impl TypeEnvironment {
                 params: vec![self_param.clone(), other_param.clone()],
                 return_type: TypeAnnotation::Basic("bool".to_string()),
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -495,6 +530,7 @@ impl TypeEnvironment {
         // Ord trait: cmp(self, other) -> int
         let ord_trait = TraitDef {
             name: "Ord".to_string(),
+            doc_comment: None,
             type_params: None,
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "cmp".to_string(),
@@ -502,6 +538,8 @@ impl TypeEnvironment {
                 params: vec![self_param, other_param],
                 return_type: TypeAnnotation::Basic("int".to_string()),
                 is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
             })],
             annotations: vec![],
         };
@@ -1586,6 +1624,7 @@ mod tests {
 
         let trait_def = TraitDef {
             name: "Queryable".to_string(),
+            doc_comment: None,
             type_params: None,
             members: vec![
                 TraitMember::Required(InterfaceMember::Method {
@@ -1594,6 +1633,8 @@ mod tests {
                     params: vec![],
                     return_type: shape_ast::ast::TypeAnnotation::Basic("number".to_string()),
                     is_async: false,
+                    span: Span::DUMMY,
+                    doc_comment: None,
                 }),
                 TraitMember::Required(InterfaceMember::Method {
                     name: "execute".to_string(),
@@ -1601,6 +1642,8 @@ mod tests {
                     params: vec![],
                     return_type: shape_ast::ast::TypeAnnotation::Basic("number".to_string()),
                     is_async: false,
+                    span: Span::DUMMY,
+                    doc_comment: None,
                 }),
             ],
             annotations: vec![],
@@ -1625,6 +1668,7 @@ mod tests {
         // Define a trait first
         let trait_def = TraitDef {
             name: "Queryable".to_string(),
+            doc_comment: None,
             type_params: None,
             members: vec![
                 TraitMember::Required(InterfaceMember::Method {
@@ -1633,6 +1677,8 @@ mod tests {
                     params: vec![],
                     return_type: shape_ast::ast::TypeAnnotation::Basic("number".to_string()),
                     is_async: false,
+                    span: Span::DUMMY,
+                    doc_comment: None,
                 }),
                 TraitMember::Required(InterfaceMember::Method {
                     name: "execute".to_string(),
@@ -1640,6 +1686,8 @@ mod tests {
                     params: vec![],
                     return_type: shape_ast::ast::TypeAnnotation::Basic("number".to_string()),
                     is_async: false,
+                    span: Span::DUMMY,
+                    doc_comment: None,
                 }),
             ],
             annotations: vec![],
@@ -1665,6 +1713,7 @@ mod tests {
 
         let trait_def = TraitDef {
             name: "Queryable".to_string(),
+            doc_comment: None,
             type_params: None,
             members: vec![
                 TraitMember::Required(InterfaceMember::Method {
@@ -1673,6 +1722,8 @@ mod tests {
                     params: vec![],
                     return_type: shape_ast::ast::TypeAnnotation::Basic("number".to_string()),
                     is_async: false,
+                    span: Span::DUMMY,
+                    doc_comment: None,
                 }),
                 TraitMember::Required(InterfaceMember::Method {
                     name: "execute".to_string(),
@@ -1680,6 +1731,8 @@ mod tests {
                     params: vec![],
                     return_type: shape_ast::ast::TypeAnnotation::Basic("number".to_string()),
                     is_async: false,
+                    span: Span::DUMMY,
+                    doc_comment: None,
                 }),
             ],
             annotations: vec![],

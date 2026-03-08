@@ -2,8 +2,9 @@
 //!
 //! Provides type information and documentation when hovering over symbols.
 
-use crate::annotation_discovery::AnnotationDiscovery;
+use crate::annotation_discovery::{AnnotationDiscovery, render_annotation_documentation};
 use crate::context::{CompletionContext, analyze_context, is_inside_interpolation_expression};
+use crate::doc_render::render_doc_comment;
 use crate::module_cache::ModuleCache;
 use crate::scope::ScopeTree;
 use crate::symbols::{SymbolKind, extract_symbols};
@@ -15,8 +16,8 @@ use crate::type_inference::{
     parse_object_shape_fields, resolve_struct_field_type, type_annotation_to_string,
     unified_metadata,
 };
-use crate::util::{get_word_at_position, offset_to_line_col, parser_source, position_to_offset};
-use shape_ast::ast::{Expr, Item, JoinKind, Pattern, Program, Span, Statement, TypeName, VarKind};
+use crate::util::{get_word_at_position, parser_source, position_to_offset};
+use shape_ast::ast::{Expr, Item, JoinKind, Pattern, Program, Span, Statement, TypeName};
 use shape_ast::parser::parse_program;
 use shape_runtime::metadata::LanguageMetadata;
 use shape_runtime::visitor::{Visitor, walk_program};
@@ -437,18 +438,23 @@ fn get_annotation_hover(
     }
 
     let info = discovery.get(word)?;
-    let mut content = format!("**Annotation**: `@{}`", info.name);
-    if !info.params.is_empty() {
-        content.push_str(&format!("\n\n**Parameters:** `{}`", info.params.join(", ")));
-    }
-    if !info.description.is_empty() {
-        content.push_str(&format!("\n\n{}", info.description));
+    let signature = if info.params.is_empty() {
+        format!("@{}", info.name)
+    } else {
+        format!("@{}({})", info.name, info.params.join(", "))
+    };
+    let mut sections = vec![format!("**Annotation**: `{signature}`")];
+    if let Some(documentation) =
+        render_annotation_documentation(info, Some(&program), module_cache, current_file, None)
+    {
+        sections.push(documentation);
     }
     if let Some(source_file) = &info.source_file {
-        content.push_str(&format!("\n\n**Defined in:** `{}`", source_file.display()));
+        sections.push(format!("**Defined in:** `{}`", source_file.display()));
     } else {
-        content.push_str("\n\n**Defined in:** current file");
+        sections.push("**Defined in:** current file".to_string());
     }
+    let content = sections.join("\n\n");
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -1602,14 +1608,8 @@ fn get_impl_header_trait_hover(
         trait_name, target_type
     );
     if let Some(resolved_trait) = resolved {
-        if let Some(source) = &resolved_trait.source_text {
-            if let Some((line, _)) = (!resolved_trait.span.is_dummy())
-                .then(|| offset_to_line_col(source, resolved_trait.span.start))
-            {
-                if let Some(doc) = extract_comment_block(source, line as usize) {
-                    content.push_str(&format!("\n\n{}", doc));
-                }
-            }
+        if let Some(doc) = &resolved_trait.documentation {
+            content.push_str(&format!("\n\n{}", doc));
         }
 
         if let Some(import_path) = &resolved_trait.import_path {
@@ -1698,252 +1698,12 @@ fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> 
     signatures
 }
 
-fn extract_comment_block(source: &str, target_line: usize) -> Option<String> {
-    let lines: Vec<&str> = source.lines().collect();
-    if target_line == 0 || target_line > lines.len() {
-        return None;
-    }
-
-    let mut comment_lines = Vec::new();
-    let mut i = target_line.saturating_sub(1);
-    loop {
-        let trimmed = lines[i].trim();
-        if trimmed.starts_with("///") || trimmed.starts_with("//") {
-            let content = trimmed
-                .trim_start_matches("///")
-                .trim_start_matches("//")
-                .trim();
-            comment_lines.push(content.to_string());
-        } else if trimmed.is_empty() {
-            if i == 0 {
-                break;
-            }
-            i -= 1;
-            continue;
-        } else {
-            break;
-        }
-
-        if i == 0 {
-            break;
-        }
-        i -= 1;
-    }
-
-    if comment_lines.is_empty() {
-        return None;
-    }
-    comment_lines.reverse();
-    Some(comment_lines.join("\n"))
-}
-
-/// Extract doc comments (`///` or `/** */`) above a given line in the source text.
-///
-/// Returns the doc comment body with leading `///` stripped and trimmed,
-/// or `None` if no doc comment is found.
-pub fn extract_doc_comment(source: &str, target_line: usize) -> Option<String> {
-    let lines: Vec<&str> = source.lines().collect();
-    if target_line == 0 || target_line > lines.len() {
-        return None;
-    }
-
-    let mut doc_lines = Vec::new();
-
-    // Walk backwards from the line above target_line
-    let mut i = target_line.saturating_sub(1);
-    loop {
-        let trimmed = lines[i].trim();
-
-        if trimmed.starts_with("///") {
-            // Line doc comment — strip the `///` prefix
-            let content = trimmed.strip_prefix("///").unwrap_or("");
-            let content = content.strip_prefix(' ').unwrap_or(content);
-            doc_lines.push(content.to_string());
-        } else if trimmed.starts_with("/**") && trimmed.ends_with("*/") {
-            // Single-line block doc comment
-            let content = trimmed
-                .strip_prefix("/**")
-                .unwrap_or("")
-                .strip_suffix("*/")
-                .unwrap_or("")
-                .trim();
-            if !content.is_empty() {
-                doc_lines.push(content.to_string());
-            }
-        } else if trimmed.ends_with("*/") {
-            // End of a multiline block doc comment — scan upward for `/**`
-            let end = i;
-            while i > 0 {
-                i -= 1;
-                let t = lines[i].trim();
-                if t.starts_with("/**") {
-                    // Collect all lines between /** and */
-                    for j in i..=end {
-                        let line_text = lines[j].trim();
-                        let line_text = line_text.strip_prefix("/**").unwrap_or(line_text);
-                        let line_text = line_text.strip_suffix("*/").unwrap_or(line_text);
-                        let line_text = line_text
-                            .strip_prefix("* ")
-                            .unwrap_or(line_text.strip_prefix('*').unwrap_or(line_text));
-                        let line_text = line_text.trim();
-                        if !line_text.is_empty() {
-                            doc_lines.push(line_text.to_string());
-                        }
-                    }
-                    break;
-                }
-            }
-        } else if trimmed.is_empty() {
-            // Skip blank lines between doc comment and definition
-            if i == 0 {
-                break;
-            }
-            i -= 1;
-            continue;
-        } else {
-            // Hit non-comment content — stop
-            break;
-        }
-
-        if i == 0 {
-            break;
-        }
-        i -= 1;
-    }
-
-    if doc_lines.is_empty() {
-        return None;
-    }
-
-    doc_lines.reverse();
-    Some(doc_lines.join("\n"))
-}
-
 /// Find the 0-based line number where a symbol is defined in the source text.
 fn type_name_base_name(type_name: &TypeName) -> String {
     match type_name {
         TypeName::Simple(name) => name.clone(),
         TypeName::Generic { name, .. } => name.clone(),
     }
-}
-
-fn binding_span_for_symbol(
-    pattern: &shape_ast::ast::DestructurePattern,
-    symbol_name: &str,
-) -> Option<Span> {
-    pattern.get_bindings().into_iter().find_map(|(name, span)| {
-        if name == symbol_name {
-            Some(span)
-        } else {
-            None
-        }
-    })
-}
-
-fn find_definition_line_in_program(
-    program: &Program,
-    source: &str,
-    symbol_name: &str,
-    kind: &SymbolKind,
-) -> Option<usize> {
-    for item in &program.items {
-        match item {
-            Item::Function(func, item_span)
-                if *kind == SymbolKind::Function && func.name == symbol_name =>
-            {
-                let span = if !func.name_span.is_dummy() {
-                    func.name_span
-                } else {
-                    *item_span
-                };
-                return Some(offset_to_line_col(source, span.start).0 as usize);
-            }
-            Item::VariableDecl(decl, item_span)
-                if matches!(kind, SymbolKind::Variable | SymbolKind::Constant) =>
-            {
-                let Some(binding_span) = binding_span_for_symbol(&decl.pattern, symbol_name) else {
-                    continue;
-                };
-                let kind_matches = match kind {
-                    SymbolKind::Variable => matches!(decl.kind, VarKind::Let | VarKind::Var),
-                    SymbolKind::Constant => matches!(decl.kind, VarKind::Const),
-                    _ => false,
-                };
-                if !kind_matches {
-                    continue;
-                }
-                let span = if binding_span.is_dummy() {
-                    *item_span
-                } else {
-                    binding_span
-                };
-                return Some(offset_to_line_col(source, span.start).0 as usize);
-            }
-            Item::Statement(Statement::VariableDecl(decl, stmt_span), item_span)
-                if matches!(kind, SymbolKind::Variable | SymbolKind::Constant) =>
-            {
-                let Some(binding_span) = binding_span_for_symbol(&decl.pattern, symbol_name) else {
-                    continue;
-                };
-                let kind_matches = match kind {
-                    SymbolKind::Variable => matches!(decl.kind, VarKind::Let | VarKind::Var),
-                    SymbolKind::Constant => matches!(decl.kind, VarKind::Const),
-                    _ => false,
-                };
-                if !kind_matches {
-                    continue;
-                }
-                let span = if binding_span.is_dummy() {
-                    if stmt_span.is_dummy() {
-                        *item_span
-                    } else {
-                        *stmt_span
-                    }
-                } else {
-                    binding_span
-                };
-                return Some(offset_to_line_col(source, span.start).0 as usize);
-            }
-            Item::TypeAlias(alias, span)
-                if *kind == SymbolKind::Type && alias.name == symbol_name =>
-            {
-                return Some(offset_to_line_col(source, span.start).0 as usize);
-            }
-            Item::StructType(struct_def, span)
-                if *kind == SymbolKind::Type && struct_def.name == symbol_name =>
-            {
-                return Some(offset_to_line_col(source, span.start).0 as usize);
-            }
-            Item::Enum(enum_def, span)
-                if *kind == SymbolKind::Type && enum_def.name == symbol_name =>
-            {
-                return Some(offset_to_line_col(source, span.start).0 as usize);
-            }
-            Item::Interface(interface_def, span)
-                if *kind == SymbolKind::Type && interface_def.name == symbol_name =>
-            {
-                return Some(offset_to_line_col(source, span.start).0 as usize);
-            }
-            Item::Trait(trait_def, span)
-                if *kind == SymbolKind::Type && trait_def.name == symbol_name =>
-            {
-                return Some(offset_to_line_col(source, span.start).0 as usize);
-            }
-            Item::ForeignFunction(foreign_fn, span)
-                if *kind == SymbolKind::Function && foreign_fn.name == symbol_name =>
-            {
-                let name_span = if !foreign_fn.name_span.is_dummy() {
-                    foreign_fn.name_span
-                } else {
-                    *span
-                };
-                return Some(offset_to_line_col(source, name_span.start).0 as usize);
-            }
-            _ => {}
-        }
-    }
-
-    None
 }
 
 /// Get hover for user-defined symbols
@@ -2048,7 +1808,7 @@ fn get_function_param_hover(
 }
 
 fn get_user_symbol_hover_from_program(
-    text: &str,
+    _text: &str,
     program: &Program,
     word: &str,
     cursor_offset: Option<usize>,
@@ -2138,11 +1898,7 @@ fn get_user_symbol_hover_from_program(
         }
     }
 
-    // Show doc comments extracted from source text
-    let doc = symbol.documentation.clone().or_else(|| {
-        let def_line = find_definition_line_in_program(program, text, word, &symbol.kind)?;
-        extract_doc_comment(text, def_line)
-    });
+    let doc = symbol.documentation.clone();
     if let Some(doc) = doc {
         content.push_str(&format!("\n\n---\n\n{}", doc));
     }
@@ -2508,24 +2264,22 @@ fn get_imported_symbol_hover(
                     }
                 };
 
-                // Also try to extract doc comment from the module source
                 let mut full_content = content;
-                if let Ok(module_source) = std::fs::read_to_string(&resolved) {
-                    let symbol_kind = match export.kind {
-                        ModSymbolKind::Function | ModSymbolKind::Pattern => SymbolKind::Function,
-                        ModSymbolKind::Enum | ModSymbolKind::TypeAlias => SymbolKind::Type,
-                        _ => SymbolKind::Variable,
-                    };
-                    if let Some(def_line) = find_definition_line_in_program(
-                        &module_info.program,
-                        &module_source,
-                        word,
-                        &symbol_kind,
-                    ) {
-                        if let Some(doc) = extract_doc_comment(&module_source, def_line) {
-                            full_content.push_str(&format!("\n\n---\n\n{}", doc));
-                        }
-                    }
+                if let Some(doc) = module_info
+                    .program
+                    .docs
+                    .comment_for_span(export.span)
+                    .map(|comment| {
+                        render_doc_comment(
+                            &module_info.program,
+                            comment,
+                            Some(module_cache),
+                            Some(&module_info.path),
+                            None,
+                        )
+                    })
+                {
+                    full_content.push_str(&format!("\n\n---\n\n{}", doc));
                 }
 
                 return Some(Hover {

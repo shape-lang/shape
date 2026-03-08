@@ -6,26 +6,42 @@
 // - JIT optimization (direct field access for known types)
 // - IDE/LSP support (type hints and autocompletion)
 
-// OHLCV Candle type for candlestick data
+/// Canonical OHLCV candle shape used across market-data APIs.
 pub type Candle = {
+    /// Exchange or feed timestamp for the bar.
     timestamp: timestamp;
+    /// Opening price.
     open: number;
+    /// Highest traded price in the interval.
     high: number;
+    /// Lowest traded price in the interval.
     low: number;
+    /// Closing price.
     close: number;
+    /// Executed volume during the interval.
     volume: number;
 };
 
-// Trade type for backtesting
+/// Canonical trade record emitted by backtests and execution reports.
 pub type Trade = {
+    /// Stable identifier for the trade.
     id: string;
+    /// Instrument or symbol identifier.
     symbol: string;
+    /// Trade direction, typically `"buy"` or `"sell"`.
     side: string;
+    /// Entry fill price.
     entry_price: number;
+    /// Exit fill price.
     exit_price: number;
+    /// Filled quantity.
     quantity: number;
+    /// Entry timestamp.
     entry_time: timestamp;
+    /// Exit timestamp.
     exit_time: timestamp;
+    /// Profit and loss in quote currency.
     pnl: number;
+    /// Profit and loss as a fraction of entry value.
     pnl_pct: number;
 };

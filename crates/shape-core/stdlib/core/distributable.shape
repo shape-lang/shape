@@ -2,6 +2,8 @@
 // Types implementing Distributable can be safely transferred
 // across node boundaries for distributed computing.
 
+/// Describe whether a value can be moved across distributed execution
+/// boundaries and how expensive that transfer is expected to be.
 trait Distributable {
     /// Estimated wire size in bytes for transfer cost estimation
     wire_size(self): int

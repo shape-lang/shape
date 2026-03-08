@@ -3,7 +3,10 @@
 from std::core::utils::rolling use { rolling_mean, rolling_std }
 from std::finance::indicators::moving_averages use { ema }
 
-// Bollinger Bands
+/// Compute Bollinger Bands and normalized bandwidth.
+///
+/// @see std::core::utils::rolling::rolling_mean
+/// @see std::core::utils::rolling::rolling_std
 pub @warmup(period) fn bollinger_bands(series, period = 20, std_dev = 2.0) {
     // Middle band (SMA) using vector rolling_mean
     let middle = rolling_mean(series, period);
@@ -23,7 +26,9 @@ pub @warmup(period) fn bollinger_bands(series, period = 20, std_dev = 2.0) {
     }
 }
 
-// Average True Range
+/// Compute the average true range from high, low, and close series.
+///
+/// @see std::finance::indicators::moving_averages::ema
 pub @warmup(period + 1) fn atr(high, low, close, period = 14) {
     // Calculate true range
     let prev_close = __intrinsic_shift(close, 1);
@@ -42,7 +47,9 @@ pub @warmup(period + 1) fn atr(high, low, close, period = 14) {
     ema(tr, wilder_period)
 }
 
-// Keltner Channels
+/// Compute Keltner Channels around an EMA center line.
+///
+/// @see std::finance::indicators::volatility::atr
 pub @warmup(period + 1) fn keltner_channels(high, low, close, period = 20, atr_mult = 2.0) {
     // Middle line (EMA of close)
     let middle = ema(close, period);
@@ -61,7 +68,7 @@ pub @warmup(period + 1) fn keltner_channels(high, low, close, period = 20, atr_m
     }
 }
 
-// Historical Volatility (Standard Deviation of Returns)
+/// Compute historical volatility from percentage returns.
 pub @warmup(period + 1) fn historical_volatility(series, period = 20, annualize = true) {
     // Calculate returns using pct_change intrinsic
     let returns = __intrinsic_pct_change(series);
@@ -77,7 +84,7 @@ pub @warmup(period + 1) fn historical_volatility(series, period = 20, annualize 
     }
 }
 
-// Donchian Channels
+/// Compute Donchian Channels over `period`.
 pub @warmup(period) fn donchian_channels(high, low, period = 20) {
     // Upper channel (highest high) - using intrinsic sliding max (O(n))
     let upper = __intrinsic_rolling_max(high, period);

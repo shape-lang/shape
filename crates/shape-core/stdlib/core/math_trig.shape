@@ -11,42 +11,52 @@ let TAU = 6.283185307179586;
 
 // ===== Trig Wrappers (delegate to intrinsics) =====
 
+/// Return the sine of `x` in radians.
 pub fn sin(x) {
     __intrinsic_sin(x)
 }
 
+/// Return the cosine of `x` in radians.
 pub fn cos(x) {
     __intrinsic_cos(x)
 }
 
+/// Return the tangent of `x` in radians.
 pub fn tan(x) {
     __intrinsic_tan(x)
 }
 
+/// Return the inverse sine of `x` in radians.
 pub fn asin(x) {
     __intrinsic_asin(x)
 }
 
+/// Return the inverse cosine of `x` in radians.
 pub fn acos(x) {
     __intrinsic_acos(x)
 }
 
+/// Return the inverse tangent of `x` in radians.
 pub fn atan(x) {
     __intrinsic_atan(x)
 }
 
+/// Return the quadrant-aware inverse tangent of `y / x` in radians.
 pub fn atan2(y, x) {
     __intrinsic_atan2(y, x)
 }
 
+/// Return the hyperbolic sine of `x`.
 pub fn sinh(x) {
     __intrinsic_sinh(x)
 }
 
+/// Return the hyperbolic cosine of `x`.
 pub fn cosh(x) {
     __intrinsic_cosh(x)
 }
 
+/// Return the hyperbolic tangent of `x`.
 pub fn tanh(x) {
     __intrinsic_tanh(x)
 }

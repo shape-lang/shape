@@ -4,7 +4,7 @@
 //! OHLCV data is now represented as generic Objects with specific fields.
 //! These helper functions provide convenience methods for working with OHLCV data.
 
-// Helper to validate OHLCV data
+/// Return whether `row` exposes the canonical OHLCV fields.
 pub fn is_ohlcv(row) {
     row.open != None
         and row.high != None
@@ -15,30 +15,44 @@ pub fn is_ohlcv(row) {
 
 // Computed properties
 
+/// Return the absolute candle body size.
+///
+/// @see std::finance::types::ohlcv::upper_wick
+/// @see std::finance::types::ohlcv::lower_wick
 pub fn body(row) {
     abs(row.close - row.open)
 }
 
+/// Return the length of the upper wick.
 pub fn upper_wick(row) {
     row.high - max(row.open, row.close)
 }
 
+/// Return the length of the lower wick.
 pub fn lower_wick(row) {
     min(row.open, row.close) - row.low
 }
 
+/// Return the full high-low range of the candle.
 pub fn candle_range(row) {
     row.high - row.low
 }
 
+/// Return whether the candle closes at or above the open.
 pub fn is_green(row) {
     row.close >= row.open
 }
 
+/// Return whether the candle closes below the open.
 pub fn is_red(row) {
     row.close < row.open
 }
 
+/// Return whether the candle body is small relative to its range.
+///
+/// @param row Candidate OHLCV row.
+/// @param threshold Optional maximum body-to-range ratio.
+/// @returns True when the candle is classified as a doji.
 pub fn is_doji(row, threshold) {
     let thresh = if threshold == None then 0.001 else threshold;
     let body_size = body(row);

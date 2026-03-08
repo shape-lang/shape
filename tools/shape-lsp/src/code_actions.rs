@@ -2,6 +2,7 @@
 //!
 //! Provides quick fixes, refactoring actions, and source actions.
 
+use crate::doc_actions::generate_doc_comment_action;
 use crate::module_cache::ModuleCache;
 use crate::util::{get_word_at_position, span_to_range};
 use shape_ast::ast::{ImportItems, Item};
@@ -42,6 +43,9 @@ pub fn get_code_actions(
 
     // Add refactoring actions based on selection
     if is_group_requested(requested_kinds, CodeActionKind::REFACTOR.as_str()) {
+        if let Some(doc_action) = generate_doc_comment_action(text, uri, range) {
+            actions.push(doc_action);
+        }
         if let Some(refactor_actions) = get_refactor_actions(text, uri, range) {
             actions.extend(refactor_actions);
         }

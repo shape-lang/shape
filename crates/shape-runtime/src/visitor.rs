@@ -1113,6 +1113,7 @@ mod tests {
                 },
                 Span::DUMMY,
             )],
+            docs: shape_ast::ast::ProgramDocs::default(),
         };
 
         let mut counter = ExprCounter { count: 0 };
@@ -1140,6 +1141,7 @@ mod tests {
                 ),
                 Span::DUMMY,
             )],
+            docs: shape_ast::ast::ProgramDocs::default(),
         };
 
         let mut counter = ExprCounter { count: 0 };
@@ -1175,6 +1177,7 @@ mod tests {
                 },
                 Span::DUMMY,
             )],
+            docs: shape_ast::ast::ProgramDocs::default(),
         };
 
         let mut collector = IdentifierCollector { names: vec![] };
@@ -1211,6 +1214,7 @@ mod tests {
                 },
                 Span::DUMMY,
             )],
+            docs: shape_ast::ast::ProgramDocs::default(),
         };
 
         let mut v = SkippingVisitor { count: 0 };
@@ -1249,6 +1253,7 @@ mod tests {
                 },
                 Span::DUMMY,
             )],
+            docs: shape_ast::ast::ProgramDocs::default(),
         };
 
         let mut mc = MatchCollector {

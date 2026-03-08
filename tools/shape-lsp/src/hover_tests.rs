@@ -1,6 +1,7 @@
 use super::*;
 use crate::module_cache::ModuleCache;
 use crate::type_inference::extract_wrapper_inner;
+use crate::util::offset_to_line_col;
 
 #[test]
 fn test_get_word_at_position() {
@@ -385,29 +386,38 @@ fn test_keyword_hover_has_examples() {
 #[test]
 fn test_extract_doc_comment_line() {
     let source = "/// This is a doc comment\nfunction foo() { return 1 }";
-    let doc = extract_doc_comment(source, 1);
-    assert_eq!(doc, Some("This is a doc comment".to_string()));
+    let program = shape_ast::parse_program(source).expect("program should parse");
+    assert_eq!(
+        program
+            .docs
+            .comment_for_path("foo")
+            .map(|doc| doc.summary.as_str()),
+        Some("This is a doc comment")
+    );
 }
 
 #[test]
 fn test_extract_doc_comment_multiline() {
     let source = "/// Line one\n/// Line two\nfunction foo() { return 1 }";
-    let doc = extract_doc_comment(source, 2);
-    assert_eq!(doc, Some("Line one\nLine two".to_string()));
+    let program = shape_ast::parse_program(source).expect("program should parse");
+    assert_eq!(
+        program.docs.comment_for_path("foo").map(|doc| doc.body.as_str()),
+        Some("Line one\nLine two")
+    );
 }
 
 #[test]
 fn test_extract_doc_comment_block() {
     let source = "/** Block doc comment */\nfunction foo() { return 1 }";
-    let doc = extract_doc_comment(source, 1);
-    assert_eq!(doc, Some("Block doc comment".to_string()));
+    let program = shape_ast::parse_program(source).expect("program should parse");
+    assert!(program.docs.comment_for_path("foo").is_none());
 }
 
 #[test]
 fn test_extract_doc_comment_none() {
     let source = "// Regular comment\nfunction foo() { return 1 }";
-    let doc = extract_doc_comment(source, 1);
-    assert_eq!(doc, None);
+    let program = shape_ast::parse_program(source).expect("program should parse");
+    assert!(program.docs.comment_for_path("foo").is_none());
 }
 
 #[test]
@@ -765,12 +775,11 @@ fn test_hover_impl_trait_resolves_members_from_module_context() {
 
 #[test]
 fn test_hover_local_annotation_usage() {
-    let code =
-        "annotation trace() {\n  metadata() { return { ok: true } }\n}\n\n@trace\nfn run() { 1 }\n";
+    let code = "/// Trace function execution.\nannotation trace() {\n  metadata() { return { ok: true } }\n}\n\n@trace\nfn run() { 1 }\n";
     let hover = get_hover(
         code,
         Position {
-            line: 4,
+            line: 5,
             character: 2,
         },
         None,
@@ -788,13 +797,23 @@ fn test_hover_local_annotation_usage() {
                 "Annotation hover should show local annotation metadata, got: {}",
                 markup.value
             );
+            assert!(
+                markup.value.contains("Trace function execution."),
+                "Annotation hover should render doc comments, got: {}",
+                markup.value
+            );
+            assert!(
+                !markup.value.contains("Handlers:"),
+                "Annotation hover must not synthesize handler descriptions, got: {}",
+                markup.value
+            );
         }
     }
 }
 
 #[test]
 fn test_hover_locally_defined_annotation_usage_with_module_cache() {
-    let code = "annotation my_ann() {}\n@my_ann\nfn run() { 1 }\n";
+    let code = "/// Mark a function for auditing.\nannotation my_ann() {}\n@my_ann\nfn run() { 1 }\n";
     let cache = ModuleCache::new();
     let current_file = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -818,6 +837,11 @@ fn test_hover_locally_defined_annotation_usage_with_module_cache() {
             assert!(
                 markup.value.contains("**Annotation**: `@my_ann`"),
                 "Locally defined annotation hover should show annotation metadata, got: {}",
+                markup.value
+            );
+            assert!(
+                markup.value.contains("Mark a function for auditing."),
+                "Locally defined annotation hover should render doc comments, got: {}",
                 markup.value
             );
         }

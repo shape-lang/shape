@@ -148,6 +148,7 @@ mod tests {
         let ann_def = AnnotationDef {
             name: "test_annotation".to_string(),
             name_span: Span::DUMMY,
+            doc_comment: None,
             params: vec![],
             allowed_targets: None,
             handlers: vec![],
@@ -167,6 +168,7 @@ mod tests {
         let func = FunctionDef {
             name: "my_func".to_string(),
             name_span: Span::DUMMY,
+            doc_comment: None,
             type_params: None,
             params: vec![],
             return_type: None,
@@ -192,6 +194,7 @@ mod tests {
         let func = FunctionDef {
             name: "annotated_func".to_string(),
             name_span: Span::DUMMY,
+            doc_comment: None,
             type_params: None,
             params: vec![],
             return_type: None,
@@ -224,6 +227,7 @@ mod tests {
         let ann_def = AnnotationDef {
             name: "tracked".to_string(),
             name_span: Span::DUMMY,
+            doc_comment: None,
             params: vec![],
             allowed_targets: None,
             handlers: vec![AnnotationHandler {
@@ -247,6 +251,7 @@ mod tests {
         let func = FunctionDef {
             name: "tracked_func".to_string(),
             name_span: Span::DUMMY,
+            doc_comment: None,
             type_params: None,
             params: vec![],
             return_type: None,

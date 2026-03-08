@@ -3,7 +3,9 @@
 from std::core::utils::rolling use { rolling_mean }
 from std::finance::indicators::moving_averages use { ema }
 
-// Relative Strength Index
+/// Compute the relative strength index.
+///
+/// @see std::finance::indicators::moving_averages::ema
 pub @warmup(period + 1) fn rsi(series, period = 14) {
     // Calculate price changes using diff intrinsic (FAST!)
     let changes = __intrinsic_diff(series);
@@ -32,7 +34,7 @@ pub @warmup(period + 1) fn rsi(series, period = 14) {
     100 - (100 / (1 + rs))
 }
 
-// Stochastic Oscillator
+/// Compute the stochastic oscillator `%K` and `%D` series.
 pub @warmup(k_period + d_period) fn stochastic(high, low, close, k_period = 14, d_period = 3) {
     // Find highest high and lowest low using intrinsics (FAST!)
     let highest_high = __intrinsic_rolling_max(high, k_period);
@@ -50,7 +52,7 @@ pub @warmup(k_period + d_period) fn stochastic(high, low, close, k_period = 14, 
     }
 }
 
-// Commodity Channel Index
+/// Compute the commodity channel index.
 pub @warmup(period) fn cci(high, low, close, period = 20) {
     // Typical price
     let tp = (high + low + close) / 3;
@@ -66,20 +68,20 @@ pub @warmup(period) fn cci(high, low, close, period = 20) {
     (tp - sma_tp) / (0.015 * mean_dev)
 }
 
-// Rate of Change
+/// Compute the rate of change in percent.
 pub @warmup(period + 1) fn roc(series, period) {
     // Use pct_change intrinsic with custom period
     let pct = __intrinsic_pct_change(series, period);
     pct * 100  // Convert to percentage
 }
 
-// Momentum
+/// Compute the raw momentum over `period`.
 pub @warmup(period + 1) fn momentum(series, period) {
     // Simple difference over period
     __intrinsic_diff(series, period)
 }
 
-// Williams %R
+/// Compute Williams `%R`.
 pub @warmup(period) fn williams_r(high, low, close, period = 14) {
     let highest_high = __intrinsic_rolling_max(high, period);
     let lowest_low = __intrinsic_rolling_min(low, period);

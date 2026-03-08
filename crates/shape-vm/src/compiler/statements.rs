@@ -1054,6 +1054,7 @@ impl BytecodeCompiler {
         Ok(FunctionDef {
             name: format!("{}.{}", type_str, method.name),
             name_span: Span::DUMMY,
+            doc_comment: None,
             params,
             return_type: method.return_type.clone(),
             body,
@@ -1102,6 +1103,7 @@ impl BytecodeCompiler {
         Ok(FunctionDef {
             name: fn_name,
             name_span: Span::DUMMY,
+            doc_comment: None,
             params,
             return_type: method.return_type.clone(),
             body,
@@ -1369,6 +1371,7 @@ impl BytecodeCompiler {
         Ok(FunctionDef {
             name: fn_name,
             name_span: Span::DUMMY,
+            doc_comment: None,
             params: method.params.clone(),
             return_type: method.return_type.clone(),
             body: method.body.clone(),
@@ -1412,6 +1415,7 @@ impl BytecodeCompiler {
         let func_def = FunctionDef {
             name: wrapper_name.clone(),
             name_span: span,
+            doc_comment: None,
             params: vec![FunctionParameter {
                 pattern: DestructurePattern::Identifier("value".to_string(), span),
                 is_const: false,
@@ -1594,6 +1598,7 @@ impl BytecodeCompiler {
             let func_def = FunctionDef {
                 name: func_name,
                 name_span: Span::DUMMY,
+                doc_comment: None,
                 params,
                 return_type: handler.return_type.clone(),
                 body,
@@ -2276,6 +2281,7 @@ impl BytecodeCompiler {
         let fn_def = FunctionDef {
             name: fn_name.clone(),
             name_span: span,
+            doc_comment: None,
             params: vec![FunctionParameter {
                 pattern: DestructurePattern::Identifier("value".to_string(), span),
                 is_const: false,

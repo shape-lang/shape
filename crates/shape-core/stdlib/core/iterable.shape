@@ -13,17 +13,36 @@
 //! | Array  | stdlib/core/array_iterable.shape             | Verified |
 //! | Table  | stdlib/core/table_iterable.shape             | Verified |
 
+/// Uniform iteration interface for ordered in-memory collections.
+///
+/// `Iterable` powers collection-style operations on arrays and tables without
+/// constraining backends to the query-planning semantics of
+/// `std::core::queryable::Queryable`.
+///
+/// @see std::core::queryable::Queryable
 trait Iterable<T> {
+    /// Return the index of the first element that satisfies `predicate`.
     findIndex(predicate): any,
+    /// Return whether the collection contains `value`.
     includes(value): any,
+    /// Pair each element with the corresponding element from `other`.
     zip(other): any,
+    /// Split the collection into fixed-size chunks.
     chunk(size): any,
+    /// Remove duplicate values while preserving order.
     unique(): any,
+    /// Flatten one level of nested iterables.
     flatten(): any,
+    /// Return the slice in `[start, end)`.
     slice(start, end): any,
+    /// Join elements into a string with `separator`.
     join(separator): any,
+    /// Return a new collection sorted by `key_fn`.
     sortBy(key_fn): any,
+    /// Return the first `n` elements.
     take(n): any,
+    /// Skip the first `n` elements.
     skip(n): any,
+    /// Pair each element with its index.
     enumerate(): any
 }

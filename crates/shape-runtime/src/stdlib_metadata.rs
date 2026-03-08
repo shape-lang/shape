@@ -5,7 +5,7 @@
 
 use crate::metadata::{FunctionCategory, FunctionInfo, ParameterInfo, TypeInfo};
 use shape_ast::ast::{
-    BuiltinFunctionDecl, BuiltinTypeDecl, FunctionDef, Item, Program, Span, TypeAnnotation,
+    BuiltinFunctionDecl, BuiltinTypeDecl, DocComment, FunctionDef, Item, Program, TypeAnnotation,
 };
 use shape_ast::error::Result;
 #[cfg(test)]
@@ -64,17 +64,11 @@ impl StdlibMetadata {
                 .strip_prefix("std::")
                 .unwrap_or(&import_path)
                 .replace("::", "/");
-            let source = loader
-                .resolve_module_path(&import_path)
-                .ok()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .unwrap_or_default();
             match loader.load_module(&import_path) {
                 Ok(module) => {
                     Self::extract_from_program(
                         &module.ast,
                         &module_path,
-                        &source,
                         &mut functions,
                         &mut patterns,
                         &mut intrinsic_functions,
@@ -98,7 +92,6 @@ impl StdlibMetadata {
     fn extract_from_program(
         program: &Program,
         module_path: &str,
-        source: &str,
         functions: &mut Vec<FunctionInfo>,
         _patterns: &mut Vec<PatternInfo>,
         intrinsic_functions: &mut Vec<FunctionInfo>,
@@ -106,15 +99,23 @@ impl StdlibMetadata {
     ) {
         for item in &program.items {
             match item {
-                Item::Function(func, _) => {
+                Item::Function(func, span) => {
                     // All top-level functions are considered exports
-                    functions.push(Self::function_to_info(func, module_path));
+                    functions.push(Self::function_to_info(
+                        func,
+                        module_path,
+                        program.docs.comment_for_span(*span),
+                    ));
                 }
-                Item::Export(export, _) => {
+                Item::Export(export, span) => {
                     // Handle explicit exports
                     match &export.item {
                         shape_ast::ast::ExportItem::Function(func) => {
-                            functions.push(Self::function_to_info(func, module_path));
+                            functions.push(Self::function_to_info(
+                                func,
+                                module_path,
+                                program.docs.comment_for_span(*span),
+                            ));
                         }
                         shape_ast::ast::ExportItem::TypeAlias(_) => {}
                         shape_ast::ast::ExportItem::Named(_) => {}
@@ -128,14 +129,14 @@ impl StdlibMetadata {
                     }
                 }
                 Item::BuiltinTypeDecl(type_decl, span) => {
-                    intrinsic_types.push(Self::builtin_type_to_info(type_decl, source, *span));
+                    intrinsic_types
+                        .push(Self::builtin_type_to_info(type_decl, program.docs.comment_for_span(*span)));
                 }
                 Item::BuiltinFunctionDecl(func_decl, span) => {
                     intrinsic_functions.push(Self::builtin_function_to_info(
                         func_decl,
                         module_path,
-                        source,
-                        *span,
+                        program.docs.comment_for_span(*span),
                     ));
                 }
                 _ => {}
@@ -168,7 +169,11 @@ impl StdlibMetadata {
         }
     }
 
-    fn function_to_info(func: &FunctionDef, module_path: &str) -> FunctionInfo {
+    fn function_to_info(
+        func: &FunctionDef,
+        module_path: &str,
+        doc: Option<&DocComment>,
+    ) -> FunctionInfo {
         let params: Vec<ParameterInfo> = func
             .params
             .iter()
@@ -180,7 +185,10 @@ impl StdlibMetadata {
                     .map(Self::format_type_annotation)
                     .unwrap_or_else(|| "any".to_string()),
                 optional: p.default_value.is_some(),
-                description: String::new(),
+                description: doc
+                    .and_then(|comment| comment.param_doc(p.simple_name().unwrap_or("_")))
+                    .unwrap_or_default()
+                    .to_string(),
                 constraints: None,
             })
             .collect();
@@ -215,31 +223,27 @@ impl StdlibMetadata {
         FunctionInfo {
             name: func.name.clone(),
             signature,
-            description: format!("Function from stdlib.{}", module_path),
+            description: doc.map(Self::doc_text).unwrap_or_default(),
             category,
             parameters: params,
             return_type,
-            example: None,
+            example: doc.and_then(|comment| comment.example_doc()).map(str::to_string),
             implemented: true,
             comptime_only: false,
         }
     }
 
-    fn builtin_type_to_info(type_decl: &BuiltinTypeDecl, source: &str, span: Span) -> TypeInfo {
-        let description = extract_doc_comment(source, span)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("Builtin type `{}`", type_decl.name));
+    fn builtin_type_to_info(type_decl: &BuiltinTypeDecl, doc: Option<&DocComment>) -> TypeInfo {
         TypeInfo {
             name: type_decl.name.clone(),
-            description,
+            description: doc.map(Self::doc_text).unwrap_or_default(),
         }
     }
 
     fn builtin_function_to_info(
         func: &BuiltinFunctionDecl,
         module_path: &str,
-        source: &str,
-        span: Span,
+        doc: Option<&DocComment>,
     ) -> FunctionInfo {
         let params: Vec<ParameterInfo> = func
             .params
@@ -252,7 +256,10 @@ impl StdlibMetadata {
                     .map(Self::format_type_annotation)
                     .unwrap_or_else(|| "any".to_string()),
                 optional: p.default_value.is_some(),
-                description: String::new(),
+                description: doc
+                    .and_then(|comment| comment.param_doc(p.simple_name().unwrap_or("_")))
+                    .unwrap_or_default()
+                    .to_string(),
                 constraints: None,
             })
             .collect();
@@ -283,20 +290,24 @@ impl StdlibMetadata {
                 .join(", "),
             return_type
         );
-        let description = extract_doc_comment(source, span)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("Builtin function `{}`", func.name));
-
         FunctionInfo {
             name: func.name.clone(),
             signature,
-            description,
+            description: doc.map(Self::doc_text).unwrap_or_default(),
             category: Self::infer_category_from_path(module_path),
             parameters: params,
             return_type,
-            example: None,
+            example: doc.and_then(|comment| comment.example_doc()).map(str::to_string),
             implemented: true,
             comptime_only: crate::builtin_metadata::is_comptime_builtin_function(&func.name),
+        }
+    }
+
+    fn doc_text(comment: &DocComment) -> String {
+        if !comment.body.is_empty() {
+            comment.body.clone()
+        } else {
+            comment.summary.clone()
         }
     }
 
@@ -383,46 +394,6 @@ impl StdlibMetadata {
             TypeAnnotation::Undefined => "undefined".to_string(),
             TypeAnnotation::Dyn(bounds) => format!("dyn {}", bounds.join(" + ")),
         }
-    }
-}
-
-fn extract_doc_comment(source: &str, span: Span) -> Option<String> {
-    if source.is_empty() {
-        return None;
-    }
-
-    let clamped_start = span.start.min(source.len());
-    let line_index = source[..clamped_start]
-        .bytes()
-        .filter(|b| *b == b'\n')
-        .count();
-    let lines: Vec<&str> = source.lines().collect();
-    if lines.is_empty() || line_index == 0 {
-        return None;
-    }
-
-    let mut docs = Vec::new();
-    let mut idx = line_index.saturating_sub(1) as isize;
-
-    while idx >= 0 {
-        let line = lines[idx as usize].trim_start();
-        if let Some(rest) = line.strip_prefix("///") {
-            docs.push(rest.trim_start().to_string());
-            idx -= 1;
-            continue;
-        }
-        if line.is_empty() && !docs.is_empty() {
-            idx -= 1;
-            continue;
-        }
-        break;
-    }
-
-    if docs.is_empty() {
-        None
-    } else {
-        docs.reverse();
-        Some(docs.join("\n"))
     }
 }
 

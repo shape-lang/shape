@@ -6,6 +6,7 @@
 //!
 //!   let name = (data.get("name") as? string)?
 
+/// Algebraic data type representing JSON values in Shape.
 pub enum Json {
     Null,
     Bool(bool),

@@ -559,7 +559,10 @@ mydep = { path = "deps/mydep" }
         let path = PathBuf::from("/test/module.shape");
 
         // Create a mock module info
-        let program = Arc::new(Program { items: vec![] });
+        let program = Arc::new(Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        });
         let module_info = ModuleInfo {
             path: path.clone(),
             program,

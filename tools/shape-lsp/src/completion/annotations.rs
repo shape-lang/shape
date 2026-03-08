@@ -1,13 +1,22 @@
 //! Annotation completions for @decorator syntax
 
-use crate::annotation_discovery::AnnotationDiscovery;
+use crate::annotation_discovery::{AnnotationDiscovery, render_annotation_documentation};
+use crate::module_cache::ModuleCache;
 use crate::symbols::{SymbolInfo, symbols_to_completions};
+use shape_ast::ast::Program;
+use std::path::Path;
 use tower_lsp_server::ls_types::{
     CompletionItem, CompletionItemKind, Documentation, InsertTextFormat,
 };
 
 /// Annotation completions after typing "@"
-pub fn annotation_completions(annotation_discovery: &AnnotationDiscovery) -> Vec<CompletionItem> {
+pub fn annotation_completions(
+    annotation_discovery: &AnnotationDiscovery,
+    program: Option<&Program>,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+    workspace_root: Option<&Path>,
+) -> Vec<CompletionItem> {
     annotation_discovery
         .all_annotations()
         .into_iter()
@@ -29,11 +38,14 @@ pub fn annotation_completions(annotation_discovery: &AnnotationDiscovery) -> Vec
                 label: format!("@{}", ann.name),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some(detail),
-                documentation: if !ann.description.is_empty() {
-                    Some(Documentation::String(ann.description.clone()))
-                } else {
-                    None
-                },
+                documentation: render_annotation_documentation(
+                    ann,
+                    program,
+                    module_cache,
+                    current_file,
+                    workspace_root,
+                )
+                .map(Documentation::String),
                 insert_text: Some(insert_text),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
@@ -80,4 +92,31 @@ pub fn is_at_annotation_position(text: &str) -> bool {
         return before_at.is_empty() || before_at.ends_with('\n');
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn annotation_completion_uses_doc_comments() {
+        let program = parse_program(
+            "/// Trace function execution.\nannotation trace() {\n    metadata() { return { traced: true } }\n}\n",
+        )
+        .expect("program");
+        let mut discovery = AnnotationDiscovery::new();
+        discovery.discover_from_program(&program);
+
+        let completions = annotation_completions(&discovery, Some(&program), None, None, None);
+        let trace = completions
+            .iter()
+            .find(|item| item.label == "@trace")
+            .expect("trace completion");
+        let Some(Documentation::String(doc)) = trace.documentation.as_ref() else {
+            panic!("expected annotation documentation");
+        };
+        assert!(doc.contains("Trace function execution."));
+        assert!(!doc.contains("Handlers:"));
+    }
 }

@@ -146,6 +146,9 @@ pub fn parse_export_item(pair: Pair<Rule>) -> Result<ExportStmt> {
         Rule::native_struct_type_def => ExportItem::Struct(
             crate::parser::types::parse_native_struct_type_def(next_pair)?,
         ),
+        Rule::interface_def => {
+            ExportItem::Interface(crate::parser::types::parse_interface_def(next_pair)?)
+        }
         Rule::trait_def => ExportItem::Trait(crate::parser::types::parse_trait_def(next_pair)?),
         Rule::variable_decl => {
             let var_decl = items::parse_variable_decl(next_pair.clone())?;
@@ -265,6 +268,7 @@ pub fn parse_module_decl(pair: Pair<Rule>) -> Result<ModuleDecl> {
     Ok(ModuleDecl {
         name,
         name_span,
+        doc_comment: None,
         annotations,
         items: items_out,
     })

@@ -14,7 +14,9 @@ fn rma(series, period) {
     linear_recurrence(series * alpha, decay, init)
 }
 
-// Average Directional Index (ADX)
+/// Compute ADX together with `+DI` and `-DI`.
+///
+/// @see std::finance::indicators::volatility::atr
 pub @warmup(period * 3) fn adx(high, low, close, period = 14) {
     let up_move = high - __intrinsic_shift(high, 1);
     let down_move = __intrinsic_shift(low, 1) - low;
@@ -60,7 +62,7 @@ pub @warmup(period * 3) fn adx(high, low, close, period = 14) {
     }
 }
 
-// SuperTrend
+/// Compute the SuperTrend value and trend direction series.
 pub @warmup(period) fn super_trend(high, low, close, period = 10, multiplier = 3.0) {
     let atr_val = atr(high, low, close, period);
     let hl2 = (high + low) / 2;
@@ -136,7 +138,7 @@ pub @warmup(period) fn super_trend(high, low, close, period = 10, multiplier = 3
     }
 }
 
-// Parabolic SAR
+/// Compute the Parabolic SAR series.
 pub @warmup(1) fn parabolic_sar(high, low, start = 0.02, inc = 0.02, max_val = 0.2) {
     let len = high.length();
     let sar = [];

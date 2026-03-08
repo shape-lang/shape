@@ -1,32 +1,20 @@
-/// Specifies warmup period for indicators and functions
+/// Require historical lookback before computing a function result.
 ///
-/// The warmup annotation ensures that functions have enough historical data
-/// before computing their results. This is essential for indicators like
-/// moving averages that require N periods of data.
+/// `@warmup(period)` associates a lookback requirement with an annotated
+/// function so tooling can reason about the amount of prior data needed before
+/// the function should be considered ready.
 ///
-/// # Parameters
-/// * `period` - Number of data points needed for warmup (expression, evaluated at call time)
-///
-/// # Handler Signatures
-/// * `before(args, ctx)` — `self` = annotated function, `period` = annotation param
-/// * `after(args, result, ctx)` — same binding
-/// * `metadata()` — returns static metadata
-///
-/// # Example
-/// ```shape
+/// @param period Number of prior data points required before the annotated
+/// function should be evaluated as warmed up.
+/// @note The current stdlib implementation keeps the pre-hook as a no-op and
+/// trims post-processed results only when warmup state is present.
+/// @see std::finance::annotations::indicator::@indicator
+/// @example
 /// @warmup(20)
 /// @indicator
 /// pub fn sma(data: Column<number>, period: number) -> number {
 ///     return data.rolling(period).mean();
 /// }
-/// ```
-///
-/// # How It Works
-/// When a function with `@warmup(20)` is called via UFCS (`candles.sma(50)`):
-/// 1. `before` gets `args[0]` (the DataTable via UFCS receiver)
-/// 2. `before` is currently a no-op and returns `None`
-/// 3. The function computes over original input data
-/// 4. `after` returns result unchanged when no warmup state is present
 annotation warmup(period) {
     // Called before each function invocation
     // self = the annotated function (e.g., sma)

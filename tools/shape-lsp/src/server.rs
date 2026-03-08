@@ -235,6 +235,13 @@ impl ShapeLanguageServer {
                     Some(&module_cache),
                     self.project_root.get().map(|p| p.as_path()),
                 );
+                diagnostics.extend(crate::doc_diagnostics::validate_program_docs(
+                    &program,
+                    &text,
+                    Some(&module_cache),
+                    uri.to_file_path().as_deref(),
+                    self.project_root.get().map(|p| p.as_path()),
+                ));
                 diagnostics.extend(foreign_startup_diagnostics);
                 diagnostics.extend(self.foreign_lsp.get_diagnostics(uri.as_str()).await);
                 diagnostics
@@ -382,6 +389,8 @@ impl LanguageServer for ShapeLanguageServer {
                         ".".to_string(),
                         "(".to_string(),
                         " ".to_string(),
+                        "@".to_string(),
+                        ":".to_string(),
                     ]),
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: None,

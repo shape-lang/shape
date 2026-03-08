@@ -5,6 +5,7 @@
 
 // Module declarations
 pub mod annotations;
+pub mod docs;
 pub mod functions;
 pub mod imports;
 pub mod inference;
@@ -88,6 +89,7 @@ pub fn get_completions_with_context(
 ) {
     let mut completions = Vec::new();
     let cursor_offset = position_to_offset(text, position);
+    let mut parsed_program = None;
 
     // Analyze context to determine what completions to show
     let context = analyze_context(text, position);
@@ -103,27 +105,31 @@ pub fn get_completions_with_context(
         named_impls,
         receiver_type_at_cursor,
     ) = if let Ok(mut program) = parse_program(text) {
-        analyze_parsed_program(
+        let analysis = analyze_parsed_program(
             &mut program,
             module_cache,
             current_file,
             workspace_root,
             text,
             cursor_offset,
-        )
+        );
+        parsed_program = Some(program);
+        analysis
     } else {
         // Strict parse failed — try resilient parse for partial recovery
         let partial = parse_program_resilient(text);
         if !partial.items.is_empty() {
             let mut program = partial.into_program();
-            analyze_parsed_program(
+            let analysis = analyze_parsed_program(
                 &mut program,
                 module_cache,
                 current_file,
                 workspace_root,
                 text,
                 cursor_offset,
-            )
+            );
+            parsed_program = Some(program);
+            analysis
         } else {
             // No items recovered — fall back to cached state
             (
@@ -245,7 +251,13 @@ pub fn get_completions_with_context(
         }
         CompletionContext::Annotation => {
             // Show discovered annotations after "@"
-            completions.extend(annotation_completions(&annotation_discovery));
+            completions.extend(annotation_completions(
+                &annotation_discovery,
+                parsed_program.as_ref(),
+                module_cache,
+                current_file,
+                workspace_root,
+            ));
         }
         CompletionContext::AnnotationArgs { annotation } => {
             // Show annotation-specific argument completions
@@ -271,7 +283,37 @@ pub fn get_completions_with_context(
         }
         CompletionContext::ExprAnnotation => {
             // After `@` in expression position — same as item-level annotations
-            completions.extend(annotation_completions(&annotation_discovery));
+            completions.extend(annotation_completions(
+                &annotation_discovery,
+                parsed_program.as_ref(),
+                module_cache,
+                current_file,
+                workspace_root,
+            ));
+        }
+        CompletionContext::DocTag { prefix } => {
+            completions.extend(docs::doc_tag_completions(&prefix));
+        }
+        CompletionContext::DocParamName { prefix } => {
+            if let (Some(program), Some(offset)) = (parsed_program.as_ref(), cursor_offset) {
+                completions.extend(docs::doc_param_completions(program, offset, &prefix));
+            }
+        }
+        CompletionContext::DocTypeParamName { prefix } => {
+            if let (Some(program), Some(offset)) = (parsed_program.as_ref(), cursor_offset) {
+                completions.extend(docs::doc_type_param_completions(program, offset, &prefix));
+            }
+        }
+        CompletionContext::DocLinkTarget { prefix } => {
+            if let Some(program) = parsed_program.as_ref() {
+                completions.extend(docs::doc_link_completions(
+                    program,
+                    &prefix,
+                    module_cache,
+                    current_file,
+                    workspace_root,
+                ));
+            }
         }
         CompletionContext::PipeTarget { pipe_input_type } => {
             completions.extend(types::pipe_target_completions(
@@ -1363,6 +1405,31 @@ const MY_CONST = 10;
             labels.contains(&"myFunction"),
             "Should include user-defined function"
         );
+    }
+
+    #[test]
+    fn test_doc_tag_completion() {
+        let code = "/// @pa\nfn add(x: number) -> number { x }\n";
+        let position = Position {
+            line: 0,
+            character: 6,
+        };
+        let completions = completions_for(code, position);
+        let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"param"));
+    }
+
+    #[test]
+    fn test_doc_param_completion_uses_attached_function_params() {
+        let code = "/// Summary.\n/// @param va\nfn add(value: number, scale: number) -> number { value * scale }\n";
+        let position = Position {
+            line: 1,
+            character: 13,
+        };
+        let completions = completions_for(code, position);
+        let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"value"));
+        assert!(!labels.contains(&"scale"));
     }
 
     #[test]

@@ -75,6 +75,7 @@ fn alias_for_named_type(
 ) -> shape_ast::ast::TypeAliasDef {
     shape_ast::ast::TypeAliasDef {
         name: name.clone(),
+        doc_comment: None,
         type_params,
         type_annotation: shape_ast::ast::TypeAnnotation::Basic(name),
         meta_param_overrides: None,
@@ -272,6 +273,7 @@ pub(super) fn process_export_with_scope(
         ExportItem::Enum(enum_def) => {
             let alias = shape_ast::ast::TypeAliasDef {
                 name: enum_def.name.clone(),
+                doc_comment: None,
                 type_params: enum_def.type_params.clone(),
                 type_annotation: shape_ast::ast::TypeAnnotation::Basic(enum_def.name.clone()),
                 meta_param_overrides: None,
@@ -281,6 +283,7 @@ pub(super) fn process_export_with_scope(
         ExportItem::Struct(struct_def) => {
             let alias = shape_ast::ast::TypeAliasDef {
                 name: struct_def.name.clone(),
+                doc_comment: None,
                 type_params: struct_def.type_params.clone(),
                 type_annotation: shape_ast::ast::TypeAnnotation::Basic(struct_def.name.clone()),
                 meta_param_overrides: None,
@@ -290,6 +293,7 @@ pub(super) fn process_export_with_scope(
         ExportItem::Interface(iface_def) => {
             let alias = shape_ast::ast::TypeAliasDef {
                 name: iface_def.name.clone(),
+                doc_comment: None,
                 type_params: iface_def.type_params.clone(),
                 type_annotation: shape_ast::ast::TypeAnnotation::Basic(iface_def.name.clone()),
                 meta_param_overrides: None,
@@ -299,6 +303,7 @@ pub(super) fn process_export_with_scope(
         ExportItem::Trait(trait_def) => {
             let alias = shape_ast::ast::TypeAliasDef {
                 name: trait_def.name.clone(),
+                doc_comment: None,
                 type_params: trait_def.type_params.clone(),
                 type_annotation: shape_ast::ast::TypeAnnotation::Basic(trait_def.name.clone()),
                 meta_param_overrides: None,
@@ -311,6 +316,7 @@ pub(super) fn process_export_with_scope(
                 Export::Function(Arc::new(shape_ast::ast::FunctionDef {
                     name: function.name.clone(),
                     name_span: function.name_span,
+                    doc_comment: function.doc_comment.clone(),
                     type_params: function.type_params.clone(),
                     params: function.params.clone(),
                     return_type: function.return_type.clone(),

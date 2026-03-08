@@ -1511,6 +1511,7 @@ impl BytecodeCompiler {
                     let shadow_def = FunctionDef {
                         name: shadow_name.clone(),
                         name_span: func_def.name_span,
+                        doc_comment: None,
                         params: func_def.params.clone(),
                         return_type: func_def.return_type.clone(),
                         body: func_def.body.clone(),
@@ -1615,6 +1616,7 @@ impl BytecodeCompiler {
         let impl_def = FunctionDef {
             name: impl_name.clone(),
             name_span: func_def.name_span,
+            doc_comment: None,
             params: func_def.params.clone(),
             return_type: func_def.return_type.clone(),
             body: func_def.body.clone(),
@@ -1669,6 +1671,7 @@ impl BytecodeCompiler {
                 let wrapper_def = FunctionDef {
                     name: wrapper_name.clone(),
                     name_span: func_def.name_span,
+                    doc_comment: None,
                     params: func_def.params.clone(),
                     return_type: func_def.return_type.clone(),
                     body: Vec::new(), // placeholder
@@ -1723,6 +1726,7 @@ impl BytecodeCompiler {
         let impl_def = FunctionDef {
             name: impl_name.clone(),
             name_span: func_def.name_span,
+            doc_comment: None,
             params: func_def.params.clone(),
             return_type: func_def.return_type.clone(),
             body: func_def.body.clone(),

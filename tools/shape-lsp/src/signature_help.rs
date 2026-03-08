@@ -2,11 +2,11 @@
 //!
 //! Shows function signatures and parameter information while typing function calls.
 
-use crate::symbols::extract_symbols;
+use crate::doc_render::render_doc_comment;
 use crate::type_inference::{
     ParamReferenceMode, infer_function_signatures, type_annotation_to_string, unified_metadata,
 };
-use shape_ast::ast::Item;
+use shape_ast::ast::{Item, Program};
 use shape_ast::parser::parse_program;
 use tower_lsp_server::ls_types::{
     ParameterInformation, ParameterLabel, Position, SignatureHelp, SignatureInformation,
@@ -371,24 +371,12 @@ fn get_user_function_signature(
 ) -> Option<SignatureHelp> {
     let program = parse_program(text).ok()?;
     let function_sigs = infer_function_signatures(&program);
-    let symbols = extract_symbols(&program);
-
-    let func_def = program.items.iter().find_map(|item| {
-        if let Item::Function(func, _) = item {
-            if func.name == function_name {
-                return Some(func);
-            }
-        }
-        None
-    })?;
+    let (params_ref, return_type_ref, doc) = lookup_user_callable(&program, function_name)?;
     let sig_info = function_sigs.get(function_name)?;
-    let func_symbol = symbols
-        .iter()
-        .find(|s| s.name == function_name && s.kind == crate::symbols::SymbolKind::Function);
 
     let mut param_labels = Vec::new();
     let mut parameters = Vec::new();
-    for param in &func_def.params {
+    for param in params_ref {
         let name = param.simple_name().unwrap_or("_");
         let ref_mode = sig_info.param_ref_modes.get(name);
         let rendered = if let Some(type_ann) = &param.type_annotation {
@@ -412,12 +400,14 @@ fn get_user_function_signature(
         param_labels.push(rendered.clone());
         parameters.push(ParameterInformation {
             label: ParameterLabel::Simple(rendered),
-            documentation: None,
+            documentation: doc
+                .and_then(|comment| comment.param_doc(name))
+                .map(|value| tower_lsp_server::ls_types::Documentation::String(value.to_string())),
         });
     }
 
     let mut signature_label = format!("fn {}({})", function_name, param_labels.join(", "));
-    let return_type = if let Some(return_type) = &func_def.return_type {
+    let return_type = if let Some(return_type) = return_type_ref {
         type_annotation_to_string(return_type)
     } else {
         sig_info.return_type.clone()
@@ -428,11 +418,10 @@ fn get_user_function_signature(
 
     let signature = SignatureInformation {
         label: signature_label,
-        documentation: func_symbol.and_then(|symbol| {
-            symbol
-                .documentation
-                .as_ref()
-                .map(|doc| tower_lsp_server::ls_types::Documentation::String(doc.clone()))
+        documentation: doc.map(|comment| {
+            tower_lsp_server::ls_types::Documentation::String(render_doc_comment(
+                &program, comment, None, None, None,
+            ))
         }),
         parameters: Some(parameters),
         active_parameter: Some(active_param),
@@ -443,6 +432,54 @@ fn get_user_function_signature(
         active_signature: Some(0),
         active_parameter: Some(active_param),
     })
+}
+
+fn lookup_user_callable<'a>(
+    program: &'a Program,
+    function_name: &str,
+) -> Option<(
+    &'a [shape_ast::ast::FunctionParameter],
+    Option<&'a shape_ast::ast::TypeAnnotation>,
+    Option<&'a shape_ast::ast::DocComment>,
+)> {
+    for item in &program.items {
+        match item {
+            Item::Function(func, span) if func.name == function_name => {
+                return Some((
+                    &func.params,
+                    func.return_type.as_ref(),
+                    program.docs.comment_for_span(*span),
+                ));
+            }
+            Item::ForeignFunction(func, span) if func.name == function_name => {
+                return Some((
+                    &func.params,
+                    func.return_type.as_ref(),
+                    program.docs.comment_for_span(*span),
+                ));
+            }
+            Item::Export(export, span) => match &export.item {
+                shape_ast::ast::ExportItem::Function(func) if func.name == function_name => {
+                    return Some((
+                        &func.params,
+                        func.return_type.as_ref(),
+                        program.docs.comment_for_span(*span),
+                    ));
+                }
+                shape_ast::ast::ExportItem::ForeignFunction(func) if func.name == function_name => {
+                    return Some((
+                        &func.params,
+                        func.return_type.as_ref(),
+                        program.docs.comment_for_span(*span),
+                    ));
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// Get signature help when cursor is inside a join block.

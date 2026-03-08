@@ -534,6 +534,7 @@ mod tests {
     fn make_trait(name: &str, methods: Vec<&str>) -> TraitDef {
         TraitDef {
             name: name.to_string(),
+            doc_comment: None,
             type_params: None,
             members: methods
                 .into_iter()
@@ -548,6 +549,8 @@ mod tests {
                         }],
                         return_type: TypeAnnotation::Basic("string".to_string()),
                         is_async: false,
+                        span: Span::DUMMY,
+                        doc_comment: None,
                     })
                 })
                 .collect(),
@@ -747,6 +750,8 @@ mod tests {
                     }],
                     return_type: TypeAnnotation::Basic("string".to_string()),
                     is_async: false,
+                    span: Span::DUMMY,
+                    doc_comment: None,
                 })
             })
             .collect();
@@ -755,11 +760,14 @@ mod tests {
             members.push(TraitMember::AssociatedType {
                 name: at.to_string(),
                 bounds: vec![],
+                span: Span::DUMMY,
+                doc_comment: None,
             });
         }
 
         TraitDef {
             name: name.to_string(),
+            doc_comment: None,
             type_params: None,
             members,
             annotations: vec![],

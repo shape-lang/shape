@@ -1,8 +1,9 @@
 //! Moving Averages - Vector Implementation (Experimental)
 //! Implements moving averages using vector intrinsics instead of dedicated intrinsics.
 
-// Simple Moving Average using Vector Intrinsics
-// Formula: SMA = (CumSum - CumSum.shift(period)) / period
+/// Experimental vectorized simple moving average implementation.
+///
+/// @see std::finance::indicators::moving_averages::sma
 pub @warmup(period) fn sma_vector(series, period) {
     // Calculate cumulative sum
     let cs = __intrinsic_cumsum(series);

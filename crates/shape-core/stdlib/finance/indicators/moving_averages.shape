@@ -3,13 +3,19 @@
 
 from std::core::utils::rolling use { rolling_mean, rolling_sum, linear_recurrence }
 
-// Simple Moving Average
+/// Compute the simple moving average over `period`.
+///
+/// @see std::core::utils::rolling::rolling_mean
 pub @warmup(period) fn sma(series, period) {
     rolling_mean(series, period)
 }
 
-// Exponential Moving Average
-// Implemented via linear recurrence: EMA[t] = (1-alpha)*EMA[t-1] + alpha*Price[t]
+/// Compute the exponential moving average over `period`.
+///
+/// Implemented as the linear recurrence
+/// `EMA[t] = (1 - alpha) * EMA[t-1] + alpha * series[t]`.
+///
+/// @see std::core::utils::rolling::linear_recurrence
 pub @warmup(period * 3) fn ema(series, period) {
     let alpha = 2.0 / (period + 1);
     let decay = 1.0 - alpha;
@@ -23,14 +29,18 @@ pub @warmup(period * 3) fn ema(series, period) {
     linear_recurrence(input, decay, init)
 }
 
-// Double Exponential Moving Average
+/// Compute the double exponential moving average.
+///
+/// @see std::finance::indicators::moving_averages::ema
 pub @warmup(period * 3) fn dema(series, period) {
     let ema1 = ema(series, period);
     let ema2 = ema(ema1, period);
     2 * ema1 - ema2
 }
 
-// Triple Exponential Moving Average
+/// Compute the triple exponential moving average.
+///
+/// @see std::finance::indicators::moving_averages::ema
 pub @warmup(period * 3) fn tema(series, period) {
     let ema1 = ema(series, period);
     let ema2 = ema(ema1, period);
@@ -38,8 +48,7 @@ pub @warmup(period * 3) fn tema(series, period) {
     3 * ema1 - 3 * ema2 + ema3
 }
 
-// Weighted Moving Average
-// Calculates weighted average where weights decrease linearly: n, n-1, ..., 1
+/// Compute the linearly weighted moving average over `period`.
 pub @warmup(period) fn wma(series, period) {
     let len = series.length();
     let result = [];
@@ -64,7 +73,7 @@ pub @warmup(period) fn wma(series, period) {
     result
 }
 
-// Volume Weighted Moving Average
+/// Compute the volume-weighted moving average.
 pub @warmup(period) fn vwma(price, volume, period) {
     let pv = price * volume;
     let pv_sum = rolling_sum(pv, period);
@@ -72,7 +81,9 @@ pub @warmup(period) fn vwma(price, volume, period) {
     pv_sum / v_sum
 }
 
-// Hull Moving Average
+/// Compute the Hull moving average.
+///
+/// @see std::finance::indicators::moving_averages::wma
 pub @warmup(period) fn hma(series, period) {
     let half_period = floor(period / 2);
     let sqrt_period = floor(sqrt(period));
@@ -84,7 +95,9 @@ pub @warmup(period) fn hma(series, period) {
     wma(raw_hma, sqrt_period)
 }
 
-// MACD (Moving Average Convergence Divergence)
+/// Compute MACD, signal, and histogram series.
+///
+/// @see std::finance::indicators::moving_averages::ema
 pub @warmup(slow_period + signal_period) fn macd(series, fast_period = 12, slow_period = 26, signal_period = 9) {
     let fast_ema = ema(series, fast_period);
     let slow_ema = ema(series, slow_period);

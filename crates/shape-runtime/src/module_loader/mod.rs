@@ -651,7 +651,10 @@ impl ModuleLoader {
                         .to_string(),
                     path: module_path.to_string(),
                     exports: HashMap::new(), // VM resolves exports from bytecode at execution time
-                    ast: shape_ast::ast::Program { items: vec![] },
+                    ast: shape_ast::ast::Program {
+                        items: vec![],
+                        docs: shape_ast::ast::ProgramDocs::default(),
+                    },
                 };
                 let module = Arc::new(module);
                 self.cache.insert(module_path.to_string(), module.clone());
@@ -722,6 +725,7 @@ impl ModuleLoader {
                     let placeholder_fn = shape_ast::ast::FunctionDef {
                         name: export_name.clone(),
                         name_span: shape_ast::ast::Span::default(),
+                        doc_comment: None,
                         params: vec![],
                         body: vec![],
                         return_type: None,
@@ -778,7 +782,10 @@ impl ModuleLoader {
                     name: manifest.name.clone(),
                     path: module_path.to_string(),
                     exports,
-                    ast: shape_ast::ast::Program { items: vec![] },
+                    ast: shape_ast::ast::Program {
+                        items: vec![],
+                        docs: shape_ast::ast::ProgramDocs::default(),
+                    },
                 };
                 let module = Arc::new(module);
                 self.cache.insert(module_path.to_string(), module.clone());

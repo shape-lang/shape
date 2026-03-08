@@ -549,7 +549,10 @@ impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
             .iter()
             .map(|s| shape_ast::Item::Statement(s.clone(), shape_ast::Span::DUMMY))
             .collect();
-        let mut program = Program { items };
+        let mut program = Program {
+            items,
+            docs: shape_ast::ast::ProgramDocs::default(),
+        };
 
         // Inject prelude and resolve imports
         crate::module_resolution::prepend_prelude_items(&mut program);

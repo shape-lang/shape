@@ -6,6 +6,7 @@
 // Declare submodules
 pub mod data_refs;
 pub mod data_sources;
+pub mod docs;
 pub mod expr_helpers;
 pub mod expressions;
 pub mod functions;
@@ -44,6 +45,11 @@ pub use time::{
 
 // From data_refs.rs
 pub use data_refs::{DataDateTimeRef, DataIndex, DataRef};
+
+// From docs.rs
+pub use docs::{
+    DocComment, DocEntry, DocLink, DocTag, DocTagKind, DocTarget, DocTargetKind, ProgramDocs,
+};
 
 // From types.rs
 pub use types::{

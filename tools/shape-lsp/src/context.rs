@@ -95,6 +95,26 @@ pub enum CompletionContext {
     ComptimeBlock,
     /// After `@` in expression position — suggest annotations for expression-level decoration
     ExprAnnotation,
+    /// After `@` inside a `///` doc comment.
+    DocTag {
+        /// The partial tag name typed so far.
+        prefix: String,
+    },
+    /// In a `@param` doc tag.
+    DocParamName {
+        /// The partial parameter name typed so far.
+        prefix: String,
+    },
+    /// In a `@typeparam` doc tag.
+    DocTypeParamName {
+        /// The partial type parameter name typed so far.
+        prefix: String,
+    },
+    /// In a `@see` or `@link` doc tag target.
+    DocLinkTarget {
+        /// The partial fully qualified symbol typed so far.
+        prefix: String,
+    },
     /// Inside formatted interpolation spec after `expr:` in `f"{expr:...}"`.
     InterpolationFormatSpec {
         /// The currently typed prefix after `:`.
@@ -135,6 +155,10 @@ pub fn analyze_context(text: &str, position: Position) -> CompletionContext {
     } else {
         current_line
     };
+
+    if let Some(doc_context) = detect_doc_comment_context(current_line, line_text_before_cursor) {
+        return doc_context;
+    }
 
     let cursor_offset = match position_to_offset(text, position) {
         Some(offset) => offset,
@@ -279,6 +303,54 @@ pub fn analyze_context(text: &str, position: Position) -> CompletionContext {
 
     // Default to general context
     CompletionContext::General
+}
+
+fn detect_doc_comment_context(
+    current_line: &str,
+    line_text_before_cursor: &str,
+) -> Option<CompletionContext> {
+    let trimmed_line = current_line.trim_start();
+    let trimmed_before = line_text_before_cursor.trim_start();
+    if !trimmed_line.starts_with("///") || !trimmed_before.starts_with("///") {
+        return None;
+    }
+
+    let content_before_cursor = trimmed_before
+        .strip_prefix("///")
+        .unwrap_or("")
+        .strip_prefix(' ')
+        .unwrap_or_else(|| trimmed_before.strip_prefix("///").unwrap_or(""));
+    let doc_text = content_before_cursor.trim_start();
+    let rest = doc_text.strip_prefix('@')?;
+    let tag_name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let tag_name = &rest[..tag_name_end];
+
+    if tag_name_end == rest.len() {
+        return Some(CompletionContext::DocTag {
+            prefix: tag_name.to_string(),
+        });
+    }
+
+    let remainder = rest[tag_name_end..].trim_start();
+    let in_first_value_token = remainder.is_empty() || !remainder.contains(char::is_whitespace);
+    let value_prefix = if in_first_value_token {
+        remainder.to_string()
+    } else {
+        String::new()
+    };
+
+    match tag_name {
+        "param" if in_first_value_token => Some(CompletionContext::DocParamName {
+            prefix: value_prefix,
+        }),
+        "typeparam" if in_first_value_token => Some(CompletionContext::DocTypeParamName {
+            prefix: value_prefix,
+        }),
+        "see" | "link" if in_first_value_token => Some(CompletionContext::DocLinkTarget {
+            prefix: value_prefix,
+        }),
+        _ => None,
+    }
 }
 
 /// Returns true when cursor is inside an interpolation expression body,
@@ -1469,6 +1541,57 @@ mod tests {
             }
             _ => panic!("Expected FunctionCall context inside interpolation"),
         }
+    }
+
+    #[test]
+    fn test_doc_tag_context() {
+        let text = "/// @pa\nfn add(x: number) -> number { x }\n";
+        let position = Position {
+            line: 0,
+            character: 7,
+        };
+
+        let context = analyze_context(text, position);
+        assert_eq!(
+            context,
+            CompletionContext::DocTag {
+                prefix: "pa".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_doc_param_context() {
+        let text = "/// @param va\nfn add(value: number) -> number { value }\n";
+        let position = Position {
+            line: 0,
+            character: 13,
+        };
+
+        let context = analyze_context(text, position);
+        assert_eq!(
+            context,
+            CompletionContext::DocParamName {
+                prefix: "va".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_doc_link_context() {
+        let text = "/// @see std::co\nfn add(x: number) -> number { x }\n";
+        let position = Position {
+            line: 0,
+            character: 16,
+        };
+
+        let context = analyze_context(text, position);
+        assert_eq!(
+            context,
+            CompletionContext::DocLinkTarget {
+                prefix: "std::co".to_string()
+            }
+        );
     }
 
     #[test]
