@@ -72,26 +72,48 @@ fn fstring_empty_interpolation_at_edges() {
     .expect_string("edge test");
 }
 
-// TDD: f$ multi-line format string may not be supported
+// f$ uses ${} for interpolation — bare {} is literal text
 #[test]
-fn fstring_dollar_multiline() {
+fn fstring_dollar_literal_braces() {
     ShapeTest::new(
         r#"
         let x = 10
         f$"value: {x}"
     "#,
     )
+    .expect_string("value: {x}");
+}
+
+#[test]
+fn fstring_dollar_interpolation() {
+    ShapeTest::new(
+        r#"
+        let x = 10
+        f$"value: ${x}"
+    "#,
+    )
     .expect_string("value: 10");
 }
 
-// TDD: f# raw interpolation may not be supported
+// f# uses #{} for interpolation — bare {} is literal text
 #[test]
-fn fstring_hash_raw() {
+fn fstring_hash_literal_braces() {
     ShapeTest::new(
         r#"
         let x = 5
         f#"raw {x}"
     "#,
+    )
+    .expect_string("raw {x}");
+}
+
+#[test]
+fn fstring_hash_interpolation() {
+    ShapeTest::new(
+        r##"
+        let x = 5
+        f#"raw #{x}"
+    "##,
     )
     .expect_string("raw 5");
 }

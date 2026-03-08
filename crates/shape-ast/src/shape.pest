@@ -1554,8 +1554,11 @@ string_escape = { "\\\"" | "\\\\" | "\\n" | "\\t" | "\\r" | "\\{" | "\\}" | "\\$
 simple_string_char = { string_escape | !("\"") ~ ANY }
 // Characters inside {}-interpolation blocks in formatted/content strings.
 // Allows nested simple strings (so f"x: {fn("arg")}" is valid), nested blocks,
-// or any non-} character.
-fmt_block_char = _{ simple_string | fmt_nested_block | (!"}" ~ ANY) }
+// or any non-} character.  fmt_block_string uses a restricted char rule that
+// stops at "}" so strings cannot eat past the closing brace of the block.
+fmt_block_string_char = _{ string_escape | (!"}" ~ !"\"" ~ ANY) }
+fmt_block_string = _{ "\"" ~ fmt_block_string_char* ~ "\"" }
+fmt_block_char = _{ fmt_block_string | fmt_nested_block | (!"}" ~ ANY) }
 fmt_nested_block = _{ "{" ~ fmt_block_char* ~ "}" }
 // Body character for formatted/content simple strings: escape, a {}-block
 // (which may contain nested strings), or any non-" character.
