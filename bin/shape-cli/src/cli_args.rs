@@ -160,6 +160,46 @@ pub enum Commands {
         #[command(subcommand)]
         action: KeysAction,
     },
+
+    /// Publish the current package to the registry
+    Publish {
+        /// Registry URL (defaults to https://pkg.shape-lang.dev)
+        #[arg(long)]
+        registry: Option<String>,
+        /// Path to the Ed25519 signing key file
+        #[arg(short, long)]
+        key: Option<PathBuf>,
+        /// Skip signing the bundle before publishing
+        #[arg(long)]
+        no_sign: bool,
+    },
+
+    /// Add a dependency to the current project
+    Add {
+        /// Package name to add
+        name: String,
+        /// Version requirement (e.g. '1.0.0', '>=0.5'). Defaults to latest.
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Remove a dependency from the current project
+    Remove {
+        /// Package name to remove
+        name: String,
+    },
+
+    /// Search for packages in the registry
+    Search {
+        /// Search query
+        query: String,
+    },
+
+    /// Show detailed information about a package
+    Info {
+        /// Package name
+        name: String,
+    },
 }
 
 #[derive(Args)]

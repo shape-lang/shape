@@ -19,13 +19,15 @@ pub mod cli_args;
 pub mod commands;
 pub mod helpers;
 pub mod module_loading;
+pub mod registry_client;
 
 use cli_args::{Cli, Commands};
 use commands::{
-    ProviderOptions, run_build, run_doctest, run_expand_comptime, run_ext_install, run_ext_list,
-    run_ext_remove, run_jit_parity, run_keys_generate, run_keys_list, run_keys_trust, run_repl,
-    run_schema_fetch, run_schema_status, run_script, run_sign, run_snapshot_delete,
-    run_snapshot_info, run_snapshot_list, run_tree, run_tui, run_verify,
+    ProviderOptions, run_add, run_build, run_doctest, run_expand_comptime, run_ext_install,
+    run_ext_list, run_ext_remove, run_info, run_jit_parity, run_keys_generate, run_keys_list,
+    run_keys_trust, run_publish, run_remove, run_repl, run_schema_fetch, run_schema_status,
+    run_script, run_search, run_sign, run_snapshot_delete, run_snapshot_info, run_snapshot_list,
+    run_tree, run_tui, run_verify,
 };
 
 #[tokio::main]
@@ -196,6 +198,22 @@ async fn main() -> Result<()> {
                     run_keys_list().await?;
                 }
             }
+        }
+
+        (Some(Commands::Publish { registry, key, no_sign }), _) => {
+            run_publish(registry, key, no_sign).await?;
+        }
+        (Some(Commands::Add { name, version }), _) => {
+            run_add(name, version).await?;
+        }
+        (Some(Commands::Remove { name }), _) => {
+            run_remove(name).await?;
+        }
+        (Some(Commands::Search { query }), _) => {
+            run_search(query).await;
+        }
+        (Some(Commands::Info { name }), _) => {
+            run_info(name).await;
         }
 
         // File mode: `shape foo.shape`
