@@ -2553,15 +2553,18 @@ fn get_namespace_api_hover(word: &str) -> Option<Hover> {
              - `DateTime.now()` — Current local time\n\
              - `DateTime.utc()` — Current UTC time\n\
              - `DateTime.parse(string)` — Parse from ISO 8601, RFC 2822, or common formats\n\
-             - `DateTime.from_epoch(ms)` — From milliseconds since Unix epoch\n\n\
+             - `DateTime.from_epoch(ms)` — From milliseconds since Unix epoch\n\
+             - `DateTime.from_parts(year, month, day, hour?, minute?, second?)` — Construct from components (UTC)\n\
+             - `DateTime.from_unix_secs(secs)` — From seconds since Unix epoch\n\n\
              **Instance Methods:**\n\
              - `.year()`, `.month()`, `.day()`, `.hour()`, `.minute()`, `.second()`\n\
              - `.day_of_week()`, `.day_of_year()`, `.week_of_year()`\n\
              - `.is_weekday()`, `.is_weekend()`\n\
-             - `.format(pattern)`, `.iso8601()`, `.rfc2822()`, `.unix_timestamp()`\n\
+             - `.format(pattern)`, `.iso8601()`, `.rfc2822()`, `.unix_timestamp()`, `.to_unix_millis()`\n\
              - `.to_utc()`, `.to_timezone(tz)`, `.to_local()`, `.timezone()`, `.offset()`\n\
              - `.add_days(n)`, `.add_hours(n)`, `.add_minutes(n)`, `.add_seconds(n)`, `.add_months(n)`\n\
-             - `.is_before(other)`, `.is_after(other)`, `.is_same_day(other)`"
+             - `.is_before(other)`, `.is_after(other)`, `.is_same_day(other)`\n\
+             - `.diff(other)` — Difference as a map with days, hours, minutes, seconds, milliseconds, total_milliseconds"
         }
         "io" => {
             "**io Module**\n\n\
@@ -2621,6 +2624,12 @@ fn get_namespace_member_hover(object: &str, member: &str) -> Option<Hover> {
         }
         ("DateTime", "from_epoch") => {
             "**DateTime.from_epoch**(ms: number): DateTime\n\nCreate a DateTime from milliseconds since Unix epoch.\n\n```shape\nlet dt = DateTime.from_epoch(1710500000000)\n```"
+        }
+        ("DateTime", "from_parts") => {
+            "**DateTime.from_parts**(year: int, month: int, day: int, hour?: int, minute?: int, second?: int): DateTime\n\nCreate a DateTime from individual components at UTC. Hour, minute, and second default to 0.\n\n```shape\nlet dt = DateTime.from_parts(2024, 3, 15, 14, 30, 0)\nlet date = DateTime.from_parts(2024, 1, 1)\n```"
+        }
+        ("DateTime", "from_unix_secs") => {
+            "**DateTime.from_unix_secs**(secs: int): DateTime\n\nCreate a DateTime from seconds since Unix epoch.\n\n```shape\nlet dt = DateTime.from_unix_secs(1705314600)\n```"
         }
 
         // io file operations

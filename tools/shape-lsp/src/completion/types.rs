@@ -635,6 +635,18 @@ fn namespace_api_completions(object: &str) -> Option<Vec<CompletionItem>> {
                 "from_epoch(${1:ms})",
                 "Create DateTime from milliseconds since Unix epoch",
             ),
+            (
+                "from_parts",
+                CompletionItemKind::METHOD,
+                "from_parts(${1:year}, ${2:month}, ${3:day})",
+                "Create DateTime from components (year, month, day, hour?, minute?, second?) at UTC",
+            ),
+            (
+                "from_unix_secs",
+                CompletionItemKind::METHOD,
+                "from_unix_secs(${1:secs})",
+                "Create DateTime from seconds since Unix epoch",
+            ),
         ],
         "io" => vec![
             (
@@ -985,6 +997,14 @@ mod tests {
         assert!(
             labels.contains(&"from_epoch"),
             "missing DateTime.from_epoch"
+        );
+        assert!(
+            labels.contains(&"from_parts"),
+            "missing DateTime.from_parts"
+        );
+        assert!(
+            labels.contains(&"from_unix_secs"),
+            "missing DateTime.from_unix_secs"
         );
     }
 

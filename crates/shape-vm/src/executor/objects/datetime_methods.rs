@@ -191,6 +191,68 @@ pub fn handle_unix_timestamp(
     vm.push_vw(ValueWord::from_i64(dt.timestamp()))
 }
 
+pub fn handle_to_unix_millis(
+    vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<(), VMError> {
+    let dt = recv_dt(&args)?;
+    vm.push_vw(ValueWord::from_i64(dt.timestamp_millis()))
+}
+
+// ===== Diff =====
+
+pub fn handle_diff(
+    vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<(), VMError> {
+    let dt = recv_dt(&args)?;
+    let other = args
+        .get(1)
+        .and_then(|a| a.as_datetime())
+        .ok_or_else(|| VMError::TypeError {
+            expected: "datetime",
+            got: args.get(1).map_or("missing", |a| a.type_name()),
+        })?;
+
+    let duration = *dt - *other;
+    let total_millis = duration.num_milliseconds();
+    let abs_millis = total_millis.unsigned_abs();
+
+    // Decompose into days, hours, minutes, seconds, milliseconds
+    let days = (abs_millis / (24 * 60 * 60 * 1000)) as i64;
+    let remainder = abs_millis % (24 * 60 * 60 * 1000);
+    let hours = (remainder / (60 * 60 * 1000)) as i64;
+    let remainder = remainder % (60 * 60 * 1000);
+    let minutes = (remainder / (60 * 1000)) as i64;
+    let remainder = remainder % (60 * 1000);
+    let seconds = (remainder / 1000) as i64;
+    let millis = (remainder % 1000) as i64;
+
+    // Apply sign to decomposed components
+    let sign = if total_millis < 0 { -1 } else { 1 };
+
+    let keys = vec![
+        ValueWord::from_string(Arc::new("days".to_string())),
+        ValueWord::from_string(Arc::new("hours".to_string())),
+        ValueWord::from_string(Arc::new("minutes".to_string())),
+        ValueWord::from_string(Arc::new("seconds".to_string())),
+        ValueWord::from_string(Arc::new("milliseconds".to_string())),
+        ValueWord::from_string(Arc::new("total_milliseconds".to_string())),
+    ];
+    let values = vec![
+        ValueWord::from_i64(days * sign),
+        ValueWord::from_i64(hours * sign),
+        ValueWord::from_i64(minutes * sign),
+        ValueWord::from_i64(seconds * sign),
+        ValueWord::from_i64(millis * sign),
+        ValueWord::from_i64(total_millis),
+    ];
+
+    vm.push_vw(ValueWord::from_hashmap_pairs(keys, values))
+}
+
 // ===== Timezone =====
 
 pub fn handle_to_utc(
@@ -661,5 +723,60 @@ mod tests {
         assert_eq!(days_in_month(2023, 2), 28); // non-leap
         assert_eq!(days_in_month(2024, 1), 31);
         assert_eq!(days_in_month(2024, 4), 30);
+    }
+
+    #[test]
+    fn test_to_unix_millis() {
+        let dt = utc_dt(2024, 1, 15, 10, 30, 0);
+        assert_eq!(dt.timestamp_millis(), 1705314600000);
+    }
+
+    #[test]
+    fn test_to_unix_millis_epoch() {
+        let dt = utc_dt(1970, 1, 1, 0, 0, 0);
+        assert_eq!(dt.timestamp_millis(), 0);
+    }
+
+    #[test]
+    fn test_diff_positive() {
+        let dt1 = utc_dt(2024, 1, 15, 10, 30, 0);
+        let dt2 = utc_dt(2024, 1, 14, 8, 15, 30);
+        let duration = dt1 - dt2;
+        let total_millis = duration.num_milliseconds();
+        assert_eq!(total_millis, 94470000); // 1 day, 2 hours, 14 min, 30 sec
+
+        // Decompose
+        let abs_millis = total_millis.unsigned_abs();
+        let days = abs_millis / (24 * 60 * 60 * 1000);
+        let remainder = abs_millis % (24 * 60 * 60 * 1000);
+        let hours = remainder / (60 * 60 * 1000);
+        let remainder = remainder % (60 * 60 * 1000);
+        let minutes = remainder / (60 * 1000);
+        let remainder = remainder % (60 * 1000);
+        let seconds = remainder / 1000;
+        let millis = remainder % 1000;
+
+        assert_eq!(days, 1);
+        assert_eq!(hours, 2);
+        assert_eq!(minutes, 14);
+        assert_eq!(seconds, 30);
+        assert_eq!(millis, 0);
+    }
+
+    #[test]
+    fn test_diff_negative() {
+        let dt1 = utc_dt(2024, 1, 14, 0, 0, 0);
+        let dt2 = utc_dt(2024, 1, 15, 0, 0, 0);
+        let duration = dt1 - dt2;
+        let total_millis = duration.num_milliseconds();
+        assert_eq!(total_millis, -86400000); // -1 day
+    }
+
+    #[test]
+    fn test_diff_same_instant() {
+        let dt1 = utc_dt(2024, 6, 15, 12, 0, 0);
+        let dt2 = utc_dt(2024, 6, 15, 12, 0, 0);
+        let duration = dt1 - dt2;
+        assert_eq!(duration.num_milliseconds(), 0);
     }
 }

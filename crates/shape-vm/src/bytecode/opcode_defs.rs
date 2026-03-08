@@ -1061,6 +1061,10 @@ pub enum BuiltinFunction {
     DateTimeParse,
     /// DateTime.from_epoch(ms) — from milliseconds since Unix epoch
     DateTimeFromEpoch,
+    /// DateTime.from_parts(year, month, day, hour?, minute?, second?) — construct from components
+    DateTimeFromParts,
+    /// DateTime.from_unix_secs(secs) — from seconds since Unix epoch
+    DateTimeFromUnixSecs,
 
     // Concurrency primitive constructors
     /// Mutex(value) — create a new mutex wrapping the given value
@@ -1299,11 +1303,13 @@ impl BuiltinFunction {
             BuiltinFunction::ContentCodeCtor,
             BuiltinFunction::ContentKvCtor,
             BuiltinFunction::ContentFragmentCtor,
-            // DateTime (4)
+            // DateTime (6)
             BuiltinFunction::DateTimeNow,
             BuiltinFunction::DateTimeUtc,
             BuiltinFunction::DateTimeParse,
             BuiltinFunction::DateTimeFromEpoch,
+            BuiltinFunction::DateTimeFromParts,
+            BuiltinFunction::DateTimeFromUnixSecs,
             // Concurrency (4)
             BuiltinFunction::MutexCtor,
             BuiltinFunction::AtomicCtor,

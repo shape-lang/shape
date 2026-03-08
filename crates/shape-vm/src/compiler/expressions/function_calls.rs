@@ -1084,6 +1084,8 @@ impl BytecodeCompiler {
                     ("DateTime", "utc") => Some(BuiltinFunction::DateTimeUtc),
                     ("DateTime", "parse") => Some(BuiltinFunction::DateTimeParse),
                     ("DateTime", "from_epoch") => Some(BuiltinFunction::DateTimeFromEpoch),
+                    ("DateTime", "from_parts") => Some(BuiltinFunction::DateTimeFromParts),
+                    ("DateTime", "from_unix_secs") => Some(BuiltinFunction::DateTimeFromUnixSecs),
                     ("Content", "chart") => Some(BuiltinFunction::ContentChart),
                     ("Content", "text") => Some(BuiltinFunction::ContentTextCtor),
                     ("Content", "table") => Some(BuiltinFunction::ContentTableCtor),

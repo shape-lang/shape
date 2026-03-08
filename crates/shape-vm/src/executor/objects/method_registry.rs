@@ -321,6 +321,7 @@ pub static DATETIME_METHODS: phf::Map<&'static str, MethodFn> = phf_map! {
     "iso8601" => crate::executor::objects::datetime_methods::handle_iso8601,
     "rfc2822" => crate::executor::objects::datetime_methods::handle_rfc2822,
     "unix_timestamp" => crate::executor::objects::datetime_methods::handle_unix_timestamp,
+    "to_unix_millis" => crate::executor::objects::datetime_methods::handle_to_unix_millis,
 
     // Timezone
     "to_utc" => crate::executor::objects::datetime_methods::handle_to_utc,
@@ -340,6 +341,9 @@ pub static DATETIME_METHODS: phf::Map<&'static str, MethodFn> = phf_map! {
     "is_before" => crate::executor::objects::datetime_methods::handle_is_before,
     "is_after" => crate::executor::objects::datetime_methods::handle_is_after,
     "is_same_day" => crate::executor::objects::datetime_methods::handle_is_same_day,
+
+    // Diff
+    "diff" => crate::executor::objects::datetime_methods::handle_diff,
 };
 
 /// PHF registry for Instant methods (6 methods)

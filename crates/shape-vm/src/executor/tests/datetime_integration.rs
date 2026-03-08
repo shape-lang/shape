@@ -203,3 +203,141 @@ fn test_datetime_iso8601_output() {
         formatted
     );
 }
+
+#[test]
+fn test_datetime_from_parts_full() {
+    let result = eval(
+        r#"
+        let dt = DateTime.from_parts(2024, 3, 15, 14, 30, 45)
+        dt.hour()
+    "#,
+    );
+    assert_eq!(
+        result.as_number_coerce(),
+        Some(14.0),
+        "from_parts hour should be 14"
+    );
+}
+
+#[test]
+fn test_datetime_from_parts_date_only() {
+    let result = eval(
+        r#"
+        let dt = DateTime.from_parts(2024, 1, 1)
+        dt.year()
+    "#,
+    );
+    assert_eq!(
+        result.as_number_coerce(),
+        Some(2024.0),
+        "from_parts year should be 2024"
+    );
+}
+
+#[test]
+fn test_datetime_from_parts_components() {
+    let result = eval(
+        r#"
+        let dt = DateTime.from_parts(2024, 6, 15, 10, 30, 0)
+        dt.month()
+    "#,
+    );
+    assert_eq!(
+        result.as_number_coerce(),
+        Some(6.0),
+        "from_parts month should be 6"
+    );
+}
+
+#[test]
+fn test_datetime_from_unix_secs() {
+    let result = eval(
+        r#"
+        let dt = DateTime.from_unix_secs(1705314600)
+        dt.year()
+    "#,
+    );
+    assert_eq!(
+        result.as_number_coerce(),
+        Some(2024.0),
+        "from_unix_secs year should be 2024"
+    );
+}
+
+#[test]
+fn test_datetime_from_unix_secs_matches_from_epoch() {
+    // from_unix_secs(N) should match from_epoch(N * 1000)
+    let result = eval(
+        r#"
+        let dt1 = DateTime.from_unix_secs(1705314600)
+        let dt2 = DateTime.from_epoch(1705314600000)
+        dt1.is_same_day(dt2)
+    "#,
+    );
+    assert!(result.is_truthy(), "from_unix_secs and from_epoch should produce same day");
+}
+
+#[test]
+fn test_datetime_to_unix_millis() {
+    let result = eval(
+        r#"
+        let dt = DateTime.from_epoch(1705314600000)
+        dt.to_unix_millis()
+    "#,
+    );
+    assert_eq!(
+        result.as_number_coerce(),
+        Some(1705314600000.0),
+        "to_unix_millis should return original epoch millis"
+    );
+}
+
+#[test]
+fn test_datetime_to_unix_millis_roundtrip() {
+    let result = eval(
+        r#"
+        let dt = DateTime.parse("2024-01-15T10:30:00Z")
+        dt.to_unix_millis()
+    "#,
+    );
+    assert_eq!(
+        result.as_number_coerce(),
+        Some(1705314600000.0),
+        "to_unix_millis should return epoch millis for parsed date"
+    );
+}
+
+#[test]
+fn test_datetime_diff_positive() {
+    let result = eval(
+        r#"
+        let a = DateTime.parse("2024-01-15T10:00:00Z")
+        let b = DateTime.parse("2024-01-14T08:00:00Z")
+        let d = a.diff(b)
+        d["total_milliseconds"]
+    "#,
+    );
+    // 1 day + 2 hours = 26 hours = 93600000 ms
+    assert_eq!(
+        result.as_number_coerce(),
+        Some(93600000.0),
+        "diff total_milliseconds should be 93600000"
+    );
+}
+
+#[test]
+fn test_datetime_diff_days() {
+    let result = eval(
+        r#"
+        let a = DateTime.parse("2024-01-15T10:00:00Z")
+        let b = DateTime.parse("2024-01-14T08:00:00Z")
+        let d = a.diff(b)
+        d["days"]
+    "#,
+    );
+    assert_eq!(
+        result.as_number_coerce(),
+        Some(1.0),
+        "diff days should be 1"
+    );
+}
