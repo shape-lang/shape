@@ -421,6 +421,50 @@ fn completions_empty_code_still_returns_keywords() {
         .expect_completion_any_of(&["let", "fn", "function"]);
 }
 
+// == Stdlib module completions ================================================
+
+#[test]
+fn csv_module_completions() {
+    let code = "mod csv { fn parse(text: string) { text } fn stringify(data: any) { data } fn parse_records(text: string) { text } fn is_valid(text: string) { true } }\ncsv.";
+    ShapeTest::new(code)
+        .at(pos(1, 4))
+        .expect_completion("parse")
+        .expect_completion("stringify")
+        .expect_completion("parse_records")
+        .expect_completion("is_valid");
+}
+
+#[test]
+fn msgpack_module_completions() {
+    let code = "mod msgpack { fn encode(value: any) { value } fn decode(data: string) { data } }\nmsgpack.";
+    ShapeTest::new(code)
+        .at(pos(1, 8))
+        .expect_completion("encode")
+        .expect_completion("decode");
+}
+
+#[test]
+fn set_module_completions() {
+    let code = "mod set { fn new() { none } fn from_array(arr: any) { arr } fn union(a: any, b: any) { a } fn intersection(a: any, b: any) { a } }\nset.";
+    ShapeTest::new(code)
+        .at(pos(1, 4))
+        .expect_completion("new")
+        .expect_completion("from_array")
+        .expect_completion("union")
+        .expect_completion("intersection");
+}
+
+#[test]
+fn crypto_module_completions() {
+    let code = "mod crypto { fn sha512(data: string) { data } fn sha1(data: string) { data } fn md5(data: string) { data } fn ed25519_sign(data: string, key: string) { data } }\ncrypto.";
+    ShapeTest::new(code)
+        .at(pos(1, 7))
+        .expect_completion("sha512")
+        .expect_completion("sha1")
+        .expect_completion("md5")
+        .expect_completion("ed25519_sign");
+}
+
 // == Signature help deep (from programs_lsp_completeness) ====================
 
 #[test]

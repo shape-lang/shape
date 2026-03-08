@@ -731,3 +731,37 @@ fn test_lsp_hover_match_scrutinee_param_type() {
         .at(pos(1, 21))
         .expect_hover_contains("int");
 }
+
+// == Stdlib module hover =====================================================
+
+#[test]
+fn csv_parse_hover() {
+    let code = "mod csv { fn parse(text: string) { text } }\ncsv.parse(\"a,b\")\n";
+    ShapeTest::new(code)
+        .at(pos(1, 6))
+        .expect_hover_contains("parse");
+}
+
+#[test]
+fn set_union_hover() {
+    let code = "mod set { fn union(a: any, b: any) { a } }\nset.union\n";
+    ShapeTest::new(code)
+        .at(pos(1, 6))
+        .expect_hover_contains("union");
+}
+
+#[test]
+fn crypto_module_hover() {
+    let code = "mod crypto { fn sha256(data: string) { data } }\ncrypto.sha256(\"hello\")\n";
+    ShapeTest::new(code)
+        .at(pos(1, 9))
+        .expect_hover_contains("sha256");
+}
+
+#[test]
+fn msgpack_module_hover() {
+    let code = "mod msgpack { fn encode(value: any) { value } }\nmsgpack.encode(42)\n";
+    ShapeTest::new(code)
+        .at(pos(1, 10))
+        .expect_hover_contains("encode");
+}
