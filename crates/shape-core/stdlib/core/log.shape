@@ -1,0 +1,65 @@
+//! Logging module — structured output with level filtering
+//!
+//! Levels (from most to least verbose): trace, debug, info, warn, error
+//! Default level: debug (all messages shown)
+
+// Level constants
+let LOG_LEVEL_TRACE = 0
+let LOG_LEVEL_DEBUG = 1
+let LOG_LEVEL_INFO = 2
+let LOG_LEVEL_WARN = 3
+let LOG_LEVEL_ERROR = 4
+
+// Current minimum level — default to debug (show everything)
+let mut _current_level = 1
+
+/// Set the minimum log level.
+/// Valid levels: "trace", "debug", "info", "warn", "error"
+pub fn set_level(level) {
+    _current_level = _level_num(level)
+}
+
+/// Log a trace-level message
+pub fn trace(msg) {
+    if _current_level <= LOG_LEVEL_TRACE {
+        print(f"[TRACE] {msg}")
+    }
+}
+
+/// Log a debug-level message
+pub fn debug(msg) {
+    if _current_level <= LOG_LEVEL_DEBUG {
+        print(f"[DEBUG] {msg}")
+    }
+}
+
+/// Log an info-level message
+pub fn info(msg) {
+    if _current_level <= LOG_LEVEL_INFO {
+        print(f"[INFO] {msg}")
+    }
+}
+
+/// Log a warning-level message
+pub fn warn(msg) {
+    if _current_level <= LOG_LEVEL_WARN {
+        print(f"[WARN] {msg}")
+    }
+}
+
+/// Log an error-level message
+pub fn error(msg) {
+    if _current_level <= LOG_LEVEL_ERROR {
+        print(f"[ERROR] {msg}")
+    }
+}
+
+fn _level_num(level) {
+    if level == "trace" { return 0 }
+    if level == "debug" { return 1 }
+    if level == "info" { return 2 }
+    if level == "warn" || level == "warning" { return 3 }
+    if level == "error" { return 4 }
+    // Default to info for unknown levels
+    2
+}
