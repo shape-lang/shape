@@ -57,6 +57,14 @@ pub async fn run_info(name: String) {
                 println!("  - {}", perm);
             }
         }
+
+        if latest.has_native_deps {
+            println!();
+            println!("Native Dependencies (latest):");
+            if !latest.native_platforms.is_empty() {
+                println!("  Platforms: {}", latest.native_platforms.join(", "));
+            }
+        }
     }
 
     // Version list

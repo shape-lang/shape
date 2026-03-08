@@ -27,6 +27,10 @@ struct RegistryVersionRecord {
     author_key: Option<String>,
     #[serde(default)]
     required_permissions: Vec<String>,
+    #[serde(default)]
+    has_native_deps: bool,
+    #[serde(default)]
+    native_platforms: Vec<String>,
 }
 
 /// Run the `shape add` command: add a dependency to the current project.
@@ -158,6 +162,35 @@ pub async fn run_add(name: String, version: Option<String>) -> Result<()> {
             resolved_version,
             version_record.required_permissions.join(", ")
         );
+    }
+
+    // Check native dependencies
+    if version_record.has_native_deps {
+        eprintln!(
+            "Warning: {} v{} has native dependencies (platforms: {})",
+            name,
+            resolved_version,
+            version_record.native_platforms.join(", ")
+        );
+        let current = if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            "unknown"
+        };
+        if !version_record.native_platforms.is_empty()
+            && !version_record
+                .native_platforms
+                .contains(&current.to_string())
+        {
+            eprintln!(
+                "Warning: your platform ({}) may not be supported!",
+                current
+            );
+        }
     }
 
     // 8. Update shape.toml

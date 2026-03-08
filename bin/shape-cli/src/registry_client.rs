@@ -15,6 +15,10 @@ pub struct PackageSearchResult {
     pub version: String,
     pub description: Option<String>,
     pub downloads: u64,
+    #[serde(default)]
+    pub has_native_deps: bool,
+    #[serde(default)]
+    pub native_platforms: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +43,10 @@ pub struct VersionInfo {
     pub yanked: bool,
     pub published_at: String,
     pub downloads: u64,
+    #[serde(default)]
+    pub has_native_deps: bool,
+    #[serde(default)]
+    pub native_platforms: Vec<String>,
 }
 
 pub struct RegistryClient {

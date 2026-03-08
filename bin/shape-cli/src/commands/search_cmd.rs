@@ -1,5 +1,25 @@
 use crate::registry_client::RegistryClient;
 
+fn format_native(has_native_deps: bool, platforms: &[String]) -> String {
+    if !has_native_deps {
+        return String::new();
+    }
+    if platforms.len() >= 3 {
+        // All platforms
+        return "native".to_string();
+    }
+    let abbrevs: Vec<&str> = platforms
+        .iter()
+        .map(|p| match p.as_str() {
+            "linux" => "L",
+            "macos" => "M",
+            "windows" => "W",
+            _ => "?",
+        })
+        .collect();
+    format!("native [{}]", abbrevs.join(","))
+}
+
 fn format_downloads(n: u64) -> String {
     if n < 1_000 {
         return n.to_string();
@@ -50,29 +70,40 @@ pub async fn run_search(query: String) {
         .max()
         .unwrap_or(9)
         .max(9);
+    let native_width = results
+        .iter()
+        .map(|r| format_native(r.has_native_deps, &r.native_platforms).len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
 
     // Header
     println!(
-        "{:<name_w$}  {:<ver_w$}  {:>dl_w$}  DESCRIPTION",
+        "{:<name_w$}  {:<ver_w$}  {:<nat_w$}  {:>dl_w$}  DESCRIPTION",
         "NAME",
         "VERSION",
+        "NATIVE",
         "DOWNLOADS",
         name_w = name_width,
         ver_w = version_width,
+        nat_w = native_width,
         dl_w = dl_width,
     );
 
     // Rows
     for pkg in &results {
         let desc = pkg.description.as_deref().unwrap_or("");
+        let native = format_native(pkg.has_native_deps, &pkg.native_platforms);
         println!(
-            "{:<name_w$}  {:<ver_w$}  {:>dl_w$}  {}",
+            "{:<name_w$}  {:<ver_w$}  {:<nat_w$}  {:>dl_w$}  {}",
             pkg.name,
             pkg.version,
+            native,
             format_downloads(pkg.downloads),
             desc,
             name_w = name_width,
             ver_w = version_width,
+            nat_w = native_width,
             dl_w = dl_width,
         );
     }
