@@ -18,8 +18,9 @@ pub fn required_permissions(module: &str, function: &str) -> PermissionSet {
         "http" => http_permissions(function),
         "env" => env_permissions(function),
         "time" => time_permissions(function),
+        "csv" => csv_permissions(function),
         // Pure computation — no permissions required.
-        "json" | "crypto" | "testing" | "regex" | "log" | "math" => PermissionSet::pure(),
+        "json" | "crypto" | "testing" | "regex" | "math" => PermissionSet::pure(),
         _ => PermissionSet::pure(),
     }
 }
@@ -42,10 +43,11 @@ pub fn module_permissions(module: &str) -> PermissionSet {
             .into_iter()
             .collect(),
         "http" => [Permission::NetConnect].into_iter().collect(),
+        "csv" => [Permission::FsRead].into_iter().collect(),
         "env" => [Permission::Env].into_iter().collect(),
         "time" => [Permission::Time].into_iter().collect(),
         // Pure computation modules.
-        "json" | "crypto" | "testing" | "regex" | "log" | "math" => PermissionSet::pure(),
+        "json" | "crypto" | "testing" | "regex" | "math" => PermissionSet::pure(),
         _ => PermissionSet::pure(),
     }
 }
@@ -83,6 +85,14 @@ fn http_permissions(function: &str) -> PermissionSet {
 fn env_permissions(function: &str) -> PermissionSet {
     match function {
         "get" | "has" | "all" | "args" | "cwd" => [Permission::Env].into_iter().collect(),
+        _ => PermissionSet::pure(),
+    }
+}
+
+fn csv_permissions(function: &str) -> PermissionSet {
+    match function {
+        "read_file" => [Permission::FsRead].into_iter().collect(),
+        // parse, parse_records, stringify, stringify_records, is_valid are pure computation.
         _ => PermissionSet::pure(),
     }
 }
@@ -204,7 +214,7 @@ mod tests {
 
     #[test]
     fn pure_modules_require_nothing() {
-        for module in &["json", "crypto", "testing", "regex", "log", "math"] {
+        for module in &["json", "crypto", "testing", "regex", "math"] {
             let perms = required_permissions(module, "any_function");
             assert!(
                 perms.is_empty(),
@@ -269,7 +279,7 @@ mod tests {
 
     #[test]
     fn pure_module_permissions() {
-        for module in &["json", "crypto", "testing", "regex", "log", "math"] {
+        for module in &["json", "crypto", "testing", "regex", "math"] {
             let perms = module_permissions(module);
             assert!(perms.is_empty(), "{module} should require no permissions");
         }

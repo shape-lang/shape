@@ -507,7 +507,7 @@ impl ModuleExports {
     }
 
     /// Return `ParsedModuleSchema` entries for the VM-native stdlib modules
-    /// (regex, http, crypto, env, log, json). Used by `SemanticAnalyzer::new()`
+    /// (regex, http, crypto, env, json). Used by `SemanticAnalyzer::new()`
     /// to make these globals visible at compile time.
     pub fn stdlib_module_schemas() -> Vec<crate::extensions::ParsedModuleSchema> {
         vec![
@@ -515,7 +515,6 @@ impl ModuleExports {
             crate::stdlib::http::create_http_module().to_parsed_schema(),
             crate::stdlib::crypto::create_crypto_module().to_parsed_schema(),
             crate::stdlib::env::create_env_module().to_parsed_schema(),
-            crate::stdlib::log::create_log_module().to_parsed_schema(),
             crate::stdlib::json::create_json_module().to_parsed_schema(),
             crate::stdlib::toml_module::create_toml_module().to_parsed_schema(),
             crate::stdlib::yaml::create_yaml_module().to_parsed_schema(),
@@ -524,6 +523,8 @@ impl ModuleExports {
             crate::stdlib::archive::create_archive_module().to_parsed_schema(),
             crate::stdlib::parallel::create_parallel_module().to_parsed_schema(),
             crate::stdlib::unicode::create_unicode_module().to_parsed_schema(),
+            crate::stdlib::csv_module::create_csv_module().to_parsed_schema(),
+            crate::stdlib::msgpack_module::create_msgpack_module().to_parsed_schema(),
         ]
     }
 }

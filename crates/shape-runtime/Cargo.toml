@@ -44,7 +44,9 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 dirs = "5.0"
 rand = "0.8"
 rand_chacha = "0.3"
+sha1 = "0.10"
 sha2 = "0.10"
+md-5 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
