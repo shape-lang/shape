@@ -177,6 +177,48 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
     }
 }
 
+/// Rewrite bare identifier arguments to `implements()` calls as string literals.
+/// This allows `implements(Dog, Speak)` (bare type/trait names) to work in
+/// comptime blocks where those identifiers don't exist as variables.
+fn rewrite_implements_ident_args(stmt: &mut Statement) {
+    match stmt {
+        Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+            rewrite_implements_in_expr(expr);
+        }
+        Statement::VariableDecl(decl, _) => {
+            if let Some(init) = &mut decl.value {
+                rewrite_implements_in_expr(init);
+            }
+        }
+        Statement::If(if_stmt, _) => {
+            for s in &mut if_stmt.then_body {
+                rewrite_implements_ident_args(s);
+            }
+            if let Some(else_body) = &mut if_stmt.else_body {
+                for s in else_body {
+                    rewrite_implements_ident_args(s);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_implements_in_expr(expr: &mut Expr) {
+    if let Expr::FunctionCall { name, args, .. } = expr {
+        if name == "implements" {
+            for arg in args.iter_mut() {
+                if let Expr::Identifier(ident, span) = arg {
+                    *arg = Expr::Literal(
+                        shape_ast::ast::Literal::String(ident.clone()),
+                        *span,
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Execute statements at compile time (comptime) and return the result.
 ///
 /// Used for meta function methods with statement bodies. The statements are
@@ -197,6 +239,11 @@ pub(crate) fn execute_comptime(
     // Wrap statements in a function so the compiler produces a callable entry point.
     // Ensure the last statement is a tail return so if/else values aren't discarded.
     let mut body = statements.to_vec();
+    // Transform bare identifiers in implements() calls to string literals,
+    // since type/trait names aren't variables in the comptime scope.
+    for stmt in &mut body {
+        rewrite_implements_ident_args(stmt);
+    }
     ensure_tail_return(&mut body);
 
     let func_name = "__comptime_block__".to_string();
@@ -416,6 +463,7 @@ pub(crate) fn execute_comptime_with_target(
         &[],
         &[],
         &[],
+        &[],
         extensions,
         trait_impl_keys,
         known_type_symbols,
@@ -427,6 +475,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     handler_params: &[AnnotationHandlerParam],
     target_value: ValueWord,
     annotation_args: &[Expr],
+    annotation_def_param_names: &[String],
     const_bindings: &[(String, ValueWord)],
     comptime_helpers: &[FunctionDef],
     extensions: &[shape_runtime::module_exports::ModuleExports],
@@ -503,7 +552,15 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         call_args.push(arg.clone());
         ann_idx += 1;
     }
-    if ann_idx < annotation_args.len() && !handler_params.iter().any(|p| p.is_variadic) {
+    // If the handler has extra declared params beyond (target, ctx) that explicitly
+    // consume annotation args, enforce that all args are consumed. But if the handler
+    // only declares (target, ctx), silently ignore leftover annotation args — those
+    // are the annotation definition's own params and may only be used in before/after hooks.
+    let extra_handler_params = handler_params.len().saturating_sub(2);
+    if extra_handler_params > 0
+        && ann_idx < annotation_args.len()
+        && !handler_params.iter().any(|p| p.is_variadic)
+    {
         return Err(ShapeError::RuntimeError {
             message: format!(
                 "too many annotation arguments: expected {}, got {}",
@@ -512,6 +569,25 @@ pub(crate) fn execute_comptime_with_annotation_handler(
             ),
             location: None,
         });
+    }
+
+    // If the handler only has (target, ctx) but the annotation definition has params,
+    // inject them as extra function params so the handler body can reference them by name.
+    let mut params = params;
+    if extra_handler_params == 0 && !annotation_def_param_names.is_empty() {
+        for (i, def_param_name) in annotation_def_param_names.iter().enumerate() {
+            if let Some(arg) = annotation_args.get(i) {
+                params.push(FunctionParameter {
+                    pattern: DestructurePattern::Identifier(def_param_name.clone(), Span::DUMMY),
+                    is_const: false,
+                    is_reference: false,
+                    is_mut_reference: false,
+                    type_annotation: None,
+                    default_value: None,
+                });
+                call_args.push(arg.clone());
+            }
+        }
     }
 
     // Keep comptime ctx structured so annotations can grow into richer APIs.
@@ -752,6 +828,11 @@ pub(crate) fn nb_to_literal(nb: &ValueWord) -> shape_ast::ast::Literal {
         // Function/ModuleFunction don't have literal representations
         _ => Literal::String(format!("{}", nb)),
     }
+}
+
+/// Public entry point for converting a comptime ValueWord to an AST expression.
+pub(crate) fn nb_to_expr_public(nb: &ValueWord, span: Span) -> std::result::Result<Expr, String> {
+    nb_to_expr(nb, span)
 }
 
 fn nb_to_expr(nb: &ValueWord, span: Span) -> std::result::Result<Expr, String> {

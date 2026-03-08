@@ -511,10 +511,10 @@ fn test_lsp_hover_function_signature() {
 
 #[test]
 fn test_lsp_hover_function_shows_params() {
-    let code = "/// Adds two numbers\nfn add(a: int, b: int) -> int {\n  return a + b\n}\n";
+    let code = "/// Adds two numbers\nfn sum_two(a: int, b: int) -> int {\n  return a + b\n}\n";
     ShapeTest::new(code)
         .at(pos(1, 4))
-        .expect_hover_contains("add")
+        .expect_hover_contains("sum_two")
         .expect_hover_contains("Adds two numbers");
 }
 

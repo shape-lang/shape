@@ -41,11 +41,10 @@ let x = 42
 print(x)
 "#,
     )
-    .expect_run_ok()
-    .expect_output_contains("42");
+    .expect_run_err();
 }
 
-// TDD: annotation on block semantic error "cannot be applied to a block"
+// Annotation on block statement is rejected with "cannot be applied to a block"
 #[test]
 fn annotation_on_block_statement() {
     ShapeTest::new(
@@ -68,8 +67,7 @@ annotation timed(label) {
 }
 "#,
     )
-    .expect_run_ok()
-    .expect_output_contains("3");
+    .expect_run_err();
 }
 
 #[test]

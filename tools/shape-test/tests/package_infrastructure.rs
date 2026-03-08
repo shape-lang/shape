@@ -203,6 +203,7 @@ fn sample_bundle() -> PackageBundle {
             native_portable: true,
             entry_module: Some("main".to_string()),
             built_at: 1700000000,
+            readme: None,
         },
         modules: vec![
             BundledModule {
@@ -304,6 +305,7 @@ fn test_bundle_metadata_preserves_all_fields() {
             native_portable: true,
             entry_module: Some("src::main".to_string()),
             built_at: 1234567890,
+            readme: None,
         },
         modules: vec![],
         dependencies: HashMap::new(),
@@ -576,6 +578,7 @@ fn test_module_loader_loads_bundle_modules() {
             native_portable: true,
             entry_module: None,
             built_at: 0,
+            readme: None,
         },
         modules: vec![
             BundledModule {

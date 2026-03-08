@@ -290,14 +290,14 @@ fn test_export_pub_fn_executes() {
 
 #[test]
 fn test_export_pub_const_executes() {
-    // BUG: semantic analyzer rejects `pub const` with "Cannot export: not defined"
+    // `pub const` now works — the semantic analyzer no longer rejects it.
     ShapeTest::new(
         r#"
         pub const MAX_SIZE = 1024
         MAX_SIZE
     "#,
     )
-    .expect_run_err_contains("Cannot export");
+    .expect_number(1024.0);
 }
 
 #[test]

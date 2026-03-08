@@ -129,7 +129,7 @@ native_struct_type_def = {
 }
 
 struct_field_list = {
-    documented_struct_field ~ (("," | NEWLINE+) ~ documented_struct_field)* ~ ","?
+    documented_struct_field ~ (","? ~ documented_struct_field)* ~ ","?
 }
 
 documented_struct_field = {
@@ -272,7 +272,7 @@ type_name = {
 }
 
 documented_method_def = {
-    doc_comment? ~ method_def
+    doc_comment? ~ annotations? ~ method_def
 }
 
 method_def = {
@@ -367,7 +367,7 @@ annotation_args = {
 //     metadata() { return { warmup_period: period }; }
 // }
 annotation_def = {
-    "annotation" ~ ident ~ "(" ~ annotation_def_params? ~ ")" ~ "{" ~ annotation_body ~ "}"
+    "annotation" ~ ident ~ ("(" ~ annotation_def_params? ~ ")")? ~ "{" ~ annotation_body ~ "}"
 }
 
 annotation_def_params = {
@@ -498,6 +498,7 @@ statement = {
     | assignment ~ ";"?
     | extend_statement
     | remove_target_stmt ~ ";"?
+    | set_param_value_stmt ~ ";"?
     | set_param_type_stmt ~ ";"?
     | set_return_stmt ~ ";"?
     | replace_body_stmt
@@ -510,6 +511,7 @@ statement = {
 }
 
 remove_target_stmt = { "remove" ~ "target" }
+set_param_value_stmt = { "set" ~ "param" ~ ident ~ "=" ~ expression }
 set_param_type_stmt = { "set" ~ "param" ~ ident ~ ":" ~ type_annotation }
 set_return_stmt = { "set" ~ "return" ~ (set_return_expr_payload | type_annotation) }
 set_return_expr_payload = { "(" ~ expression ~ ")" }
@@ -1327,6 +1329,7 @@ block_statement = {
     | assignment
     | extend_statement
     | remove_target_stmt
+    | set_param_value_stmt
     | set_param_type_stmt
     | set_return_stmt
     | replace_body_stmt
@@ -1340,6 +1343,7 @@ block_item = {
     | assignment
     | extend_statement
     | remove_target_stmt
+    | set_param_value_stmt
     | set_param_type_stmt
     | set_return_stmt
     | replace_body_stmt

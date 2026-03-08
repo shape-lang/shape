@@ -220,8 +220,7 @@ fn test_mod_simple_function_call_runtime() {
 
 #[test]
 fn test_mod_nested_access_runtime() {
-    // Module 'A' is now registered, but nested module member access (A.B.f())
-    // hits a runtime limitation: B is resolved as a TypedObject without method 'f'
+    // Nested module member access (A.B.f()) now works.
     ShapeTest::new(
         r#"
         mod A {
@@ -232,7 +231,7 @@ fn test_mod_nested_access_runtime() {
         A.B.f()
     "#,
     )
-    .expect_run_err_contains("Unknown method");
+    .expect_number(2.0);
 }
 
 #[test]
@@ -281,8 +280,7 @@ fn test_mod_function_not_global_runtime() {
 
 #[test]
 fn test_mod_triple_nested_access_runtime() {
-    // Module 'A' is now registered, but deeply nested module member access
-    // (A.B.C.deep()) hits a runtime limitation with nested TypedObject resolution
+    // Triple-nested module access now works.
     ShapeTest::new(
         r#"
         mod A {
@@ -295,7 +293,7 @@ fn test_mod_triple_nested_access_runtime() {
         A.B.C.deep()
     "#,
     )
-    .expect_run_err_contains("Unknown method");
+    .expect_number(99.0);
 }
 
 #[test]

@@ -1432,6 +1432,7 @@ fn statement_contains_offset(stmt: &Statement, offset: usize) -> bool {
         | Statement::Extend(_, span)
         | Statement::RemoveTarget(span)
         | Statement::SetParamType { span, .. }
+        | Statement::SetParamValue { span, .. }
         | Statement::SetReturnType { span, .. } => span_contains_offset(*span, offset),
         Statement::SetReturnExpr { span, .. } => span_contains_offset(*span, offset),
         Statement::ReplaceModuleExpr { span, .. } => span_contains_offset(*span, offset),

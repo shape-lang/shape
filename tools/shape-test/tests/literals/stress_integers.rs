@@ -297,13 +297,13 @@ fn test_int_negative_of_negative() {
 // Variable shadowing with int
 // =============================================================================
 
-/// Verifies shadowing in same scope is a semantic error.
+/// Verifies shadowing in same scope is allowed (second `let` shadows first).
 #[test]
 fn test_shadow_bool_with_int() {
     ShapeTest::new(
         "fn test() {\n    let x = true\n    let x = 99\n    x\n}\ntest()",
     )
-    .expect_run_err();
+    .expect_number(99.0);
 }
 
 // =============================================================================

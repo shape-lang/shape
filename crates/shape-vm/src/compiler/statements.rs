@@ -61,6 +61,22 @@ impl BytecodeCompiler {
         self.emit_comptime_internal_call("__emit_remove", Vec::new(), span)
     }
 
+    fn emit_comptime_set_param_value_directive(
+        &mut self,
+        param_name: &str,
+        expression: &Expr,
+        span: Span,
+    ) -> Result<()> {
+        self.emit_comptime_internal_call(
+            "__emit_set_param_value",
+            vec![
+                Expr::Literal(Literal::String(param_name.to_string()), span),
+                expression.clone(),
+            ],
+            span,
+        )
+    }
+
     fn emit_comptime_set_param_type_directive(
         &mut self,
         param_name: &str,
@@ -1059,7 +1075,7 @@ impl BytecodeCompiler {
             return_type: method.return_type.clone(),
             body,
             type_params: Some(Vec::new()),
-            annotations: Vec::new(),
+            annotations: method.annotations.clone(),
             is_async: method.is_async,
             is_comptime: false,
             where_clause: None,
@@ -1108,7 +1124,7 @@ impl BytecodeCompiler {
             return_type: method.return_type.clone(),
             body,
             type_params: Some(Vec::new()),
-            annotations: Vec::new(),
+            annotations: method.annotations.clone(),
             is_async: method.is_async,
             is_comptime: false,
             where_clause: None,
@@ -2387,7 +2403,7 @@ impl BytecodeCompiler {
                     let target_name = struct_def.name.clone();
                     let handler_span = handler.span;
                     let execution =
-                        self.execute_comptime_annotation_handler(ann, &handler, target_value, &[])?;
+                        self.execute_comptime_annotation_handler(ann, &handler, target_value, &compiled.param_names, &[])?;
 
                     if self
                         .process_comptime_directives(execution.directives, &target_name)
@@ -2649,7 +2665,8 @@ impl BytecodeCompiler {
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { items } => {
                     *module_items = items;
                 }
-                super::comptime_builtins::ComptimeDirective::SetParamType { .. } => {
+                super::comptime_builtins::ComptimeDirective::SetParamType { .. }
+                | super::comptime_builtins::ComptimeDirective::SetParamValue { .. } => {
                     return Err(
                         "`set param` directives are only valid when compiling function targets"
                             .to_string(),
@@ -2694,7 +2711,7 @@ impl BytecodeCompiler {
                     let target_value = target.to_nanboxed();
                     let handler_span = handler.span;
                     let execution =
-                        self.execute_comptime_annotation_handler(ann, &handler, target_value, &[])?;
+                        self.execute_comptime_annotation_handler(ann, &handler, target_value, &compiled.param_names, &[])?;
                     if self
                         .process_comptime_directives_for_module(
                             execution.directives,
@@ -3469,6 +3486,20 @@ impl BytecodeCompiler {
                     });
                 }
                 self.emit_comptime_set_param_type_directive(param_name, type_annotation, *span)?;
+            }
+            Statement::SetParamValue {
+                param_name,
+                expression,
+                span,
+            } => {
+                if !self.comptime_mode {
+                    return Err(ShapeError::SemanticError {
+                        message: "`set param` is only valid inside `comptime { }` context"
+                            .to_string(),
+                        location: Some(self.span_to_source_location(*span)),
+                    });
+                }
+                self.emit_comptime_set_param_value_directive(param_name, expression, *span)?;
             }
             Statement::SetReturnType {
                 type_annotation,

@@ -48,6 +48,9 @@ pub struct FunctionBlob {
     pub ref_mutates: Vec<bool>,
     #[serde(default)]
     pub mutable_captures: Vec<bool>,
+    /// Typed frame layout for this function's locals (propagated from compiler).
+    #[serde(default)]
+    pub frame_descriptor: Option<FrameDescriptor>,
 
     // -- code --
     /// This function's bytecode instructions.

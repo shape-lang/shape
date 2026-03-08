@@ -42,7 +42,7 @@ fn null_coalesce_with_value() {
 fn null_coalesce_with_none() {
     ShapeTest::new(
         r#"
-        let x = none
+        let x = None
         x ?? 99
     "#,
     )
@@ -53,7 +53,7 @@ fn null_coalesce_with_none() {
 fn null_coalesce_string() {
     ShapeTest::new(
         r#"
-        let name = none
+        let name = None
         name ?? "anonymous"
     "#,
     )

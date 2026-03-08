@@ -22,6 +22,7 @@ fn make_blob(
         ref_params: vec![],
         ref_mutates: vec![],
         mutable_captures: vec![],
+        frame_descriptor: None,
         instructions,
         constants,
         strings,
@@ -203,6 +204,7 @@ fn test_link_circular_dependency_detected() {
         ref_params: vec![],
         ref_mutates: vec![],
         mutable_captures: vec![],
+        frame_descriptor: None,
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -225,6 +227,7 @@ fn test_link_circular_dependency_detected() {
         ref_params: vec![],
         ref_mutates: vec![],
         mutable_captures: vec![],
+        frame_descriptor: None,
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -256,6 +259,7 @@ fn test_link_missing_blob() {
         ref_params: vec![],
         ref_mutates: vec![],
         mutable_captures: vec![],
+        frame_descriptor: None,
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -367,6 +371,7 @@ fn test_source_map_merging() {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
+            frame_descriptor: None,
             instructions: vec![
                 Instruction {
                     opcode: OpCode::Return,
@@ -404,6 +409,7 @@ fn test_source_map_merging() {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
+            frame_descriptor: None,
             instructions: vec![Instruction {
                 opcode: OpCode::Return,
                 operand: None,

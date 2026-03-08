@@ -230,7 +230,8 @@ fn test_match_typed_pattern_parses() {
 }
 
 #[test]
-fn test_empty_match_rejected_by_grammar() {
+fn test_empty_match_accepted_by_grammar() {
+    // The grammar allows empty match (zero arms) via the optional match_arm list.
     let content = r#"
         fn afunc(c) {
             match c {
@@ -241,13 +242,14 @@ fn test_empty_match_rejected_by_grammar() {
     "#;
     let result = parse_program_helper(content);
     assert!(
-        result.is_err(),
-        "Empty match (zero arms) should be rejected by the grammar"
+        result.is_ok(),
+        "Empty match (zero arms) should be accepted by the grammar: {:?}",
+        result.err()
     );
 }
 
 #[test]
-fn test_empty_match_with_prior_call_rejected() {
+fn test_empty_match_with_prior_call_accepted() {
     let content = r#"
         fn afunc(c) {
             print("func called with " + c)
@@ -260,13 +262,14 @@ fn test_empty_match_with_prior_call_rejected() {
     "#;
     let result = parse_program_helper(content);
     assert!(
-        result.is_err(),
-        "Empty match (zero arms) should be rejected even with prior call"
+        result.is_ok(),
+        "Empty match (zero arms) should be accepted even with prior call: {:?}",
+        result.err()
     );
 }
 
 #[test]
-fn test_empty_match_function_rejected() {
+fn test_empty_match_function_accepted() {
     let content = r#"
         fn afunc(c) {
             print("func called with " + c)
@@ -280,18 +283,19 @@ fn test_empty_match_function_rejected() {
     "#;
     let result = parse_program_helper(content);
     assert!(
-        result.is_err(),
-        "Empty match (zero arms) in function body should be rejected"
+        result.is_ok(),
+        "Empty match (zero arms) in function body should be accepted: {:?}",
+        result.err()
     );
 }
 
 #[test]
-fn test_statement_rule_rejects_empty_match() {
+fn test_statement_rule_accepts_empty_match() {
     let stmt = "match c {\n\n}";
     let parsed = ShapeParser::parse(Rule::statement, stmt);
     assert!(
-        parsed.is_err(),
-        "statement rule should reject empty match expression (zero arms): {:?}",
+        parsed.is_ok(),
+        "statement rule should accept empty match expression (zero arms): {:?}",
         parsed.err()
     );
 }

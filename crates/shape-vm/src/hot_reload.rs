@@ -200,6 +200,7 @@ mod tests {
             ref_params: Vec::new(),
             ref_mutates: Vec::new(),
             mutable_captures: Vec::new(),
+            frame_descriptor: None,
             instructions: Vec::new(),
             constants: Vec::new(),
             strings: Vec::new(),

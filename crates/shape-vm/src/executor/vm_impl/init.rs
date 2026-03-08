@@ -89,6 +89,7 @@ impl VirtualMachine {
         vm.register_stdlib_module(shape_runtime::stdlib::unicode::create_unicode_module());
         vm.register_stdlib_module(shape_runtime::stdlib::csv_module::create_csv_module());
         vm.register_stdlib_module(shape_runtime::stdlib::msgpack_module::create_msgpack_module());
+        vm.register_stdlib_module(shape_runtime::stdlib::set_module::create_set_module());
 
         // Initialise metrics collector when requested.
         if vm.config.metrics_enabled {

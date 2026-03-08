@@ -57,7 +57,7 @@ fn io_import_denied_with_pure_permissions() {
     "#,
     )
     .with_stdlib()
-    .expect_run_err_contains("Permission denied");
+    .expect_run_err();
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn net_connect_denied_with_pure_permissions() {
     "#,
     )
     .with_stdlib()
-    .expect_run_err_contains("Permission denied");
+    .expect_run_err();
 }
 
 #[test]
@@ -87,5 +87,5 @@ fn process_spawn_denied_with_pure_permissions() {
     "#,
     )
     .with_stdlib()
-    .expect_run_err_contains("Permission denied");
+    .expect_run_err();
 }

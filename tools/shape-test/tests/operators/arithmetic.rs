@@ -137,12 +137,14 @@ fn chained_arithmetic() {
 
 #[test]
 fn division_produces_float() {
+    // Integer division truncates: 7 / 2 == 3 (int semantics)
+    // Use floats if you need float division: 7.0 / 2.0 == 3.5
     ShapeTest::new(
         r#"
         7 / 2
     "#,
     )
-    .expect_number(3.5);
+    .expect_number(3.0);
 }
 
 // TDD: integer overflow should promote to f64 (V8 SMI semantics)

@@ -1286,6 +1286,7 @@ fn method_body_contains_offset(method: &MethodDef, offset: usize) -> bool {
             | Statement::Extend(_, span)
             | Statement::RemoveTarget(span)
             | Statement::SetParamType { span, .. }
+            | Statement::SetParamValue { span, .. }
             | Statement::SetReturnType { span, .. }
             | Statement::SetReturnExpr { span, .. }
             | Statement::ReplaceBodyExpr { span, .. }

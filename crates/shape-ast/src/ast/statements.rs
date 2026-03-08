@@ -37,6 +37,12 @@ pub enum Statement {
         type_annotation: TypeAnnotation,
         span: Span,
     },
+    /// Comptime-only directive to set a function parameter default value.
+    SetParamValue {
+        param_name: String,
+        expression: Expr,
+        span: Span,
+    },
     /// Comptime-only directive to set a function return type.
     SetReturnType {
         type_annotation: TypeAnnotation,

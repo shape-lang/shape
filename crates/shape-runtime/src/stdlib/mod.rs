@@ -21,6 +21,7 @@ pub mod msgpack_module;
 pub mod parallel;
 pub mod regex;
 pub mod runtime_policy;
+pub mod set_module;
 pub mod toml_module;
 pub mod unicode;
 pub mod virtual_fs;

@@ -71,12 +71,14 @@ fn fibonacci_one() {
 
 #[test]
 fn sum_recursive() {
+    // The builtin `sum` function shadows the user-defined one.
+    // Rename to avoid conflict with the builtin.
     ShapeTest::new(
         r#"
-        fn sum(n) {
-            if n <= 0 { 0 } else { n + sum(n - 1) }
+        fn my_sum(n) {
+            if n <= 0 { 0 } else { n + my_sum(n - 1) }
         }
-        sum(10)
+        my_sum(10)
     "#,
     )
     .expect_number(55.0);

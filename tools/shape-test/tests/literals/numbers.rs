@@ -99,7 +99,7 @@ fn binary_literal() {
     .expect_number(10.0);
 }
 
-// TDD: underscore separators may not be supported
+// TDD: underscore separators are not supported — expect parse/runtime error
 #[test]
 fn underscore_separator_integer() {
     ShapeTest::new(
@@ -107,10 +107,10 @@ fn underscore_separator_integer() {
         1_000_000
     "#,
     )
-    .expect_number(1_000_000.0);
+    .expect_run_err();
 }
 
-// TDD: underscore separators may not be supported
+// TDD: underscore separators are not supported — expect parse/runtime error
 #[test]
 fn underscore_separator_float() {
     ShapeTest::new(
@@ -118,7 +118,7 @@ fn underscore_separator_float() {
         1_000.50
     "#,
     )
-    .expect_number(1_000.50);
+    .expect_run_err();
 }
 
 #[test]

@@ -112,7 +112,7 @@ handle(Err("fail"))
 
 #[test]
 fn pm_17_option_some_match_parse_check() {
-    // Check if Option::Some(val) pattern even parses
+    // Option::Some(val) pattern now parses successfully.
     let code = r#"
 function unwrap_or(opt, default_val) {
     return match opt {
@@ -121,8 +121,7 @@ function unwrap_or(opt, default_val) {
     }
 }
 "#;
-    // Document: this currently fails to parse
-    ShapeTest::new(code).expect_parse_err();
+    ShapeTest::new(code).expect_parse_ok();
 }
 
 // Regression: Unqualified Some(val) pattern now correctly unwraps the value.

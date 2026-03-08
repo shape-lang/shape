@@ -39,19 +39,19 @@ fn bool_in_let_binding() {
 fn none_literal() {
     ShapeTest::new(
         r#"
-        let x = none
+        let x = None
         print(x)
     "#,
     )
     .expect_run_ok()
-    .expect_output("none");
+    .expect_output("None");
 }
 
 #[test]
 fn none_equality() {
     ShapeTest::new(
         r#"
-        none == none
+        None == None
     "#,
     )
     .expect_bool(true);
@@ -61,7 +61,7 @@ fn none_equality() {
 fn none_not_equal_to_value() {
     ShapeTest::new(
         r#"
-        none == 0
+        None == 0
     "#,
     )
     .expect_bool(false);
@@ -71,7 +71,7 @@ fn none_not_equal_to_value() {
 fn none_null_coalesce() {
     ShapeTest::new(
         r#"
-        let x = none
+        let x = None
         x ?? 42
     "#,
     )

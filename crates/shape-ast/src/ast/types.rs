@@ -421,6 +421,9 @@ pub struct MethodDef {
     pub span: Span,
     #[serde(default)]
     pub doc_comment: Option<DocComment>,
+    /// Annotations applied to this method (e.g., `@traced`)
+    #[serde(default)]
+    pub annotations: Vec<super::functions::Annotation>,
     /// Method parameters
     pub params: Vec<super::functions::FunctionParameter>,
     /// Optional when clause for conditional method definitions
@@ -437,6 +440,7 @@ impl PartialEq for MethodDef {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.doc_comment == other.doc_comment
+            && self.annotations == other.annotations
             && self.params == other.params
             && self.when_clause == other.when_clause
             && self.return_type == other.return_type
@@ -473,6 +477,9 @@ pub struct StructTypeDef {
     pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
     pub fields: Vec<StructField>,
+    /// Inline method definitions inside the type body
+    #[serde(default)]
+    pub methods: Vec<MethodDef>,
     /// Annotations applied to the struct (e.g., `@derive_debug type Foo { ... }`)
     pub annotations: Vec<Annotation>,
     /// Optional native layout metadata for `type C`.

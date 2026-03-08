@@ -71,16 +71,16 @@ annotation traced(label) {
   }
 }
 
-@traced("sum")
-fn sum(a: int, b: int) -> int {
+@traced("add_nums")
+fn add_nums(a: int, b: int) -> int {
   a + b
 }
 
-print(sum(10, 20))
+print(add_nums(10, 20))
 "#,
     )
     .expect_run_ok()
-    .expect_output("[sum] before\n[sum] after = 30\n30");
+    .expect_output("[add_nums] before\n[add_nums] after = 30\n30");
 }
 
 #[test]

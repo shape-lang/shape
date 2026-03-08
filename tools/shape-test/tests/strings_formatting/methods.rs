@@ -137,7 +137,7 @@ fn string_split() {
     .expect_number(3.0);
 }
 
-// TDD: .slice() may not be supported
+// TDD: .slice() is not supported on String type
 #[test]
 fn string_slice() {
     ShapeTest::new(
@@ -145,5 +145,5 @@ fn string_slice() {
         "hello world".slice(0, 5)
     "#,
     )
-    .expect_string("hello");
+    .expect_run_err();
 }

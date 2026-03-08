@@ -3,7 +3,8 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{
-    DestructurePattern, Expr, FunctionDef, ObjectEntry, Span, Statement, VarKind, VariableDecl,
+    DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Statement, VarKind,
+    VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
@@ -841,7 +842,12 @@ impl BytecodeCompiler {
             let compiled = self.program.compiled_annotations.get(&ann.name).cloned();
             if let Some(compiled) = compiled {
                 if let Some(handler) = compiled.comptime_pre_handler {
-                    if self.execute_function_comptime_handler(ann, &handler, func_def)? {
+                    if self.execute_function_comptime_handler(
+                        ann,
+                        &handler,
+                        &compiled.param_names,
+                        func_def,
+                    )? {
                         removed = true;
                         break;
                     }
@@ -855,7 +861,12 @@ impl BytecodeCompiler {
                 let compiled = self.program.compiled_annotations.get(&ann.name).cloned();
                 if let Some(compiled) = compiled {
                     if let Some(handler) = compiled.comptime_post_handler {
-                        if self.execute_function_comptime_handler(ann, &handler, func_def)? {
+                        if self.execute_function_comptime_handler(
+                            ann,
+                            &handler,
+                            &compiled.param_names,
+                            func_def,
+                        )? {
                             removed = true;
                             break;
                         }
@@ -871,6 +882,7 @@ impl BytecodeCompiler {
         &mut self,
         annotation: &shape_ast::ast::Annotation,
         handler: &shape_ast::ast::AnnotationHandler,
+        annotation_def_param_names: &[String],
         func_def: &mut FunctionDef,
     ) -> Result<bool> {
         // Build the target object from the function definition
@@ -888,6 +900,7 @@ impl BytecodeCompiler {
             annotation,
             handler,
             target_value,
+            annotation_def_param_names,
             &const_bindings,
         )?;
 
@@ -906,6 +919,7 @@ impl BytecodeCompiler {
         annotation: &shape_ast::ast::Annotation,
         handler: &shape_ast::ast::AnnotationHandler,
         target_value: ValueWord,
+        annotation_def_param_names: &[String],
         const_bindings: &[(String, shape_value::ValueWord)],
     ) -> Result<super::comptime::ComptimeExecutionResult> {
         let handler_span = handler.span;
@@ -931,6 +945,7 @@ impl BytecodeCompiler {
             &handler.params,
             target_value,
             &annotation.args,
+            annotation_def_param_names,
             const_bindings,
             &comptime_helpers,
             &extensions,
@@ -1023,6 +1038,7 @@ impl BytecodeCompiler {
                 }
             }
             Statement::SetReturnExpr { expression, .. }
+            | Statement::SetParamValue { expression, .. }
             | Statement::ReplaceBodyExpr { expression, .. }
             | Statement::ReplaceModuleExpr { expression, .. } => {
                 Self::collect_scoped_names_in_expr(expression, names);
@@ -1414,7 +1430,8 @@ impl BytecodeCompiler {
                     removed = true;
                     break;
                 }
-                super::comptime_builtins::ComptimeDirective::SetParamType { .. } => {
+                super::comptime_builtins::ComptimeDirective::SetParamType { .. }
+                | super::comptime_builtins::ComptimeDirective::SetParamValue { .. } => {
                     return Err(
                         "`set param` directives are only valid when compiling function targets"
                             .to_string(),
@@ -1484,6 +1501,34 @@ impl BytecodeCompiler {
                     } else {
                         param.type_annotation = Some(type_annotation);
                     }
+                }
+                super::comptime_builtins::ComptimeDirective::SetParamValue {
+                    param_name,
+                    value,
+                } => {
+                    let maybe_param = func_def
+                        .params
+                        .iter_mut()
+                        .find(|p| p.simple_name() == Some(param_name.as_str()));
+                    let Some(param) = maybe_param else {
+                        return Err(format!(
+                            "comptime directive referenced unknown parameter '{}'",
+                            param_name
+                        ));
+                    };
+                    // Convert the comptime ValueWord to an AST literal expression
+                    let default_expr = if let Some(i) = value.as_i64() {
+                        Expr::Literal(Literal::Int(i), Span::DUMMY)
+                    } else if let Some(n) = value.as_number_coerce() {
+                        Expr::Literal(Literal::Number(n), Span::DUMMY)
+                    } else if let Some(b) = value.as_bool() {
+                        Expr::Literal(Literal::Bool(b), Span::DUMMY)
+                    } else if let Some(s) = value.as_str() {
+                        Expr::Literal(Literal::String(s.to_string()), Span::DUMMY)
+                    } else {
+                        Expr::Literal(Literal::None, Span::DUMMY)
+                    };
+                    param.default_value = Some(default_expr);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { type_annotation } => {
                     if let Some(existing) = &func_def.return_type {

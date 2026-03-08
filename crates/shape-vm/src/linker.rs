@@ -413,7 +413,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
                 ref_params: blob.ref_params.clone(),
                 ref_mutates: blob.ref_mutates.clone(),
                 mutable_captures: blob.mutable_captures.clone(),
-                frame_descriptor: None,
+                frame_descriptor: blob.frame_descriptor.clone(),
             })
             .collect();
 
@@ -516,7 +516,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             ref_params: blob.ref_params.clone(),
             ref_mutates: blob.ref_mutates.clone(),
             mutable_captures: blob.mutable_captures.clone(),
-            frame_descriptor: None,
+            frame_descriptor: blob.frame_descriptor.clone(),
         })
         .collect();
 

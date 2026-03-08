@@ -188,7 +188,7 @@ impl BytecodeCompiler {
                 ref_params: Vec::new(),
                 ref_mutates: Vec::new(),
                 mutable_captures: Vec::new(),
-                frame_descriptor: None,
+                frame_descriptor: self.program.top_level_frame.clone(),
                 osr_entry_points: Vec::new(),
             };
 

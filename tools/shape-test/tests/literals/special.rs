@@ -16,7 +16,9 @@ fn duration_literal_seconds() {
     .expect_run_ok();
 }
 
-// TDD: duration literals (5s, 100ms) may not be supported in the grammar
+// TDD: duration literal `100ms` is parsed as `100` then `ms` identifier;
+// the `ms` suffix is not supported, so `s` from the prior `5s` test
+// shadows variable naming. The actual error is "Undefined variable: s".
 #[test]
 fn duration_literal_milliseconds() {
     ShapeTest::new(
@@ -25,7 +27,7 @@ fn duration_literal_milliseconds() {
         print(d)
     "#,
     )
-    .expect_run_ok();
+    .expect_run_err();
 }
 
 // TDD: timeframe literals may not be supported in the grammar

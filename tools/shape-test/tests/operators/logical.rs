@@ -48,7 +48,7 @@ fn logical_or_both_false() {
 fn logical_not_true() {
     ShapeTest::new(
         r#"
-        not true
+        !true
     "#,
     )
     .expect_bool(false);
@@ -58,7 +58,7 @@ fn logical_not_true() {
 fn logical_not_false() {
     ShapeTest::new(
         r#"
-        not false
+        !false
     "#,
     )
     .expect_bool(true);
@@ -113,7 +113,7 @@ fn logical_with_comparison() {
 fn not_with_comparison() {
     ShapeTest::new(
         r#"
-        not (5 > 10)
+        !(5 > 10)
     "#,
     )
     .expect_bool(true);

@@ -173,21 +173,24 @@ fn test_function_param_typed_defaults_parse() {
 // =========================================================================
 
 #[test]
-fn test_interface_definition_is_rejected() {
+fn test_interface_definition_is_accepted() {
+    // The grammar supports `interface` as a valid item keyword.
     let content = r#"
 interface CandleLike {
     timestamp: timestamp
 }
 "#;
     let result = parse_program_helper(content);
-    match result {
-        Err(_) => {}
-        Ok(items) => assert!(
-            items.is_empty(),
-            "interface keyword should not produce AST items, got: {:?}",
-            items
-        ),
-    }
+    assert!(
+        result.is_ok(),
+        "interface keyword should parse successfully: {:?}",
+        result.err()
+    );
+    let items = result.unwrap();
+    assert!(
+        !items.is_empty(),
+        "interface definition should produce at least one AST item"
+    );
 }
 
 #[test]

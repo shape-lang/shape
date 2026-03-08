@@ -134,7 +134,7 @@ pub use query_result::{AlertResult, QueryResult, QueryType};
 use shape_value::ValueWord;
 pub use shape_value::ValueWord as Value;
 pub use stream_executor::{StreamEvent, StreamExecutor, StreamState};
-pub use sync_bridge::{SyncDataProvider, block_on_shared, initialize_shared_runtime};
+pub use sync_bridge::{SyncDataProvider, block_on_shared, get_runtime_handle, initialize_shared_runtime};
 pub use type_schema::{
     FieldDef, FieldType, SchemaId, TypeSchema, TypeSchemaBuilder, TypeSchemaRegistry,
 };

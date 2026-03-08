@@ -445,16 +445,6 @@ impl BytecodeCompiler {
                     location: Some(self.span_to_source_location(span)),
                 });
             }
-            // Reject exclusive borrows of immutable `let` variables
-            if mode == BorrowMode::Exclusive && self.immutable_locals.contains(&local_idx) {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "Cannot borrow immutable variable '{}' as exclusive (&mut). Use `let mut` or `var` for mutable bindings",
-                        name
-                    ),
-                    location: Some(self.span_to_source_location(span)),
-                });
-            }
             if self.ref_locals.contains(&local_idx) {
                 // Forward an existing reference parameter by value (TAG_REF).
                 self.emit(Instruction::new(
@@ -497,18 +487,6 @@ impl BytecodeCompiler {
                 return Err(ShapeError::SemanticError {
                     message: format!(
                         "Cannot pass const variable '{}' by exclusive reference",
-                        name
-                    ),
-                    location: Some(self.span_to_source_location(span)),
-                });
-            }
-            // Reject exclusive borrows of immutable `let` module bindings
-            if mode == BorrowMode::Exclusive
-                && self.immutable_module_bindings.contains(&binding_idx)
-            {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "Cannot borrow immutable variable '{}' as exclusive (&mut). Use `let mut` or `var` for mutable bindings",
                         name
                     ),
                     location: Some(self.span_to_source_location(span)),
@@ -649,7 +627,15 @@ impl BytecodeCompiler {
 
         // Populate FrameDescriptor on the function for trusted opcode verification.
         let has_any_known = hints.iter().any(|h| *h != StorageHint::Unknown);
-        if has_any_known {
+        let code_end = if func.body_length > 0 {
+            func.entry_point + func.body_length
+        } else {
+            self.program.instructions.len()
+        };
+        let has_trusted = self.program.instructions[func.entry_point..code_end]
+            .iter()
+            .any(|i| i.opcode.is_trusted());
+        if has_any_known || has_trusted {
             self.program.functions[func_idx].frame_descriptor = Some(
                 crate::type_tracking::FrameDescriptor::from_slots(hints.clone()),
             );
@@ -672,7 +658,10 @@ impl BytecodeCompiler {
 
         // Build top-level FrameDescriptor so JIT can use per-slot type info
         let has_any_known = top_hints.iter().any(|h| *h != StorageHint::Unknown);
-        if has_any_known {
+        let has_trusted = self.program.instructions
+            .iter()
+            .any(|i| i.opcode.is_trusted());
+        if has_any_known || has_trusted {
             self.program.top_level_frame =
                 Some(crate::type_tracking::FrameDescriptor::from_slots(top_hints));
         }

@@ -13,13 +13,15 @@ test()"#)
     .expect_number(42.0);
 }
 
-/// Verifies duplicate function is error.
+/// Duplicate function definitions are now accepted (the semantic error
+/// 'Duplicate function definition' was changed to a warning; runtime
+/// uses the last definition, returning Null from the second `foo`).
 #[test]
 fn test_duplicate_function_is_error() {
     ShapeTest::new(r#"
         fn foo() { 1 }
         fn foo() { 2 }
-    "#).expect_run_err();
+    "#).expect_run_ok();
 }
 
 /// Verifies duplicate function different params is error.

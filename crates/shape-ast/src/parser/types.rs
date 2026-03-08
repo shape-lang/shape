@@ -514,6 +514,7 @@ pub fn parse_struct_type_def(pair: Pair<Rule>) -> Result<crate::ast::StructTypeD
         doc_comment: None,
         type_params,
         fields,
+        methods: Vec::new(),
         annotations,
         native_layout: None,
     })
@@ -585,6 +586,7 @@ pub fn parse_native_struct_type_def(pair: Pair<Rule>) -> Result<crate::ast::Stru
         doc_comment: None,
         type_params,
         fields,
+        methods: Vec::new(),
         annotations,
         native_layout: Some(crate::ast::NativeLayoutBinding { abi }),
     })
@@ -1100,6 +1102,7 @@ pub(crate) fn parse_method_def_shared(pair: Pair<Rule>) -> Result<crate::ast::ty
         name,
         span,
         doc_comment: None,
+        annotations: Vec::new(),
         params,
         when_clause,
         return_type,
@@ -1111,14 +1114,37 @@ pub(crate) fn parse_method_def_shared(pair: Pair<Rule>) -> Result<crate::ast::ty
 pub(crate) fn parse_documented_method_def_shared(
     pair: Pair<Rule>,
 ) -> Result<crate::ast::types::MethodDef> {
-    let (doc_comment, pair) = unwrap_documented_pair(
-        pair,
-        Rule::documented_method_def,
-        Rule::method_def,
-        "method definition",
-    )?;
-    let mut method = parse_method_def_shared(pair)?;
+    if pair.as_rule() == Rule::method_def {
+        return parse_method_def_shared(pair);
+    }
+    assert_eq!(pair.as_rule(), Rule::documented_method_def);
+    let mut inner = pair.into_inner();
+    let mut doc_comment = None;
+    let mut annotations = Vec::new();
+    let mut method_pair = None;
+
+    for child in inner {
+        match child.as_rule() {
+            Rule::doc_comment => {
+                doc_comment = Some(super::docs::parse_doc_comment(child));
+            }
+            Rule::annotations => {
+                annotations = super::functions::parse_annotations(child)?;
+            }
+            Rule::method_def => {
+                method_pair = Some(child);
+            }
+            _ => {}
+        }
+    }
+
+    let method_pair = method_pair.ok_or_else(|| ShapeError::ParseError {
+        message: "expected method definition".to_string(),
+        location: None,
+    })?;
+    let mut method = parse_method_def_shared(method_pair)?;
     method.doc_comment = doc_comment;
+    method.annotations = annotations;
     Ok(method)
 }
 

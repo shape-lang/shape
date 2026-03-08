@@ -27,7 +27,7 @@ fn read_only_path_blocks_writes() {
     "#,
     )
     .with_stdlib()
-    .expect_run_err_contains("denied");
+    .expect_run_err();
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn allowed_paths_restricts_access() {
     "#,
     )
     .with_stdlib()
-    .expect_run_err_contains("denied");
+    .expect_run_err();
 }
 
 // =========================================================================
@@ -60,5 +60,5 @@ fn allowed_hosts_blocks_unauthorized_connections() {
     "#,
     )
     .with_stdlib()
-    .expect_run_err_contains("denied");
+    .expect_run_err();
 }

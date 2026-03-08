@@ -338,6 +338,7 @@ impl FunctionBlobBuilder {
             ref_params: func.ref_params.clone(),
             ref_mutates: func.ref_mutates.clone(),
             mutable_captures: func.mutable_captures.clone(),
+            frame_descriptor: func.frame_descriptor.clone(),
             required_permissions: self.required_permissions.clone(),
             instructions: local_instructions,
             constants: local_constants,

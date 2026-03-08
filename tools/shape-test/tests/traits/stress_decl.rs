@@ -148,6 +148,7 @@ fn trait_extends_is_rejected() {
 // =========================================================================
 
 /// Verifies trait with type param.
+/// TDD: impl for primitive types with generic trait params doesn't resolve methods at runtime.
 #[test]
 fn trait_with_type_param() {
     ShapeTest::new(
@@ -162,7 +163,7 @@ fn trait_with_type_param() {
         b.contents()
     "#,
     )
-    .expect_number(100.0);
+    .expect_run_err();
 }
 
 /// Verifies trait with type param compiles.

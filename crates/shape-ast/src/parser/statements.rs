@@ -90,6 +90,24 @@ pub fn parse_statement(pair: Pair<Rule>) -> Result<Statement> {
             ))
         }
         Rule::remove_target_stmt => Ok(Statement::RemoveTarget(pair_span(&inner))),
+        Rule::set_param_value_stmt => {
+            let inner_span = pair_span(&inner);
+            let mut inner_parts = inner.into_inner();
+            let param_pair = inner_parts.next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected parameter name in `set param` value directive".to_string(),
+                location: Some(pair_loc.clone()),
+            })?;
+            let expr_pair = inner_parts.next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected expression in `set param` value directive".to_string(),
+                location: Some(pair_loc.clone()),
+            })?;
+            let expression = crate::parser::expressions::parse_expression(expr_pair)?;
+            Ok(Statement::SetParamValue {
+                param_name: param_pair.as_str().to_string(),
+                expression,
+                span: inner_span,
+            })
+        }
         Rule::set_param_type_stmt => {
             let inner_span = pair_span(&inner);
             let mut inner_parts = inner.into_inner();

@@ -54,7 +54,7 @@ fn json_stringify_null() {
     // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.stringify(none)
+        let result = json.stringify(None)
         print(result)
     "#,
     )

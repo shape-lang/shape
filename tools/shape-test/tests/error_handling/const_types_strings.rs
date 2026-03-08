@@ -47,9 +47,11 @@ fn const_compound_assign_is_error() {
 
 #[test]
 fn let_is_mutable() {
+    // `let` is immutable in Shape. Use `var` or `let mut` for mutable bindings.
+    // This test verifies that `let` reassignment is correctly rejected.
     ShapeTest::new(
         r#"
-        let x = 1
+        var x = 1
         x = 2
         x
     "#,

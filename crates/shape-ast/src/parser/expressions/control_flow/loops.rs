@@ -351,6 +351,24 @@ fn parse_block_entry(inner: Pair<Rule>) -> Result<BlockItem> {
         Rule::remove_target_stmt => Ok(BlockItem::Statement(crate::ast::Statement::RemoveTarget(
             pair_span(&inner),
         ))),
+        Rule::set_param_value_stmt => {
+            let span = pair_span(&inner);
+            let mut parts = inner.into_inner();
+            let param_pair = parts.next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected parameter name in `set param` value directive".to_string(),
+                location: None,
+            })?;
+            let expr_pair = parts.next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected expression in `set param` value directive".to_string(),
+                location: None,
+            })?;
+            let expression = super::super::parse_expression(expr_pair)?;
+            Ok(BlockItem::Statement(crate::ast::Statement::SetParamValue {
+                param_name: param_pair.as_str().to_string(),
+                expression,
+                span,
+            }))
+        }
         Rule::set_param_type_stmt => {
             let span = pair_span(&inner);
             let mut parts = inner.into_inner();

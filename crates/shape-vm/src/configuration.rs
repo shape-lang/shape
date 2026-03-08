@@ -87,6 +87,8 @@ impl BytecodeExecutor {
             .push(shape_runtime::stdlib::csv_module::create_csv_module());
         self.extensions
             .push(shape_runtime::stdlib::msgpack_module::create_msgpack_module());
+        self.extensions
+            .push(shape_runtime::stdlib::set_module::create_set_module());
     }
 
     /// Register an external/user extension module (e.g. loaded from a .so plugin).

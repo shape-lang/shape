@@ -244,7 +244,7 @@ impl<'a> ValueFormatter<'a> {
             }
             Some(HeapValue::IntArray(a)) => {
                 let elems: Vec<String> = a.iter().map(|v| v.to_string()).collect();
-                format!("Vec<int>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::FloatArray(a)) => {
                 let elems: Vec<String> = a
@@ -257,42 +257,42 @@ impl<'a> ValueFormatter<'a> {
                         }
                     })
                     .collect();
-                format!("Vec<number>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::BoolArray(a)) => {
                 let elems: Vec<String> = a
                     .iter()
                     .map(|v| if *v != 0 { "true" } else { "false" }.to_string())
                     .collect();
-                format!("Vec<bool>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::I8Array(a)) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("Vec<i8>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::I16Array(a)) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("Vec<i16>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::I32Array(a)) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("Vec<i32>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::U8Array(a)) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("Vec<u8>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::U16Array(a)) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("Vec<u16>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::U32Array(a)) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("Vec<u32>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::U64Array(a)) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("Vec<u64>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::F32Array(a)) => {
                 let elems: Vec<String> = a
@@ -306,7 +306,7 @@ impl<'a> ValueFormatter<'a> {
                         }
                     })
                     .collect();
-                format!("Vec<f32>[{}]", elems.join(", "))
+                format!("[{}]", elems.join(", "))
             }
             Some(HeapValue::Matrix(m)) => {
                 format!("<Mat<number>:{}x{}>", m.rows, m.cols)

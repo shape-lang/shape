@@ -26,6 +26,10 @@ pub(crate) enum ComptimeDirective {
         param_name: String,
         type_annotation: shape_ast::ast::TypeAnnotation,
     },
+    SetParamValue {
+        param_name: String,
+        value: ValueWord,
+    },
     SetReturnType {
         type_annotation: shape_ast::ast::TypeAnnotation,
     },
@@ -270,6 +274,26 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
                 param_name,
                 type_annotation,
             })?;
+            Ok(ValueWord::unit())
+        },
+    );
+
+    // Internal comptime directive: set a parameter default value.
+    // __emit_set_param_value(param_name: string, value: any)
+    module.add_function(
+        "__emit_set_param_value",
+        |nb_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
+            let param_name = nb_args
+                .first()
+                .and_then(|nb| nb.as_str())
+                .ok_or_else(|| {
+                    "__emit_set_param_value expects param name as first string arg".to_string()
+                })?
+                .to_string();
+            let value = nb_args.get(1).cloned().ok_or_else(|| {
+                "__emit_set_param_value expects a value as second arg".to_string()
+            })?;
+            push_comptime_directive(ComptimeDirective::SetParamValue { param_name, value })?;
             Ok(ValueWord::unit())
         },
     );

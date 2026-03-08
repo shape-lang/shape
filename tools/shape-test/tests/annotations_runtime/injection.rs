@@ -5,8 +5,10 @@
 
 use shape_test::shape_test::ShapeTest;
 
-// TDD: before hook arg modification causes int->number type coercion (known bug ct_15)
+// BUG: before hook arg modification causes int->number type coercion,
+// which triggers "Trusted AddInt invariant violated" panic (known bug ct_15).
 #[test]
+#[should_panic(expected = "Trusted AddInt invariant violated")]
 fn before_hook_doubles_first_argument() {
     ShapeTest::new(
         r#"

@@ -157,6 +157,31 @@ fn render_heap_as_content(value: &ValueWord) -> ContentNode {
         Some(HeapValue::DataTable(dt)) => datatable_to_content_node(dt, None),
         Some(HeapValue::TypedTable { table, .. }) => datatable_to_content_node(table, None),
         Some(HeapValue::IndexedTable { table, .. }) => datatable_to_content_node(table, None),
+        // Typed arrays: render as plain text with bracket notation
+        Some(HeapValue::IntArray(a)) => {
+            let elems: Vec<String> = a.iter().map(|v| v.to_string()).collect();
+            ContentNode::plain(format!("[{}]", elems.join(", ")))
+        }
+        Some(HeapValue::FloatArray(a)) => {
+            let elems: Vec<String> = a
+                .iter()
+                .map(|v| {
+                    if *v == v.trunc() && v.abs() < 1e15 {
+                        format!("{}", *v as i64)
+                    } else {
+                        format!("{}", v)
+                    }
+                })
+                .collect();
+            ContentNode::plain(format!("[{}]", elems.join(", ")))
+        }
+        Some(HeapValue::BoolArray(a)) => {
+            let elems: Vec<String> = a
+                .iter()
+                .map(|v| if *v != 0 { "true" } else { "false" }.to_string())
+                .collect();
+            ContentNode::plain(format!("[{}]", elems.join(", ")))
+        }
         _ => ContentNode::plain(format!("{}", value)),
     }
 }

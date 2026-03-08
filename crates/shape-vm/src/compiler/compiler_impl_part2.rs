@@ -264,6 +264,17 @@ impl BytecodeCompiler {
                     );
                 }
             }
+            Statement::SetParamValue { expression, .. } => {
+                Self::analyze_expr_for_ref_mutation(
+                    expression,
+                    caller_name,
+                    param_index_by_name,
+                    caller_ref_params,
+                    callee_ref_params,
+                    direct_mutates,
+                    edges,
+                );
+            }
             Statement::Break(_)
             | Statement::Continue(_)
             | Statement::Return(None, _)

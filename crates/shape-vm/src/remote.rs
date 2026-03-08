@@ -1121,6 +1121,7 @@ mod tests {
             ref_params: Vec::new(),
             ref_mutates: Vec::new(),
             mutable_captures: Vec::new(),
+            frame_descriptor: None,
             instructions: vec![
                 Instruction::simple(OpCode::PushNull),
                 Instruction::simple(OpCode::ReturnValue),

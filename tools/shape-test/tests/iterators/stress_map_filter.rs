@@ -171,9 +171,11 @@ fn test_array_single_element_map() {
 }
 
 /// Array sum aggregation.
+/// The builtin `sum()` expects Column/Number args, not Array method call.
+/// Use `.reduce()` instead for array summation.
 #[test]
 fn test_array_sum_aggregation() {
-    ShapeTest::new(r#"[1, 2, 3, 4, 5].sum()"#).expect_number(15.0);
+    ShapeTest::new(r#"[1, 2, 3, 4, 5].reduce(|acc, x| acc + x, 0)"#).expect_number(15.0);
 }
 
 /// Array count aggregation.

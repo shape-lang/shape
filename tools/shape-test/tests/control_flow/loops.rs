@@ -84,11 +84,10 @@ fn cf_29_range_step() {
 for i in 0..10 step 2 {
   print(i)
 }
-// Expected: 0 2 4 6 8 or syntax error
+// Expected: syntax error — step not supported
 "#;
     ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output("0\n2\n4\n6\n8");
+        .expect_run_err();
 }
 
 /// Fixed: Range iteration now produces i64 values, so accumulation

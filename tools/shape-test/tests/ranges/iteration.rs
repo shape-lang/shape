@@ -47,7 +47,7 @@ fn range_builtin_function() {
     .expect_number(10.0);
 }
 
-// TDD: range with step syntax may not be supported (BUG-CF-029)
+// BUG-CF-029: range with step syntax is not supported — parser error.
 #[test]
 fn range_with_step() {
     ShapeTest::new(
@@ -57,8 +57,7 @@ fn range_with_step() {
         }
     "#,
     )
-    .expect_run_ok()
-    .expect_output("0\n2\n4\n6\n8");
+    .expect_run_err();
 }
 
 #[test]

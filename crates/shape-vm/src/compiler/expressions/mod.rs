@@ -185,6 +185,7 @@ impl BytecodeCompiler {
                     annotation,
                     &handler,
                     target_value,
+                    &compiled.param_names,
                     &[],
                 )?;
 
@@ -829,7 +830,35 @@ impl BytecodeCompiler {
                 variant,
                 payload,
                 ..
-            } => self.compile_expr_enum_constructor(enum_name, variant, payload),
+            } => {
+                // Check if this is a Type::comptime_field access (looks like enum syntax)
+                if matches!(payload, shape_ast::ast::EnumConstructorPayload::Unit) {
+                    if let Some(comptime_value) = self
+                        .comptime_fields
+                        .get(enum_name)
+                        .and_then(|m| m.get(variant))
+                        .cloned()
+                    {
+                        let const_idx =
+                            if let Some(n) = comptime_value.as_number_coerce() {
+                                self.program.add_constant(Constant::Number(n))
+                            } else if let Some(b) = comptime_value.as_bool() {
+                                self.program.add_constant(Constant::Bool(b))
+                            } else if let Some(s) = comptime_value.as_str() {
+                                self.program
+                                    .add_constant(Constant::String(s.to_string()))
+                            } else {
+                                self.program.add_constant(Constant::Null)
+                            };
+                        self.emit(Instruction::new(
+                            OpCode::PushConst,
+                            Some(Operand::Const(const_idx)),
+                        ));
+                        return Ok(());
+                    }
+                }
+                self.compile_expr_enum_constructor(enum_name, variant, payload)
+            }
 
             // Closures
             Expr::FunctionExpr { params, body, .. } => self.compile_expr_closure(params, body),
@@ -987,9 +1016,15 @@ impl BytecodeCompiler {
                         message: format!("Comptime block directive processing failed: {}", e),
                         location: Some(self.span_to_source_location(*span)),
                     })?;
-                // Convert the result to a literal and compile it
-                let lit = super::comptime::vmvalue_to_literal(&execution.value);
-                self.compile_literal(&lit)?;
+                // Convert the result to an expression and compile it.
+                // Use nb_to_expr for complex types (arrays, objects) that
+                // cannot be represented as a single literal.
+                if let Ok(expr) = super::comptime::nb_to_expr_public(&execution.value, *span) {
+                    self.compile_expr(&expr)?;
+                } else {
+                    let lit = super::comptime::vmvalue_to_literal(&execution.value);
+                    self.compile_literal(&lit)?;
+                }
                 self.last_expr_schema = None;
                 Ok(())
             }

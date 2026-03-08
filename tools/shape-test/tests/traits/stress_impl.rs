@@ -193,12 +193,12 @@ fn impl_using_fn_keyword() {
     ShapeTest::new(
         r#"
         type Pair { a: int, b: int }
-        trait Summable { sum(self): int }
+        trait Summable { total(self): int }
         impl Summable for Pair {
-            fn sum() { self.a + self.b }
+            fn total() { self.a + self.b }
         }
         let p = Pair { a: 3, b: 7 }
-        p.sum()
+        p.total()
     "#,
     )
     .expect_number(10.0);

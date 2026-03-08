@@ -191,6 +191,11 @@ impl ShapeTest {
 
     fn eval_with_output(&self) -> Result<(serde_json::Value, Vec<String>), String> {
         let _ = initialize_shared_runtime();
+        // Enter the shared Tokio runtime so that Handle::current() works
+        // for async module exports (e.g. http).
+        let handle = shape_runtime::get_runtime_handle().map_err(|e| e.to_string())?;
+        let _guard = handle.enter();
+
         let mut engine = ShapeEngine::new().map_err(|e| e.to_string())?;
         if self.use_stdlib {
             engine.load_stdlib().map_err(|e| e.to_string())?;

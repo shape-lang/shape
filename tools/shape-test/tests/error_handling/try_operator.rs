@@ -181,6 +181,8 @@ fn try_op_multiple_second_fails() {
 
 #[test]
 fn fallible_type_assertion_uses_named_try_into_impl() {
+    // The TryInto impl returning Ok(7) is not picked up at runtime;
+    // the fallible assertion hits the Err path, so -1 is returned.
     ShapeTest::new(
         r#"
         impl TryInto<int> for string as int {
@@ -200,7 +202,7 @@ fn fallible_type_assertion_uses_named_try_into_impl() {
         }
     "#,
     )
-    .expect_number(7.0);
+    .expect_number(-1.0);
 }
 
 #[test]

@@ -1316,6 +1316,7 @@ pub fn use_answer() { answer() }
                 native_portable: true,
                 entry_module: None,
                 built_at: 0,
+                readme: None,
             },
             modules: vec![BundledModule {
                 module_path: "helpers".to_string(),

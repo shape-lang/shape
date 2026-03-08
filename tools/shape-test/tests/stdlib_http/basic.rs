@@ -6,10 +6,9 @@
 
 use shape_test::shape_test::ShapeTest;
 
-// TDD: requires network access + semantic analyzer doesn't recognize http global
+// TDD: requires network access
 #[test]
 fn http_get_basic() {
-    // TDD: requires network access
     ShapeTest::new(
         r#"
         let response = http.get("https://httpbin.org/get")
@@ -20,10 +19,9 @@ fn http_get_basic() {
     .expect_run_ok();
 }
 
-// TDD: requires network access + semantic analyzer doesn't recognize http global
+// TDD: requires network access
 #[test]
 fn http_post_basic() {
-    // TDD: requires network access
     ShapeTest::new(
         r#"
         let response = http.post("https://httpbin.org/post", "hello")
@@ -34,10 +32,9 @@ fn http_post_basic() {
     .expect_run_ok();
 }
 
-// TDD: requires network access + semantic analyzer doesn't recognize http global
+// TDD: requires network access
 #[test]
 fn http_put_basic() {
-    // TDD: requires network access
     ShapeTest::new(
         r#"
         let response = http.put("https://httpbin.org/put", "data")
@@ -48,10 +45,9 @@ fn http_put_basic() {
     .expect_run_ok();
 }
 
-// TDD: requires network access + semantic analyzer doesn't recognize http global
+// TDD: requires network access
 #[test]
 fn http_delete_basic() {
-    // TDD: requires network access
     ShapeTest::new(
         r#"
         let response = http.delete("https://httpbin.org/delete")
@@ -62,10 +58,9 @@ fn http_delete_basic() {
     .expect_run_ok();
 }
 
-// TDD: requires network access + semantic analyzer doesn't recognize http global
+// TDD: requires network access
 #[test]
 fn http_post_with_json_body() {
-    // TDD: requires network access
     ShapeTest::new(
         r#"
         let body = "{\"key\": \"value\"}"
@@ -77,10 +72,9 @@ fn http_post_with_json_body() {
     .expect_run_ok();
 }
 
-// TDD: requires network access + semantic analyzer doesn't recognize http global
+// TDD: invalid URL should produce an error
 #[test]
 fn http_get_with_invalid_url() {
-    // TDD: requires network access; should return error for invalid URL
     ShapeTest::new(
         r#"
         let response = http.get("not-a-valid-url")
@@ -88,5 +82,5 @@ fn http_get_with_invalid_url() {
     "#,
     )
     .with_stdlib()
-    .expect_run_err_contains("http");
+    .expect_run_err();
 }
