@@ -45,6 +45,9 @@ pub struct BundleMetadata {
     pub entry_module: Option<String>,
     /// Build timestamp (unix seconds from SystemTime)
     pub built_at: u64,
+    /// README content (raw Markdown), read from README.md in project root.
+    #[serde(default)]
+    pub readme: Option<String>,
 }
 
 fn default_native_portable() -> bool {
@@ -187,6 +190,7 @@ mod tests {
                 native_portable: true,
                 entry_module: Some("main".to_string()),
                 built_at: 1700000000,
+                readme: None,
             },
             modules: vec![
                 BundledModule {
@@ -274,6 +278,7 @@ mod tests {
                 native_portable: true,
                 entry_module: None,
                 built_at: 0,
+                readme: None,
             },
             modules: vec![],
             dependencies: HashMap::new(),
@@ -323,6 +328,7 @@ mod tests {
                 native_portable: true,
                 entry_module: None,
                 built_at: 1700000001,
+                readme: None,
             },
             modules: vec![],
             dependencies: HashMap::new(),
@@ -423,6 +429,7 @@ mod tests {
                 native_portable: true,
                 entry_module: None,
                 built_at: 0,
+                readme: None,
             },
             modules: vec![],
             dependencies: HashMap::new(),

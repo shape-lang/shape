@@ -112,7 +112,14 @@ impl BundleCompiler {
             .iter()
             .all(native_dependency_scope_is_portable);
 
-        // 5. Build metadata
+        // 5. Read README.md if present
+        let readme = ["README.md", "readme.md", "Readme.md"]
+            .iter()
+            .map(|name| root.join(name))
+            .find(|p| p.is_file())
+            .and_then(|p| std::fs::read_to_string(p).ok());
+
+        // 6. Build metadata
         let built_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -133,9 +140,10 @@ impl BundleCompiler {
                 .as_ref()
                 .map(|e| path_to_module_path(Path::new(e), root)),
             built_at,
+            readme,
         };
 
-        // 6. Extract content-addressed blobs and build manifests
+        // 7. Extract content-addressed blobs and build manifests
         let mut blob_store: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         let mut manifests: Vec<ModuleManifest> = Vec::new();
 
