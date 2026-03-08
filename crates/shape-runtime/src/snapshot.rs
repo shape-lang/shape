@@ -18,7 +18,6 @@ use shape_ast::ast::{DataDateTimeRef, DateTimeExpr, EnumDef, TimeReference, Type
 use shape_ast::data::Timeframe;
 
 use crate::data::DataFrame;
-use crate::semantic::symbol_table::SymbolTable;
 use shape_value::datatable::DataTable;
 
 /// Version for snapshot format.
@@ -165,7 +164,6 @@ pub struct ExecutionSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticSnapshot {
-    pub symbol_table: SymbolTable,
     pub exported_symbols: HashSet<String>,
 }
 
@@ -1916,9 +1914,8 @@ mod tests {
             bincode::deserialize(&bytes).expect("deserialize ContextSnapshot");
         assert_eq!(decoded.variable_scopes.len(), 1);
 
-        // 4. SemanticSnapshot with SymbolTable
+        // 4. SemanticSnapshot
         let sem_snap = SemanticSnapshot {
-            symbol_table: crate::semantic::symbol_table::SymbolTable::new(),
             exported_symbols: HashSet::new(),
         };
         let bytes = bincode::serialize(&sem_snap).expect("serialize SemanticSnapshot");

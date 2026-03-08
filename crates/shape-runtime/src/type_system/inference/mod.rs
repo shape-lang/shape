@@ -1134,24 +1134,6 @@ impl TypeInferenceEngine {
         (types, errors)
     }
 
-    /// Rebuild callable default-parameter metadata from the semantic symbol table.
-    ///
-    /// This is used by legacy semantic analysis paths that infer expressions
-    /// incrementally instead of running whole-program inference.
-    pub fn sync_callable_defaults_from_symbol_table(
-        &mut self,
-        symbol_table: &crate::semantic::symbol_table::SymbolTable,
-    ) {
-        self.callable_param_defaults.clear();
-        Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
-
-        for (name, symbol) in symbol_table.iter_all_symbols() {
-            if let crate::semantic::symbol_table::Symbol::Function { defaults, .. } = symbol {
-                self.callable_param_defaults
-                    .insert(name.to_string(), defaults.clone());
-            }
-        }
-    }
 
     fn apply_callsite_unions(&mut self, types: &mut HashMap<String, Type>) {
         let callsites = self.callsite_param_types.clone();

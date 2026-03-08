@@ -75,7 +75,6 @@ pub mod query_result;
 pub mod renderers;
 pub mod schema_cache;
 pub mod schema_inference;
-pub mod semantic;
 pub mod simd_comparisons;
 pub mod simd_forward_fill;
 pub mod simd_i64;

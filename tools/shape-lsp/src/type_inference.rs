@@ -1564,6 +1564,7 @@ pub struct MethodCompletionInfo {
     pub name: String,
     pub signature: Option<String>,
     pub from_trait: Option<String>,
+    pub documentation: Option<String>,
 }
 
 /// Extract methods defined via `impl`, `extend`, and `trait` blocks.
@@ -1583,7 +1584,7 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
                 .members
                 .iter()
                 .filter_map(|member| match member {
-                    TraitMember::Required(InterfaceMember::Method {
+                    TraitMember::Required(im @ InterfaceMember::Method {
                         name,
                         params,
                         return_type,
@@ -1604,6 +1605,7 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
                             name: name.clone(),
                             signature: Some(sig),
                             from_trait: Some(trait_def.name.clone()),
+                            documentation: interface_member_doc(im),
                         })
                     }
                     _ => None,
@@ -1656,6 +1658,7 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
                             name: method.name.clone(),
                             signature: Some(sig),
                             from_trait: Some(trait_name.clone()),
+                            documentation: method_doc(method.doc_comment.as_ref()),
                         });
                     }
                 }
@@ -1682,6 +1685,7 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
                             name: method.name.clone(),
                             signature: Some(sig),
                             from_trait: None,
+                            documentation: method_doc(method.doc_comment.as_ref()),
                         });
                     }
                 }
@@ -1691,6 +1695,25 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
     }
 
     result
+}
+
+fn interface_member_doc(member: &InterfaceMember) -> Option<String> {
+    match member {
+        InterfaceMember::Method { doc_comment, .. }
+        | InterfaceMember::Property { doc_comment, .. }
+        | InterfaceMember::IndexSignature { doc_comment, .. } => method_doc(doc_comment.as_ref()),
+    }
+}
+
+fn method_doc(doc_comment: Option<&shape_ast::ast::DocComment>) -> Option<String> {
+    let comment = doc_comment?;
+    if !comment.body.is_empty() {
+        Some(comment.body.clone())
+    } else if !comment.summary.is_empty() {
+        Some(comment.summary.clone())
+    } else {
+        None
+    }
 }
 
 /// Simplify `Result<T, E>` to `Result<T>` for display.

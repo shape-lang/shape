@@ -11,10 +11,7 @@ mod repl_persistence_tests {
     ) -> shape_runtime::error::Result<WireValue> {
         let program = shape_ast::parser::parse_program(source)?;
 
-        // Use incremental analysis for REPL (persistent state)
-        engine.analyze_incremental(&program, source)?;
-
-        // Execute via VM
+        // Execute via VM (type checking happens during bytecode compilation)
         let executor = BytecodeExecutor::new();
         let result = executor.execute_program(engine, &program)?;
         Ok(result.wire_value)
@@ -85,9 +82,6 @@ mod repl_persistence_tests {
 
         // Cell 1: define variable
         let program1 = shape_ast::parser::parse_program("let x = 42").expect("parse");
-        engine
-            .analyze_incremental(&program1, "let x = 42")
-            .expect("analyze");
         let result1 = executor.execute_program(&mut engine, &program1);
         assert!(
             result1.is_ok(),
@@ -97,9 +91,6 @@ mod repl_persistence_tests {
 
         // Cell 2: use variable from cell 1
         let program2 = shape_ast::parser::parse_program("x + 8").expect("parse");
-        engine
-            .analyze_incremental(&program2, "x + 8")
-            .expect("analyze");
         let result2 = executor.execute_program(&mut engine, &program2);
         assert!(
             result2.is_ok(),

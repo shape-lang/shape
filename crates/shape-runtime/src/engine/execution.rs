@@ -58,10 +58,7 @@ impl super::ShapeEngine {
         // Desugar high-level syntax (e.g., from-queries to method chains) before analysis
         shape_ast::transform::desugar_program(&mut program);
 
-        // Analyze the program to understand data requirements
         let analysis_start = std::time::Instant::now();
-        self.analyzer.set_source(source);
-        self.analyzer.analyze(&program)?;
         let analysis_time_ms = analysis_start.elapsed().as_millis() as u64;
 
         // Prefetch data if using async provider
@@ -138,10 +135,7 @@ impl super::ShapeEngine {
         // Desugar high-level syntax (e.g., from-queries to method chains) before analysis
         shape_ast::transform::desugar_program(&mut program);
 
-        // Analyze incrementally - state persists across REPL commands
         let analysis_start = std::time::Instant::now();
-        self.analyzer.set_source(source);
-        self.analyzer.analyze_incremental(&program)?;
         let analysis_time_ms = analysis_start.elapsed().as_millis() as u64;
 
         // Prefetch data if using async provider
@@ -203,8 +197,6 @@ impl super::ShapeEngine {
         }
         let mut program = parser::parse_program(source)?;
         shape_ast::transform::desugar_program(&mut program);
-        self.analyzer.set_source(source);
-        self.analyzer.analyze(&program)?;
         self.set_source(source);
         Ok(program)
     }
@@ -234,11 +226,7 @@ impl super::ShapeEngine {
         // Desugar high-level syntax (e.g., from-queries to method chains) before analysis
         shape_ast::transform::desugar_program(&mut program);
 
-        // Analyze the program
         let analysis_start = std::time::Instant::now();
-        // Note: Semantic analyzer handles function parameters in map/filter via closure type inference
-        self.analyzer.set_source(source);
-        self.analyzer.analyze(&program)?;
         let analysis_time_ms = analysis_start.elapsed().as_millis() as u64;
 
         // Store source text for error messages during execution

@@ -507,7 +507,7 @@ impl ModuleExports {
     }
 
     /// Return `ParsedModuleSchema` entries for the VM-native stdlib modules
-    /// (regex, http, crypto, env, json). Used by `SemanticAnalyzer::new()`
+    /// (regex, http, crypto, env, json). Used during engine initialization
     /// to make these globals visible at compile time.
     pub fn stdlib_module_schemas() -> Vec<crate::extensions::ParsedModuleSchema> {
         vec![

@@ -49,6 +49,10 @@ impl TypeInferenceEngine {
                 }
                 None
             }
+            // Handle T? desugared to TypeAnnotation::Generic { name: "Option", args }
+            Type::Concrete(TypeAnnotation::Generic { name, args }) if name == "Option" && args.len() == 1 => {
+                Some(Type::Concrete(args[0].clone()))
+            }
             _ => None,
         }
     }

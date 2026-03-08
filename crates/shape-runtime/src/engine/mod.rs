@@ -20,7 +20,6 @@ pub use types::{
 
 use crate::Runtime;
 use crate::data::DataFrame;
-use crate::semantic::SemanticAnalyzer;
 use shape_ast::error::{Result, ShapeError};
 
 #[cfg(feature = "jit")]
@@ -76,8 +75,6 @@ pub trait ProgramExecutor {
 pub struct ShapeEngine {
     /// The runtime environment
     pub runtime: Runtime,
-    /// Semantic analyzer for type checking
-    pub(crate) analyzer: SemanticAnalyzer,
     /// Default data for expressions/assignments
     pub default_data: DataFrame,
     /// JIT compilation cache (source hash -> compiled program)
@@ -91,6 +88,8 @@ pub struct ShapeEngine {
     pub(crate) last_snapshot: Option<HashDigest>,
     /// Script path for snapshot metadata
     pub(crate) script_path: Option<String>,
+    /// Exported symbol names (persisted across REPL commands)
+    pub(crate) exported_symbols: std::collections::HashSet<String>,
 }
 
 impl ShapeEngine {
@@ -101,7 +100,6 @@ impl ShapeEngine {
 
         Ok(Self {
             runtime,
-            analyzer: SemanticAnalyzer::new(),
             default_data: DataFrame::default(),
             #[cfg(feature = "jit")]
             jit_cache: HashMap::new(),
@@ -109,6 +107,7 @@ impl ShapeEngine {
             snapshot_store: None,
             last_snapshot: None,
             script_path: None,
+            exported_symbols: std::collections::HashSet::new(),
         })
     }
 
@@ -118,7 +117,6 @@ impl ShapeEngine {
         runtime.enable_persistent_context(&data);
         Ok(Self {
             runtime,
-            analyzer: SemanticAnalyzer::new(),
             default_data: data,
             #[cfg(feature = "jit")]
             jit_cache: HashMap::new(),
@@ -126,6 +124,7 @@ impl ShapeEngine {
             snapshot_store: None,
             last_snapshot: None,
             script_path: None,
+            exported_symbols: std::collections::HashSet::new(),
         })
     }
 
@@ -147,7 +146,6 @@ impl ShapeEngine {
 
         Ok(Self {
             runtime,
-            analyzer: SemanticAnalyzer::new(),
             default_data: DataFrame::default(),
             #[cfg(feature = "jit")]
             jit_cache: HashMap::new(),
@@ -155,17 +153,16 @@ impl ShapeEngine {
             snapshot_store: None,
             last_snapshot: None,
             script_path: None,
+            exported_symbols: std::collections::HashSet::new(),
         })
     }
 
     /// Initialize REPL mode
     ///
     /// Call this once after creating the engine and loading stdlib,
-    /// but before executing any REPL commands. This sets up persistent
-    /// state for the semantic analyzer and configures output adapters.
+    /// but before executing any REPL commands. This configures output adapters
+    /// for REPL-friendly display.
     pub fn init_repl(&mut self) {
-        self.analyzer.init_repl_scope();
-
         // Set REPL output adapter to preserve PrintResult spans
         if let Some(ctx) = self.runtime.persistent_context_mut() {
             ctx.set_output_adapter(Box::new(crate::output_adapter::ReplAdapter));
@@ -185,14 +182,16 @@ impl ShapeEngine {
                     location: None,
                 })?;
         Ok(EngineBootstrapState {
-            semantic: self.analyzer.snapshot(),
+            semantic: SemanticSnapshot {
+                exported_symbols: self.exported_symbols.clone(),
+            },
             context,
         })
     }
 
     /// Apply a previously captured stdlib bootstrap state.
     pub fn apply_bootstrap_state(&mut self, state: &EngineBootstrapState) {
-        self.analyzer.restore_from_snapshot(state.semantic.clone());
+        self.exported_symbols = state.semantic.exported_symbols.clone();
         self.runtime.set_persistent_context(state.context.clone());
     }
 
@@ -247,7 +246,9 @@ impl ShapeEngine {
                 location: None,
             })?;
 
-        let semantic = self.analyzer.snapshot();
+        let semantic = SemanticSnapshot {
+            exported_symbols: self.exported_symbols.clone(),
+        };
         let semantic_hash = store.put_struct(&semantic)?;
 
         let context = if let Some(ctx) = self.runtime.persistent_context() {
@@ -316,7 +317,7 @@ impl ShapeEngine {
         semantic: SemanticSnapshot,
         context: ContextSnapshot,
     ) -> Result<()> {
-        self.analyzer.restore_from_snapshot(semantic);
+        self.exported_symbols = semantic.exported_symbols;
         if let Some(ctx) = self.runtime.persistent_context_mut() {
             let store = self
                 .snapshot_store
@@ -335,14 +336,13 @@ impl ShapeEngine {
         }
     }
 
-    /// Register extension module namespaces with the semantic analyzer.
-    /// Must be called before execute() so the type system recognizes modules like `duckdb`.
+    /// Register extension module namespaces with the runtime.
+    /// Must be called before execute() so the module loader recognizes modules like `duckdb`.
     pub fn register_extension_modules(
         &mut self,
         modules: &[crate::extensions::ParsedModuleSchema],
     ) {
         self.runtime.register_extension_module_artifacts(modules);
-        self.analyzer.register_extension_modules(modules);
     }
 
     /// Set the current source text for error messages
@@ -356,20 +356,6 @@ impl ShapeEngine {
     /// Get the current source text (if set)
     pub fn current_source(&self) -> Option<&str> {
         self.current_source.as_deref()
-    }
-
-    /// Analyze a program incrementally (for REPL usage)
-    ///
-    /// This maintains semantic state across calls, allowing variables
-    /// and functions defined in previous commands to be visible.
-    /// Call `init_repl()` first.
-    pub fn analyze_incremental(
-        &mut self,
-        program: &shape_ast::Program,
-        source: &str,
-    ) -> Result<()> {
-        self.analyzer.set_source(source);
-        self.analyzer.analyze_incremental(program)
     }
 
     /// Register a data provider (Phase 8)
@@ -537,56 +523,40 @@ impl ShapeEngine {
         type_name: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<(String, std::collections::HashMap<String, serde_json::Value>)> {
-        // Check if type_name is a type alias through the semantic analyzer
-        if let Some(alias_entry) = self.analyzer.lookup_type_alias(type_name) {
-            // Get the base type name from the alias
-            let base_type_name = Self::get_base_type_name(&alias_entry.type_annotation);
+        // Check if type_name is a type alias through the runtime context
+        let resolved = self
+            .runtime
+            .persistent_context()
+            .map(|ctx| ctx.resolve_type_for_format(type_name));
 
-            // Merge stored meta parameter overrides with passed params
-            // Passed params take precedence over stored overrides
-            let mut merged = std::collections::HashMap::new();
+        if let Some((base_type, Some(overrides))) = resolved {
+            if base_type != type_name {
+                let mut merged = std::collections::HashMap::new();
 
-            // First, add stored overrides from the alias
-            if let Some(overrides) = &alias_entry.meta_param_overrides {
-                for (key, expr) in overrides {
-                    // Evaluate the expression to get the value
-                    if let Some(json_val) = Self::expr_to_json(expr) {
-                        merged.insert(key.clone(), json_val);
-                    }
+                // First, add stored overrides from the alias (convert ValueWord to JSON)
+                for (key, val) in overrides {
+                    let json_val = if let Some(n) = val.as_f64() {
+                        serde_json::json!(n)
+                    } else if val.is_bool() {
+                        serde_json::json!(val.as_bool())
+                    } else {
+                        // Skip non-primitive override values
+                        continue;
+                    };
+                    merged.insert(key, json_val);
                 }
+
+                // Then, overlay with passed params (these take precedence)
+                for (key, val) in params {
+                    merged.insert(key.clone(), val.clone());
+                }
+
+                return Ok((base_type, merged));
             }
-
-            // Then, overlay with passed params (these take precedence)
-            for (key, val) in params {
-                merged.insert(key.clone(), val.clone());
-            }
-
-            Ok((base_type_name, merged))
-        } else {
-            // Not an alias, use as-is
-            Ok((type_name.to_string(), params.clone()))
         }
-    }
 
-    /// Extract base type name from TypeAnnotation
-    fn get_base_type_name(ty: &shape_ast::ast::TypeAnnotation) -> String {
-        match ty {
-            shape_ast::ast::TypeAnnotation::Basic(name) => name.clone(),
-            shape_ast::ast::TypeAnnotation::Reference(name) => name.clone(),
-            shape_ast::ast::TypeAnnotation::Generic { name, .. } => name.clone(),
-            _ => "Unknown".to_string(),
-        }
-    }
-
-    /// Convert AST expression to JSON value (for simple literals)
-    fn expr_to_json(expr: &shape_ast::ast::Expr) -> Option<serde_json::Value> {
-        use shape_ast::ast::{Expr, Literal};
-        match expr {
-            Expr::Literal(Literal::Number(n), _) => Some(serde_json::json!(n)),
-            Expr::Literal(Literal::String(s), _) => Some(serde_json::json!(s)),
-            Expr::Literal(Literal::Bool(b), _) => Some(serde_json::json!(b)),
-            _ => None, // Complex expressions not supported in simple conversion
-        }
+        // Not an alias, use as-is
+        Ok((type_name.to_string(), params.clone()))
     }
 
     // ========================================================================

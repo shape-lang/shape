@@ -15,7 +15,7 @@ Shape is a **general-purpose, statically-typed programming language** implemente
 | **shape-runtime** | `shape/shape-runtime/` | Bytecode compiler, builtin functions, method registry, type schemas, stdlib modules |
 | **shape-vm** | `shape/shape-vm/` | Stack-based bytecode interpreter, typed opcodes, feedback vectors |
 | **shape-jit** | `shape/shape-jit/` | Cranelift JIT compiler (tiered: baseline @ 100 calls, optimizing @ 10k) |
-| **shape-core** | `shape/shape-core/` | High-level pipeline: parse → semantic analysis → bytecode → execute |
+| **shape-core** | `shape/shape-core/` | High-level pipeline: parse → bytecode → execute |
 | **shape-cli** | `bin/shape-cli/` | CLI: REPL, script runner, TUI editor |
 | **shape-lsp** | `tools/shape-lsp/` | Language Server Protocol (hover, completions, diagnostics, semantic tokens) |
 | **shape-test** | `tools/shape-test/` | Test framework and integration test utilities |
@@ -101,10 +101,9 @@ Shape supports:
 
 ### Compilation Pipeline
 1. **Parser** (shape-ast): Pest grammar → AST
-2. **Semantic Analysis** (shape-core): Type checking, trait resolution, method resolution
-3. **Bytecode Compiler** (shape-runtime): Two-pass — register functions, then compile. Emits typed opcodes when types are proven at compile time.
-4. **VM Interpreter** (shape-vm): Stack-based execution with NaN-boxed values, feedback vectors for type profiling
-5. **JIT** (shape-jit): Cranelift codegen, tiered (Tier 1 baseline @ 100 calls, Tier 2 optimizing @ 10k), OSR for hot loops, deoptimization back to interpreter
+2. **Bytecode Compiler** (shape-runtime): Two-pass — register functions, then compile. Type inference and checking happen during compilation. Emits typed opcodes when types are proven at compile time.
+3. **VM Interpreter** (shape-vm): Stack-based execution with NaN-boxed values, feedback vectors for type profiling
+4. **JIT** (shape-jit): Cranelift codegen, tiered (Tier 1 baseline @ 100 calls, Tier 2 optimizing @ 10k), OSR for hot loops, deoptimization back to interpreter
 
 ### Value Representation
 - **NaN-boxing**: All values fit in 8 bytes (`ValueWord`/`NanBoxed`). Plain f64 stored directly; tagged values use the NaN payload space with a 3-bit tag (i48 int, bool, none, unit, function, heap pointer).
@@ -127,7 +126,7 @@ Shape supports:
 ## Development Guidelines
 
 ### Exhaustive Match Rule
-Adding a new AST variant (Expr, Statement, Item) requires updating **~8+ files**: desugar, closure analysis, semantic analysis, type inference, visitor (x2), compiler (x2), LSP (hover/inlay/tokens), and potentially JIT translation. The compiler will tell you — follow the exhaustive match errors.
+Adding a new AST variant (Expr, Statement, Item) requires updating **~8+ files**: desugar, closure analysis, type inference, visitor (x2), compiler (x2), LSP (hover/inlay/tokens), and potentially JIT translation. The compiler will tell you — follow the exhaustive match errors.
 
 ### Benchmark Integrity
 Benchmark files (`shape/benchmarks/`) must NEVER be modified to improve compiler/JIT performance numbers. Benchmarks measure the compiler — the compiler does not get to rewrite the benchmarks. Adding type annotations, restructuring code, or inserting hints to help the JIT is forbidden. If the JIT needs hints to perform well, fix the compiler, not the benchmark.
@@ -140,17 +139,16 @@ Benchmark files (`shape/benchmarks/`) must NEVER be modified to improve compiler
 ### Testing Conventions
 - Always use **unit tests** (`#[cfg(test)]` modules inside source files). Never create standalone test files.
 - Test helpers: `eval()`, `eval_int()`, `eval_float()`, `eval_string()`, `eval_bool()` for quick bytecode-level tests.
-- `eval_with_loaders()` bypasses the semantic analyzer for tests involving extension module globals.
+- `eval_with_loaders()` bypasses standard analysis for tests involving extension module globals.
 - Use `to_obj_map(&val, &vm)` to inspect TypedObject fields in test assertions.
 
 ### Error Handling
 - Shape uses **Result types**, not exceptions. Do NOT add try/catch or throw to the language.
 
 ### Known Constraints
-- SemanticAnalyzer doesn't know about extension module globals (csv, json, etc.)
 - `BuiltinTypes::function()` loses TypeVars (`Type::Variable` → `.to_annotation()` returns `None` → falls back to fresh TypeVar)
 - `format()` builtin shadows `.format()` method on DateTime — use `iso8601()` or other named methods
-- `Queryable<T>` impl blocks remain non-generic — semantic analyzer cannot handle unbound type variables in impl blocks
+- `Queryable<T>` impl blocks remain non-generic — type inference cannot handle unbound type variables in impl blocks
 - **No `any` type**: The `any` type has been removed. Unannotated positions use `Type::Variable(TypeVar::fresh())` for inference. If inference fails, it's a compile error — no escape hatch.
 - **Bidirectional closure inference**: Method calls infer closure param types from generic method signatures (e.g. `arr.filter(|x| ...)` infers x's type from the array element type)
 - **Flow-sensitive narrowing**: `if x != null { ... }` narrows `T?` to `T` in the then-branch

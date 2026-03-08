@@ -9,14 +9,12 @@ use shape_ast::error::{Result, ResultExt, ShapeError};
 use std::collections::HashMap;
 
 use crate::data::DataFrame;
-use crate::semantic::SemanticAnalyzer;
 use crate::{QueryResult as RuntimeQueryResult, Runtime};
 use shape_ast::parser;
 
 /// Main query executor that orchestrates the entire Shape pipeline
 pub struct QueryExecutor {
     runtime: Runtime,
-    analyzer: SemanticAnalyzer,
 }
 
 /// Result of executing a Shape query
@@ -149,7 +147,6 @@ impl QueryExecutor {
     pub fn new() -> Self {
         Self {
             runtime: Runtime::new(),
-            analyzer: SemanticAnalyzer::new(),
         }
     }
 
@@ -160,11 +157,6 @@ impl QueryExecutor {
 
         // Parse the query
         let program = parser::parse_program(query).with_context("Failed to parse Shape query")?;
-
-        // Analyze semantically
-        self.analyzer
-            .analyze(&program)
-            .with_context("Semantic analysis failed")?;
 
         // Load the program first
         self.runtime
