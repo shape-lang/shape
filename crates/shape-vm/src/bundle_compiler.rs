@@ -2,8 +2,9 @@
 //!
 //! Takes a ProjectRoot and compiles all .shape files into a PackageBundle.
 
-use crate::bytecode::BytecodeProgram;
+use crate::bytecode;
 use crate::compiler::BytecodeCompiler;
+use crate::module_resolution::should_include_item;
 use sha2::{Digest, Sha256};
 use shape_ast::parser::parse_program;
 use shape_runtime::module_manifest::ModuleManifest;
@@ -34,6 +35,12 @@ impl BundleCompiler {
         let mut modules = Vec::new();
         let mut all_sources = String::new();
         let mut docs: HashMap<String, Vec<shape_runtime::doc_extract::DocItem>> = HashMap::new();
+        // Collect content-addressed programs alongside modules (avoids deserialize roundtrip)
+        let mut compiled_programs: Vec<(String, Vec<String>, Option<bytecode::Program>)> =
+            Vec::new();
+
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        let known_bindings = crate::stdlib::core_binding_names();
 
         for (file_path, module_path) in &shape_files {
             let source = std::fs::read_to_string(file_path)
@@ -48,24 +55,34 @@ impl BundleCompiler {
             all_sources.push_str(&source);
 
             // Parse
-            let ast = parse_program(&source)
+            let mut ast = parse_program(&source)
                 .map_err(|e| format!("Failed to parse '{}': {}", file_path.display(), e))?;
 
-            // Extract documentation from source + AST
+            // Extract documentation from source + AST (must use original AST)
             let module_docs =
                 shape_runtime::doc_extract::extract_docs_from_ast(&source, &ast);
             if !module_docs.is_empty() {
                 docs.insert(module_path.clone(), module_docs);
             }
 
-            // Collect export names from AST
+            // Collect export names from AST (must use original AST)
             let export_names = collect_export_names(&ast);
 
-            // Compile to bytecode (BytecodeCompiler::compile consumes self)
-            let compiler = BytecodeCompiler::new();
+            // Inject stdlib prelude items
+            crate::module_resolution::prepend_prelude_items(&mut ast);
+
+            // Resolve explicit imports via ModuleLoader
+            resolve_and_inline_imports(&mut ast, &mut loader);
+
+            // Compile to bytecode with known bindings
+            let mut compiler = BytecodeCompiler::new();
+            compiler.register_known_bindings(&known_bindings);
             let bytecode = compiler
                 .compile(&ast)
                 .map_err(|e| format!("Failed to compile '{}': {}", file_path.display(), e))?;
+
+            // Extract content-addressed program BEFORE serializing (avoid roundtrip)
+            let content_addressed = bytecode.content_addressed.clone();
 
             // Serialize bytecode to MessagePack
             let bytecode_bytes = rmp_serde::to_vec(&bytecode).map_err(|e| {
@@ -75,6 +92,12 @@ impl BundleCompiler {
                     e
                 )
             })?;
+
+            compiled_programs.push((
+                module_path.clone(),
+                export_names.clone(),
+                content_addressed,
+            ));
 
             modules.push(BundledModule {
                 module_path: module_path.clone(),
@@ -143,19 +166,12 @@ impl BundleCompiler {
             readme,
         };
 
-        // 7. Extract content-addressed blobs and build manifests
+        // 7. Extract content-addressed blobs and build manifests (from in-memory programs)
         let mut blob_store: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         let mut manifests: Vec<ModuleManifest> = Vec::new();
 
-        for bundled_module in &modules {
-            // Deserialize the bytecode to access content_addressed metadata
-            let program: BytecodeProgram =
-                match rmp_serde::from_slice(&bundled_module.bytecode_bytes) {
-                    Ok(p) => p,
-                    Err(_) => continue, // Skip if deserialization fails
-                };
-
-            if let Some(ref ca) = program.content_addressed {
+        for (module_path, export_names, content_addressed) in &compiled_programs {
+            if let Some(ca) = content_addressed {
                 // Extract blobs into blob_store
                 for (hash, blob) in &ca.function_store {
                     if let Ok(blob_bytes) = rmp_serde::to_vec(blob) {
@@ -164,13 +180,11 @@ impl BundleCompiler {
                 }
 
                 // Build manifest for this module
-                let mut manifest = ModuleManifest::new(
-                    bundled_module.module_path.clone(),
-                    metadata.version.clone(),
-                );
+                let mut manifest =
+                    ModuleManifest::new(module_path.clone(), metadata.version.clone());
 
                 // Map export names to their function hashes
-                for export_name in &bundled_module.export_names {
+                for export_name in export_names {
                     for (hash, blob) in &ca.function_store {
                         if blob.name == *export_name {
                             manifest.add_export(export_name.clone(), hash.0);
@@ -184,7 +198,6 @@ impl BundleCompiler {
                 for (_hash, blob) in &ca.function_store {
                     for schema_name in &blob.type_schemas {
                         if seen_schemas.insert(schema_name.clone()) {
-                            use sha2::{Digest, Sha256};
                             let schema_hash = Sha256::digest(schema_name.as_bytes());
                             let mut hash_bytes = [0u8; 32];
                             hash_bytes.copy_from_slice(&schema_hash);
@@ -229,6 +242,54 @@ impl BundleCompiler {
             native_dependency_scopes,
             docs,
         })
+    }
+}
+
+/// Resolve import statements in a program by loading modules and inlining their AST items.
+/// This replicates the logic from `BytecodeExecutor::append_imported_module_items` but
+/// takes a `ModuleLoader` directly, suitable for use outside the executor context.
+fn resolve_and_inline_imports(
+    ast: &mut shape_ast::Program,
+    loader: &mut shape_runtime::module_loader::ModuleLoader,
+) {
+    use shape_ast::ast::{ImportItems, Item};
+    let mut module_items = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+
+    for item in &ast.items {
+        let Item::Import(import_stmt, _) = item else {
+            continue;
+        };
+        let module_path = import_stmt.from.as_str();
+        if module_path.is_empty() || !seen_paths.insert(module_path.to_string()) {
+            continue;
+        }
+
+        // Load module (errors are non-fatal — module might resolve at runtime)
+        let _ = loader.load_module(module_path);
+
+        let named_filter: Option<std::collections::HashSet<&str>> = match &import_stmt.items {
+            ImportItems::Named(specs) => Some(specs.iter().map(|s| s.name.as_str()).collect()),
+            ImportItems::Namespace { .. } => None,
+        };
+
+        if let Some(module) = loader.get_module(module_path) {
+            let items = module.ast.items.clone();
+            if let Some(ref names) = named_filter {
+                for ast_item in items {
+                    if should_include_item(&ast_item, names) {
+                        module_items.push(ast_item);
+                    }
+                }
+            } else {
+                module_items.extend(items);
+            }
+        }
+    }
+
+    if !module_items.is_empty() {
+        module_items.extend(std::mem::take(&mut ast.items));
+        ast.items = module_items;
     }
 }
 
@@ -634,6 +695,47 @@ version = "0.1.0"
             .iter()
             .find(|m| m.module_path == "utils::helpers");
         assert!(helpers_mod.is_some(), "should have utils::helpers module");
+    }
+
+    #[test]
+    fn test_compile_with_stdlib_imports() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
+
+        std::fs::write(
+            root.join("shape.toml"),
+            r#"
+[project]
+name = "test-stdlib-imports"
+version = "0.1.0"
+"#,
+        )
+        .expect("write shape.toml");
+
+        // Source file that uses stdlib imports — this previously failed because
+        // BundleCompiler didn't resolve imports before compilation.
+        std::fs::write(
+            root.join("main.shape"),
+            r#"
+from std::core::native use { ptr_new_cell }
+
+pub fn make_cell() {
+    let cell = ptr_new_cell()
+    cell
+}
+"#,
+        )
+        .expect("write main.shape");
+
+        let project =
+            shape_runtime::project::find_project_root(root).expect("should find project root");
+
+        let bundle = BundleCompiler::compile(&project)
+            .expect("compilation with stdlib imports should succeed");
+
+        assert_eq!(bundle.metadata.name, "test-stdlib-imports");
+        let main_mod = bundle.modules.iter().find(|m| m.module_path == "main");
+        assert!(main_mod.is_some(), "should have main module");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use shape_runtime::module_loader::ModuleCode;
 /// Check whether an AST item's name is in the given set of imported names.
 /// Items without a clear name (Impl, Extend, Import) are always included
 /// because they may be required by the named items.
-fn should_include_item(item: &Item, names: &std::collections::HashSet<&str>) -> bool {
+pub(crate) fn should_include_item(item: &Item, names: &std::collections::HashSet<&str>) -> bool {
     match item {
         Item::Function(func_def, _) => names.contains(func_def.name.as_str()),
         Item::Export(export, _) => match &export.item {
