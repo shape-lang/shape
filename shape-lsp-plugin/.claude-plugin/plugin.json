@@ -1,0 +1,6 @@
+{
+    "name": "shape-lsp",
+    "description": "Language Server Protocol support for Shape",
+    "version": "0.1.0",
+    "lspServers": "../.lsp.json"
+}

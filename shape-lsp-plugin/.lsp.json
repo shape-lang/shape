@@ -1,0 +1,9 @@
+{
+    "shape": {
+        "command": "shape-lsp",
+        "args": ["serve"],
+        "extensionToLanguage": {
+            ".shape": "shape"
+        }
+    }
+}
