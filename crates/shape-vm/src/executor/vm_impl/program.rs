@@ -1,72 +1,6 @@
-use super::*;
+use super::super::*;
 
 impl VirtualMachine {
-    pub(super) fn pop_builtin_args(&mut self) -> Result<Vec<ValueWord>, VMError> {
-        // Pop arg count (top of stack)
-        let count_nb = self.pop_vw()?;
-        let count = count_nb.as_number_coerce().ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "Expected numeric arg count, got {:?}",
-                count_nb.type_name()
-            ))
-        })? as usize;
-
-        // Pop args in reverse order (stack is LIFO) then reverse to get correct order
-        let mut args = Vec::with_capacity(count);
-        for _ in 0..count {
-            args.push(self.pop_vw()?);
-        }
-        args.reverse();
-        Ok(args)
-    }
-    // ========================================================================
-
-    /// Enable output capture for testing
-    /// When enabled, print output goes to an internal buffer instead of stdout
-    pub fn enable_output_capture(&mut self) {
-        self.output_buffer = Some(Vec::new());
-    }
-
-    /// Get captured output (returns empty vec if capture not enabled)
-    pub fn get_captured_output(&self) -> Vec<String> {
-        self.output_buffer.clone().unwrap_or_default()
-    }
-
-    /// Clear captured output
-    pub fn clear_captured_output(&mut self) {
-        if let Some(ref mut buf) = self.output_buffer {
-            buf.clear();
-        }
-    }
-
-    /// Write to output (either buffer or stdout)
-    pub(crate) fn write_output(&mut self, text: &str) {
-        if let Some(ref mut buf) = self.output_buffer {
-            buf.push(text.to_string());
-        } else {
-            println!("{}", text);
-        }
-    }
-
-    /// Set a module_binding variable by name using ValueWord directly.
-    pub(crate) fn set_module_binding_by_name_nb(&mut self, name: &str, value: ValueWord) {
-        if let Some(idx) = self
-            .program
-            .module_binding_names
-            .iter()
-            .position(|n| n == name)
-        {
-            if idx < self.module_bindings.len() {
-                // BARRIER: heap write site — overwrites module binding by name
-                self.module_bindings[idx] = value;
-            } else {
-                self.module_bindings.resize_with(idx + 1, ValueWord::none);
-                // BARRIER: heap write site — overwrites module binding by name (after resize)
-                self.module_bindings[idx] = value;
-            }
-        }
-    }
-
     /// Load a program into the VM
     pub fn load_program(&mut self, program: BytecodeProgram) {
         // Content-addressed bytecode is the canonical runtime format.
@@ -415,7 +349,7 @@ impl VirtualMachine {
     /// If the program was compiled with content-addressed metadata (`content_addressed`
     /// is `Some`), we extract blob hashes by matching function names/entry points.
     /// Otherwise both vectors remain empty and `CallFrame::blob_hash` will be `None`.
-    pub(super) fn populate_content_addressed_metadata(&mut self) {
+    pub(crate) fn populate_content_addressed_metadata(&mut self) {
         let func_count = self.program.functions.len();
         self.function_entry_points = self
             .program
@@ -460,7 +394,7 @@ impl VirtualMachine {
     /// Build the function name → index map for runtime UFCS dispatch.
     /// Called after program load or merge to enable type-scoped method resolution
     /// (e.g., "DbTable::filter" looked up when calling .filter() on an Object with __type "DbTable").
-    pub(super) fn rebuild_function_name_index(&mut self) {
+    pub(crate) fn rebuild_function_name_index(&mut self) {
         self.function_name_index.clear();
         for (i, func) in self.program.functions.iter().enumerate() {
             self.function_name_index.insert(func.name.clone(), i as u16);
@@ -521,47 +455,6 @@ impl VirtualMachine {
         self.last_uncaught_exception = None;
     }
 
-    /// Get the line number of the last error (for LSP integration)
-    pub fn last_error_line(&self) -> Option<u32> {
-        self.last_error_line
-    }
-
-    /// Get the file path of the last error (for LSP integration)
-    pub fn last_error_file(&self) -> Option<&str> {
-        self.last_error_file.as_deref()
-    }
-
-    /// Capture an uncaught exception payload for host-side rendering.
-    pub(crate) fn set_last_uncaught_exception(&mut self, value: ValueWord) {
-        self.last_uncaught_exception = Some(value);
-    }
-
-    /// Clear any previously captured uncaught exception payload.
-    pub(crate) fn clear_last_uncaught_exception(&mut self) {
-        self.last_uncaught_exception = None;
-    }
-
-    /// Take the last uncaught exception payload if present.
-    pub fn take_last_uncaught_exception(&mut self) -> Option<ValueWord> {
-        self.last_uncaught_exception.take()
-    }
-
-    // execute(), execute_with_suspend(), execute_fast(), execute_instruction(),
-    // execute_until_call_depth(), enrich_error_with_location() moved to dispatch module.
-
-    // execute_function_by_name/id(), execute_closure(), execute_function_fast(),
-    // execute_function_with_named_args(), resume(), execute_with_async(),
-    // resolve_spawned_task(), call_function_with_nb_args(), call_closure_with_nb_args(),
-    // call_value_immediate_nb(), call_function_from_stack()
-    // moved to call_convention module.
-
-    // snapshot(), from_snapshot() moved to snapshot module.
-
-    // handle_window_functions(), handle_join_execute(), handle_eval_datetime_expr(),
-    // exec_bind_schema(), exec_load_col() moved to window_join module.
-
-    // ===== Stack Operations =====
-
     /// Push a value onto the stack (public, for testing and host integration)
     pub fn push_value(&mut self, value: ValueWord) {
         if self.sp >= self.stack.len() {
@@ -569,14 +462,5 @@ impl VirtualMachine {
         }
         self.stack[self.sp] = value;
         self.sp += 1;
-    }
-
-    /// Get function ID for fast repeated calls (avoids name lookup in hot loops)
-    pub fn get_function_id(&self, name: &str) -> Option<u16> {
-        self.program
-            .functions
-            .iter()
-            .position(|f| f.name == name)
-            .map(|id| id as u16)
     }
 }

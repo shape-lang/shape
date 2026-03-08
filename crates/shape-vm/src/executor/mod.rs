@@ -277,8 +277,8 @@ pub struct VirtualMachine {
     /// type-scoped impl methods (e.g., "DuckDbQuery::filter") at runtime.
     function_name_index: HashMap<String, u16>,
 
-    /// Extension method intrinsics for fast dispatch on typed Objects.
-    /// Populated from ModuleExports.method_intrinsics during register_extension().
+    /// Method intrinsics for fast dispatch on typed Objects.
+    /// Populated from ModuleExports.method_intrinsics during module registration.
     /// Checked in handle_object_method() after built-in methods, before UFCS.
     extension_methods: HashMap<String, HashMap<String, shape_runtime::module_exports::ModuleFn>>,
 
@@ -415,10 +415,7 @@ pub struct DebugVMState {
     pub call_stack_depth: usize,
 }
 
-mod vm_impl_part1;
-mod vm_impl_part2;
-mod vm_impl_part3;
-mod vm_impl_part4;
+mod vm_impl;
 
 /// Replace the active wire transport provider used by VM transport builtins.
 pub fn set_transport_provider(

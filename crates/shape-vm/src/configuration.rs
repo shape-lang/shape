@@ -1,6 +1,6 @@
 //! BytecodeExecutor struct definition, constructors, and configuration.
 //!
-//! Extension registration, module schema export, bytecode caching,
+//! Stdlib module registration, module schema export, bytecode caching,
 //! interrupt handling, and dependency path wiring live here.
 
 use std::collections::{HashMap, HashSet};
@@ -47,7 +47,7 @@ impl BytecodeExecutor {
             dependency_paths: HashMap::new(),
             module_loader: None,
         };
-        executor.register_stdlib_extensions();
+        executor.register_stdlib_modules();
 
         // Always initialize a module loader so that append_imported_module_items()
         // can resolve imports via the embedded stdlib modules.
@@ -58,9 +58,9 @@ impl BytecodeExecutor {
         executor
     }
 
-    /// Register the VM-native stdlib modules (regex, http, crypto, env, log, json)
+    /// Register the VM-native stdlib modules (regex, http, crypto, env, json, etc.)
     /// so the compiler discovers their exports and emits correct module bindings.
-    fn register_stdlib_extensions(&mut self) {
+    fn register_stdlib_modules(&mut self) {
         self.extensions
             .push(shape_runtime::stdlib::regex::create_regex_module());
         self.extensions
@@ -69,8 +69,6 @@ impl BytecodeExecutor {
             .push(shape_runtime::stdlib::crypto::create_crypto_module());
         self.extensions
             .push(shape_runtime::stdlib::env::create_env_module());
-        self.extensions
-            .push(shape_runtime::stdlib::log::create_log_module());
         self.extensions
             .push(shape_runtime::stdlib::json::create_json_module());
         self.extensions
@@ -85,9 +83,14 @@ impl BytecodeExecutor {
             .push(shape_runtime::stdlib::archive::create_archive_module());
         self.extensions
             .push(shape_runtime::stdlib::unicode::create_unicode_module());
+        self.extensions
+            .push(shape_runtime::stdlib::csv_module::create_csv_module());
+        self.extensions
+            .push(shape_runtime::stdlib::msgpack_module::create_msgpack_module());
     }
 
-    /// Register an extension module. It will be available in all subsequent executions.
+    /// Register an external/user extension module (e.g. loaded from a .so plugin).
+    /// It will be available in all subsequent executions.
     /// Bundled Shape sources are kept for legacy virtual-module imports.
     pub fn register_extension(&mut self, module: shape_runtime::module_exports::ModuleExports) {
         // Register bundled module artifacts for import-based resolution.

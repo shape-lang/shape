@@ -475,11 +475,13 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::ContentCodeCtor,
     BuiltinFunction::ContentKvCtor,
     BuiltinFunction::ContentFragmentCtor,
-    // DateTime (4)
+    // DateTime (6)
     BuiltinFunction::DateTimeNow,
     BuiltinFunction::DateTimeUtc,
     BuiltinFunction::DateTimeParse,
     BuiltinFunction::DateTimeFromEpoch,
+    BuiltinFunction::DateTimeFromParts,
+    BuiltinFunction::DateTimeFromUnixSecs,
     // Concurrency (4)
     BuiltinFunction::MutexCtor,
     BuiltinFunction::AtomicCtor,
