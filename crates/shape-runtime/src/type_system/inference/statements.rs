@@ -4,7 +4,7 @@
 
 use super::TypeInferenceEngine;
 use crate::type_system::*;
-use shape_ast::ast::Statement;
+use shape_ast::ast::{BinaryOp, Expr, Literal, Statement, TypeAnnotation};
 
 impl TypeInferenceEngine {
     /// Infer type of statements
@@ -134,14 +134,32 @@ impl TypeInferenceEngine {
             Statement::If(if_stmt, _) => {
                 self.infer_expr(&if_stmt.condition)?;
 
+                // Extract flow-sensitive narrowing info from the condition
+                let narrowings = self.extract_narrowings(&if_stmt.condition);
+
                 // Enter conditional context for field evolution tracking
                 self.env.enter_conditional();
+                self.env.push_scope();
+                // Push narrowed types for then-branch (e.g. x != null → x: T)
+                for (var_name, narrowed_type) in &narrowings {
+                    self.env.define(var_name, TypeScheme::mono(narrowed_type.clone()));
+                }
                 let then_type = self.infer_statements(&if_stmt.then_body)?;
+                self.env.pop_scope();
                 self.env.exit_conditional();
 
                 if let Some(else_body) = &if_stmt.else_body {
+                    // Compute inverse narrowings for else-branch
+                    let inverse_narrowings =
+                        self.extract_inverse_narrowings(&if_stmt.condition);
                     self.env.enter_conditional();
+                    self.env.push_scope();
+                    for (var_name, narrowed_type) in &inverse_narrowings {
+                        self.env
+                            .define(var_name, TypeScheme::mono(narrowed_type.clone()));
+                    }
                     let else_type = self.infer_statements(else_body)?;
+                    self.env.pop_scope();
                     self.env.exit_conditional();
                     // Both branches should have compatible types
                     self.constraints.push((then_type.clone(), else_type));
@@ -194,6 +212,97 @@ impl TypeInferenceEngine {
                 Ok(BuiltinTypes::void())
             }
             _ => Ok(BuiltinTypes::void()),
+        }
+    }
+
+    /// Extract narrowing info from a condition expression.
+    /// For `x != null`, returns `[(x, T)]` where the original type of x is `T?`.
+    fn extract_narrowings(&self, condition: &Expr) -> Vec<(String, Type)> {
+        match condition {
+            // x != null  or  x != undefined  →  narrow x from T? to T
+            Expr::BinaryOp {
+                left,
+                op: BinaryOp::NotEqual,
+                right,
+                ..
+            } => {
+                if Self::is_null_literal(right) {
+                    self.try_null_narrowing(left)
+                } else if Self::is_null_literal(left) {
+                    self.try_null_narrowing(right)
+                } else {
+                    vec![]
+                }
+            }
+            // x == null  →  no narrowing in then-branch (narrowing in else-branch)
+            _ => vec![],
+        }
+    }
+
+    /// Extract inverse narrowings for else-branch.
+    /// For `x == null`, returns `[(x, T)]` (else means x is not null).
+    /// For `x != null`, no narrowing in else-branch.
+    fn extract_inverse_narrowings(&self, condition: &Expr) -> Vec<(String, Type)> {
+        match condition {
+            // x == null  →  in the else-branch, x is not null → narrow T? to T
+            Expr::BinaryOp {
+                left,
+                op: BinaryOp::Equal,
+                right,
+                ..
+            } => {
+                if Self::is_null_literal(right) {
+                    self.try_null_narrowing(left)
+                } else if Self::is_null_literal(left) {
+                    self.try_null_narrowing(right)
+                } else {
+                    vec![]
+                }
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Check if an expression is a null/none literal.
+    fn is_null_literal(expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(Literal::None, _) => true,
+            Expr::Identifier(name, _) => {
+                name == "null" || name == "undefined" || name == "none"
+            }
+            _ => false,
+        }
+    }
+
+    /// Try to narrow a variable from T? to T.
+    /// Returns narrowing if the expression is a variable with an Optional type.
+    fn try_null_narrowing(&self, expr: &Expr) -> Vec<(String, Type)> {
+        if let Expr::Identifier(name, _) = expr {
+            if let Some(scheme) = self.env.lookup(name) {
+                let ty = scheme.instantiate();
+                if let Some(inner) = Self::unwrap_optional_type(&ty) {
+                    return vec![(name.clone(), inner)];
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// Unwrap T? / Optional<T> to T.
+    fn unwrap_optional_type(ty: &Type) -> Option<Type> {
+        match ty {
+            Type::Concrete(TypeAnnotation::Optional(inner)) => {
+                Some(Type::Concrete(*inner.clone()))
+            }
+            Type::Generic { base, args } => {
+                if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {
+                    if name == "Option" && args.len() == 1 {
+                        return Some(args[0].clone());
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 }

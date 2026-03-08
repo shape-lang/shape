@@ -395,7 +395,7 @@ pub unsafe extern "C" fn ts_compile(
     };
     let return_type_str = match str_from_raw(return_type, return_type_len) {
         Some(s) => s,
-        None => "any",
+        None => "_",
     };
 
     let param_names: Vec<String> = if param_names_msgpack.is_null() || param_names_len == 0 {

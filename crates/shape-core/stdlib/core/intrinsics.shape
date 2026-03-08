@@ -77,11 +77,11 @@ builtin fn cosh(value: number) -> number;
 builtin fn tanh(value: number) -> number;
 
 /// Print values to output.
-builtin fn print(values: any) -> void;
+builtin fn print<T>(values: T) -> void;
 /// Return the length of an array, string, or collection.
-builtin fn len(value: any) -> number;
+builtin fn len<T>(value: T) -> number;
 /// Alias for len().
-builtin fn length(value: any) -> number;
+builtin fn length<T>(value: T) -> number;
 /// Generate an array of numbers from start to end.
 builtin fn range(start: number, end: number, step: number = 1) -> Vec<number>;
 
@@ -117,25 +117,25 @@ builtin fn rolling_max<T>(
 ) -> Table<T>;
 
 /// Compute average of values in a collection.
-builtin fn avg(collection: any, value: number) -> number;
+builtin fn avg<T>(collection: T, value: number) -> number;
 /// Compute sum.
 builtin fn sum<T>(table: Table<T>, value: (row: T) => number) -> number;
 /// Compute mean.
 builtin fn mean<T>(table: Table<T>, value: (row: T) => number) -> number;
 /// Compute standard deviation.
-builtin fn stddev(values: any) -> number;
+builtin fn stddev<T>(values: T) -> number;
 /// Count elements.
 builtin fn count(array: Vec) -> number;
 /// Return highest value.
-builtin fn highest(collection: any, count: number) -> number;
+builtin fn highest<T>(collection: T, count: number) -> number;
 /// Return lowest value.
-builtin fn lowest(collection: any, count: number) -> number;
+builtin fn lowest<T>(collection: T, count: number) -> number;
 
 /// Configure the data backend.
 builtin fn configure_data_source(config: object) -> void;
 
 /// Format a value with a template.
-builtin fn format(value: any, template: string) -> string;
+builtin fn format<T>(value: T, template: string) -> string;
 /// Format a number as percent.
 builtin fn format_percent(value: number) -> string;
 /// Format a number with optional decimals.
@@ -185,10 +185,10 @@ builtin fn __native_ptr_read_ptr(addr: ptr) -> ptr;
 /// Write a pointer-sized value to memory at `addr`.
 builtin fn __native_ptr_write_ptr(addr: ptr, value: ptr) -> void;
 /// Import Arrow C Data Interface pointers into a table.
-builtin fn __native_table_from_arrow_c(
+builtin fn __native_table_from_arrow_c<T>(
   schema_ptr: ptr,
   array_ptr: ptr
-) -> Result<Table<any>, AnyError>;
+) -> Result<Table<T>, AnyError>;
 /// Import Arrow C Data pointers and bind to a named row schema in one step.
 builtin fn __native_table_from_arrow_c_typed<T>(
   schema_ptr: ptr,
@@ -197,7 +197,7 @@ builtin fn __native_table_from_arrow_c_typed<T>(
 ) -> Result<Table<T>, AnyError>;
 /// Bind/validate a table against a runtime type schema by name.
 builtin fn __native_table_bind_type<T>(
-  table: Table<any>,
+  table: Table<T>,
   type_name: string
 ) -> Result<Table<T>, AnyError>;
 

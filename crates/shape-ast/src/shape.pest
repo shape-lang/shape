@@ -940,7 +940,6 @@ basic_type = {
     | "option"
     | "timestamp"
     | "undefined"
-    | "any"
     | "never"
     | "pattern"
     | ident

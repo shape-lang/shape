@@ -230,7 +230,6 @@ fn format_annotation(ann: &TypeAnnotation) -> String {
                 .join(", ")
         ),
         TypeAnnotation::Void => "void".to_string(),
-        TypeAnnotation::Any => "any".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "None".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),

@@ -151,7 +151,6 @@ impl Unifier {
             TypeAnnotation::Basic(_)
             | TypeAnnotation::Reference(_)
             | TypeAnnotation::Void
-            | TypeAnnotation::Any
             | TypeAnnotation::Never
             | TypeAnnotation::Null
             | TypeAnnotation::Undefined

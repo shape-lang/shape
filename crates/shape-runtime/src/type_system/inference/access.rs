@@ -322,7 +322,6 @@ impl TypeInferenceEngine {
                     .collect(),
             },
             TypeAnnotation::Void
-            | TypeAnnotation::Any
             | TypeAnnotation::Never
             | TypeAnnotation::Null
             | TypeAnnotation::Undefined
@@ -480,7 +479,7 @@ impl TypeInferenceEngine {
         ) {
             if matches!(
                 &func_type,
-                Type::Variable(_) | Type::Constrained { .. } | Type::Concrete(TypeAnnotation::Any)
+                Type::Variable(_) | Type::Constrained { .. }
             ) {
                 let result_type = Type::Variable(TypeVar::fresh());
                 let expected_func_type =

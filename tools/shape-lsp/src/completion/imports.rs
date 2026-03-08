@@ -80,7 +80,7 @@ fn local_module_function_from_def(function: &FunctionDef) -> LocalModuleFunction
             .type_annotation
             .as_ref()
             .and_then(type_annotation_to_string)
-            .unwrap_or_else(|| "any".to_string());
+            .unwrap_or_else(|| "_".to_string());
         let required = param.default_value.is_none();
         for name in names {
             params.push(LocalModuleParam {

@@ -1196,12 +1196,12 @@ fn get_impl_method_hover(
                         .map(|p| {
                             let pname = p.name.clone().unwrap_or_else(|| "_".to_string());
                             let ptype = type_annotation_to_string(&p.type_annotation)
-                                .unwrap_or_else(|| "any".to_string());
+                                .unwrap_or_else(|| "_".to_string());
                             format!("{}: {}", pname, ptype)
                         })
                         .collect();
                     let return_type_str =
-                        type_annotation_to_string(return_type).unwrap_or_else(|| "any".to_string());
+                        type_annotation_to_string(return_type).unwrap_or_else(|| "_".to_string());
                     let signature =
                         format!("{}({}): {}", name, param_names.join(", "), return_type_str);
                     let mut content = format!(
@@ -1230,7 +1230,7 @@ fn get_impl_method_hover(
                         .return_type
                         .as_ref()
                         .and_then(type_annotation_to_string)
-                        .unwrap_or_else(|| "any".to_string());
+                        .unwrap_or_else(|| "_".to_string());
 
                     let signature = format!(
                         "{}({}): {}",
@@ -2073,7 +2073,7 @@ fn build_function_signature_from_inference(
             let ref_mode = sig_info.param_ref_modes.get(name);
             if let Some(type_ann) = &p.type_annotation {
                 let type_str =
-                    type_annotation_to_string(type_ann).unwrap_or_else(|| "any".to_string());
+                    type_annotation_to_string(type_ann).unwrap_or_else(|| "_".to_string());
                 let display_type = format_reference_aware_type(&type_str, ref_mode);
                 format!("{}: {}", name, display_type)
             } else if let Some((_, inferred)) = sig_info.param_types.iter().find(|(n, _)| n == name)

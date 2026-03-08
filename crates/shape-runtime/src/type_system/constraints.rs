@@ -412,9 +412,6 @@ impl ConstraintSolver {
                 self.unify_annotation_sets(i1, i2)
             }
 
-            // Any type unifies with anything
-            (TypeAnnotation::Any, _) | (_, TypeAnnotation::Any) => Ok(true),
-
             // Void, Null, Undefined
             (TypeAnnotation::Void, TypeAnnotation::Void) => Ok(true),
             (TypeAnnotation::Null, TypeAnnotation::Null) => Ok(true),
@@ -878,9 +875,6 @@ impl ConstraintSolver {
         match (ty, base) {
             // Same types are subtypes
             (t1, t2) if t1 == t2 => Ok(()),
-
-            // Any is a supertype of everything
-            (_, Type::Concrete(TypeAnnotation::Any)) => Ok(()),
 
             // Type variables - if we can unify, it's compatible
             (Type::Variable(_), _) | (_, Type::Variable(_)) => Ok(()),

@@ -368,7 +368,7 @@ fn convert_with_type(
             Ok(rmpv::Value::Map(entries))
         }
 
-        // "any" or unknown — fall back to untyped
+        // "object" or unknown — fall back to untyped
         _ => pyobject_to_msgpack(py, obj),
     }
 }

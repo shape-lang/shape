@@ -256,7 +256,6 @@ impl VirtualMachine {
             TypeAnnotation::Intersection(types) => types
                 .iter()
                 .all(|inner| self.check_instanceof_nb(value, inner)),
-            TypeAnnotation::Any => true,
             TypeAnnotation::Void => matches!(value.tag(), NanTag::Unit),
             TypeAnnotation::Never => false,
             TypeAnnotation::Tuple(types) => {

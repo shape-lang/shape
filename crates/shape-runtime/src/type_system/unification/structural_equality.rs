@@ -160,9 +160,6 @@ pub fn annotations_equal(a: &TypeAnnotation, b: &TypeAnnotation) -> bool {
         // Void
         (TypeAnnotation::Void, TypeAnnotation::Void) => true,
 
-        // Any
-        (TypeAnnotation::Any, TypeAnnotation::Any) => true,
-
         // Never
         (TypeAnnotation::Never, TypeAnnotation::Never) => true,
 

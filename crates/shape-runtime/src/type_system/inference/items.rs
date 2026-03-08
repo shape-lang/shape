@@ -445,7 +445,7 @@ impl TypeInferenceEngine {
                     .map(|e| {
                         self.resolve_type_annotation(e)
                             .to_annotation()
-                            .unwrap_or(TypeAnnotation::Any)
+                            .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()))
                     })
                     .collect();
                 Type::Concrete(TypeAnnotation::Tuple(resolved))
@@ -459,7 +459,7 @@ impl TypeInferenceEngine {
                         type_annotation: self
                             .resolve_type_annotation(&f.type_annotation)
                             .to_annotation()
-                            .unwrap_or(TypeAnnotation::Any),
+                            .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
                         annotations: vec![],
                     })
                     .collect();
@@ -489,10 +489,9 @@ impl TypeInferenceEngine {
             TypeAnnotation::Union(types) => {
                 let resolved: Vec<TypeAnnotation> = types
                     .iter()
-                    .map(|t| {
+                    .filter_map(|t| {
                         self.resolve_type_annotation(t)
                             .to_annotation()
-                            .unwrap_or(TypeAnnotation::Any)
                     })
                     .collect();
                 Type::Concrete(TypeAnnotation::Union(resolved))
@@ -500,10 +499,9 @@ impl TypeInferenceEngine {
             TypeAnnotation::Intersection(types) => {
                 let resolved: Vec<TypeAnnotation> = types
                     .iter()
-                    .map(|t| {
+                    .filter_map(|t| {
                         self.resolve_type_annotation(t)
                             .to_annotation()
-                            .unwrap_or(TypeAnnotation::Any)
                     })
                     .collect();
                 Type::Concrete(TypeAnnotation::Intersection(resolved))
@@ -511,7 +509,7 @@ impl TypeInferenceEngine {
             TypeAnnotation::Optional(inner) => Type::Concrete(TypeAnnotation::Optional(Box::new(
                 self.resolve_type_annotation(inner)
                     .to_annotation()
-                    .unwrap_or(TypeAnnotation::Any),
+                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
             ))),
             _ => Type::Concrete(ann.clone()),
         }

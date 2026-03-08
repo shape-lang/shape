@@ -269,7 +269,6 @@ fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
                 .join(", ");
             format!("({})", types_str)
         }
-        TypeAnnotation::Any => "any".to_string(),
         TypeAnnotation::Void => "void".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "null".to_string(),
@@ -388,7 +387,6 @@ mod tests {
             ])),
             "string | number"
         );
-        assert_eq!(type_annotation_to_string(&TypeAnnotation::Any), "any");
         assert_eq!(type_annotation_to_string(&TypeAnnotation::Void), "void");
         assert_eq!(type_annotation_to_string(&TypeAnnotation::Never), "never");
     }

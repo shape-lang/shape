@@ -144,7 +144,6 @@ pub fn type_annotation_to_type_with_aliases(
         }
         TypeAnnotation::Tuple(_) => types::Type::Unknown, // Tuple types not fully supported yet
         TypeAnnotation::Void => types::Type::Unknown,
-        TypeAnnotation::Any => types::Type::Unknown,
         TypeAnnotation::Never => types::Type::Error,
         TypeAnnotation::Null => types::Type::Unknown,
         TypeAnnotation::Undefined => types::Type::Unknown,
@@ -726,7 +725,7 @@ fn build_module_type(schema: &ParsedModuleSchema) -> TypeAnnotation {
                 .return_type
                 .as_ref()
                 .map(|r| schema_type_to_annotation(r))
-                .unwrap_or(TypeAnnotation::Any);
+                .unwrap_or(TypeAnnotation::Basic("unknown".to_string()));
 
             ObjectTypeField {
                 name: function.name.clone(),

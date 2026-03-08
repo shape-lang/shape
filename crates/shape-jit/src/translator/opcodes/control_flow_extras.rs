@@ -76,7 +76,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 crate::ast::TypeAnnotation::Union(_) => "unknown".to_string(),
                 crate::ast::TypeAnnotation::Intersection(_) => "unknown".to_string(),
                 crate::ast::TypeAnnotation::Generic { name, .. } => format!("generic:{name}"),
-                crate::ast::TypeAnnotation::Any => "any".to_string(),
                 crate::ast::TypeAnnotation::Void => "void".to_string(),
                 crate::ast::TypeAnnotation::Never => "never".to_string(),
                 crate::ast::TypeAnnotation::Null => "null".to_string(),

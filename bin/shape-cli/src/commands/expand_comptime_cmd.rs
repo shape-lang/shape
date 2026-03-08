@@ -348,7 +348,6 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
             format!("{{ {} }}", fields)
         }
         TypeAnnotation::Void => "()".to_string(),
-        TypeAnnotation::Any => "any".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "null".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),

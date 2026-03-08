@@ -386,7 +386,6 @@ impl<'a> TokenCollector<'a> {
                 }
             }
             TypeAnnotation::Void
-            | TypeAnnotation::Any
             | TypeAnnotation::Never
             | TypeAnnotation::Null
             | TypeAnnotation::Undefined => {}

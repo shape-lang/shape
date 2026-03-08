@@ -20,7 +20,7 @@ pub fn shape_type_to_ts_hint(shape_type: &str) -> String {
             let inner = &s[6..s.len() - 1];
             format!("Array<{}>", shape_type_to_ts_hint(inner))
         }
-        _ => "any".to_string(),
+        _ => "object".to_string(),
     }
 }
 

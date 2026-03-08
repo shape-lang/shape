@@ -380,7 +380,7 @@ fn get_user_function_signature(
         let name = param.simple_name().unwrap_or("_");
         let ref_mode = sig_info.param_ref_modes.get(name);
         let rendered = if let Some(type_ann) = &param.type_annotation {
-            let type_str = type_annotation_to_string(type_ann).unwrap_or_else(|| "any".to_string());
+            let type_str = type_annotation_to_string(type_ann).unwrap_or_else(|| "_".to_string());
             format!(
                 "{}: {}",
                 name,

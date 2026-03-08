@@ -50,7 +50,7 @@ extend Json {
     }
 
     /// Return the keys of a JSON object, or an empty array for non-objects.
-    method keys() -> any {
+    method keys() -> Array<string> {
         match self {
             Json::Object(obj) => __json_object_keys(obj),
             _ => [],

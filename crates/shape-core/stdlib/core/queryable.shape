@@ -33,13 +33,13 @@
 /// @see std::core::iterable::Iterable
 trait Queryable<T> {
     /// Return a query filtered by `predicate`.
-    filter(predicate): any,
+    filter(predicate: (T) => bool): Self,
     /// Project each row with `transform`.
-    map(transform): any,
+    map(transform): Self,
     /// Apply backend ordering by `column` and `direction`.
-    orderBy(column, direction): any,
+    orderBy(column: string, direction: string): Self,
     /// Restrict the result set to at most `n` rows.
-    limit(n): any,
+    limit(n: int): Self,
     /// Execute the query and materialize the result.
-    execute(): any
+    execute(): Array<T>
 }

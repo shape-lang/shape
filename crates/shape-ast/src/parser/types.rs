@@ -134,7 +134,6 @@ pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
 pub fn parse_basic_type(name: &str) -> Result<TypeAnnotation> {
     Ok(match name {
         "void" => TypeAnnotation::Void,
-        "any" => TypeAnnotation::Any,
         "never" => TypeAnnotation::Never,
         "undefined" => TypeAnnotation::Undefined,
         other => TypeAnnotation::Basic(other.to_string()),

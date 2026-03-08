@@ -406,7 +406,7 @@ pub unsafe extern "C" fn python_compile(
     };
     let return_type_str = match str_from_raw(return_type, return_type_len) {
         Some(s) => s,
-        None => "any", // Default to "any" for generic/complex return types
+        None => "_", // Default to inferred for generic/complex return types
     };
 
     let param_names: Vec<String> = if param_names_msgpack.is_null() || param_names_len == 0 {

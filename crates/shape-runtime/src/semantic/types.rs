@@ -317,7 +317,7 @@ impl Type {
             }
             Type::Pattern => BuiltinTypes::pattern(),
             Type::Module => InferenceType::Concrete(TypeAnnotation::Basic("module".to_string())),
-            Type::Unknown => BuiltinTypes::any(),
+            Type::Unknown => InferenceType::Variable(super::super::type_system::TypeVar::fresh()),
             Type::Error => InferenceType::Concrete(TypeAnnotation::Never),
 
             Type::Array(elem) => BuiltinTypes::array(elem.to_inference_type()),
@@ -447,7 +447,7 @@ impl Type {
             Type::Duration => TypeAnnotation::Basic("duration".to_string()),
             Type::Pattern => TypeAnnotation::Basic("pattern".to_string()),
             Type::Module => TypeAnnotation::Basic("module".to_string()),
-            Type::Unknown => TypeAnnotation::Any,
+            Type::Unknown => TypeAnnotation::Basic("unknown".to_string()),
             Type::Error => TypeAnnotation::Never,
 
             Type::Array(elem) => TypeAnnotation::Array(Box::new(elem.to_type_annotation())),
@@ -580,7 +580,6 @@ impl Type {
             }
 
             TypeAnnotation::Void => Type::Unit,
-            TypeAnnotation::Any => Type::Unknown,
             TypeAnnotation::Never => Type::Error,
             TypeAnnotation::Null | TypeAnnotation::Undefined => Type::Null,
 

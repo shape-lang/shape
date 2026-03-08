@@ -1264,7 +1264,7 @@ impl MethodTable {
 
     /// Resolve a TypeParamExpr into a concrete Type given the receiver type params
     /// and fresh variables for method type params.
-    fn resolve_type_param_expr(
+    pub fn resolve_type_param_expr(
         expr: &TypeParamExpr,
         receiver_type: &Type,
         receiver_params: &[Type],
@@ -1321,7 +1321,7 @@ impl MethodTable {
     }
 
     /// Extract type name and receiver type parameters from a receiver type.
-    fn extract_receiver_info(receiver_type: &Type) -> (Option<String>, Vec<Type>) {
+    pub fn extract_receiver_info(receiver_type: &Type) -> (Option<String>, Vec<Type>) {
         match receiver_type {
             Type::Generic { base, args } => {
                 if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {

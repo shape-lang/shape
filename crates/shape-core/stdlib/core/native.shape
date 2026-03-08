@@ -19,10 +19,10 @@ pub fn ptr_read(addr: ptr) -> ptr { __native_ptr_read_ptr(addr) }
 pub fn ptr_write(addr: ptr, value: ptr) -> void { __native_ptr_write_ptr(addr, value) }
 
 /// Import Arrow C schema/array pointers into an untyped table.
-pub fn table_from_arrow_c(
+pub fn table_from_arrow_c<T>(
   schema_ptr: ptr,
   array_ptr: ptr
-) -> Result<Table<any>, AnyError> {
+) -> Result<Table<T>, AnyError> {
   __native_table_from_arrow_c(schema_ptr, array_ptr)
 }
 
@@ -37,7 +37,7 @@ pub fn table_from_arrow_c_typed<T>(
 
 /// Bind an existing table to a named row schema.
 pub fn table_bind_type<T>(
-  table: Table<any>,
+  table: Table<T>,
   type_name: string
 ) -> Result<Table<T>, AnyError> {
   __native_table_bind_type(table, type_name)

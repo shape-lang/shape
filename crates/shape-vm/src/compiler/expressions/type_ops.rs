@@ -73,7 +73,6 @@ impl BytecodeCompiler {
                         .any(|arg| Self::annotation_contains_type_param(arg, type_params))
             }
             TypeAnnotation::Void
-            | TypeAnnotation::Any
             | TypeAnnotation::Never
             | TypeAnnotation::Null
             | TypeAnnotation::Undefined

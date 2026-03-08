@@ -61,7 +61,6 @@ pub fn annotation_to_string(ann: &TypeAnnotation) -> String {
             .join(" + "),
         TypeAnnotation::Optional(inner) => format!("{}?", annotation_to_string(inner)),
         TypeAnnotation::Void => "()".to_string(),
-        TypeAnnotation::Any => "any".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "None".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),
@@ -129,7 +128,6 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
         }
         TypeAnnotation::Reference(name) => scalar_name_to_semantic(name),
         TypeAnnotation::Void => SemanticType::Void,
-        TypeAnnotation::Any => SemanticType::Any,
         TypeAnnotation::Never => SemanticType::Never,
         TypeAnnotation::Function { params, returns } => {
             let param_types: Vec<_> = params
@@ -186,7 +184,7 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
         }
         TypeAnnotation::Intersection(_) => {
             // Intersection types are resolved during type checking
-            SemanticType::Any
+            SemanticType::Void
         }
         TypeAnnotation::Null | TypeAnnotation::Undefined => SemanticType::Void,
         TypeAnnotation::Dyn(traits) => SemanticType::Named(format!("dyn {}", traits.join(" + "))),
@@ -231,7 +229,6 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
         }
         SemanticType::TypeVar(id) => TypeAnnotation::Reference(format!("T{}", id.0)),
         SemanticType::Void => TypeAnnotation::Void,
-        SemanticType::Any => TypeAnnotation::Any,
         SemanticType::Never => TypeAnnotation::Never,
         SemanticType::Function(sig) => {
             let params: Vec<_> = sig

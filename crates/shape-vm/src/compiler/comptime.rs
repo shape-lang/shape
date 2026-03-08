@@ -51,13 +51,13 @@ fn comptime_target_param_type() -> TypeAnnotation {
         ObjectTypeField {
             name: "fields".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Any)),
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
             annotations: vec![],
         },
         ObjectTypeField {
             name: "params".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Any)),
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
             annotations: vec![],
         },
         ObjectTypeField {
@@ -69,13 +69,13 @@ fn comptime_target_param_type() -> TypeAnnotation {
         ObjectTypeField {
             name: "annotations".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Any)),
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
             annotations: vec![],
         },
         ObjectTypeField {
             name: "captures".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Any)),
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
             annotations: vec![],
         },
     ])
@@ -121,7 +121,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                         .map(|f| ObjectTypeField {
                             name: f.to_string(),
                             optional: false,
-                            type_annotation: TypeAnnotation::Any,
+                            type_annotation: TypeAnnotation::Basic("unknown".to_string()),
                             annotations: vec![],
                         })
                         .collect(),

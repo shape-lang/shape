@@ -237,12 +237,12 @@ fn infer_semantic_type_nb(nb: &ValueWord) -> SemanticType {
         NanTag::F64 => SemanticType::Number,
         NanTag::I48 => SemanticType::Integer,
         NanTag::Bool => SemanticType::Bool,
-        NanTag::None => SemanticType::Option(Box::new(SemanticType::Any)),
+        NanTag::None => SemanticType::Option(Box::new(SemanticType::Named("Unknown".to_string()))),
         NanTag::Unit => SemanticType::Void,
         NanTag::Function | NanTag::ModuleFunction => {
             SemanticType::Function(Box::new(super::semantic::FunctionSignature {
                 params: vec![],
-                return_type: SemanticType::Any,
+                return_type: SemanticType::Named("Unknown".to_string()),
                 is_fallible: false,
             }))
         }
@@ -250,10 +250,10 @@ fn infer_semantic_type_nb(nb: &ValueWord) -> SemanticType {
             match nb.as_heap_ref() {
                 Some(hv) => infer_semantic_type_heap(hv),
                 // Should never happen: Heap tag but no heap ref
-                std::option::Option::None => SemanticType::Any,
+                std::option::Option::None => SemanticType::Named("Unknown".to_string()),
             }
         }
-        NanTag::Ref => SemanticType::Any, // References are transparent at the type level
+        NanTag::Ref => SemanticType::Named("Unknown".to_string()), // References are transparent at the type level
     }
 }
 
@@ -265,7 +265,7 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
             let elem_type = arr
                 .first()
                 .map(|nb| infer_semantic_type_nb(nb))
-                .unwrap_or(SemanticType::Any);
+                .unwrap_or(SemanticType::Named("Unknown".to_string()));
             SemanticType::Array(Box::new(elem_type))
         }
         HeapValue::TypedObject { .. } => SemanticType::Struct {
@@ -275,7 +275,7 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
         HeapValue::Closure { .. } | HeapValue::FunctionRef { .. } => {
             SemanticType::Function(Box::new(super::semantic::FunctionSignature {
                 params: vec![],
-                return_type: SemanticType::Any,
+                return_type: SemanticType::Named("Unknown".to_string()),
                 is_fallible: false,
             }))
         }
@@ -295,7 +295,7 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
             err_type: None,
         },
         HeapValue::Err(_) => SemanticType::Result {
-            ok_type: Box::new(SemanticType::Any),
+            ok_type: Box::new(SemanticType::Named("Unknown".to_string())),
             err_type: None,
         },
         HeapValue::Future(_) => SemanticType::Named("Future".to_string()),

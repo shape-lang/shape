@@ -149,7 +149,7 @@ impl StorageType {
             SemanticType::Function(_) => StorageType::Function,
 
             // Type variables and unresolved - use dynamic
-            SemanticType::TypeVar(_) | SemanticType::Generic { .. } | SemanticType::Any => {
+            SemanticType::TypeVar(_) | SemanticType::Generic { .. } => {
                 StorageType::Dynamic
             }
 

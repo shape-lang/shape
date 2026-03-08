@@ -46,7 +46,6 @@ pub fn type_annotation_to_string(ta: &TypeAnnotation) -> Option<String> {
             Some(format!("{}<{}>", name, arg_strs.join(", ")))
         }
         TypeAnnotation::Void => Some("()".to_string()),
-        TypeAnnotation::Any => Some("any".to_string()),
         TypeAnnotation::Never => Some("never".to_string()),
         TypeAnnotation::Null => Some("None".to_string()),
         TypeAnnotation::Undefined => Some("undefined".to_string()),
@@ -839,7 +838,7 @@ pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionT
                     return None;
                 }
                 let param_name = ast_param.simple_name()?.to_string();
-                if inferred_type == "any" || inferred_type == "unknown" {
+                if inferred_type == "_" || inferred_type == "unknown" {
                     return None;
                 }
                 Some((param_name, inferred_type.clone()))
@@ -870,7 +869,7 @@ pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionT
         }
 
         let return_type = if func_def.return_type.is_none() {
-            return_type_string.filter(|s| s != "any" && s != "unknown")
+            return_type_string.filter(|s| s != "_" && s != "unknown")
         } else {
             None
         };
@@ -1336,7 +1335,7 @@ fn schema_column_type(shape_type: &str, nullable: bool) -> String {
         "string" => "string",
         "bool" => "bool",
         "timestamp" => "timestamp",
-        _ => "any",
+        _ => "_",
     };
     if nullable {
         format!("Option<{}>", base)
@@ -1602,7 +1601,7 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
                             name,
                             param_names.join(", "),
                             type_annotation_to_string(return_type)
-                                .unwrap_or_else(|| "any".to_string())
+                                .unwrap_or_else(|| "_".to_string())
                         );
                         Some(MethodCompletionInfo {
                             name: name.clone(),

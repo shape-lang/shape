@@ -240,10 +240,10 @@ impl Type {
                     .map(|p| shape_ast::ast::FunctionParam {
                         name: None,
                         optional: false,
-                        type_annotation: p.to_annotation().unwrap_or(TypeAnnotation::Any),
+                        type_annotation: p.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
                     })
                     .collect();
-                let ret_ann = returns.to_annotation().unwrap_or(TypeAnnotation::Any);
+                let ret_ann = returns.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()));
                 Some(TypeAnnotation::Function {
                     params: param_anns,
                     returns: Box::new(ret_ann),
@@ -309,7 +309,7 @@ impl Type {
                             })
                     })
                     .collect();
-                let return_type = returns.to_semantic().unwrap_or(SemanticType::Any);
+                let return_type = returns.to_semantic().unwrap_or(SemanticType::Void);
                 Some(SemanticType::Function(Box::new(
                     crate::type_system::semantic::FunctionSignature {
                         params: semantic_params,
@@ -371,7 +371,6 @@ impl SemanticType {
                 args: args.iter().map(|a| a.to_inference_type()).collect(),
             },
             SemanticType::Void => Type::Concrete(TypeAnnotation::Void),
-            SemanticType::Any => Type::Concrete(TypeAnnotation::Any),
             SemanticType::Never => Type::Concrete(TypeAnnotation::Never),
             SemanticType::Function(sig) => {
                 let param_types: Vec<_> = sig

@@ -469,7 +469,8 @@ impl TypeInferenceEngine {
 
             if let TypeConstraint::HasField(field_name, expected_ty) = constraint {
                 let field_annotation = self
-                    .resolve_expected_annotation_from_constraints(expected_ty, local_constraints);
+                    .resolve_expected_annotation_from_constraints(expected_ty, local_constraints)
+                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()));
                 if fields.iter().all(|field| field.name != *field_name) {
                     fields.push(ObjectTypeField {
                         name: field_name.clone(),
@@ -492,26 +493,26 @@ impl TypeInferenceEngine {
         &self,
         expected_ty: &Type,
         local_constraints: &[(Type, Type)],
-    ) -> TypeAnnotation {
+    ) -> Option<TypeAnnotation> {
         if let Some(annotation) = expected_ty.to_annotation() {
-            return annotation;
+            return Some(annotation);
         }
 
         let Type::Variable(var) = expected_ty else {
-            return TypeAnnotation::Any;
+            return None;
         };
 
         if let Some(annotation) = self.find_concrete_annotation_for_var(local_constraints, var) {
-            return annotation;
+            return Some(annotation);
         }
 
         if self.var_has_constraint(local_constraints, var, |constraint| {
             matches!(constraint, TypeConstraint::Numeric)
         }) {
-            return TypeAnnotation::Basic("number".to_string());
+            return Some(TypeAnnotation::Basic("number".to_string()));
         }
 
-        TypeAnnotation::Any
+        None
     }
 
     fn find_concrete_annotation_for_var(
@@ -691,7 +692,7 @@ impl TypeInferenceEngine {
         let union_annotation = TypeAnnotation::Union(
             unique_types
                 .iter()
-                .map(|t| self.type_to_annotation(t))
+                .filter_map(|t| self.type_to_annotation(t))
                 .collect(),
         );
 
@@ -736,7 +737,6 @@ impl TypeInferenceEngine {
             TypeAnnotation::Intersection(_) => "intersection".to_string(),
             TypeAnnotation::Generic { .. } => "generic".to_string(),
             TypeAnnotation::Void => "void".to_string(),
-            TypeAnnotation::Any => "any".to_string(),
             TypeAnnotation::Never => "never".to_string(),
             TypeAnnotation::Null => "None".to_string(),
             TypeAnnotation::Undefined => "undefined".to_string(),
@@ -745,14 +745,13 @@ impl TypeInferenceEngine {
     }
 
     /// Convert a Type to TypeAnnotation
-    fn type_to_annotation(&self, ty: &Type) -> shape_ast::ast::TypeAnnotation {
-        use shape_ast::ast::TypeAnnotation;
+    fn type_to_annotation(&self, ty: &Type) -> Option<shape_ast::ast::TypeAnnotation> {
         match ty {
-            Type::Concrete(ann) => ann.clone(),
-            Type::Variable(_) => TypeAnnotation::Any,
-            Type::Generic { .. } => TypeAnnotation::Any,
-            Type::Constrained { .. } => TypeAnnotation::Any,
-            Type::Function { .. } => ty.to_annotation().unwrap_or(TypeAnnotation::Any),
+            Type::Concrete(ann) => Some(ann.clone()),
+            Type::Variable(_) => None,
+            Type::Generic { .. } => ty.to_annotation(),
+            Type::Constrained { .. } => None,
+            Type::Function { .. } => ty.to_annotation(),
         }
     }
 
@@ -1189,9 +1188,6 @@ impl TypeInferenceEngine {
                         widened_params[index] = widened_type.clone();
                         substitutions.insert(var, widened_type);
                     }
-                    Type::Concrete(TypeAnnotation::Any) => {
-                        widened_params[index] = widened_type;
-                    }
                     _ if source_var.is_some() => {
                         widened_params[index] = widened_type;
                     }
@@ -1281,7 +1277,7 @@ impl TypeInferenceEngine {
             _ => self.create_nominal_union(&members).unwrap_or_else(|_| {
                 let variants: Vec<TypeAnnotation> = members
                     .iter()
-                    .map(|t| t.to_annotation().unwrap_or(TypeAnnotation::Any))
+                    .filter_map(|t| t.to_annotation())
                     .collect();
                 Type::Concrete(TypeAnnotation::Union(variants))
             }),
@@ -1309,7 +1305,7 @@ impl TypeInferenceEngine {
             _ => self.create_nominal_union(&unique).ok().or_else(|| {
                 let variants: Vec<TypeAnnotation> = unique
                     .iter()
-                    .map(|t| t.to_annotation().unwrap_or(TypeAnnotation::Any))
+                    .filter_map(|t| t.to_annotation())
                     .collect();
                 Some(Type::Concrete(TypeAnnotation::Union(variants)))
             }),

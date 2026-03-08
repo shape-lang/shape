@@ -82,9 +82,6 @@ pub enum SemanticType {
     /// Bottom type - computation that never returns (e.g., panic, infinite loop)
     Never,
 
-    /// Top type - escape hatch (discouraged)
-    Any,
-
     /// Void - no value
     Void,
 
@@ -327,7 +324,6 @@ impl SemanticType {
             }
 
             SemanticType::Never => TypeInfo::primitive("Never"),
-            SemanticType::Any => TypeInfo::primitive("Any"),
             SemanticType::Void => TypeInfo::null(),
 
             SemanticType::Function(sig) => {
@@ -380,7 +376,6 @@ impl fmt::Display for SemanticType {
                 write!(f, ">")
             }
             SemanticType::Never => write!(f, "Never"),
-            SemanticType::Any => write!(f, "Any"),
             SemanticType::Void => write!(f, "Void"),
             SemanticType::Function(sig) => {
                 write!(f, "(")?;

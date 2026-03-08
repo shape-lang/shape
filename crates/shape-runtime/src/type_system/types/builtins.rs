@@ -43,12 +43,12 @@ impl BuiltinTypes {
 
     pub fn array(element_type: Type) -> Type {
         Type::Concrete(TypeAnnotation::Array(Box::new(
-            element_type.to_annotation().unwrap_or(TypeAnnotation::Any),
+            element_type.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
         )))
     }
 
     pub fn any() -> Type {
-        Type::Concrete(TypeAnnotation::Any)
+        Type::Variable(super::core::TypeVar::fresh())
     }
 
     /// Canonical runtime numeric type for aliases and width-aware native names.

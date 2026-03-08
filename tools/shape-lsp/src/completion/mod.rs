@@ -700,8 +700,8 @@ fn types_compatible(actual: &str, expected: &str) -> TypeMatch {
         return TypeMatch::Compatible;
     }
 
-    // Any matches everything
-    if a == "any" || e == "any" {
+    // Unknown/inferred types match everything
+    if a == "_" || e == "_" || a == "unknown" || e == "unknown" {
         return TypeMatch::Compatible;
     }
 
@@ -845,7 +845,7 @@ fn impl_block_completions(
                     .collect();
 
                 let return_type_str = crate::type_inference::type_annotation_to_string(return_type)
-                    .unwrap_or_else(|| "any".to_string());
+                    .unwrap_or_else(|| "_".to_string());
 
                 // Build snippet: method name(params) { $0 }
                 let snippet_params: Vec<String> = param_names
@@ -895,7 +895,7 @@ fn impl_block_completions(
                     .return_type
                     .as_ref()
                     .and_then(|rt| crate::type_inference::type_annotation_to_string(rt))
-                    .unwrap_or_else(|| "any".to_string());
+                    .unwrap_or_else(|| "_".to_string());
 
                 let snippet_params: Vec<String> = param_names
                     .iter()

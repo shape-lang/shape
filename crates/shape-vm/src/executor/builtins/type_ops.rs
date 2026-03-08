@@ -415,7 +415,7 @@ impl VirtualMachine {
             NanTag::Bool => TypeAnnotation::Basic("bool".to_string()),
             NanTag::None => TypeAnnotation::Generic {
                 name: "Option".to_string(),
-                args: vec![TypeAnnotation::Any],
+                args: vec![TypeAnnotation::Basic("unknown".to_string())],
             },
             NanTag::Unit => TypeAnnotation::Void,
             NanTag::Function | NanTag::ModuleFunction => {

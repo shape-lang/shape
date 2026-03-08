@@ -636,7 +636,7 @@ let b = afunc(1)
                     let has_object = variants
                         .iter()
                         .any(|v| matches!(v, TypeAnnotation::Object(_)));
-                    let has_any = variants.iter().any(|v| matches!(v, TypeAnnotation::Any));
+                    let has_any = variants.iter().any(|v| matches!(v, TypeAnnotation::Basic(name) if name == "unknown"));
                     assert!(
                         has_string,
                         "return union should include string: {:?}",
@@ -730,7 +730,7 @@ let b = afunc(1)
                     let has_object = variants
                         .iter()
                         .any(|v| matches!(v, TypeAnnotation::Object(_)));
-                    let has_any = variants.iter().any(|v| matches!(v, TypeAnnotation::Any));
+                    let has_any = variants.iter().any(|v| matches!(v, TypeAnnotation::Basic(name) if name == "unknown"));
                     assert!(
                         has_string,
                         "return union should include string: {:?}",

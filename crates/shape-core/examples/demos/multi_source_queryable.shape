@@ -88,12 +88,12 @@
 //   source.filter(predicate).select(cols).orderBy(key, dir).limit(n).execute()
 //
 // The Queryable trait (stdlib/core/queryable.shape):
-//   trait Queryable {
-//       filter(predicate): any,
-//       select(columns): any,
-//       orderBy(column, direction): any,
-//       limit(n): any,
-//       execute(): any
+//   trait Queryable<T> {
+//       filter(predicate: (T) => bool): Self,
+//       select(columns): Self,
+//       orderBy(column: string, direction: string): Self,
+//       limit(n: int): Self,
+//       execute(): Array<T>
 //   }
 //
 // Extension authors implement this trait for their query type,

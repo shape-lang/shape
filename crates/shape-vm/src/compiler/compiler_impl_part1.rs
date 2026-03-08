@@ -707,7 +707,6 @@ impl BytecodeCompiler {
             }
             TypeAnnotation::Optional(inner) => Self::annotation_is_heap_like(inner),
             TypeAnnotation::Void
-            | TypeAnnotation::Any
             | TypeAnnotation::Never
             | TypeAnnotation::Null
             | TypeAnnotation::Undefined => false,

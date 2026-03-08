@@ -148,9 +148,12 @@ Benchmark files (`shape/benchmarks/`) must NEVER be modified to improve compiler
 
 ### Known Constraints
 - SemanticAnalyzer doesn't know about extension module globals (csv, json, etc.)
-- `BuiltinTypes::function()` loses TypeVars (`Type::Variable` → `.to_annotation()` returns `None` → falls back to `Any`)
+- `BuiltinTypes::function()` loses TypeVars (`Type::Variable` → `.to_annotation()` returns `None` → falls back to fresh TypeVar)
 - `format()` builtin shadows `.format()` method on DateTime — use `iso8601()` or other named methods
 - `Queryable<T>` impl blocks remain non-generic — semantic analyzer cannot handle unbound type variables in impl blocks
+- **No `any` type**: The `any` type has been removed. Unannotated positions use `Type::Variable(TypeVar::fresh())` for inference. If inference fails, it's a compile error — no escape hatch.
+- **Bidirectional closure inference**: Method calls infer closure param types from generic method signatures (e.g. `arr.filter(|x| ...)` infers x's type from the array element type)
+- **Flow-sensitive narrowing**: `if x != null { ... }` narrows `T?` to `T` in the then-branch
 
 ## Memories
 

@@ -1540,13 +1540,13 @@ impl BytecodeCompiler {
                         shape_ast::ast::ObjectTypeField {
                             name: "state".to_string(),
                             optional: false,
-                            type_annotation: TypeAnnotation::Any,
+                            type_annotation: TypeAnnotation::Basic("unknown".to_string()),
                             annotations: vec![],
                         },
                         shape_ast::ast::ObjectTypeField {
                             name: "event_log".to_string(),
                             optional: false,
-                            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Any)),
+                            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
                             annotations: vec![],
                         },
                     ]))
