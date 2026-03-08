@@ -69,9 +69,7 @@ pub fn result_method_completions() -> Vec<CompletionItem> {
             label: "unwrap".to_string(),
             kind: Some(CompletionItemKind::METHOD),
             detail: Some("T".to_string()),
-            documentation: Some(Documentation::String(
-                "Unwrap the Result, panicking if Err".to_string(),
-            )),
+            documentation: None,
             insert_text: Some("unwrap()".to_string()),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..CompletionItem::default()
@@ -80,9 +78,7 @@ pub fn result_method_completions() -> Vec<CompletionItem> {
             label: "unwrap_or".to_string(),
             kind: Some(CompletionItemKind::METHOD),
             detail: Some("T".to_string()),
-            documentation: Some(Documentation::String(
-                "Unwrap the Result, returning default if Err".to_string(),
-            )),
+            documentation: None,
             insert_text: Some("unwrap_or(${1:default})".to_string()),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..CompletionItem::default()
@@ -91,7 +87,7 @@ pub fn result_method_completions() -> Vec<CompletionItem> {
             label: "is_ok".to_string(),
             kind: Some(CompletionItemKind::METHOD),
             detail: Some("Boolean".to_string()),
-            documentation: Some(Documentation::String("Check if Result is Ok".to_string())),
+            documentation: None,
             insert_text: Some("is_ok()".to_string()),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..CompletionItem::default()
@@ -100,7 +96,7 @@ pub fn result_method_completions() -> Vec<CompletionItem> {
             label: "is_err".to_string(),
             kind: Some(CompletionItemKind::METHOD),
             detail: Some("Boolean".to_string()),
-            documentation: Some(Documentation::String("Check if Result is Err".to_string())),
+            documentation: None,
             insert_text: Some("is_err()".to_string()),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..CompletionItem::default()
@@ -115,9 +111,7 @@ pub fn option_method_completions() -> Vec<CompletionItem> {
             label: "unwrap".to_string(),
             kind: Some(CompletionItemKind::METHOD),
             detail: Some("T".to_string()),
-            documentation: Some(Documentation::String(
-                "Unwrap the Option, panicking if None".to_string(),
-            )),
+            documentation: None,
             insert_text: Some("unwrap()".to_string()),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..CompletionItem::default()
@@ -126,9 +120,7 @@ pub fn option_method_completions() -> Vec<CompletionItem> {
             label: "unwrap_or".to_string(),
             kind: Some(CompletionItemKind::METHOD),
             detail: Some("T".to_string()),
-            documentation: Some(Documentation::String(
-                "Unwrap the Option, returning default if None".to_string(),
-            )),
+            documentation: None,
             insert_text: Some("unwrap_or(${1:default})".to_string()),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..CompletionItem::default()
@@ -137,9 +129,7 @@ pub fn option_method_completions() -> Vec<CompletionItem> {
             label: "is_some".to_string(),
             kind: Some(CompletionItemKind::METHOD),
             detail: Some("Boolean".to_string()),
-            documentation: Some(Documentation::String(
-                "Check if Option has a value".to_string(),
-            )),
+            documentation: None,
             insert_text: Some("is_some()".to_string()),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..CompletionItem::default()
@@ -148,7 +138,7 @@ pub fn option_method_completions() -> Vec<CompletionItem> {
             label: "is_none".to_string(),
             kind: Some(CompletionItemKind::METHOD),
             detail: Some("Boolean".to_string()),
-            documentation: Some(Documentation::String("Check if Option is None".to_string())),
+            documentation: None,
             insert_text: Some("is_none()".to_string()),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..CompletionItem::default()

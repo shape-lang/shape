@@ -1,4 +1,5 @@
 use super::span::Span;
+use super::types::{TypeAnnotation, TypeName};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,9 +68,7 @@ impl DocComment {
 
     pub fn type_param_doc(&self, name: &str) -> Option<&str> {
         self.tags.iter().find_map(|tag| match &tag.kind {
-            DocTagKind::TypeParam if tag.name.as_deref() == Some(name) => {
-                Some(tag.body.as_str())
-            }
+            DocTagKind::TypeParam if tag.name.as_deref() == Some(name) => Some(tag.body.as_str()),
             _ => None,
         })
     }
@@ -217,6 +216,8 @@ pub enum DocTargetKind {
     Trait,
     TraitMethod,
     TraitAssociatedType,
+    ExtensionMethod,
+    ImplMethod,
     Enum,
     EnumVariant,
 }
@@ -257,4 +258,50 @@ impl ProgramDocs {
     pub fn comment_for_span(&self, span: Span) -> Option<&DocComment> {
         self.entry_for_span(span).map(|entry| &entry.comment)
     }
+}
+
+pub fn qualify_doc_owner_path(module_path: &[String], owner: &str) -> String {
+    if module_path.is_empty() {
+        owner.to_string()
+    } else {
+        format!("{}::{}", module_path.join("::"), owner)
+    }
+}
+
+pub fn type_name_doc_path(type_name: &TypeName) -> String {
+    match type_name {
+        TypeName::Simple(name) => name.clone(),
+        TypeName::Generic { name, type_args } => {
+            let args = type_args
+                .iter()
+                .map(type_annotation_doc_path)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}<{args}>")
+        }
+    }
+}
+
+pub fn type_annotation_doc_path(annotation: &TypeAnnotation) -> String {
+    annotation.to_type_string()
+}
+
+pub fn extend_method_doc_path(
+    module_path: &[String],
+    target_type: &TypeName,
+    method_name: &str,
+) -> String {
+    let owner = qualify_doc_owner_path(module_path, &type_name_doc_path(target_type));
+    format!("{owner}::{method_name}")
+}
+
+pub fn impl_method_doc_path(
+    module_path: &[String],
+    trait_name: &TypeName,
+    target_type: &TypeName,
+    method_name: &str,
+) -> String {
+    let target = qualify_doc_owner_path(module_path, &type_name_doc_path(target_type));
+    let trait_name = qualify_doc_owner_path(module_path, &type_name_doc_path(trait_name));
+    format!("{target}::{trait_name}::{method_name}")
 }

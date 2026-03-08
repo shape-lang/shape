@@ -2,11 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::DocComment;
 use super::functions::{Annotation, ForeignFunctionDef, FunctionDef};
 use super::program::Item;
 use super::span::Span;
 use super::types::{EnumDef, InterfaceDef, StructTypeDef, TraitDef};
-use super::DocComment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportStmt {

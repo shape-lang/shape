@@ -235,11 +235,16 @@ pub fn parse_extend_statement(pair: Pair<Rule>) -> Result<crate::ast::ExtendStat
         }
     };
 
-    // Parse method_def*
+    // Parse documented_method_def*
     let mut methods = Vec::new();
     for method_pair in inner {
-        if method_pair.as_rule() == Rule::method_def {
-            methods.push(super::types::parse_method_def_shared(method_pair)?);
+        if matches!(
+            method_pair.as_rule(),
+            Rule::documented_method_def | Rule::method_def
+        ) {
+            methods.push(super::types::parse_documented_method_def_shared(
+                method_pair,
+            )?);
         }
     }
 
@@ -297,8 +302,8 @@ pub fn parse_impl_block(pair: Pair<Rule>) -> Result<crate::ast::ImplBlock> {
                     let binding = parse_associated_type_binding(child)?;
                     associated_type_bindings.push(binding);
                 }
-                Rule::method_def => {
-                    methods.push(super::types::parse_method_def_shared(child)?);
+                Rule::documented_method_def | Rule::method_def => {
+                    methods.push(super::types::parse_documented_method_def_shared(child)?);
                 }
                 _ => {}
             }

@@ -984,10 +984,13 @@ fn parse_trait_body(pair: Pair<Rule>) -> Result<Vec<crate::ast::TraitMember>> {
         }
 
         if inner.as_rule() == Rule::trait_member_core {
-            inner = inner.into_inner().next().ok_or_else(|| ShapeError::ParseError {
-                message: "expected trait member".to_string(),
-                location: None,
-            })?;
+            inner = inner
+                .into_inner()
+                .next()
+                .ok_or_else(|| ShapeError::ParseError {
+                    message: "expected trait member".to_string(),
+                    location: None,
+                })?;
         }
 
         match inner.as_rule() {
@@ -1103,6 +1106,20 @@ pub(crate) fn parse_method_def_shared(pair: Pair<Rule>) -> Result<crate::ast::ty
         body,
         is_async,
     })
+}
+
+pub(crate) fn parse_documented_method_def_shared(
+    pair: Pair<Rule>,
+) -> Result<crate::ast::types::MethodDef> {
+    let (doc_comment, pair) = unwrap_documented_pair(
+        pair,
+        Rule::documented_method_def,
+        Rule::method_def,
+        "method definition",
+    )?;
+    let mut method = parse_method_def_shared(pair)?;
+    method.doc_comment = doc_comment;
+    Ok(method)
 }
 
 fn parse_interface_body(pair: Pair<Rule>) -> Result<Vec<crate::ast::InterfaceMember>> {
@@ -1248,8 +1265,12 @@ fn attach_interface_member_doc_comment(
     doc_comment: crate::ast::DocComment,
 ) {
     match member {
-        crate::ast::InterfaceMember::Property { doc_comment: slot, .. }
-        | crate::ast::InterfaceMember::Method { doc_comment: slot, .. }
+        crate::ast::InterfaceMember::Property {
+            doc_comment: slot, ..
+        }
+        | crate::ast::InterfaceMember::Method {
+            doc_comment: slot, ..
+        }
         | crate::ast::InterfaceMember::IndexSignature {
             doc_comment: slot, ..
         } => *slot = Some(doc_comment),

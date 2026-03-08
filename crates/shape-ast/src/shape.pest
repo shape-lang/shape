@@ -228,7 +228,7 @@ impl_block = {
 }
 
 impl_member = {
-    associated_type_binding | method_def
+    associated_type_binding | documented_method_def
 }
 
 impl_name = { "as" ~ ident }
@@ -264,11 +264,15 @@ enum_variant_struct = { ident ~ "{" ~ object_type_member_list? ~ "}" }
 
 // ===== Type Extension =====
 extend_statement = {
-    "extend" ~ type_name ~ "{" ~ method_def* ~ "}"
+    "extend" ~ type_name ~ "{" ~ documented_method_def* ~ "}"
 }
 
 type_name = {
     ident ~ ("<" ~ type_annotation ~ ("," ~ type_annotation)* ~ ">")?
+}
+
+documented_method_def = {
+    doc_comment? ~ method_def
 }
 
 method_def = {

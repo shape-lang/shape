@@ -216,6 +216,10 @@ fn get_hover_for_word(
         return Some(hover);
     }
 
+    if let Some(hover) = get_extend_method_hover(text, word, position, module_cache, current_file) {
+        return Some(hover);
+    }
+
     // Check user-defined symbols BEFORE builtin types — prevents false matches
     // from type aliases (e.g., "double" → "float", "record" → "object")
     if let Some(hover) = get_typed_match_pattern_hover(text, word, position) {
@@ -1188,6 +1192,7 @@ fn get_impl_method_hover(
                         name,
                         params,
                         return_type,
+                        doc_comment,
                         ..
                     },
                 ) if name == word => {
@@ -1208,6 +1213,12 @@ fn get_impl_method_hover(
                         "**Trait Method**: `{}`\n\n**Trait:** `{}`\n**Target:** `{}`\n\n**Signature:**\n```shape\n{}\n```",
                         name, trait_name, target_type, signature
                     );
+                    if let Some(comment) = doc_comment.as_ref() {
+                        content.push_str(&format!(
+                            "\n\n{}",
+                            render_doc_comment(&program, comment, module_cache, current_file, None,)
+                        ));
+                    }
                     if let Some(impl_name) = &impl_block.impl_name {
                         content.push_str(&format!("\n\n**Implementation:** `{}`", impl_name));
                     }
@@ -1243,6 +1254,12 @@ fn get_impl_method_hover(
                         "**Trait Method** (default): `{}`\n\n**Trait:** `{}`\n**Target:** `{}`\n\nThis method has a default implementation and does not need to be overridden.\n\n**Signature:**\n```shape\n{}\n```",
                         method_def.name, trait_name, target_type, signature
                     );
+                    if let Some(comment) = program.docs.comment_for_span(method_def.span) {
+                        content.push_str(&format!(
+                            "\n\n{}",
+                            render_doc_comment(&program, comment, module_cache, current_file, None,)
+                        ));
+                    }
                     if let Some(impl_name) = &impl_block.impl_name {
                         content.push_str(&format!("\n\n**Implementation:** `{}`", impl_name));
                     }
@@ -1297,6 +1314,12 @@ fn get_impl_method_hover(
             "**Method**: `{}`\n\n**Trait:** `{}`\n**Target:** `{}`\n\n**Signature:**\n```shape\n{}\n```",
             method_def.name, trait_name, target_type, signature
         );
+        if let Some(comment) = program.docs.comment_for_span(method_def.span) {
+            content.push_str(&format!(
+                "\n\n{}",
+                render_doc_comment(&program, comment, module_cache, current_file, None)
+            ));
+        }
         if let Some(impl_name) = &impl_block.impl_name {
             content.push_str(&format!("\n\n**Implementation:** `{}`", impl_name));
         }
@@ -1311,6 +1334,84 @@ fn get_impl_method_hover(
     }
 
     None
+}
+
+fn get_extend_method_hover(
+    text: &str,
+    word: &str,
+    position: Position,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+) -> Option<Hover> {
+    use crate::type_inference::type_annotation_to_string;
+
+    let offset = position_to_offset(text, position)?;
+    let program = parse_with_fallback(text)?;
+
+    let mut selected_extend: Option<&shape_ast::ast::ExtendStatement> = None;
+    for item in &program.items {
+        let Item::Extend(extend, span) = item else {
+            continue;
+        };
+        if !span_contains_offset(*span, offset) {
+            continue;
+        }
+        if !extend.methods.iter().any(|method| method.name == word) {
+            continue;
+        }
+        selected_extend = Some(extend);
+        break;
+    }
+
+    let extend = selected_extend?;
+    let target_type = type_name_base_name(&extend.type_name);
+    let method = extend.methods.iter().find(|method| method.name == word)?;
+    let param_names: Vec<String> = method
+        .params
+        .iter()
+        .map(|p| {
+            let pname = p.simple_name().unwrap_or("_").to_string();
+            let ptype = p
+                .type_annotation
+                .as_ref()
+                .and_then(type_annotation_to_string);
+            match ptype {
+                Some(t) => format!("{pname}: {t}"),
+                None => pname,
+            }
+        })
+        .collect();
+    let return_type = method
+        .return_type
+        .as_ref()
+        .and_then(type_annotation_to_string)
+        .or_else(|| infer_block_return_type_via_engine(&method.body))
+        .unwrap_or_else(|| "unknown".to_string());
+    let signature = format!(
+        "{}({}): {}",
+        method.name,
+        param_names.join(", "),
+        return_type
+    );
+
+    let mut content = format!(
+        "**Method**: `{}`\n\n**Target:** `{}`\n\n**Signature:**\n```shape\n{}\n```",
+        method.name, target_type, signature
+    );
+    if let Some(comment) = program.docs.comment_for_span(method.span) {
+        content.push_str(&format!(
+            "\n\n{}",
+            render_doc_comment(&program, comment, module_cache, current_file, None)
+        ));
+    }
+
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: content,
+        }),
+        range: None,
+    })
 }
 
 fn method_body_contains_offset(method: &shape_ast::ast::MethodDef, offset: usize) -> bool {
@@ -2265,19 +2366,20 @@ fn get_imported_symbol_hover(
                 };
 
                 let mut full_content = content;
-                if let Some(doc) = module_info
-                    .program
-                    .docs
-                    .comment_for_span(export.span)
-                    .map(|comment| {
-                        render_doc_comment(
-                            &module_info.program,
-                            comment,
-                            Some(module_cache),
-                            Some(&module_info.path),
-                            None,
-                        )
-                    })
+                if let Some(doc) =
+                    module_info
+                        .program
+                        .docs
+                        .comment_for_span(export.span)
+                        .map(|comment| {
+                            render_doc_comment(
+                                &module_info.program,
+                                comment,
+                                Some(module_cache),
+                                Some(&module_info.path),
+                                None,
+                            )
+                        })
                 {
                     full_content.push_str(&format!("\n\n---\n\n{}", doc));
                 }
@@ -2781,8 +2883,8 @@ fn get_property_access_hover(text: &str, hovered_word: &str, position: Position)
     // Try user-defined struct fields from AST (including generic instantiations).
     if let Some(field_type) = resolve_struct_field_type(&program, &object_type, &property) {
         let content = format!(
-            "**Property**: `{}.{}`\n\n**Type:** `{}`\n\nField `{}` on `{}`",
-            object_name, property, field_type, property, object_type
+            "**Property**: `{}.{}`\n\n**Type:** `{}`",
+            object_name, property, field_type
         );
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -2798,8 +2900,8 @@ fn get_property_access_hover(text: &str, hovered_word: &str, position: Position)
     if let Some(fields) = struct_fields.get(&object_type) {
         if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == &property) {
             let content = format!(
-                "**Property**: `{}.{}`\n\n**Type:** `{}`\n\nField `{}` of inferred type `{}`",
-                object_name, property, field_type, property, object_type
+                "**Property**: `{}.{}`\n\n**Type:** `{}`",
+                object_name, property, field_type
             );
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -2815,8 +2917,8 @@ fn get_property_access_hover(text: &str, hovered_word: &str, position: Position)
     if let Some(fields) = parse_object_shape_fields(&object_type) {
         if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == &property) {
             let content = format!(
-                "**Property**: `{}.{}`\n\n**Type:** `{}`\n\nField `{}` of inferred object type",
-                object_name, property, field_type, property
+                "**Property**: `{}.{}`\n\n**Type:** `{}`",
+                object_name, property, field_type
             );
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {

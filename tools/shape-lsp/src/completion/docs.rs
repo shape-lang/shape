@@ -1,6 +1,6 @@
 use crate::doc_symbols::{
-    collect_import_paths, collect_program_doc_symbols, current_module_import_path,
-    find_doc_owner, span_contains,
+    collect_import_paths, collect_program_doc_symbols, current_module_import_path, find_doc_owner,
+    span_contains,
 };
 use crate::module_cache::ModuleCache;
 use shape_ast::ast::{DocTagKind, DocTargetKind, Program};
@@ -18,7 +18,10 @@ const DOC_TAGS: [(&str, &str); 11] = [
     ("requires", "Describe availability requirements"),
     ("since", "Record the introduction version or milestone"),
     ("see", "Reference another fully qualified symbol"),
-    ("link", "Reference another fully qualified symbol with an optional label"),
+    (
+        "link",
+        "Reference another fully qualified symbol with an optional label",
+    ),
     ("note", "Record an additional implementation or usage note"),
 ];
 
@@ -124,7 +127,11 @@ pub fn doc_link_completions(
             if imported_modules.contains(&module_path) {
                 continue;
             }
-            let priority = if module_path.starts_with("std::") { 3 } else { 2 };
+            let priority = if module_path.starts_with("std::") {
+                3
+            } else {
+                2
+            };
             push_module_link_candidates(
                 &mut candidates,
                 &mut seen,
@@ -204,7 +211,11 @@ fn completion_items_for_names(
         .into_iter()
         .filter(|name| prefix.is_empty() || name.starts_with(prefix))
         .map(|name| {
-            let priority = if already_documented.contains(&name) { 1 } else { 0 };
+            let priority = if already_documented.contains(&name) {
+                1
+            } else {
+                0
+            };
             CompletionItem {
                 label: name.clone(),
                 insert_text: Some(name.clone()),
@@ -235,7 +246,8 @@ fn push_module_link_candidates(
         ));
     }
 
-    let Some(resolved) = module_cache.resolve_import(import_path, current_file, workspace_root) else {
+    let Some(resolved) = module_cache.resolve_import(import_path, current_file, workspace_root)
+    else {
         return;
     };
     let Some(module_info) =
@@ -262,6 +274,8 @@ fn completion_kind_for_doc_symbol(kind: DocTargetKind) -> CompletionItemKind {
         | DocTargetKind::Annotation
         | DocTargetKind::ForeignFunction
         | DocTargetKind::BuiltinFunction
+        | DocTargetKind::ExtensionMethod
+        | DocTargetKind::ImplMethod
         | DocTargetKind::TraitMethod
         | DocTargetKind::InterfaceMethod => CompletionItemKind::FUNCTION,
         DocTargetKind::Struct

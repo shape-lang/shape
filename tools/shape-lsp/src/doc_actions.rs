@@ -2,8 +2,7 @@ use crate::util::span_to_range;
 use shape_ast::ast::{ExportItem, Item, Span, TraitMember, TypeAnnotation, TypeParam};
 use shape_ast::parser::parse_program;
 use tower_lsp_server::ls_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, Position, Range, TextEdit, Uri,
-    WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeActionOrCommand, Position, Range, TextEdit, Uri, WorkspaceEdit,
 };
 
 pub fn generate_doc_comment_action(
@@ -85,7 +84,10 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                     *span,
                     function.doc_comment.is_some(),
                     function.type_params.as_deref(),
-                    function.params.iter().flat_map(|param| param.get_identifiers()),
+                    function
+                        .params
+                        .iter()
+                        .flat_map(|param| param.get_identifiers()),
                     function
                         .return_type
                         .as_ref()
@@ -97,7 +99,10 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                     *span,
                     function.doc_comment.is_some(),
                     function.type_params.as_deref(),
-                    function.params.iter().flat_map(|param| param.get_identifiers()),
+                    function
+                        .params
+                        .iter()
+                        .flat_map(|param| param.get_identifiers()),
                     function
                         .return_type
                         .as_ref()
@@ -109,12 +114,19 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                     *span,
                     function.doc_comment.is_some(),
                     function.type_params.as_deref(),
-                    function.params.iter().flat_map(|param| param.get_identifiers()),
+                    function
+                        .params
+                        .iter()
+                        .flat_map(|param| param.get_identifiers()),
                     !matches!(function.return_type, TypeAnnotation::Void),
                 ));
             }
             Item::BuiltinTypeDecl(ty, span) if starts_on_line(text, *span, line) => {
-                return Some(type_target(*span, ty.doc_comment.is_some(), ty.type_params.as_deref()));
+                return Some(type_target(
+                    *span,
+                    ty.doc_comment.is_some(),
+                    ty.type_params.as_deref(),
+                ));
             }
             Item::TypeAlias(alias, span) if starts_on_line(text, *span, line) => {
                 return Some(type_target(
@@ -199,7 +211,10 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                                 span,
                                 method.doc_comment.is_some(),
                                 None,
-                                method.params.iter().flat_map(|param| param.get_identifiers()),
+                                method
+                                    .params
+                                    .iter()
+                                    .flat_map(|param| param.get_identifiers()),
                                 method
                                     .return_type
                                     .as_ref()
@@ -218,7 +233,8 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                                 !matches!(return_type, TypeAnnotation::Void),
                             ),
                             TraitMember::Required(shape_ast::ast::InterfaceMember::Property {
-                                doc_comment, ..
+                                doc_comment,
+                                ..
                             })
                             | TraitMember::Required(
                                 shape_ast::ast::InterfaceMember::IndexSignature {
@@ -232,13 +248,54 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                     }
                 }
             }
+            Item::Extend(extend, _) => {
+                for method in &extend.methods {
+                    if starts_on_line(text, method.span, line) {
+                        return Some(callable_target(
+                            method.span,
+                            method.doc_comment.is_some(),
+                            None,
+                            method
+                                .params
+                                .iter()
+                                .flat_map(|param| param.get_identifiers()),
+                            method
+                                .return_type
+                                .as_ref()
+                                .is_some_and(|ty| !matches!(ty, TypeAnnotation::Void)),
+                        ));
+                    }
+                }
+            }
+            Item::Impl(impl_block, _) => {
+                for method in &impl_block.methods {
+                    if starts_on_line(text, method.span, line) {
+                        return Some(callable_target(
+                            method.span,
+                            method.doc_comment.is_some(),
+                            None,
+                            method
+                                .params
+                                .iter()
+                                .flat_map(|param| param.get_identifiers()),
+                            method
+                                .return_type
+                                .as_ref()
+                                .is_some_and(|ty| !matches!(ty, TypeAnnotation::Void)),
+                        ));
+                    }
+                }
+            }
             Item::Export(export, span) if starts_on_line(text, *span, line) => {
                 return Some(match &export.item {
                     ExportItem::Function(function) => callable_target(
                         *span,
                         function.doc_comment.is_some(),
                         function.type_params.as_deref(),
-                        function.params.iter().flat_map(|param| param.get_identifiers()),
+                        function
+                            .params
+                            .iter()
+                            .flat_map(|param| param.get_identifiers()),
                         function
                             .return_type
                             .as_ref()
@@ -248,31 +305,40 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                         *span,
                         function.doc_comment.is_some(),
                         function.type_params.as_deref(),
-                        function.params.iter().flat_map(|param| param.get_identifiers()),
+                        function
+                            .params
+                            .iter()
+                            .flat_map(|param| param.get_identifiers()),
                         function
                             .return_type
                             .as_ref()
                             .is_some_and(|ty| !matches!(ty, TypeAnnotation::Void)),
                     ),
-                    ExportItem::TypeAlias(alias) => {
-                        type_target(*span, alias.doc_comment.is_some(), alias.type_params.as_deref())
-                    }
+                    ExportItem::TypeAlias(alias) => type_target(
+                        *span,
+                        alias.doc_comment.is_some(),
+                        alias.type_params.as_deref(),
+                    ),
                     ExportItem::Struct(struct_def) => type_target(
                         *span,
                         struct_def.doc_comment.is_some(),
                         struct_def.type_params.as_deref(),
                     ),
-                    ExportItem::Enum(enum_def) => {
-                        type_target(*span, enum_def.doc_comment.is_some(), enum_def.type_params.as_deref())
-                    }
+                    ExportItem::Enum(enum_def) => type_target(
+                        *span,
+                        enum_def.doc_comment.is_some(),
+                        enum_def.type_params.as_deref(),
+                    ),
                     ExportItem::Interface(interface) => type_target(
                         *span,
                         interface.doc_comment.is_some(),
                         interface.type_params.as_deref(),
                     ),
-                    ExportItem::Trait(trait_def) => {
-                        type_target(*span, trait_def.doc_comment.is_some(), trait_def.type_params.as_deref())
-                    }
+                    ExportItem::Trait(trait_def) => type_target(
+                        *span,
+                        trait_def.doc_comment.is_some(),
+                        trait_def.type_params.as_deref(),
+                    ),
                     ExportItem::Named(_) => continue,
                 });
             }
@@ -334,7 +400,9 @@ fn type_param_names(type_params: Option<&[TypeParam]>) -> Vec<String> {
 fn render_doc_stub(target: &DocTemplateTarget, indent: &str) -> String {
     let mut lines = vec![format!("{indent}/// Summary.")];
     for type_param in &target.type_params {
-        lines.push(format!("{indent}/// @typeparam {type_param} Describe `{type_param}`."));
+        lines.push(format!(
+            "{indent}/// @typeparam {type_param} Describe `{type_param}`."
+        ));
     }
     for param in &target.params {
         lines.push(format!("{indent}/// @param {param} Describe `{param}`."));
@@ -393,11 +461,7 @@ mod tests {
             .edit
             .and_then(|edit| edit.changes)
             .expect("workspace edits");
-        let new_text = &edits
-            .values()
-            .next()
-            .expect("doc edits")[0]
-            .new_text;
+        let new_text = &edits.values().next().expect("doc edits")[0].new_text;
         assert!(new_text.contains("/// Summary."));
         assert!(new_text.contains("/// @param value"));
         assert!(new_text.contains("/// @returns"));
@@ -451,11 +515,7 @@ mod tests {
             .edit
             .and_then(|edit| edit.changes)
             .expect("workspace edits");
-        let new_text = &edits
-            .values()
-            .next()
-            .expect("doc edits")[0]
-            .new_text;
+        let new_text = &edits.values().next().expect("doc edits")[0].new_text;
         assert!(new_text.contains("/// Summary."));
         assert!(new_text.contains("/// @param period"));
         assert!(!new_text.contains("/// @returns"));

@@ -79,10 +79,7 @@ pub fn property_completions(
                         label: name.clone(),
                         kind: Some(CompletionItemKind::FIELD),
                         detail: Some(field_type.clone()),
-                        documentation: Some(Documentation::String(format!(
-                            "Field `{}` of type `{}`",
-                            name, resolved_type
-                        ))),
+                        documentation: None,
                         ..CompletionItem::default()
                     });
                 }
@@ -97,10 +94,7 @@ pub fn property_completions(
                         label: name.clone(),
                         kind: Some(CompletionItemKind::FIELD),
                         detail: Some(field_type.clone()),
-                        documentation: Some(Documentation::String(format!(
-                            "Field `{}` of inferred object type",
-                            name
-                        ))),
+                        documentation: None,
                         ..CompletionItem::default()
                     });
                 }
@@ -114,16 +108,14 @@ pub fn property_completions(
                     .signature
                     .clone()
                     .unwrap_or_else(|| method.name.clone());
-                let doc = method
-                    .from_trait
-                    .as_ref()
-                    .map(|t| format!("Method from trait `{}`", t))
-                    .unwrap_or_else(|| "Extension method".to_string());
                 completions.push(CompletionItem {
                     label: method.name.clone(),
                     kind: Some(CompletionItemKind::METHOD),
                     detail: Some(detail),
-                    documentation: Some(Documentation::String(doc)),
+                    documentation: method
+                        .documentation
+                        .as_ref()
+                        .map(|doc| Documentation::String(doc.clone())),
                     insert_text: Some(format!("{}(${{1}})", method.name)),
                     insert_text_format: Some(InsertTextFormat::SNIPPET),
                     ..CompletionItem::default()
@@ -149,10 +141,7 @@ pub fn property_completions(
                     label: sig.name.clone(),
                     kind: Some(CompletionItemKind::METHOD),
                     detail: Some(format!("{} method", resolved_type)),
-                    documentation: Some(Documentation::String(format!(
-                        "Built-in method on {}",
-                        resolved_type
-                    ))),
+                    documentation: None,
                     insert_text: Some(insert),
                     insert_text_format: Some(InsertTextFormat::SNIPPET),
                     ..CompletionItem::default()
@@ -316,9 +305,10 @@ pub fn pipe_target_completions(
                     label: method.name.clone(),
                     kind: Some(CompletionItemKind::METHOD),
                     detail: Some(detail),
-                    documentation: Some(Documentation::String(
-                        "Pipe-compatible method".to_string(),
-                    )),
+                    documentation: method
+                        .documentation
+                        .as_ref()
+                        .map(|doc| Documentation::String(doc.clone())),
                     insert_text: Some(format!("{}(${{1}})", method.name)),
                     insert_text_format: Some(InsertTextFormat::SNIPPET),
                     ..CompletionItem::default()
@@ -341,10 +331,7 @@ pub fn pipe_target_completions(
                     label: sig.name.clone(),
                     kind: Some(CompletionItemKind::METHOD),
                     detail: Some(format!("{} method", input_type)),
-                    documentation: Some(Documentation::String(format!(
-                        "Built-in method on {}",
-                        input_type
-                    ))),
+                    documentation: None,
                     insert_text: Some(insert),
                     insert_text_format: Some(InsertTextFormat::SNIPPET),
                     ..CompletionItem::default()

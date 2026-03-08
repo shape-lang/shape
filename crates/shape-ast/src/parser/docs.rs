@@ -1,6 +1,7 @@
 use crate::ast::{
     DocComment, DocEntry, DocLink, DocTag, DocTagKind, DocTarget, DocTargetKind, ExportItem, Item,
-    Program, ProgramDocs, Span, TraitMember, TypeParam,
+    Program, ProgramDocs, Span, TraitMember, TypeParam, extend_method_doc_path,
+    impl_method_doc_path,
 };
 use pest::iterators::Pair;
 
@@ -32,7 +33,10 @@ pub fn parse_doc_comment(pair: Pair<Rule>) -> DocComment {
     }
 }
 
-pub fn build_program_docs(program: &Program, module_doc_comment: Option<&DocComment>) -> ProgramDocs {
+pub fn build_program_docs(
+    program: &Program,
+    module_doc_comment: Option<&DocComment>,
+) -> ProgramDocs {
     let mut collector = DocCollector::default();
     collector.collect_program_doc(module_doc_comment);
     collector.collect_items(&program.items, &[]);
@@ -167,7 +171,8 @@ fn parse_tag_line(line: &DocLine) -> Option<DocTag> {
                 span: tag_span,
                 kind_span,
                 name: (!name.is_empty()).then(|| name.to_string()),
-                name_span: (!name.is_empty()).then(|| span_from_offsets(line.span, name_start, name_end)),
+                name_span: (!name.is_empty())
+                    .then(|| span_from_offsets(line.span, name_start, name_end)),
                 body: body.trim().to_string(),
                 body_span: (!body.trim().is_empty())
                     .then(|| span_from_offsets(line.span, body_start, line.text.len())),
@@ -373,11 +378,22 @@ impl DocCollector {
             }
             Item::Interface(interface_def, span) => {
                 let path = join_path(module_path, &interface_def.name);
-                self.collect_interface(&path, *span, interface_def.doc_comment.as_ref(), interface_def);
+                self.collect_interface(
+                    &path,
+                    *span,
+                    interface_def.doc_comment.as_ref(),
+                    interface_def,
+                );
             }
             Item::Trait(trait_def, span) => {
                 let path = join_path(module_path, &trait_def.name);
                 self.collect_trait(&path, *span, trait_def.doc_comment.as_ref(), trait_def);
+            }
+            Item::Extend(extend, span) => {
+                self.collect_extend(module_path, *span, extend);
+            }
+            Item::Impl(impl_block, span) => {
+                self.collect_impl(module_path, *span, impl_block);
             }
             Item::Export(export, span) => match &export.item {
                 ExportItem::Function(function) => {
@@ -482,7 +498,12 @@ impl DocCollector {
         doc_comment: Option<&DocComment>,
         interface_def: &crate::ast::InterfaceDef,
     ) {
-        self.attach_comment(DocTargetKind::Interface, path.to_string(), span, doc_comment);
+        self.attach_comment(
+            DocTargetKind::Interface,
+            path.to_string(),
+            span,
+            doc_comment,
+        );
         self.collect_type_params(path, interface_def.type_params.as_deref());
         for member in &interface_def.members {
             let (kind, name) = match member {
@@ -521,13 +542,21 @@ impl DocCollector {
         self.collect_type_params(path, trait_def.type_params.as_deref());
         for member in &trait_def.members {
             let (kind, child_name, child_span) = match member {
-                TraitMember::Required(crate::ast::InterfaceMember::Property { name, span, .. })
-                | TraitMember::Required(crate::ast::InterfaceMember::Method { name, span, .. }) => {
-                    (DocTargetKind::TraitMethod, name.clone(), *span)
-                }
+                TraitMember::Required(crate::ast::InterfaceMember::Property {
+                    name, span, ..
+                })
+                | TraitMember::Required(crate::ast::InterfaceMember::Method {
+                    name, span, ..
+                }) => (DocTargetKind::TraitMethod, name.clone(), *span),
                 TraitMember::Required(crate::ast::InterfaceMember::IndexSignature {
-                    param_type, span, ..
-                }) => (DocTargetKind::TraitMethod, format!("[{}]", param_type), *span),
+                    param_type,
+                    span,
+                    ..
+                }) => (
+                    DocTargetKind::TraitMethod,
+                    format!("[{}]", param_type),
+                    *span,
+                ),
                 TraitMember::Default(method) => {
                     (DocTargetKind::TraitMethod, method.name.clone(), method.span)
                 }
@@ -540,6 +569,43 @@ impl DocCollector {
                 join_child_path(path, &child_name),
                 child_span,
                 member.doc_comment(),
+            );
+        }
+    }
+
+    fn collect_extend(
+        &mut self,
+        module_path: &[String],
+        _span: Span,
+        extend: &crate::ast::ExtendStatement,
+    ) {
+        for method in &extend.methods {
+            self.attach_comment(
+                DocTargetKind::ExtensionMethod,
+                extend_method_doc_path(module_path, &extend.type_name, &method.name),
+                method.span,
+                method.doc_comment.as_ref(),
+            );
+        }
+    }
+
+    fn collect_impl(
+        &mut self,
+        module_path: &[String],
+        _span: Span,
+        impl_block: &crate::ast::ImplBlock,
+    ) {
+        for method in &impl_block.methods {
+            self.attach_comment(
+                DocTargetKind::ImplMethod,
+                impl_method_doc_path(
+                    module_path,
+                    &impl_block.trait_name,
+                    &impl_block.target_type,
+                    &method.name,
+                ),
+                method.span,
+                method.doc_comment.as_ref(),
             );
         }
     }
@@ -607,7 +673,7 @@ fn module_path_from_comment(comment: &DocComment) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::DocTargetKind;
+    use crate::ast::{DocTargetKind, Item};
     use crate::parser::parse_program;
 
     #[test]
@@ -688,5 +754,67 @@ mod tests {
         let source = "/** Old style */\nfn add(x: number) -> number { x }\n";
         let program = parse_program(source).expect("program should parse");
         assert!(program.docs.comment_for_path("add").is_none());
+    }
+
+    #[test]
+    fn attaches_docs_to_extend_methods() {
+        let source = "extend Json {\n    /// Access a field.\n    method get(key: string) -> Json { self }\n}\n";
+        let program = parse_program(source).expect("program should parse");
+        let extend = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Extend(extend, _) => Some(extend),
+                _ => None,
+            })
+            .expect("extend block");
+        let method = extend.methods.first().expect("extend method");
+        let entry = program
+            .docs
+            .entry_for_span(method.span)
+            .expect("doc entry for extend method");
+        assert_eq!(entry.target.kind, DocTargetKind::ExtensionMethod);
+        assert_eq!(entry.comment.summary, "Access a field.");
+    }
+
+    #[test]
+    fn attaches_docs_to_impl_methods() {
+        let source = "impl Display for Json {\n    /// Render the value.\n    method render() -> string { \"json\" }\n}\n";
+        let program = parse_program(source).expect("program should parse");
+        let impl_block = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Impl(impl_block, _) => Some(impl_block),
+                _ => None,
+            })
+            .expect("impl block");
+        let method = impl_block.methods.first().expect("impl method");
+        let entry = program
+            .docs
+            .entry_for_span(method.span)
+            .expect("doc entry for impl method");
+        assert_eq!(entry.target.kind, DocTargetKind::ImplMethod);
+        assert_eq!(entry.comment.summary, "Render the value.");
+    }
+
+    #[test]
+    fn parses_stdlib_json_value_module_with_documented_methods() {
+        let source = include_str!("../../../shape-core/stdlib/core/json_value.shape");
+        let program = parse_program(source).expect("stdlib json_value module should parse");
+        assert!(
+            program
+                .docs
+                .entry_for_path("std::core::json_value")
+                .is_some()
+        );
+        assert!(
+            program
+                .docs
+                .entries
+                .iter()
+                .any(|entry| entry.target.kind == DocTargetKind::ExtensionMethod),
+            "expected documented extension methods in std::core::json_value"
+        );
     }
 }

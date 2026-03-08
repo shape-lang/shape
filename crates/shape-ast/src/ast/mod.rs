@@ -49,6 +49,8 @@ pub use data_refs::{DataDateTimeRef, DataIndex, DataRef};
 // From docs.rs
 pub use docs::{
     DocComment, DocEntry, DocLink, DocTag, DocTagKind, DocTarget, DocTargetKind, ProgramDocs,
+    extend_method_doc_path, impl_method_doc_path, qualify_doc_owner_path, type_annotation_doc_path,
+    type_name_doc_path,
 };
 
 // From types.rs

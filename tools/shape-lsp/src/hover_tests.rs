@@ -401,7 +401,10 @@ fn test_extract_doc_comment_multiline() {
     let source = "/// Line one\n/// Line two\nfunction foo() { return 1 }";
     let program = shape_ast::parse_program(source).expect("program should parse");
     assert_eq!(
-        program.docs.comment_for_path("foo").map(|doc| doc.body.as_str()),
+        program
+            .docs
+            .comment_for_path("foo")
+            .map(|doc| doc.body.as_str()),
         Some("Line one\nLine two")
     );
 }
@@ -813,7 +816,8 @@ fn test_hover_local_annotation_usage() {
 
 #[test]
 fn test_hover_locally_defined_annotation_usage_with_module_cache() {
-    let code = "/// Mark a function for auditing.\nannotation my_ann() {}\n@my_ann\nfn run() { 1 }\n";
+    let code =
+        "/// Mark a function for auditing.\nannotation my_ann() {}\n@my_ann\nfn run() { 1 }\n";
     let cache = ModuleCache::new();
     let current_file = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))

@@ -1,10 +1,10 @@
 //! Function definition and parameter types for Shape AST
 
+use super::DocComment;
 use super::expressions::Expr;
 use super::span::Span;
 use super::statements::Statement;
 use super::types::TypeAnnotation;
-use super::DocComment;
 use serde::{Deserialize, Serialize};
 // Re-export TypeParam from types to avoid duplication
 pub use super::types::TypeParam;

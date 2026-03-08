@@ -1,7 +1,7 @@
 use crate::module_cache::ModuleCache;
 use shape_ast::ast::{
     DocTargetKind, ExportItem, FunctionParameter, InterfaceMember, Item, Program, Span,
-    TraitMember, TypeAnnotation, TypeParam,
+    TraitMember, TypeAnnotation, TypeParam, extend_method_doc_path, impl_method_doc_path,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -89,7 +89,13 @@ fn collect_doc_symbols_in_items(
         match item {
             Item::Module(module, span) => {
                 let path = join_path(path_prefix, &module.name);
-                push_symbol(out, DocTargetKind::Module, module_prefix, path.clone(), *span);
+                push_symbol(
+                    out,
+                    DocTargetKind::Module,
+                    module_prefix,
+                    path.clone(),
+                    *span,
+                );
                 let mut next = path_prefix.to_vec();
                 next.push(module.name.clone());
                 collect_doc_symbols_in_items(&module.items, module_prefix, &next, out);
@@ -102,7 +108,13 @@ fn collect_doc_symbols_in_items(
                     join_path(path_prefix, &function.name),
                     *span,
                 );
-                push_type_params(out, module_prefix, path_prefix, &function.name, function.type_params.as_deref());
+                push_type_params(
+                    out,
+                    module_prefix,
+                    path_prefix,
+                    &function.name,
+                    function.type_params.as_deref(),
+                );
             }
             Item::AnnotationDef(annotation_def, span) => {
                 push_symbol(
@@ -121,7 +133,13 @@ fn collect_doc_symbols_in_items(
                     join_path(path_prefix, &function.name),
                     *span,
                 );
-                push_type_params(out, module_prefix, path_prefix, &function.name, function.type_params.as_deref());
+                push_type_params(
+                    out,
+                    module_prefix,
+                    path_prefix,
+                    &function.name,
+                    function.type_params.as_deref(),
+                );
             }
             Item::BuiltinFunctionDecl(function, span) => {
                 push_symbol(
@@ -131,7 +149,13 @@ fn collect_doc_symbols_in_items(
                     join_path(path_prefix, &function.name),
                     *span,
                 );
-                push_type_params(out, module_prefix, path_prefix, &function.name, function.type_params.as_deref());
+                push_type_params(
+                    out,
+                    module_prefix,
+                    path_prefix,
+                    &function.name,
+                    function.type_params.as_deref(),
+                );
             }
             Item::BuiltinTypeDecl(ty, span) => {
                 push_symbol(
@@ -141,7 +165,13 @@ fn collect_doc_symbols_in_items(
                     join_path(path_prefix, &ty.name),
                     *span,
                 );
-                push_type_params(out, module_prefix, path_prefix, &ty.name, ty.type_params.as_deref());
+                push_type_params(
+                    out,
+                    module_prefix,
+                    path_prefix,
+                    &ty.name,
+                    ty.type_params.as_deref(),
+                );
             }
             Item::TypeAlias(alias, span) => {
                 push_symbol(
@@ -151,11 +181,23 @@ fn collect_doc_symbols_in_items(
                     join_path(path_prefix, &alias.name),
                     *span,
                 );
-                push_type_params(out, module_prefix, path_prefix, &alias.name, alias.type_params.as_deref());
+                push_type_params(
+                    out,
+                    module_prefix,
+                    path_prefix,
+                    &alias.name,
+                    alias.type_params.as_deref(),
+                );
             }
             Item::StructType(struct_def, span) => {
                 let path = join_path(path_prefix, &struct_def.name);
-                push_symbol(out, DocTargetKind::Struct, module_prefix, path.clone(), *span);
+                push_symbol(
+                    out,
+                    DocTargetKind::Struct,
+                    module_prefix,
+                    path.clone(),
+                    *span,
+                );
                 push_type_params(
                     out,
                     module_prefix,
@@ -195,7 +237,13 @@ fn collect_doc_symbols_in_items(
             }
             Item::Interface(interface, span) => {
                 let path = join_path(path_prefix, &interface.name);
-                push_symbol(out, DocTargetKind::Interface, module_prefix, path.clone(), *span);
+                push_symbol(
+                    out,
+                    DocTargetKind::Interface,
+                    module_prefix,
+                    path.clone(),
+                    *span,
+                );
                 push_type_params(
                     out,
                     module_prefix,
@@ -215,7 +263,13 @@ fn collect_doc_symbols_in_items(
             }
             Item::Trait(trait_def, span) => {
                 let path = join_path(path_prefix, &trait_def.name);
-                push_symbol(out, DocTargetKind::Trait, module_prefix, path.clone(), *span);
+                push_symbol(
+                    out,
+                    DocTargetKind::Trait,
+                    module_prefix,
+                    path.clone(),
+                    *span,
+                );
                 push_type_params(
                     out,
                     module_prefix,
@@ -230,6 +284,33 @@ fn collect_doc_symbols_in_items(
                         module_prefix,
                         join_child_path(&path, &trait_member_name(member)),
                         member.span(),
+                    );
+                }
+            }
+            Item::Extend(extend, _) => {
+                for method in &extend.methods {
+                    push_symbol(
+                        out,
+                        DocTargetKind::ExtensionMethod,
+                        module_prefix,
+                        extend_method_doc_path(path_prefix, &extend.type_name, &method.name),
+                        method.span,
+                    );
+                }
+            }
+            Item::Impl(impl_block, _) => {
+                for method in &impl_block.methods {
+                    push_symbol(
+                        out,
+                        DocTargetKind::ImplMethod,
+                        module_prefix,
+                        impl_method_doc_path(
+                            path_prefix,
+                            &impl_block.trait_name,
+                            &impl_block.target_type,
+                            &method.name,
+                        ),
+                        method.span,
                     );
                 }
             }
@@ -257,7 +338,13 @@ fn collect_export_symbols(
                 join_path(path_prefix, &function.name),
                 span,
             );
-            push_type_params(out, module_prefix, path_prefix, &function.name, function.type_params.as_deref());
+            push_type_params(
+                out,
+                module_prefix,
+                path_prefix,
+                &function.name,
+                function.type_params.as_deref(),
+            );
         }
         ExportItem::ForeignFunction(function) => {
             push_symbol(
@@ -267,7 +354,13 @@ fn collect_export_symbols(
                 join_path(path_prefix, &function.name),
                 span,
             );
-            push_type_params(out, module_prefix, path_prefix, &function.name, function.type_params.as_deref());
+            push_type_params(
+                out,
+                module_prefix,
+                path_prefix,
+                &function.name,
+                function.type_params.as_deref(),
+            );
         }
         ExportItem::TypeAlias(alias) => {
             push_symbol(
@@ -277,11 +370,23 @@ fn collect_export_symbols(
                 join_path(path_prefix, &alias.name),
                 span,
             );
-            push_type_params(out, module_prefix, path_prefix, &alias.name, alias.type_params.as_deref());
+            push_type_params(
+                out,
+                module_prefix,
+                path_prefix,
+                &alias.name,
+                alias.type_params.as_deref(),
+            );
         }
         ExportItem::Struct(struct_def) => {
             let path = join_path(path_prefix, &struct_def.name);
-            push_symbol(out, DocTargetKind::Struct, module_prefix, path.clone(), span);
+            push_symbol(
+                out,
+                DocTargetKind::Struct,
+                module_prefix,
+                path.clone(),
+                span,
+            );
             push_type_params(
                 out,
                 module_prefix,
@@ -321,7 +426,13 @@ fn collect_export_symbols(
         }
         ExportItem::Interface(interface) => {
             let path = join_path(path_prefix, &interface.name);
-            push_symbol(out, DocTargetKind::Interface, module_prefix, path.clone(), span);
+            push_symbol(
+                out,
+                DocTargetKind::Interface,
+                module_prefix,
+                path.clone(),
+                span,
+            );
             push_type_params(
                 out,
                 module_prefix,
@@ -491,6 +602,8 @@ fn find_doc_owner_in_item(item: &Item, target_span: Span) -> Option<DocOwner> {
         )),
         Item::Interface(interface, _) => find_doc_owner_in_interface(interface, target_span),
         Item::Trait(trait_def, _) => find_doc_owner_in_trait(trait_def, target_span),
+        Item::Extend(extend, _) => find_doc_owner_in_extend(extend, target_span),
+        Item::Impl(impl_block, _) => find_doc_owner_in_impl(impl_block, target_span),
         Item::Export(export, span) if *span == target_span => Some(export_owner(export)),
         _ => None,
     }
@@ -561,6 +674,38 @@ fn find_doc_owner_in_trait(
     None
 }
 
+fn find_doc_owner_in_extend(
+    extend: &shape_ast::ast::ExtendStatement,
+    target_span: Span,
+) -> Option<DocOwner> {
+    extend.methods.iter().find_map(|method| {
+        (method.span == target_span).then(|| {
+            callable_owner(
+                DocTargetKind::ExtensionMethod,
+                &method.params,
+                None,
+                method.return_type.as_ref(),
+            )
+        })
+    })
+}
+
+fn find_doc_owner_in_impl(
+    impl_block: &shape_ast::ast::ImplBlock,
+    target_span: Span,
+) -> Option<DocOwner> {
+    impl_block.methods.iter().find_map(|method| {
+        (method.span == target_span).then(|| {
+            callable_owner(
+                DocTargetKind::ImplMethod,
+                &method.params,
+                None,
+                method.return_type.as_ref(),
+            )
+        })
+    })
+}
+
 fn export_owner(export: &shape_ast::ast::ExportStmt) -> DocOwner {
     match &export.item {
         ExportItem::Function(function) => callable_owner(
@@ -575,13 +720,21 @@ fn export_owner(export: &shape_ast::ast::ExportStmt) -> DocOwner {
             function.type_params.as_deref(),
             function.return_type.as_ref(),
         ),
-        ExportItem::TypeAlias(alias) => type_owner(DocTargetKind::TypeAlias, alias.type_params.as_deref()),
-        ExportItem::Struct(struct_def) => type_owner(DocTargetKind::Struct, struct_def.type_params.as_deref()),
-        ExportItem::Enum(enum_def) => type_owner(DocTargetKind::Enum, enum_def.type_params.as_deref()),
+        ExportItem::TypeAlias(alias) => {
+            type_owner(DocTargetKind::TypeAlias, alias.type_params.as_deref())
+        }
+        ExportItem::Struct(struct_def) => {
+            type_owner(DocTargetKind::Struct, struct_def.type_params.as_deref())
+        }
+        ExportItem::Enum(enum_def) => {
+            type_owner(DocTargetKind::Enum, enum_def.type_params.as_deref())
+        }
         ExportItem::Interface(interface) => {
             type_owner(DocTargetKind::Interface, interface.type_params.as_deref())
         }
-        ExportItem::Trait(trait_def) => type_owner(DocTargetKind::Trait, trait_def.type_params.as_deref()),
+        ExportItem::Trait(trait_def) => {
+            type_owner(DocTargetKind::Trait, trait_def.type_params.as_deref())
+        }
         ExportItem::Named(_) => DocOwner::default(),
     }
 }
@@ -684,7 +837,8 @@ mod tests {
 
     #[test]
     fn collects_annotation_symbols_with_canonical_paths() {
-        let program = parse_program("/// Trace execution.\nannotation trace() {}\n").expect("program");
+        let program =
+            parse_program("/// Trace execution.\nannotation trace() {}\n").expect("program");
         let symbols = collect_program_doc_symbols(&program, "pkg::debug");
         assert!(
             symbols
