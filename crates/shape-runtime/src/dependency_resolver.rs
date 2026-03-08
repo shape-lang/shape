@@ -57,6 +57,12 @@ struct RegistryVersionRecord {
     dependencies: HashMap<String, DependencySpec>,
     #[serde(default)]
     source: Option<RegistrySourceSpec>,
+    #[serde(default)]
+    pub checksum: Option<String>,
+    #[serde(default)]
+    pub author_key: Option<String>,
+    #[serde(default)]
+    pub required_permissions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1472,6 +1478,7 @@ version = "2.1.0"
             blob_store: std::collections::HashMap::new(),
             manifests: vec![],
             native_dependency_scopes: vec![],
+            docs: std::collections::HashMap::new(),
         };
 
         let bundle_path = tmp.path().join("my-lib.shapec");
@@ -1516,6 +1523,7 @@ version = "2.1.0"
             blob_store: std::collections::HashMap::new(),
             manifests: vec![],
             native_dependency_scopes: vec![],
+            docs: std::collections::HashMap::new(),
         };
         let bundle_path = tmp.path().join("my-utils.shapec");
         bundle.write_to_file(&bundle_path).unwrap();

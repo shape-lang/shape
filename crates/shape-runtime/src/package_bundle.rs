@@ -5,13 +5,14 @@
 //!
 //! File format: `[8 bytes "SHAPEPKG"] [4 bytes format_version LE] [MessagePack payload]`
 
+use crate::doc_extract::DocItem;
 use crate::module_manifest::ModuleManifest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"SHAPEPKG";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 /// Minimum version we can still load (v1 bundles lack blob_store/manifests).
 const MIN_FORMAT_VERSION: u32 = 1;
 
@@ -84,6 +85,9 @@ pub struct PackageBundle {
     /// Used by consumers of `.shapec` bundles to lock/validate native prerequisites.
     #[serde(default)]
     pub native_dependency_scopes: Vec<BundledNativeDependencyScope>,
+    /// Documentation items extracted from source code, keyed by module path.
+    #[serde(default)]
+    pub docs: HashMap<String, Vec<DocItem>>,
 }
 
 /// Native dependency scope embedded in a `.shapec` bundle.
@@ -114,8 +118,8 @@ impl PackageBundle {
 
     /// Deserialize a bundle from bytes, validating magic and version.
     ///
-    /// Supports both v1 (no blob_store/manifests) and v2 bundles. The v1
-    /// fields are filled with defaults via `#[serde(default)]`.
+    /// Supports v1 (no blob_store/manifests), v2, and v3 (docs) bundles.
+    /// Missing fields are filled with defaults via `#[serde(default)]`.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         if data.len() < 12 {
             return Err("Bundle too small: missing header".to_string());
@@ -154,6 +158,17 @@ impl PackageBundle {
             .map_err(|e| format!("Failed to read bundle from '{}': {}", path.display(), e))?;
         Self::from_bytes(&data)
     }
+}
+
+/// Verify SHA-256 checksum of raw bundle bytes.
+/// `expected` should be in format "sha256:hexdigest" or just the hex digest.
+pub fn verify_bundle_checksum(bundle_bytes: &[u8], expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bundle_bytes);
+    let digest = hex::encode(hasher.finalize());
+    let expected_hex = expected.strip_prefix("sha256:").unwrap_or(expected);
+    digest == expected_hex
 }
 
 #[cfg(test)]
@@ -195,6 +210,7 @@ mod tests {
             blob_store: HashMap::new(),
             manifests: vec![],
             native_dependency_scopes: vec![],
+            docs: HashMap::new(),
         }
     }
 
@@ -264,6 +280,7 @@ mod tests {
             blob_store: HashMap::new(),
             manifests: vec![],
             native_dependency_scopes: vec![],
+            docs: HashMap::new(),
         };
 
         let bytes = bundle.to_bytes().expect("should serialize");
@@ -316,6 +333,7 @@ mod tests {
             },
             manifests: vec![manifest],
             native_dependency_scopes: vec![],
+            docs: HashMap::new(),
         };
 
         let bytes = bundle.to_bytes().expect("serialization should succeed");
@@ -327,6 +345,58 @@ mod tests {
         assert!(restored.manifests[0].verify_integrity());
         assert_eq!(restored.blob_store.get(&blob_hash), Some(&blob_data));
         assert!(restored.modules.is_empty());
+    }
+
+    // --- verify_bundle_checksum tests ---
+
+    fn sha256_hex(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hex::encode(hasher.finalize())
+    }
+
+    #[test]
+    fn test_verify_checksum_correct() {
+        let data = b"hello world";
+        let hash = sha256_hex(data);
+        assert!(verify_bundle_checksum(data, &hash));
+    }
+
+    #[test]
+    fn test_verify_checksum_wrong() {
+        let data = b"hello world";
+        assert!(!verify_bundle_checksum(data, "0000000000000000000000000000000000000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn test_verify_checksum_with_sha256_prefix() {
+        let data = b"test data";
+        let hash = sha256_hex(data);
+        let prefixed = format!("sha256:{}", hash);
+        assert!(verify_bundle_checksum(data, &prefixed));
+    }
+
+    #[test]
+    fn test_verify_checksum_without_prefix() {
+        let data = b"test data";
+        let hash = sha256_hex(data);
+        assert!(verify_bundle_checksum(data, &hash));
+    }
+
+    #[test]
+    fn test_verify_checksum_empty_data() {
+        let data = b"";
+        let hash = sha256_hex(data);
+        assert!(verify_bundle_checksum(data, &hash));
+    }
+
+    #[test]
+    fn test_verify_checksum_case_sensitive() {
+        let data = b"case test";
+        let hash = sha256_hex(data).to_uppercase();
+        // hex::encode produces lowercase; uppercase should fail
+        assert!(!verify_bundle_checksum(data, &hash));
     }
 
     #[test]
@@ -363,6 +433,7 @@ mod tests {
             },
             manifests: vec![m1, m2],
             native_dependency_scopes: vec![],
+            docs: HashMap::new(),
         };
 
         let bytes = bundle.to_bytes().expect("serialize");

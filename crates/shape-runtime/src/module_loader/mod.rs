@@ -1320,6 +1320,7 @@ pub fn use_answer() { answer() }
             blob_store: std::collections::HashMap::new(),
             manifests: vec![],
             native_dependency_scopes: vec![],
+            docs: std::collections::HashMap::new(),
         };
 
         let mut loader = ModuleLoader::new();

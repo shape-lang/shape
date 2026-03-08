@@ -33,6 +33,7 @@ impl BundleCompiler {
         // 2. Compile each file
         let mut modules = Vec::new();
         let mut all_sources = String::new();
+        let mut docs: HashMap<String, Vec<shape_runtime::doc_extract::DocItem>> = HashMap::new();
 
         for (file_path, module_path) in &shape_files {
             let source = std::fs::read_to_string(file_path)
@@ -49,6 +50,13 @@ impl BundleCompiler {
             // Parse
             let ast = parse_program(&source)
                 .map_err(|e| format!("Failed to parse '{}': {}", file_path.display(), e))?;
+
+            // Extract documentation from source + AST
+            let module_docs =
+                shape_runtime::doc_extract::extract_docs_from_ast(&source, &ast);
+            if !module_docs.is_empty() {
+                docs.insert(module_path.clone(), module_docs);
+            }
 
             // Collect export names from AST
             let export_names = collect_export_names(&ast);
@@ -211,6 +219,7 @@ impl BundleCompiler {
             blob_store,
             manifests,
             native_dependency_scopes,
+            docs,
         })
     }
 }

@@ -35,6 +35,7 @@ pub mod context;
 pub mod crypto;
 pub mod data;
 pub mod dependency_resolver;
+pub mod doc_extract;
 pub mod distributed_gc;
 pub mod engine;
 pub mod event_queue;

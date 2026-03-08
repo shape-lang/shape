@@ -523,6 +523,8 @@ pub struct ProjectSection {
     pub license: Option<String>,
     #[serde(default)]
     pub repository: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// [modules] section

@@ -233,6 +233,7 @@ fn sample_bundle() -> PackageBundle {
         blob_store: HashMap::new(),
         manifests: vec![],
         native_dependency_scopes: vec![],
+        docs: HashMap::new(),
     }
 }
 
@@ -309,6 +310,7 @@ fn test_bundle_metadata_preserves_all_fields() {
         blob_store: HashMap::new(),
         manifests: vec![],
         native_dependency_scopes: vec![],
+        docs: HashMap::new(),
     };
 
     let bytes = bundle.to_bytes().unwrap();
@@ -593,6 +595,7 @@ fn test_module_loader_loads_bundle_modules() {
         blob_store: HashMap::new(),
         manifests: vec![],
         native_dependency_scopes: vec![],
+        docs: HashMap::new(),
     };
 
     let mut loader = ModuleLoader::new();
