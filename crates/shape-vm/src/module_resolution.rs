@@ -373,6 +373,7 @@ mod tests {
         };
         let mut program = Program {
             items: vec![Item::Import(import, Span::DUMMY)],
+            docs: shape_ast::ast::ProgramDocs::default(),
         };
         let count_before = program.items.len();
         prepend_prelude_items(&mut program);

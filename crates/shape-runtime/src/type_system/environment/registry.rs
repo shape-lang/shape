@@ -528,7 +528,9 @@ impl TypeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_ast::ast::{FunctionParam, InterfaceMember, TraitDef, TraitMember, TypeAnnotation};
+    use shape_ast::ast::{
+        FunctionParam, InterfaceMember, Span, TraitDef, TraitMember, TypeAnnotation,
+    };
 
     /// Helper: build a simple trait with one required method
     fn make_trait(name: &str, methods: Vec<&str>) -> TraitDef {
