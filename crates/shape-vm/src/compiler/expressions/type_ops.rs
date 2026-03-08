@@ -49,7 +49,7 @@ impl BytecodeCompiler {
             TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
                 type_params.contains(name)
             }
-            TypeAnnotation::Array(inner) | TypeAnnotation::Optional(inner) => {
+            TypeAnnotation::Array(inner) => {
                 Self::annotation_contains_type_param(inner, type_params)
             }
             TypeAnnotation::Tuple(items)
@@ -208,7 +208,11 @@ impl BytecodeCompiler {
         expr: &Expr,
         type_annotation: &shape_ast::ast::TypeAnnotation,
     ) -> Result<()> {
-        if let TypeAnnotation::Optional(inner_type) = type_annotation {
+        if let TypeAnnotation::Generic { name, args } = type_annotation
+            && name == "Option"
+            && args.len() == 1
+        {
+            let inner_type = &args[0];
             let source_name = self
                 .static_type_annotation_for_expr(expr)
                 .ok()
@@ -225,7 +229,7 @@ impl BytecodeCompiler {
                     ),
                     location: Some(self.span_to_source_location(expr.span())),
                 })?;
-            let target_selector = Self::try_into_name_from_annotation(inner_type.as_ref())
+            let target_selector = Self::try_into_name_from_annotation(inner_type)
                 .ok_or_else(|| ShapeError::SemanticError {
                     message: format!(
                         "`as Type?` target must be a named type selector, found '{}'",

@@ -402,11 +402,6 @@ impl ConstraintSolver {
                 Ok(false)
             }
 
-            // Optional types
-            (TypeAnnotation::Optional(o1), TypeAnnotation::Optional(o2)) => {
-                self.unify_annotations(o1, o2)
-            }
-
             // Intersection types (order-independent)
             (TypeAnnotation::Intersection(i1), TypeAnnotation::Intersection(i2)) => {
                 self.unify_annotation_sets(i1, i2)
@@ -922,9 +917,11 @@ impl ConstraintSolver {
                 self.is_subtype(&ret1, &ret2)
             }
 
-            // Optional subtyping: T <: T?
-            (t, Type::Concrete(TypeAnnotation::Optional(opt_inner))) => {
-                let inner = Type::Concrete(*opt_inner.clone());
+            // Optional subtyping: T <: Option<T>
+            (t, Type::Concrete(TypeAnnotation::Generic { name, args }))
+                if name == "Option" && args.len() == 1 =>
+            {
+                let inner = Type::Concrete(args[0].clone());
                 self.is_subtype(t, &inner)
             }
 

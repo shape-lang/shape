@@ -220,7 +220,6 @@ fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
         TypeAnnotation::Basic(name) => name.clone(),
         TypeAnnotation::Reference(name) => name.clone(),
         TypeAnnotation::Array(inner) => format!("[{}]", type_annotation_to_string(inner)),
-        TypeAnnotation::Optional(inner) => format!("{}?", type_annotation_to_string(inner)),
         TypeAnnotation::Union(types) => types
             .iter()
             .map(type_annotation_to_string)
@@ -375,10 +374,11 @@ mod tests {
             "[string]"
         );
         assert_eq!(
-            type_annotation_to_string(&TypeAnnotation::Optional(Box::new(TypeAnnotation::Basic(
-                "number".to_string()
-            )))),
-            "number?"
+            type_annotation_to_string(&TypeAnnotation::Generic {
+                name: "Option".to_string(),
+                args: vec![TypeAnnotation::Basic("number".to_string())],
+            }),
+            "Option<number>"
         );
         assert_eq!(
             type_annotation_to_string(&TypeAnnotation::Union(vec![

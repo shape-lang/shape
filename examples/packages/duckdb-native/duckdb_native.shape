@@ -1,15 +1,15 @@
-//! Proof-of-concept: package-level DuckDB C interop (no extension).
-//!
-//! This example demonstrates:
-//! - `extern C` declarations resolved via `[native-dependencies]`
-//! - pointer-cell out-parameter handling in pure Shape
-//! - strict schema load into `Result<Table<T>>` via Arrow C import
-//!
-//! API choice note:
-//! This PoC uses DuckDB's `duckdb_query_arrow*` family to keep the data path
-//! Arrow-native. Those symbols are currently marked deprecated upstream; a
-//! production package should migrate to the non-deprecated Arrow APIs once the
-//! same end-to-end flow is exposed.
+// Proof-of-concept: package-level DuckDB C interop (no extension).
+//
+// This example demonstrates:
+// - `extern C` declarations resolved via `[native-dependencies]`
+// - pointer-cell out-parameter handling in pure Shape
+// - strict schema load into `Result<Table<T>>` via Arrow C import
+//
+// API choice note:
+// This PoC uses DuckDB's `duckdb_query_arrow*` family to keep the data path
+// Arrow-native. Those symbols are currently marked deprecated upstream; a
+// production package should migrate to the non-deprecated Arrow APIs once the
+// same end-to-end flow is exposed.
 
 from std::core::native use {
   ptr_new_cell,

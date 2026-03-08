@@ -220,7 +220,6 @@ fn format_annotation(ann: &TypeAnnotation) -> String {
             .map(format_annotation)
             .collect::<Vec<_>>()
             .join(" + "),
-        TypeAnnotation::Optional(inner) => format!("{}?", format_annotation(inner)),
         TypeAnnotation::Generic { name, args } => format!(
             "{}<{}>",
             name,

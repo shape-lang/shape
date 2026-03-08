@@ -1,6 +1,7 @@
-//! Backtest Performance Metrics
-//!
-//! Functions for calculating trading performance metrics from backtest results.
+/// @module std::finance::backtest::metrics
+/// Backtest Performance Metrics
+///
+/// Functions for calculating trading performance metrics from backtest results.
 
 // ===== Core Metrics =====
 

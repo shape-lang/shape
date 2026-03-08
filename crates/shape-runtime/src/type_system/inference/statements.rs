@@ -288,11 +288,13 @@ impl TypeInferenceEngine {
         vec![]
     }
 
-    /// Unwrap T? / Optional<T> to T.
+    /// Unwrap T? / Option<T> to T.
     fn unwrap_optional_type(ty: &Type) -> Option<Type> {
         match ty {
-            Type::Concrete(TypeAnnotation::Optional(inner)) => {
-                Some(Type::Concrete(*inner.clone()))
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if name == "Option" && args.len() == 1 =>
+            {
+                Some(Type::Concrete(args[0].clone()))
             }
             Type::Generic { base, args } => {
                 if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {

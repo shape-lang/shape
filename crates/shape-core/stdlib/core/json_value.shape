@@ -1,10 +1,11 @@
-//! Typed JSON value ADT.
-//!
-//! `json.parse(text)` returns `Result<Json>`. Pattern matching and
-//! navigation methods provide typed access to unknown JSON structures.
-//! `TryFrom<Json>` impls auto-derive `TryInto` so `as?` works:
-//!
-//!   let name = (data.get("name") as? string)?
+/// @module std::core::json_value
+/// Typed JSON value ADT.
+///
+/// `json.parse(text)` returns `Result<Json>`. Pattern matching and
+/// navigation methods provide typed access to unknown JSON structures.
+/// `TryFrom<Json>` impls auto-derive `TryInto` so `as?` works:
+///
+///   let name = (data.get("name") as? string)?
 
 /// Algebraic data type representing JSON values in Shape.
 pub enum Json {

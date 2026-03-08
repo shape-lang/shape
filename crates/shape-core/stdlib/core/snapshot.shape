@@ -1,4 +1,5 @@
-//! Process Snapshotting and Resumability
+/// @module std::core::snapshot
+/// Process Snapshotting and Resumability
 
 /// Result of a snapshot operation.
 /// `snapshot()` is a builtin that returns self enum directly.

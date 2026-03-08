@@ -1,7 +1,8 @@
-//! Order Fill Simulation
-//!
-//! Models for realistic order fill simulation including slippage,
-//! commissions, and market impact.
+/// @module std::finance::backtest::fills
+/// Order Fill Simulation
+///
+/// Models for realistic order fill simulation including slippage,
+/// commissions, and market impact.
 
 // ===== Slippage Models =====
 

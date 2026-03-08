@@ -226,7 +226,6 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
             .map(format_type_annotation)
             .collect::<Vec<_>>()
             .join(" + "),
-        TypeAnnotation::Optional(inner) => format!("{}?", format_type_annotation(inner)),
         TypeAnnotation::Generic { name, args } => {
             if args.is_empty() {
                 name.clone()

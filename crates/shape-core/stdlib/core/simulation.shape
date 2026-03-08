@@ -1,27 +1,28 @@
-//! Core Simulation Module - Multi-Table State Machine Operations
-//!
-//! Provides simulation primitives for event-driven state machines over time series.
-//! This module is domain-agnostic - finance, IoT, and other industry-specific
-//! simulation wrappers should build on these primitives.
-//!
-//! ## SIMD-First Design Philosophy
-//!
-//! `simulate()` and `simulate_correlated()` are thin sequential layers for state
-//! machines. Most computation should happen BEFORE simulate using SIMD primitives:
-//!
-//! ```shape
-//! // CORRECT: SIMD-first approach
-//! let signals = prices.rolling(20).mean()
-//!     .zip_combine(prices.rolling(50).mean(), (f, s) => f > s);
-//! let positions = signals.simulate(state_tracker, { initial_state: 0 });
-//! ```
-//!
-//! ## Cross-Domain Applications
-//!
-//! - Physics: State machines for PDE boundary conditions
-//! - Signal Processing: Edge detection state, filter initialization
-//! - IoT: Device state tracking, alert accumulation
-//! - Finance: Position tracking, order state management
+/// @module std::core::simulation
+/// Core Simulation Module - Multi-Table State Machine Operations
+///
+/// Provides simulation primitives for event-driven state machines over time series.
+/// This module is domain-agnostic - finance, IoT, and other industry-specific
+/// simulation wrappers should build on these primitives.
+///
+/// ## SIMD-First Design Philosophy
+///
+/// `simulate()` and `simulate_correlated()` are thin sequential layers for state
+/// machines. Most computation should happen BEFORE simulate using SIMD primitives:
+///
+/// ```shape
+/// // CORRECT: SIMD-first approach
+/// let signals = prices.rolling(20).mean()
+///     .zip_combine(prices.rolling(50).mean(), (f, s) => f > s);
+/// let positions = signals.simulate(state_tracker, { initial_state: 0 });
+/// ```
+///
+/// ## Cross-Domain Applications
+///
+/// - Physics: State machines for PDE boundary conditions
+/// - Signal Processing: Edge detection state, filter initialization
+/// - IoT: Device state tracking, alert accumulation
+/// - Finance: Position tracking, order state management
 
 // ===== Single Table Simulation =====
 

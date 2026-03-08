@@ -1,7 +1,8 @@
-//! Transport Interface for Distributed Shape
-//!
-//! Defines the abstract transport layer for inter-node communication.
-//! Reference implementations (TCP, QUIC) are provided as Rust extensions.
+/// @module std::core::transport
+/// Transport Interface for Distributed Shape
+///
+/// Defines the abstract transport layer for inter-node communication.
+/// Reference implementations (TCP, QUIC) are provided as Rust extensions.
 
 /// Abstract transport for sending payloads to remote nodes.
 pub type Transport {

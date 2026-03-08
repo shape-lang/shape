@@ -1,7 +1,8 @@
-//! Math Trigonometry — Constants and Helper Functions
-//!
-//! Provides mathematical constants and convenience functions
-//! built on the trig intrinsics (sin, cos, tan, etc.).
+/// @module std::core::math_trig
+/// Math Trigonometry — Constants and Helper Functions
+///
+/// Provides mathematical constants and convenience functions
+/// built on the trig intrinsics (sin, cos, tan, etc.).
 
 // ===== Constants =====
 

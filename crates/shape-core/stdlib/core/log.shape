@@ -1,7 +1,8 @@
-//! Logging module — structured output with level filtering
-//!
-//! Levels (from most to least verbose): trace, debug, info, warn, error
-//! Default level: debug (all messages shown)
+/// @module std::core::log
+/// Logging module — structured output with level filtering
+///
+/// Levels (from most to least verbose): trace, debug, info, warn, error
+/// Default level: debug (all messages shown)
 
 // Level constants
 let LOG_LEVEL_TRACE = 0

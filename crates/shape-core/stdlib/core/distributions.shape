@@ -1,6 +1,7 @@
-//! Statistical Distributions
-//!
-//! Thin wrappers around intrinsic distribution samplers.
+/// @module std::core::distributions
+/// Statistical Distributions
+///
+/// Thin wrappers around intrinsic distribution samplers.
 
 /// Uniform distribution U(lo, hi)
 pub fn dist_uniform(lo, hi) {

@@ -1,7 +1,8 @@
-//! IoT Anomaly Detection Patterns
-//!
-//! Statistical and rule-based anomaly detection for sensor data.
-//! Uses SIMD-accelerated computations where possible.
+/// @module std::iot::anomaly
+/// IoT Anomaly Detection Patterns
+///
+/// Statistical and rule-based anomaly detection for sensor data.
+/// Uses SIMD-accelerated computations where possible.
 
 // ===== Statistical Anomaly Detection =====
 

@@ -88,9 +88,6 @@ fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
         TypeAnnotation::Array(inner) => {
             format!("Vec<{}>", type_annotation_to_compact_string(inner))
         }
-        TypeAnnotation::Optional(inner) => {
-            format!("Option<{}>", type_annotation_to_compact_string(inner))
-        }
         TypeAnnotation::Generic { name, args } => {
             if args.is_empty() {
                 name.clone()

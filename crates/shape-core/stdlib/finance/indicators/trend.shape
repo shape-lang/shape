@@ -1,5 +1,6 @@
-//! Trend Indicators
-//! Directional movement and trend strength indicators
+/// @module std::finance::indicators::trend
+/// Trend Indicators
+/// Directional movement and trend strength indicators
 
 from std::finance::indicators::moving_averages use { ema }
 from std::finance::indicators::volatility use { atr }

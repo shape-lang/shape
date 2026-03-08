@@ -1,5 +1,5 @@
-//! Simple Moving Average Crossover Strategy
-//! Using intrinsics for performance
+// Simple Moving Average Crossover Strategy
+// Using intrinsics for performance
 
 // This demonstrates a realistic strategy using intrinsics
 

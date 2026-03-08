@@ -1,17 +1,18 @@
-//! Iterable trait — uniform iteration interface for ordered collections.
-//!
-//! Any type that implements Iterable gets access to a rich set of
-//! collection operations: slicing, searching, deduplication, chunking, etc.
-//!
-//! Queryable stays lean (filter/map/orderBy/limit/execute) for database queries.
-//! Iterable is for in-memory, ordered collections (Array, Table).
-//!
-//! ## Known Implementations
-//!
-//! | Type   | Location                                    | Status   |
-//! |--------|---------------------------------------------|----------|
-//! | Array  | stdlib/core/array_iterable.shape             | Verified |
-//! | Table  | stdlib/core/table_iterable.shape             | Verified |
+/// @module std::core::iterable
+/// Iterable trait — uniform iteration interface for ordered collections.
+///
+/// Any type that implements Iterable gets access to a rich set of
+/// collection operations: slicing, searching, deduplication, chunking, etc.
+///
+/// Queryable stays lean (filter/map/orderBy/limit/execute) for database queries.
+/// Iterable is for in-memory, ordered collections (Array, Table).
+///
+/// ## Known Implementations
+///
+/// | Type   | Location                                    | Status   |
+/// |--------|---------------------------------------------|----------|
+/// | Array  | stdlib/core/array_iterable.shape             | Verified |
+/// | Table  | stdlib/core/table_iterable.shape             | Verified |
 
 /// Uniform iteration interface for ordered in-memory collections.
 ///

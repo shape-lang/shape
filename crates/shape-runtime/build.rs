@@ -16,6 +16,7 @@ fn generate_embedded_stdlib_sources() {
     let stdlib_root = Path::new("../shape-core/stdlib");
 
     println!("cargo:rerun-if-changed={}", stdlib_root.display());
+    emit_rerun_markers(stdlib_root);
 
     let modules = collect_stdlib_modules(stdlib_root);
 
@@ -31,6 +32,20 @@ fn generate_embedded_stdlib_sources() {
     generated.push_str("];\n");
 
     fs::write(dest_path, generated).expect("failed to write embedded stdlib source map");
+}
+
+fn emit_rerun_markers(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        println!("cargo:rerun-if-changed={}", path.display());
+        if path.is_dir() {
+            emit_rerun_markers(&path);
+        }
+    }
 }
 
 fn collect_stdlib_modules(stdlib_root: &Path) -> Vec<(String, String)> {

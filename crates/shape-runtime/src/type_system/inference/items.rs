@@ -506,11 +506,6 @@ impl TypeInferenceEngine {
                     .collect();
                 Type::Concrete(TypeAnnotation::Intersection(resolved))
             }
-            TypeAnnotation::Optional(inner) => Type::Concrete(TypeAnnotation::Optional(Box::new(
-                self.resolve_type_annotation(inner)
-                    .to_annotation()
-                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
-            ))),
             _ => Type::Concrete(ann.clone()),
         }
     }

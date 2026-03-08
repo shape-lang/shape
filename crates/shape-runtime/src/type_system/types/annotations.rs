@@ -59,7 +59,6 @@ pub fn annotation_to_string(ann: &TypeAnnotation) -> String {
             .map(annotation_to_string)
             .collect::<Vec<_>>()
             .join(" + "),
-        TypeAnnotation::Optional(inner) => format!("{}?", annotation_to_string(inner)),
         TypeAnnotation::Void => "()".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "None".to_string(),
@@ -96,9 +95,6 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
     match ann {
         TypeAnnotation::Basic(name) => scalar_name_to_semantic(name),
         TypeAnnotation::Array(elem) => SemanticType::Array(Box::new(annotation_to_semantic(elem))),
-        TypeAnnotation::Optional(inner) => {
-            SemanticType::Option(Box::new(annotation_to_semantic(inner)))
-        }
         TypeAnnotation::Generic { name, args } => {
             let semantic_args: Vec<_> = args.iter().map(annotation_to_semantic).collect();
             match name.as_str() {
@@ -198,9 +194,10 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
         SemanticType::Integer => TypeAnnotation::Basic("int".to_string()),
         SemanticType::Bool => TypeAnnotation::Basic("bool".to_string()),
         SemanticType::String => TypeAnnotation::Basic("string".to_string()),
-        SemanticType::Option(inner) => {
-            TypeAnnotation::Optional(Box::new(semantic_to_annotation(inner)))
-        }
+        SemanticType::Option(inner) => TypeAnnotation::Generic {
+            name: "Option".to_string(),
+            args: vec![semantic_to_annotation(inner)],
+        },
         SemanticType::Result { ok_type, err_type } => {
             let mut args = vec![semantic_to_annotation(ok_type)];
             if let Some(err) = err_type {

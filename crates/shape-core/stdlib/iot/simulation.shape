@@ -1,7 +1,8 @@
-//! IoT Device Monitoring Simulation
-//!
-//! Wrapper functions for monitoring IoT devices using the high-performance
-//! simulation engine. Processes sensor readings and generates alerts.
+/// @module std::iot::simulation
+/// IoT Device Monitoring Simulation
+///
+/// Wrapper functions for monitoring IoT devices using the high-performance
+/// simulation engine. Processes sensor readings and generates alerts.
 
 // ===== Single Device Monitoring =====
 

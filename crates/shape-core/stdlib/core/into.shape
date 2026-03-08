@@ -1,7 +1,8 @@
-//! Infallible conversion trait used by `as Type`.
-//!
-//! Dispatch uses named impl selectors (`as <TypeName>`) so conversions are
-//! statically validated and resolved without primitive conversion tables.
+/// @module std::core::into
+/// Infallible conversion trait used by `as Type`.
+///
+/// Dispatch uses named impl selectors (`as <TypeName>`) so conversions are
+/// statically validated and resolved without primitive conversion tables.
 
 /// Define an infallible conversion from `Self` into `Target`.
 ///

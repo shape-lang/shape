@@ -52,7 +52,9 @@ fn type_annotation_to_numeric(annotation: &TypeAnnotation) -> Option<NumericType
         TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
             basic_name_to_numeric(name)
         }
-        TypeAnnotation::Optional(inner) => type_annotation_to_numeric(inner),
+        TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
+            type_annotation_to_numeric(&args[0])
+        }
         _ => None,
     }
 }
@@ -60,10 +62,14 @@ fn type_annotation_to_numeric(annotation: &TypeAnnotation) -> Option<NumericType
 fn index_result_numeric_from_object_type(ty: &Type) -> Option<NumericType> {
     match ty {
         Type::Concrete(TypeAnnotation::Array(inner)) => type_annotation_to_numeric(inner),
-        Type::Concrete(TypeAnnotation::Optional(inner)) => match inner.as_ref() {
-            TypeAnnotation::Array(elem) => type_annotation_to_numeric(elem),
-            _ => None,
-        },
+        Type::Concrete(TypeAnnotation::Generic { name, args })
+            if name == "Option" && args.len() == 1 =>
+        {
+            match &args[0] {
+                TypeAnnotation::Array(elem) => type_annotation_to_numeric(elem),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

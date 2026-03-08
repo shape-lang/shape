@@ -63,11 +63,15 @@ pub fn parse_program(input: &str) -> Result<Program> {
     })?;
 
     let mut items = Vec::new();
+    let mut module_doc_comment = None;
 
     for pair in pairs {
         if pair.as_rule() == Rule::program {
             for inner in pair.into_inner() {
                 match inner.as_rule() {
+                    Rule::program_doc_comment => {
+                        module_doc_comment = Some(docs::parse_doc_comment(inner));
+                    }
                     Rule::item => {
                         items.push(parse_item(inner)?);
                     }
@@ -96,7 +100,7 @@ pub fn parse_program(input: &str) -> Result<Program> {
         items,
         docs: crate::ast::ProgramDocs::default(),
     };
-    program.docs = docs::build_program_docs(&program);
+    program.docs = docs::build_program_docs(&program, module_doc_comment.as_ref());
     Ok(program)
 }
 

@@ -1,5 +1,6 @@
-//! Moving Averages - Vector Implementation (Experimental)
-//! Implements moving averages using vector intrinsics instead of dedicated intrinsics.
+/// @module std::finance::indicators::moving_averages_v2
+/// Moving Averages - Vector Implementation (Experimental)
+/// Implements moving averages using vector intrinsics instead of dedicated intrinsics.
 
 /// Experimental vectorized simple moving average implementation.
 ///

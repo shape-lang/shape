@@ -1,7 +1,8 @@
-//! Collision Detection
-//!
-//! Axis-Aligned Bounding Box (AABB) collision detection with spatial hashing
-//! for efficient broad-phase collision queries.
+/// @module std::physics::collision
+/// Collision Detection
+///
+/// Axis-Aligned Bounding Box (AABB) collision detection with spatial hashing
+/// for efficient broad-phase collision queries.
 
 /// Create an AABB from min/max corners
 ///

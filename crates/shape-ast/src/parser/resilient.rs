@@ -14,6 +14,8 @@ use pest::error::InputLocation;
 pub struct PartialProgram {
     /// Successfully parsed top-level items.
     pub items: Vec<Item>,
+    /// Module-level doc comment declared at the start of the file.
+    pub doc_comment: Option<crate::ast::DocComment>,
     /// Parse issues collected during resilient parsing.
     pub errors: Vec<ParseError>,
 }
@@ -25,7 +27,8 @@ impl PartialProgram {
             items: self.items,
             docs: crate::ast::ProgramDocs::default(),
         };
-        program.docs = crate::parser::docs::build_program_docs(&program);
+        program.docs =
+            crate::parser::docs::build_program_docs(&program, self.doc_comment.as_ref());
         program
     }
 
@@ -70,10 +73,11 @@ pub struct ParseError {
 /// - Runs targeted source-level diagnostics (malformed `from ... use`, empty match).
 pub fn parse_program_resilient(source: &str) -> PartialProgram {
     let mut items = Vec::new();
+    let mut doc_comment = None;
     let mut errors = Vec::new();
 
     match ShapeParser::parse(Rule::program, source) {
-        Ok(pairs) => collect_pairs(pairs, 0, &mut items, &mut errors),
+        Ok(pairs) => collect_pairs(pairs, 0, &mut items, &mut doc_comment, &mut errors),
         Err(pest_err) => {
             errors.push(parse_error_from_pest(&pest_err, source));
             recover_items_before_grammar_failure(source, &pest_err, &mut items, &mut errors);
@@ -86,13 +90,18 @@ pub fn parse_program_resilient(source: &str) -> PartialProgram {
 
     dedup_and_sort_errors(&mut errors);
 
-    PartialProgram { items, errors }
+    PartialProgram {
+        items,
+        doc_comment,
+        errors,
+    }
 }
 
 fn collect_pairs(
     pairs: pest::iterators::Pairs<Rule>,
     base_offset: usize,
     items: &mut Vec<Item>,
+    doc_comment: &mut Option<crate::ast::DocComment>,
     errors: &mut Vec<ParseError>,
 ) {
     for pair in pairs {
@@ -102,6 +111,9 @@ fn collect_pairs(
 
         for inner in pair.into_inner() {
             match inner.as_rule() {
+                Rule::program_doc_comment => {
+                    *doc_comment = Some(crate::parser::docs::parse_doc_comment(inner));
+                }
                 Rule::item => match parse_item(inner.clone()) {
                     Ok(item) => items.push(item),
                     Err(e) => {
@@ -155,7 +167,8 @@ fn recover_items_before_grammar_failure(
         }
         let prefix = &source[..candidate];
         if let Ok(pairs) = ShapeParser::parse(Rule::program, prefix) {
-            collect_pairs(pairs, 0, items, errors);
+            let mut doc_comment = None;
+            collect_pairs(pairs, 0, items, &mut doc_comment, errors);
             return;
         }
     }

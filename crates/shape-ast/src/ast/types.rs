@@ -25,8 +25,6 @@ pub enum TypeAnnotation {
     /// Intersection type: T1 + T2 (structural merge - value has ALL fields from both types)
     /// Only valid for object/interface types. Field collisions are compile-time errors.
     Intersection(Vec<TypeAnnotation>),
-    /// Optional type: T?
-    Optional(Box<TypeAnnotation>),
     /// Generic type: Map<K, V>
     Generic {
         name: String,
@@ -48,6 +46,35 @@ pub enum TypeAnnotation {
 }
 
 impl TypeAnnotation {
+    pub fn option(inner: TypeAnnotation) -> Self {
+        TypeAnnotation::Generic {
+            name: "Option".to_string(),
+            args: vec![inner],
+        }
+    }
+
+    pub fn option_inner(&self) -> Option<&TypeAnnotation> {
+        match self {
+            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
+                args.first()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn into_option_inner(self) -> Option<TypeAnnotation> {
+        match self {
+            TypeAnnotation::Generic { name, mut args } if name == "Option" && args.len() == 1 => {
+                Some(args.remove(0))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_option(&self) -> bool {
+        self.option_inner().is_some()
+    }
+
     /// Extract a simple type name if this is a Reference or Basic type
     ///
     /// Returns `Some(type_name)` for:
@@ -68,7 +95,9 @@ impl TypeAnnotation {
         match self {
             TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
             TypeAnnotation::Array(inner) => format!("Array<{}>", inner.to_type_string()),
-            TypeAnnotation::Optional(inner) => format!("{}?", inner.to_type_string()),
+            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
+                format!("{}?", args[0].to_type_string())
+            }
             TypeAnnotation::Generic { name, args } => {
                 let args_str: Vec<String> = args.iter().map(|a| a.to_type_string()).collect();
                 format!("{}<{}>", name, args_str.join(", "))

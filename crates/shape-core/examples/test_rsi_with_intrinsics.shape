@@ -1,5 +1,5 @@
-//! RSI Indicator Implementation Using Intrinsics
-//! This demonstrates how intrinsics enable efficient RSI calculation
+// RSI Indicator Implementation Using Intrinsics
+// This demonstrates how intrinsics enable efficient RSI calculation
 
 function rsi(series, period) {
     // Calculate price changes using diff intrinsic

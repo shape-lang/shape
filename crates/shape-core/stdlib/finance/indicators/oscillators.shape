@@ -1,4 +1,5 @@
-//! Oscillators - Optimized with Intrinsics
+/// @module std::finance::indicators::oscillators
+/// Oscillators - Optimized with Intrinsics
 
 from std::core::utils::rolling use { rolling_mean }
 from std::finance::indicators::moving_averages use { ema }

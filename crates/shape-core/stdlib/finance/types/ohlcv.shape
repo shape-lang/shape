@@ -1,8 +1,9 @@
-//! OHLCV Data Type Definition
-//! Standard Open-High-Low-Close-Volume market data structure
-//!
-//! OHLCV data is now represented as generic Objects with specific fields.
-//! These helper functions provide convenience methods for working with OHLCV data.
+/// @module std::finance::types::ohlcv
+/// OHLCV Data Type Definition
+/// Standard Open-High-Low-Close-Volume market data structure
+///
+/// OHLCV data is now represented as generic Objects with specific fields.
+/// These helper functions provide convenience methods for working with OHLCV data.
 
 /// Return whether `row` exposes the canonical OHLCV fields.
 pub fn is_ohlcv(row) {

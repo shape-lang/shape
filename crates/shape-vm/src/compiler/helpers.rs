@@ -1676,7 +1676,6 @@ impl BytecodeCompiler {
             TypeAnnotation::Array(inner) => {
                 FieldType::Array(Box::new(Self::type_annotation_to_field_type(inner)))
             }
-            TypeAnnotation::Optional(_) => FieldType::Any, // Optional needs NaN boxing
             TypeAnnotation::Generic { name, .. } => match name.as_str() {
                 // Generic containers that need NaN boxing
                 "HashMap" | "Map" | "Result" | "Option" | "Set" => FieldType::Any,
@@ -1825,7 +1824,10 @@ mod tests {
 
     #[test]
     fn test_type_annotation_to_field_type_optional() {
-        let ann = TypeAnnotation::Optional(Box::new(TypeAnnotation::Basic("int".to_string())));
+        let ann = TypeAnnotation::Generic {
+            name: "Option".to_string(),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
         assert_eq!(ft, FieldType::Any);
     }

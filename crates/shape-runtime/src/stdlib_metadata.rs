@@ -378,7 +378,6 @@ impl StdlibMetadata {
                 .map(Self::format_type_annotation)
                 .collect::<Vec<_>>()
                 .join(" + "),
-            TypeAnnotation::Optional(inner) => format!("{}?", Self::format_type_annotation(inner)),
             TypeAnnotation::Generic { name, args } => format!(
                 "{}<{}>",
                 name,

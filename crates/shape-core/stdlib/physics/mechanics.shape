@@ -1,6 +1,7 @@
-//! Physics Mechanics
-//!
-//! Basic step functions for common mechanics systems.
+/// @module std::physics::mechanics
+/// Physics Mechanics
+///
+/// Basic step functions for common mechanics systems.
 
 function vec_add(a, b) {
     let out = [];

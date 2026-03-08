@@ -1,8 +1,9 @@
-//! Iterable implementation for Array (Vec<T>).
-//!
-//! Delegates performance-critical operations to Rust builtins registered
-//! in VM method dispatch and JIT (findIndex, flatten, unique, slice, join, take).
-//! Pure Shape fallbacks for methods without native dispatch.
+/// @module std::core::array_iterable
+/// Iterable implementation for Array (Vec<T>).
+///
+/// Delegates performance-critical operations to Rust builtins registered
+/// in VM method dispatch and JIT (findIndex, flatten, unique, slice, join, take).
+/// Pure Shape fallbacks for methods without native dispatch.
 
 impl Iterable for Array {
     method findIndex(predicate) {

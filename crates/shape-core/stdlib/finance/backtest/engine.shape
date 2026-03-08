@@ -1,7 +1,8 @@
-//! Backtest Engine
-//!
-//! Main backtesting wrapper that uses the high-performance simulation engine.
-//! Wraps simulate() with finance-specific state management and order processing.
+/// @module std::finance::backtest::engine
+/// Backtest Engine
+///
+/// Main backtesting wrapper that uses the high-performance simulation engine.
+/// Wraps simulate() with finance-specific state management and order processing.
 
 // Import state and fill modules
 // from std::finance::backtest::state use { initial_state, is_flat, is_long, is_short }

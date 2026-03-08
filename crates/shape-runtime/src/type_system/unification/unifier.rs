@@ -135,10 +135,6 @@ impl Unifier {
                     .collect(),
             ),
 
-            TypeAnnotation::Optional(ty) => {
-                TypeAnnotation::Optional(Box::new(self.apply_to_annotation(ty)))
-            }
-
             TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
                 name: name.clone(),
                 args: args

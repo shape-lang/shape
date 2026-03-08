@@ -1,5 +1,6 @@
-//! Volume Indicators
-//! Volume analysis tools
+/// @module std::finance::indicators::volume
+/// Volume Indicators
+/// Volume analysis tools
 
 from std::core::utils::rolling use { rolling_sum }
 from std::core::utils::vector use { select }

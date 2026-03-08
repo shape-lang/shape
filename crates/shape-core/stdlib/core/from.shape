@@ -1,7 +1,8 @@
-//! Infallible reverse-conversion trait.
-//!
-//! `impl From<Source> for Target` auto-derives `Into<Target>` and
-//! `TryInto<Target>` on the source type so `as`/`as?` operators work.
+/// @module std::core::from
+/// Infallible reverse-conversion trait.
+///
+/// `impl From<Source> for Target` auto-derives `Into<Target>` and
+/// `TryInto<Target>` on the source type so `as`/`as?` operators work.
 
 /// Define an infallible conversion from `Source` into `Self`.
 ///

@@ -1,6 +1,7 @@
-//! Stochastic Processes
-//!
-//! Thin wrappers around intrinsic process generators.
+/// @module std::core::stochastic
+/// Stochastic Processes
+///
+/// Thin wrappers around intrinsic process generators.
 
 /// Brownian motion path
 pub fn brownian_motion(n, dt, sigma) {

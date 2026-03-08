@@ -2008,8 +2008,10 @@ impl BytecodeCompiler {
                     align: spec.2,
                 })
             }
-            TypeAnnotation::Optional(inner) => {
-                let inner = self.native_field_layout_spec(inner, span, struct_name)?;
+            TypeAnnotation::Generic { name, args }
+                if name == "Option" && args.len() == 1 =>
+            {
+                let inner = self.native_field_layout_spec(&args[0], span, struct_name)?;
                 if inner.c_type == "cstring" {
                     Ok(NativeFieldLayoutSpec {
                         c_type: "cstring?".to_string(),

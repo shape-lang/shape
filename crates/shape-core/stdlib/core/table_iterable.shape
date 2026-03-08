@@ -1,7 +1,8 @@
-//! Iterable implementation for Table<T>.
-//!
-//! Makes Table<T> a first-class Iterable, enabling collection operations
-//! on in-memory tables. Delegates to Table's native methods where available.
+/// @module std::core::table_iterable
+/// Iterable implementation for Table<T>.
+///
+/// Makes Table<T> a first-class Iterable, enabling collection operations
+/// on in-memory tables. Delegates to Table's native methods where available.
 
 impl Iterable for Table {
     method findIndex(predicate) {

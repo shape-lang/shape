@@ -732,7 +732,6 @@ impl TypeInferenceEngine {
             TypeAnnotation::Object(_) => "object".to_string(),
             TypeAnnotation::Function { .. } => "function".to_string(),
             TypeAnnotation::Union(_) => "union".to_string(),
-            TypeAnnotation::Optional(_) => "optional".to_string(),
             TypeAnnotation::Tuple(_) => "tuple".to_string(),
             TypeAnnotation::Intersection(_) => "intersection".to_string(),
             TypeAnnotation::Generic { .. } => "generic".to_string(),

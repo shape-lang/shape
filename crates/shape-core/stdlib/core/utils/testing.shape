@@ -1,7 +1,8 @@
-//! Testing Utilities
-//!
-//! Assertion functions for unit testing Shape programs.
-//! All assertions return Result<bool> — Ok(true) on success, Err(message) on failure.
+/// @module std::core::utils::testing
+/// Testing Utilities
+///
+/// Assertion functions for unit testing Shape programs.
+/// All assertions return Result<bool> — Ok(true) on success, Err(message) on failure.
 
 /// Assert that a condition is true.
 ///

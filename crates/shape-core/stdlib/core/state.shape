@@ -1,8 +1,9 @@
-//! Content-Addressed VM State Primitives
-//!
-//! Provides introspection, capture, and resume of VM execution state.
-//! Every function, type, and value is content-addressed via SHA-256 hashes,
-//! enabling portable state transfer across nodes, programs, and time.
+/// @module std::core::state
+/// Content-Addressed VM State Primitives
+///
+/// Provides introspection, capture, and resume of VM execution state.
+/// Every function, type, and value is content-addressed via SHA-256 hashes,
+/// enabling portable state transfer across nodes, programs, and time.
 
 /// A content-addressed function reference.
 /// The hash uniquely identifies the function's bytecode, constants, and dependencies.

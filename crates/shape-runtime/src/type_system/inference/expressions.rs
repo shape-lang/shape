@@ -242,13 +242,15 @@ impl TypeInferenceEngine {
                 ..
             } => {
                 let expr_type = self.infer_expr(expr)?;
-                if let TypeAnnotation::Optional(inner) = type_annotation {
-                    // `as Type?` is the typed fallible-conversion form.
-                    // It compiles to `Result<Type, AnyError>` and is validated
-                    // statically against source/target strong types.
-                    let target_type = self.resolve_type_annotation(inner.as_ref());
-                    self.validate_fallible_conversion(&expr_type, &target_type)?;
-                    return Ok(self.wrap_result_type(target_type));
+                if let TypeAnnotation::Generic { name, args } = type_annotation {
+                    if name == "Option" && args.len() == 1 {
+                        // `as Type?` is the typed fallible-conversion form.
+                        // It compiles to `Result<Type, AnyError>` and is validated
+                        // statically against source/target strong types.
+                        let target_type = self.resolve_type_annotation(&args[0]);
+                        self.validate_fallible_conversion(&expr_type, &target_type)?;
+                        return Ok(self.wrap_result_type(target_type));
+                    }
                 }
 
                 let asserted_type = self.resolve_type_annotation(type_annotation);
@@ -1020,16 +1022,6 @@ impl TypeInferenceEngine {
                     );
                 }
             }
-            TypeAnnotation::Optional(inner) => {
-                if let Type::Concrete(TypeAnnotation::Optional(actual_inner)) = actual {
-                    self.bind_type_params_from_annotation(
-                        inner,
-                        &Type::Concrete((**actual_inner).clone()),
-                        type_params,
-                        bindings,
-                    );
-                }
-            }
             TypeAnnotation::Generic { name, args } => {
                 if let Type::Generic {
                     base,
@@ -1224,9 +1216,6 @@ impl TypeInferenceEngine {
                 }
                 _ => None,
             },
-            Type::Concrete(TypeAnnotation::Optional(inner)) => {
-                Some(Type::Concrete(inner.as_ref().clone()))
-            }
             Type::Concrete(TypeAnnotation::Generic { name, args })
                 if (name == "Result" || name == "Option") && !args.is_empty() =>
             {
@@ -1415,9 +1404,10 @@ mod tests {
         let mut engine = TypeInferenceEngine::new();
         engine.push_fallible_scope();
 
-        let optional_number = Type::Concrete(TypeAnnotation::Optional(Box::new(
-            TypeAnnotation::Basic("number".to_string()),
-        )));
+        let optional_number = Type::Concrete(TypeAnnotation::Generic {
+            name: "Option".to_string(),
+            args: vec![TypeAnnotation::Basic("number".to_string())],
+        });
         engine
             .env
             .define("value", TypeScheme::mono(optional_number));

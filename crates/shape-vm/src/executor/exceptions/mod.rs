@@ -247,8 +247,8 @@ impl VirtualMachine {
                     false
                 }
             }
-            TypeAnnotation::Optional(inner_type) => {
-                value.is_none() || self.check_instanceof_nb(value, inner_type)
+            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
+                value.is_none() || self.check_instanceof_nb(value, &args[0])
             }
             TypeAnnotation::Union(types) => types
                 .iter()

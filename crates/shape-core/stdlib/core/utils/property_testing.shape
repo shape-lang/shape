@@ -1,7 +1,8 @@
-//! Property-Based Testing
-//!
-//! Generates random inputs to test invariants (properties) that should
-//! hold for all inputs. Inspired by QuickCheck/Hypothesis.
+/// @module std::core::utils::property_testing
+/// Property-Based Testing
+///
+/// Generates random inputs to test invariants (properties) that should
+/// hold for all inputs. Inspired by QuickCheck/Hypothesis.
 
 /// Run a property test with random inputs.
 ///

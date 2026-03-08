@@ -1,5 +1,6 @@
-//! Moving Averages - Optimized with Vector Intrinsics
-//! High-performance moving average implementations using SIMD vector operations
+/// @module std::finance::indicators::moving_averages
+/// Moving Averages - Optimized with Vector Intrinsics
+/// High-performance moving average implementations using SIMD vector operations
 
 from std::core::utils::rolling use { rolling_mean, rolling_sum, linear_recurrence }
 

@@ -1,6 +1,7 @@
-//! ODE Integrators
-//!
-//! Basic Euler and RK4 integrators for scalar and vector systems.
+/// @module std::core::ode
+/// ODE Integrators
+///
+/// Basic Euler and RK4 integrators for scalar and vector systems.
 
 function vec_add(a, b) {
     let out = [];

@@ -1,7 +1,8 @@
-//! IoT Type Definitions
-//!
-//! Core types for IoT device monitoring, sensor data processing,
-//! and alert management.
+/// @module std::iot::types
+/// IoT Type Definitions
+///
+/// Core types for IoT device monitoring, sensor data processing,
+/// and alert management.
 
 // ===== Sensor Data Types =====
 

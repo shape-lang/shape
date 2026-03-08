@@ -8,9 +8,11 @@ line_comment = _{ "//" ~ !"/" ~ (!"\n" ~ ANY)* }
 block_comment = _{ "/*" ~ (block_comment | (!"*/" ~ ANY))* ~ "*/" }
 doc_comment = { doc_comment_line+ }
 doc_comment_line = @{ "///" ~ (!NEWLINE ~ ANY)* }
+program_doc_comment = { program_doc_comment_head ~ doc_comment_line* }
+program_doc_comment_head = @{ "///" ~ (" " | "\t")* ~ "@module" ~ (!NEWLINE ~ ANY)* }
 
 // ===== Main Entry Point =====
-program = { SOI ~ (item_or_error ~ ";"?)* ~ EOI }
+program = { SOI ~ program_doc_comment? ~ (item_or_error ~ ";"?)* ~ EOI }
 
 // Error recovery: when an item fails to parse, consume tokens until the next
 // top-level keyword boundary so that later items can still be parsed.

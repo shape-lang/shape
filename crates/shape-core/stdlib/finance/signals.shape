@@ -1,7 +1,8 @@
-//! Finance Trading Signals
-//!
-//! Finance-specific signal definitions for trading strategies.
-//! Uses the core signal module for domain-agnostic signal handling.
+/// @module std::finance::signals
+/// Finance Trading Signals
+///
+/// Finance-specific signal definitions for trading strategies.
+/// Uses the core signal module for domain-agnostic signal handling.
 
 // Import core signal functionality
 // (Note: imports will be resolved by the stdlib loader)

@@ -1,4 +1,5 @@
-//! Physics Types
+/// @module std::physics::types
+/// Physics Types
 
 /// Particle state for simple Newtonian simulations.
 pub type Particle = {

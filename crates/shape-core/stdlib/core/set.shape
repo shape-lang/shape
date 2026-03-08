@@ -1,9 +1,10 @@
-//! Set module - unordered collection of unique elements
-//!
-//! Backed by HashMap for O(1) lookup.
-//! Exports: set.new(), set.from_array(arr), set.add(s, item), set.remove(s, item),
-//!          set.contains(s, item), set.union(a, b), set.intersection(a, b),
-//!          set.difference(a, b), set.to_array(s), set.size(s)
+/// @module std::core::set
+/// Set module - unordered collection of unique elements
+///
+/// Backed by HashMap for O(1) lookup.
+/// Exports: set.new(), set.from_array(arr), set.add(s, item), set.remove(s, item),
+///          set.contains(s, item), set.union(a, b), set.intersection(a, b),
+///          set.difference(a, b), set.to_array(s), set.size(s)
 
 /// Create a new empty set
 pub fn new() {

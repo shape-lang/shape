@@ -1,5 +1,6 @@
-//! Math Functions - Optimized with Intrinsics
-//! High-performance mathematical operations
+/// @module std::core::math
+/// Math Functions - Optimized with Intrinsics
+/// High-performance mathematical operations
 
 // ===== Basic Statistics =====
 

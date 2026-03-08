@@ -717,7 +717,6 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
             let parts: Vec<String> = items.iter().map(format_type_annotation).collect();
             format!("[{}]", parts.join(", "))
         }
-        TypeAnnotation::Optional(inner) => format!("{}?", format_type_annotation(inner)),
         TypeAnnotation::Generic { name, args } => {
             let parts: Vec<String> = args.iter().map(format_type_annotation).collect();
             format!("{}<{}>", name, parts.join(", "))

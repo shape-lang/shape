@@ -1,7 +1,8 @@
-//! Backtest State Types
-//!
-//! Core state types for backtesting simulations using the high-performance
-//! simulation engine (simulate() and simulate_correlated()).
+/// @module std::finance::backtest::state
+/// Backtest State Types
+///
+/// Core state types for backtesting simulations using the high-performance
+/// simulation engine (simulate() and simulate_correlated()).
 
 // ===== Backtest State =====
 

@@ -1,5 +1,5 @@
-//! Bollinger Bands using intrinsics
-//! Demonstrates combining multiple intrinsics
+// Bollinger Bands using intrinsics
+// Demonstrates combining multiple intrinsics
 
 function bollinger_bands(series, period, std_dev) {
     // Calculate middle band (SMA) - uses rolling_mean intrinsic

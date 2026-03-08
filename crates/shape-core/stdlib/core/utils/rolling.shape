@@ -1,5 +1,6 @@
-//! Rolling Window Operations
-//! Optimized implementations using dedicated intrinsics for performance
+/// @module std::core::utils::rolling
+/// Rolling Window Operations
+/// Optimized implementations using dedicated intrinsics for performance
 
 /// Compute the rolling sum over a fixed-size window.
 ///

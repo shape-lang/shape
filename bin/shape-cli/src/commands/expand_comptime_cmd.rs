@@ -311,7 +311,6 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
                 .join(", ");
             format!("{}<{}>", name, args)
         }
-        TypeAnnotation::Optional(inner) => format!("{}?", format_type_annotation(inner)),
         TypeAnnotation::Array(inner) => format!("Array<{}>", format_type_annotation(inner)),
         TypeAnnotation::Tuple(types) => {
             let inner = types

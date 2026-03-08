@@ -141,9 +141,6 @@ pub fn annotations_equal(a: &TypeAnnotation, b: &TypeAnnotation) -> bool {
                     .all(|t2| i1.iter().any(|t1| annotations_equal(t1, t2)))
         }
 
-        // Optional types
-        (TypeAnnotation::Optional(o1), TypeAnnotation::Optional(o2)) => annotations_equal(o1, o2),
-
         // Generic types
         (
             TypeAnnotation::Generic { name: n1, args: a1 },

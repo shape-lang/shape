@@ -1,6 +1,7 @@
-//! Physics Simulations
-//!
-//! Convenience wrappers for iterating mechanics step functions.
+/// @module std::physics::simulation
+/// Physics Simulations
+///
+/// Convenience wrappers for iterating mechanics step functions.
 
 from std::physics::mechanics use { projectile_step, spring_mass_step, n_body_step }
 

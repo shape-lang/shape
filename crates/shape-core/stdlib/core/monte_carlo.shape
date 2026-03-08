@@ -1,6 +1,7 @@
-//! Monte Carlo Utilities
-//!
-//! Provides simple Monte Carlo runner and summary statistics helpers.
+/// @module std::core::monte_carlo
+/// Monte Carlo Utilities
+///
+/// Provides simple Monte Carlo runner and summary statistics helpers.
 
 // percentile is defined in math.shape but each stdlib file is compiled
 // independently, so we call the intrinsic directly.

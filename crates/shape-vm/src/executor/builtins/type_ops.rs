@@ -163,7 +163,6 @@ impl VirtualMachine {
             TypeAnnotation::Basic(name)
             | TypeAnnotation::Reference(name)
             | TypeAnnotation::Generic { name, .. } => Some(Self::canonical_try_into_name(name)),
-            TypeAnnotation::Optional(inner) => Self::annotation_conversion_name(inner.as_ref()),
             _ => None,
         }
     }
@@ -195,8 +194,11 @@ impl VirtualMachine {
             return Ok((kind, Some(source), selector));
         }
 
-        if let TypeAnnotation::Optional(inner) = target {
-            let selector = Self::annotation_conversion_name(inner.as_ref())
+        if let TypeAnnotation::Generic { name, args } = target
+            && name == "Option"
+            && args.len() == 1
+        {
+            let selector = Self::annotation_conversion_name(&args[0])
                 .ok_or_else(|| format!("invalid conversion target annotation: {:?}", target))?;
             return Ok((ConvertDispatchKind::TryInto, None, selector));
         }

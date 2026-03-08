@@ -37,9 +37,6 @@ pub fn type_annotation_to_string(ta: &TypeAnnotation) -> Option<String> {
         TypeAnnotation::Array(inner) => {
             type_annotation_to_string(inner).map(|s| format!("{}[]", s))
         }
-        TypeAnnotation::Optional(inner) => {
-            type_annotation_to_string(inner).map(|s| format!("{}?", s))
-        }
         TypeAnnotation::Reference(s) => Some(s.clone()),
         TypeAnnotation::Generic { name, args } => {
             let arg_strs: Vec<String> = args.iter().filter_map(type_annotation_to_string).collect();

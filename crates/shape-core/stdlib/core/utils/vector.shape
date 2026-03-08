@@ -1,5 +1,6 @@
-//! Vector Utilities
-//! General purpose vector operations
+/// @module std::core::utils::vector
+/// Vector Utilities
+/// General purpose vector operations
 
 /// Select values element-wise from `true_val` or `false_val` based on
 /// `condition`.

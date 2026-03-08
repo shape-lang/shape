@@ -61,7 +61,7 @@ pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
                 })?;
             let mut ty = parse_type_annotation(inner)?;
             if pair.as_str().trim_end().ends_with('?') {
-                ty = TypeAnnotation::Optional(Box::new(ty));
+                ty = TypeAnnotation::option(ty);
             }
             Ok(ty)
         }

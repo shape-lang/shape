@@ -23,7 +23,6 @@ fn format_type_annotation(annotation: &TypeAnnotation) -> String {
                 format!("{}<{}>", name, arg_list.join(", "))
             }
         }
-        TypeAnnotation::Optional(inner) => format!("{}?", format_type_annotation(inner)),
         TypeAnnotation::Array(inner) => format!("Array<{}>", format_type_annotation(inner)),
         TypeAnnotation::Tuple(types) => {
             let type_list: Vec<String> = types.iter().map(format_type_annotation).collect();

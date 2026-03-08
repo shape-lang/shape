@@ -1,5 +1,5 @@
-//! Complete Strategy Test with Real Market Data
-//! Uses load_instrument to get ES data with timestamps
+// Complete Strategy Test with Real Market Data
+// Uses load_instrument to get ES data with timestamps
 
 // Load real ES futures data from DuckDB
 // This loads actual market data with proper timestamps

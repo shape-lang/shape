@@ -469,7 +469,6 @@ impl TypeChecker {
                     || self.references_type(returns, name)
             }
             TypeAnnotation::Union(types) => types.iter().any(|ty| self.references_type(ty, name)),
-            TypeAnnotation::Optional(ty) => self.references_type(ty, name),
             TypeAnnotation::Generic { args, .. } => {
                 args.iter().any(|arg| self.references_type(arg, name))
             }

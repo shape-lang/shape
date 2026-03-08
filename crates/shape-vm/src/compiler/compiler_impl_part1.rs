@@ -705,7 +705,6 @@ impl BytecodeCompiler {
             TypeAnnotation::Union(types) | TypeAnnotation::Intersection(types) => {
                 types.iter().any(Self::annotation_is_heap_like)
             }
-            TypeAnnotation::Optional(inner) => Self::annotation_is_heap_like(inner),
             TypeAnnotation::Void
             | TypeAnnotation::Never
             | TypeAnnotation::Null

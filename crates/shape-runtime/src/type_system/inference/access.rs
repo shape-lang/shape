@@ -311,9 +311,6 @@ impl TypeInferenceEngine {
                     .map(|ty| Self::substitute_type_params_in_annotation(ty, bindings))
                     .collect(),
             ),
-            TypeAnnotation::Optional(inner) => TypeAnnotation::Optional(Box::new(
-                Self::substitute_type_params_in_annotation(inner, bindings),
-            )),
             TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
                 name: name.clone(),
                 args: args

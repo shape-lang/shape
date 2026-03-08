@@ -574,11 +574,6 @@ impl Type {
                 }
             }
 
-            TypeAnnotation::Optional(inner) => {
-                // Optional types are represented as the inner type for now
-                Self::from_type_annotation(inner)
-            }
-
             TypeAnnotation::Void => Type::Unit,
             TypeAnnotation::Never => Type::Error,
             TypeAnnotation::Null | TypeAnnotation::Undefined => Type::Null,

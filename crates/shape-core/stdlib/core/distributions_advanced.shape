@@ -1,8 +1,9 @@
-//! Advanced Statistical Distributions
-//!
-//! Provides PDF, CDF, and sampling functions for common distributions
-//! beyond the basic ones in distributions.shape.
-//! Built on top of random.shape intrinsics using standard mathematical methods.
+/// @module std::core::distributions_advanced
+/// Advanced Statistical Distributions
+///
+/// Provides PDF, CDF, and sampling functions for common distributions
+/// beyond the basic ones in distributions.shape.
+/// Built on top of random.shape intrinsics using standard mathematical methods.
 
 let PI = 3.141592653589793;
 let E = 2.718281828459045;

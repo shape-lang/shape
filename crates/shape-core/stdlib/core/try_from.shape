@@ -1,7 +1,8 @@
-//! Fallible reverse-conversion trait.
-//!
-//! `impl TryFrom<Source> for Target` auto-derives `TryInto<Target>`
-//! on the source type so `as?` operators work.
+/// @module std::core::try_from
+/// Fallible reverse-conversion trait.
+///
+/// `impl TryFrom<Source> for Target` auto-derives `TryInto<Target>`
+/// on the source type so `as?` operators work.
 
 /// Define a fallible conversion from `Source` into `Self`.
 ///

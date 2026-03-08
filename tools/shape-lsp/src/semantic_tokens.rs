@@ -359,9 +359,6 @@ impl<'a> TokenCollector<'a> {
                 out.push("Array");
                 Self::collect_type_annotation_identifiers(inner, out);
             }
-            TypeAnnotation::Optional(inner) => {
-                Self::collect_type_annotation_identifiers(inner, out);
-            }
             TypeAnnotation::Tuple(items)
             | TypeAnnotation::Union(items)
             | TypeAnnotation::Intersection(items) => {

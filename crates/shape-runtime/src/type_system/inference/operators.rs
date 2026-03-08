@@ -49,9 +49,6 @@ impl TypeInferenceEngine {
                 }
                 None
             }
-            Type::Concrete(TypeAnnotation::Optional(inner)) => {
-                Some(Type::Concrete(inner.as_ref().clone()))
-            }
             _ => None,
         }
     }
@@ -78,9 +75,6 @@ impl TypeInferenceEngine {
                 }
                 _ => None,
             },
-            Type::Concrete(TypeAnnotation::Optional(inner)) => {
-                Some(Type::Concrete(inner.as_ref().clone()))
-            }
             Type::Concrete(TypeAnnotation::Generic { name, args })
                 if (name == "Result" || name == "Option") && !args.is_empty() =>
             {
@@ -123,10 +117,6 @@ impl TypeInferenceEngine {
         match ty {
             Type::Concrete(TypeAnnotation::Basic(name))
             | Type::Concrete(TypeAnnotation::Reference(name)) => name == "string",
-            Type::Concrete(TypeAnnotation::Optional(inner)) => matches!(
-                inner.as_ref(),
-                TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) if name == "string"
-            ),
             Type::Concrete(TypeAnnotation::Union(types)) => types.iter().any(|ann| {
                 matches!(ann, TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) if name == "string")
             }),
@@ -546,9 +536,10 @@ mod tests {
 
     #[test]
     fn test_unwrap_option_annotation() {
-        let option_num = Type::Concrete(TypeAnnotation::Optional(Box::new(TypeAnnotation::Basic(
-            "number".to_string(),
-        ))));
+        let option_num = Type::Concrete(TypeAnnotation::Generic {
+            name: "Option".to_string(),
+            args: vec![TypeAnnotation::Basic("number".to_string())],
+        });
         let inner = TypeInferenceEngine::unwrap_option_type(&option_num);
         assert!(inner.is_some());
     }
@@ -574,9 +565,10 @@ mod tests {
     #[test]
     fn test_error_context_promotes_option_to_result() {
         let mut engine = TypeInferenceEngine::new();
-        let option_num = Type::Concrete(TypeAnnotation::Optional(Box::new(TypeAnnotation::Basic(
-            "number".to_string(),
-        ))));
+        let option_num = Type::Concrete(TypeAnnotation::Generic {
+            name: "Option".to_string(),
+            args: vec![TypeAnnotation::Basic("number".to_string())],
+        });
         let inferred = engine
             .infer_binary_op(
                 &option_num,

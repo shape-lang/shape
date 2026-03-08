@@ -65,8 +65,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     format!("array:{}", encode_type(inner))
                 }
                 crate::ast::TypeAnnotation::Function { .. } => "function".to_string(),
-                crate::ast::TypeAnnotation::Optional(inner) => {
-                    format!("optional:{}", encode_type(inner))
+                crate::ast::TypeAnnotation::Generic { name, args }
+                    if name == "Option" && args.len() == 1 =>
+                {
+                    format!("optional:{}", encode_type(&args[0]))
                 }
                 crate::ast::TypeAnnotation::Tuple(types) => {
                     let inner: Vec<String> = types.iter().map(encode_type).collect();

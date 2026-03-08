@@ -7,20 +7,34 @@ use pest::iterators::Pair;
 use super::Rule;
 
 pub fn parse_doc_comment(pair: Pair<Rule>) -> DocComment {
-    debug_assert_eq!(pair.as_rule(), Rule::doc_comment);
+    debug_assert!(matches!(
+        pair.as_rule(),
+        Rule::doc_comment | Rule::program_doc_comment
+    ));
     let span = crate::parser::pair_span(&pair);
+    let is_program_doc = pair.as_rule() == Rule::program_doc_comment;
 
     let lines = pair
         .into_inner()
-        .filter(|line| line.as_rule() == Rule::doc_comment_line)
+        .filter(|line| {
+            matches!(
+                line.as_rule(),
+                Rule::doc_comment_line | Rule::program_doc_comment_head
+            )
+        })
         .map(parse_doc_line)
         .collect::<Vec<_>>();
 
-    parse_doc_lines(span, &lines)
+    if is_program_doc {
+        parse_program_doc_lines(span, &lines)
+    } else {
+        parse_doc_lines(span, &lines)
+    }
 }
 
-pub fn build_program_docs(program: &Program) -> ProgramDocs {
+pub fn build_program_docs(program: &Program, module_doc_comment: Option<&DocComment>) -> ProgramDocs {
     let mut collector = DocCollector::default();
+    collector.collect_program_doc(module_doc_comment);
     collector.collect_items(&program.items, &[]);
     ProgramDocs {
         entries: collector.entries,
@@ -46,6 +60,20 @@ fn parse_doc_line(line: Pair<Rule>) -> DocLine {
         text,
         span: Span::new(content_start, raw_span.end),
     }
+}
+
+fn parse_program_doc_lines(span: Span, lines: &[DocLine]) -> DocComment {
+    let Some((first_line, remaining_lines)) = lines.split_first() else {
+        return DocComment::default();
+    };
+    let Some(module_tag) = parse_tag_line(first_line) else {
+        return parse_doc_lines(span, lines);
+    };
+
+    let mut comment = parse_doc_lines(span, remaining_lines);
+    comment.span = span;
+    comment.tags.insert(0, module_tag);
+    comment
 }
 
 fn parse_doc_lines(span: Span, lines: &[DocLine]) -> DocComment {
@@ -241,6 +269,23 @@ struct DocCollector {
 }
 
 impl DocCollector {
+    fn collect_program_doc(&mut self, doc_comment: Option<&DocComment>) {
+        let Some(comment) = doc_comment else {
+            return;
+        };
+        let Some(path) = module_path_from_comment(comment) else {
+            return;
+        };
+        self.entries.push(DocEntry {
+            target: DocTarget {
+                kind: DocTargetKind::Module,
+                path,
+                span: comment.span,
+            },
+            comment: comment.clone(),
+        });
+    }
+
     fn collect_items(&mut self, items: &[Item], module_path: &[String]) {
         for item in items {
             self.collect_item(item, module_path);
@@ -553,6 +598,13 @@ fn join_type_param_path(parent: &str, name: &str) -> String {
     format!("{}::<{}>", parent, name)
 }
 
+fn module_path_from_comment(comment: &DocComment) -> Option<String> {
+    comment.tags.iter().find_map(|tag| match tag.kind {
+        DocTagKind::Module if !tag.body.trim().is_empty() => Some(tag.body.trim().to_string()),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ast::DocTargetKind;
@@ -567,6 +619,19 @@ mod tests {
             .comment_for_path("add")
             .expect("doc for function");
         assert_eq!(doc.summary, "Adds");
+    }
+
+    #[test]
+    fn attaches_docs_to_program_modules() {
+        let source =
+            "/// @module std::core::json_value\n/// Typed JSON values.\npub enum Json { Null }\n";
+        let program = parse_program(source).expect("program should parse");
+        let entry = program
+            .docs
+            .entry_for_path("std::core::json_value")
+            .expect("doc entry for module");
+        assert_eq!(entry.target.kind, DocTargetKind::Module);
+        assert_eq!(entry.comment.summary, "Typed JSON values.");
     }
 
     #[test]

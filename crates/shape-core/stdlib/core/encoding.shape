@@ -1,9 +1,10 @@
-//! Encoding Utilities
-//!
-//! URL encoding/decoding and other text encoding helpers.
-//! For base64 and hex encoding, use the crypto module:
-//!   crypto.base64_encode(), crypto.base64_decode()
-//!   crypto.hex_encode(), crypto.hex_decode()
+/// @module std::core::encoding
+/// Encoding Utilities
+///
+/// URL encoding/decoding and other text encoding helpers.
+/// For base64 and hex encoding, use the crypto module:
+///   crypto.base64_encode(), crypto.base64_decode()
+///   crypto.hex_encode(), crypto.hex_decode()
 
 /// URL-encode a string (percent encoding).
 ///

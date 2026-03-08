@@ -1,4 +1,4 @@
-//! Test all series transformation intrinsics
+// Test all series transformation intrinsics
 
 let prices = series([100.0, 105.0, 102.0, 108.0, 110.0, 107.0, 112.0, 115.0]);
 

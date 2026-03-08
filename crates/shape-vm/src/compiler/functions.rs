@@ -380,14 +380,6 @@ impl BytecodeCompiler {
                     Some(format!("cslice<{elem}>"))
                 }
             }
-            TypeAnnotation::Optional(inner) => {
-                let inner = Self::native_ctype_from_annotation(inner, is_return)?;
-                if inner == "cstring" {
-                    Some("cstring?".to_string())
-                } else {
-                    None
-                }
-            }
             TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
                 let inner = Self::native_ctype_from_annotation(&args[0], is_return)?;
                 if inner == "cstring" {

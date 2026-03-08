@@ -1,7 +1,8 @@
-//! Random Number Generation
-//!
-//! Provides high-quality random number generation using ChaCha8 PRNG.
-//! All functions use thread-local state for performance and reproducibility.
+/// @module std::core::random
+/// Random Number Generation
+///
+/// Provides high-quality random number generation using ChaCha8 PRNG.
+/// All functions use thread-local state for performance and reproducibility.
 
 /// Generate random f64 in [0, 1)
 ///

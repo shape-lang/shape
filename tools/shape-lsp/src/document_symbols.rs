@@ -145,9 +145,6 @@ fn format_type_annotation(ty: &shape_ast::ast::TypeAnnotation) -> String {
         TypeAnnotation::Array(inner) => {
             format!("{}[]", format_type_annotation(inner))
         }
-        TypeAnnotation::Optional(inner) => {
-            format!("{}?", format_type_annotation(inner))
-        }
         TypeAnnotation::Union(types) => {
             let types_str: Vec<String> = types.iter().map(format_type_annotation).collect();
             types_str.join(" | ")

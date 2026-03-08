@@ -96,10 +96,6 @@ pub fn type_annotation_to_type_with_aliases(
                 returns: Box::new(return_type),
             }
         }
-        TypeAnnotation::Optional(inner) => {
-            // Optional types are represented as the inner type for now
-            type_annotation_to_type_with_aliases(inner, symbol_table)
-        }
         TypeAnnotation::Object(fields) => {
             // Convert object type annotation to Type::Object with fields
             let type_fields: Vec<(String, types::Type)> = fields
