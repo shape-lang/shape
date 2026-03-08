@@ -39,6 +39,7 @@ ctrlc = "3"
 indicatif = "0.17"
 libloading = "0.8"
 reqwest = { workspace = true }
+tempfile = "3.24"
 
 # TUI REPL dependencies
 ratatui = "0.29"

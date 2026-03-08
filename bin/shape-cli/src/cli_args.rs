@@ -200,6 +200,15 @@ pub enum Commands {
         /// Package name
         name: String,
     },
+
+    /// Start a shape-wire protocol server for external tool integration
+    WireServe {
+        /// Address to listen on (default: 127.0.0.1:9527)
+        #[arg(long, default_value = "127.0.0.1:9527")]
+        address: String,
+        #[command(flatten)]
+        opts: RuntimeCommandOptions,
+    },
 }
 
 #[derive(Args)]

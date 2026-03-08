@@ -17,6 +17,7 @@ pub mod search_cmd;
 pub mod snapshot_cmd;
 pub mod tree_cmd;
 pub mod tui_cmd;
+pub mod wire_serve_cmd;
 
 // Re-export command entry points
 pub use add_cmd::run_add;
@@ -36,6 +37,7 @@ pub use search_cmd::run_search;
 pub use snapshot_cmd::{run_snapshot_delete, run_snapshot_info, run_snapshot_list};
 pub use tree_cmd::run_tree;
 pub use tui_cmd::run_tui;
+pub use wire_serve_cmd::run_wire_serve;
 
 // Re-export ExecutionModeArg from cli_args
 pub use crate::cli_args::ExecutionModeArg;
