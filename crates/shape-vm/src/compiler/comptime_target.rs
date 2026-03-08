@@ -7,16 +7,21 @@
 //! The target object has these fields:
 //! - `kind`: string — "function", "type", "expression", etc.
 //! - `name`: string — the name of the annotated item (if applicable)
-//! - `fields`: array of {name, type} objects (for struct/type targets)
+//! - `fields`: array of {name, type, annotations} objects (for struct/type targets)
 //! - `params`: array of {name, type} objects (for function targets)
 //! - `return_type`: string (for function targets)
 //! - `annotations`: array of annotation names already applied
 
 pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
-use shape_ast::ast::{FunctionDef, TypeAnnotation};
+use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
+use shape_ast::ast::functions::Annotation;
+use shape_ast::ast::literals::Literal;
 use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_nb_pairs};
 use shape_value::ValueWord;
 use std::sync::Arc;
+
+/// Per-field annotation: (annotation_name, Vec<stringified_args>).
+pub(crate) type FieldAnnotation = (String, Vec<String>);
 
 /// A compile-time target descriptor passed to comptime annotation handlers
 /// in annotation definitions.
@@ -26,8 +31,8 @@ pub(crate) struct ComptimeTarget {
     pub kind: AnnotationTargetKind,
     /// Name of the annotated item (empty string for expressions)
     pub name: String,
-    /// Fields (for struct/type targets): Vec<(field_name, type_string)>
-    pub fields: Vec<(String, String)>,
+    /// Fields (for struct/type targets): Vec<(field_name, type_string, field_annotations)>
+    pub fields: Vec<(String, String, Vec<FieldAnnotation>)>,
     /// Parameters (for function targets): Vec<(param_name, type_string, is_const)>
     pub params: Vec<(String, String, bool)>,
     /// Return type (for function targets)
@@ -75,15 +80,30 @@ impl ComptimeTarget {
     }
 
     /// Create a target descriptor for a named type with fields.
-    pub fn from_type(name: &str, fields: &[(String, Option<TypeAnnotation>)]) -> Self {
+    ///
+    /// Each field carries its type annotation and any annotations applied to it
+    /// (e.g. `@description`, `@range`). The annotations are converted to
+    /// `(name, stringified_args)` pairs so comptime handlers can inspect them.
+    pub fn from_type(
+        name: &str,
+        fields: &[(String, Option<TypeAnnotation>, Vec<Annotation>)],
+    ) -> Self {
         let fields = fields
             .iter()
-            .map(|(fname, ftype)| {
+            .map(|(fname, ftype, anns)| {
                 let type_str = ftype
                     .as_ref()
                     .map(type_annotation_to_string)
                     .unwrap_or_else(|| "any".to_string());
-                (fname.clone(), type_str)
+                let field_anns: Vec<FieldAnnotation> = anns
+                    .iter()
+                    .map(|a| {
+                        let args: Vec<String> =
+                            a.args.iter().map(expr_to_string_lossy).collect();
+                        (a.name.clone(), args)
+                    })
+                    .collect();
+                (fname.clone(), type_str, field_anns)
             })
             .collect();
 
@@ -99,11 +119,17 @@ impl ComptimeTarget {
     }
 
     /// Create a target descriptor for a module definition.
+    ///
+    /// Module fields don't carry annotations, so they get empty annotation lists.
     pub fn from_module(name: &str, fields: &[(String, String)]) -> Self {
+        let fields = fields
+            .iter()
+            .map(|(n, t)| (n.clone(), t.clone(), Vec::new()))
+            .collect();
         Self {
             kind: AnnotationTargetKind::Module,
             name: name.to_string(),
-            fields: fields.to_vec(),
+            fields,
             params: Vec::new(),
             return_type: None,
             annotations: Vec::new(),
@@ -137,7 +163,9 @@ impl ComptimeTarget {
         };
 
         ensure_schema(&["name", "type"]);
+        ensure_schema(&["name", "type", "annotations"]);
         ensure_schema(&["name", "type", "const"]);
+        ensure_schema(&["name", "args"]);
         ensure_schema(&[
             "kind",
             "name",
@@ -159,14 +187,27 @@ impl ComptimeTarget {
             AnnotationTargetKind::Binding => "binding",
         };
 
-        // fields: array of {name, type} TypedObjects
+        // fields: array of {name, type, annotations} TypedObjects
         let fields_arr: Vec<ValueWord> = self
             .fields
             .iter()
-            .map(|(fname, ftype)| {
+            .map(|(fname, ftype, fanns)| {
+                // Each annotation becomes {name, args} where args is an array of strings
+                let anns_arr: Vec<ValueWord> = fanns
+                    .iter()
+                    .map(|(aname, aargs)| {
+                        let args_arr: Vec<ValueWord> =
+                            aargs.iter().map(|a| nb_string(a.clone())).collect();
+                        typed_object_from_nb_pairs(&[
+                            ("name", nb_string(aname.clone())),
+                            ("args", ValueWord::from_array(Arc::new(args_arr))),
+                        ])
+                    })
+                    .collect();
                 typed_object_from_nb_pairs(&[
                     ("name", nb_string(fname.clone())),
                     ("type", nb_string(ftype.clone())),
+                    ("annotations", ValueWord::from_array(Arc::new(anns_arr))),
                 ])
             })
             .collect();
@@ -211,6 +252,21 @@ impl ComptimeTarget {
             ("annotations", ValueWord::from_array(Arc::new(ann_arr))),
             ("captures", ValueWord::from_array(Arc::new(captures_arr))),
         ])
+    }
+}
+
+/// Best-effort stringification of an annotation argument expression.
+///
+/// Annotation args are typically literals (string, number, bool). For anything
+/// more complex we fall back to the Debug representation.
+fn expr_to_string_lossy(expr: &Expr) -> String {
+    match expr {
+        // For string literals, return the raw string (no quotes)
+        Expr::Literal(Literal::String(s), _) => s.clone(),
+        // All other literals have a Display impl
+        Expr::Literal(lit, _) => lit.to_string(),
+        Expr::Identifier(name, _) => name.clone(),
+        _ => format!("{expr:?}"),
     }
 }
 
@@ -320,10 +376,12 @@ mod tests {
             (
                 "x".to_string(),
                 Some(TypeAnnotation::Basic("number".to_string())),
+                Vec::new(),
             ),
             (
                 "y".to_string(),
                 Some(TypeAnnotation::Basic("number".to_string())),
+                Vec::new(),
             ),
         ];
 
@@ -333,6 +391,65 @@ mod tests {
         assert_eq!(target.fields.len(), 2);
         assert_eq!(target.fields[0].0, "x");
         assert_eq!(target.fields[0].1, "number");
+        assert!(target.fields[0].2.is_empty());
+    }
+
+    #[test]
+    fn test_target_from_type_with_field_annotations() {
+        use shape_ast::ast::Expr;
+        use shape_ast::ast::literals::Literal;
+
+        let fields = vec![
+            (
+                "label".to_string(),
+                Some(TypeAnnotation::Basic("string".to_string())),
+                vec![Annotation {
+                    name: "description".to_string(),
+                    args: vec![Expr::Literal(
+                        Literal::String("A label".to_string()),
+                        Span::DUMMY,
+                    )],
+                    span: Span::DUMMY,
+                }],
+            ),
+            (
+                "confidence".to_string(),
+                Some(TypeAnnotation::Basic("number".to_string())),
+                vec![
+                    Annotation {
+                        name: "description".to_string(),
+                        args: vec![Expr::Literal(
+                            Literal::String("0.0 to 1.0".to_string()),
+                            Span::DUMMY,
+                        )],
+                        span: Span::DUMMY,
+                    },
+                    Annotation {
+                        name: "range".to_string(),
+                        args: vec![
+                            Expr::Literal(Literal::Number(0.0), Span::DUMMY),
+                            Expr::Literal(Literal::Number(1.0), Span::DUMMY),
+                        ],
+                        span: Span::DUMMY,
+                    },
+                ],
+            ),
+        ];
+
+        let target = ComptimeTarget::from_type("Sentiment", &fields);
+        assert_eq!(target.name, "Sentiment");
+        assert_eq!(target.fields.len(), 2);
+
+        // First field: one annotation
+        assert_eq!(target.fields[0].2.len(), 1);
+        assert_eq!(target.fields[0].2[0].0, "description");
+        assert_eq!(target.fields[0].2[0].1, vec!["A label"]);
+
+        // Second field: two annotations
+        assert_eq!(target.fields[1].2.len(), 2);
+        assert_eq!(target.fields[1].2[0].0, "description");
+        assert_eq!(target.fields[1].2[1].0, "range");
+        assert_eq!(target.fields[1].2[1].1, vec!["0", "1"]);
     }
 
     #[test]
@@ -348,7 +465,33 @@ mod tests {
         };
 
         let value = target.to_nanboxed();
-        // Now returns TypedObject instead of Object
+        assert_eq!(value.type_name(), "object");
+    }
+
+    #[test]
+    fn test_target_to_vmvalue_with_field_annotations() {
+        let target = ComptimeTarget {
+            kind: AnnotationTargetKind::Type,
+            name: "Sentiment".to_string(),
+            fields: vec![
+                (
+                    "label".to_string(),
+                    "string".to_string(),
+                    vec![("description".to_string(), vec!["A label".to_string()])],
+                ),
+                (
+                    "score".to_string(),
+                    "number".to_string(),
+                    vec![("range".to_string(), vec!["0".to_string(), "1".to_string()])],
+                ),
+            ],
+            params: Vec::new(),
+            return_type: None,
+            annotations: Vec::new(),
+            captures: Vec::new(),
+        };
+
+        let value = target.to_nanboxed();
         assert_eq!(value.type_name(), "object");
     }
 

@@ -2362,10 +2362,21 @@ impl BytecodeCompiler {
                 ];
                 for handler in handlers.into_iter().flatten() {
                     // Build field info for ComptimeTarget::from_type()
-                    let fields: Vec<(String, Option<shape_ast::ast::TypeAnnotation>)> = struct_def
+                    // Include per-field annotations so comptime handlers can inspect them.
+                    let fields: Vec<(
+                        String,
+                        Option<shape_ast::ast::TypeAnnotation>,
+                        Vec<shape_ast::ast::functions::Annotation>,
+                    )> = struct_def
                         .fields
                         .iter()
-                        .map(|f| (f.name.clone(), Some(f.type_annotation.clone())))
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                Some(f.type_annotation.clone()),
+                                f.annotations.clone(),
+                            )
+                        })
                         .collect();
 
                     let target = super::comptime_target::ComptimeTarget::from_type(

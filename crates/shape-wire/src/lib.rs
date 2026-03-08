@@ -47,3 +47,10 @@ pub use value::{DurationUnit, WireColumn, WireTable, WireValue};
 
 /// Re-export content types used in `WireValue::Content`.
 pub use shape_value::content::{self as content, ContentNode};
+
+/// Wire protocol version constant.
+///
+/// Used by external tools (e.g. shape-mcp) to verify protocol compatibility
+/// with the shape CLI. Bump this when the wire framing or message format changes
+/// in a backward-incompatible way.
+pub const WIRE_PROTOCOL_V1: u32 = 1;
