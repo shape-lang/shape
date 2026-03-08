@@ -82,6 +82,7 @@ impl BytecodeCompiler {
             inferred_param_type_hints: HashMap::new(),
             drop_locals: Vec::new(),
             drop_type_info: HashMap::new(),
+            drop_module_bindings: Vec::new(),
             mutable_closure_captures: HashMap::new(),
             boxed_locals: HashSet::new(),
             permission_set: None,

@@ -119,10 +119,10 @@ fn infer_array_mutation_nested_function() {
     // around this.
     ShapeTest::new(
         r#"
-        fn set(&arr, i, v) { arr[i] = v }
+        fn write_at(&arr, i, v) { arr[i] = v }
         fn init_arr(&arr) {
-            set(&arr, 0, 100)
-            set(&arr, 1, 200)
+            write_at(&arr, 0, 100)
+            write_at(&arr, 1, 200)
         }
         let nums = [0, 0]
         init_arr(&nums)

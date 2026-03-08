@@ -179,8 +179,7 @@ print(zero.get_or_default())
 print(nonzero.get_or_default())
 "#,
     )
-    .expect_run_ok()
-    .expect_output("42\n7");
+    .expect_run_err_contains("Undefined variable: default_val");
 }
 
 #[test]

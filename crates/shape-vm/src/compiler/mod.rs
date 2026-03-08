@@ -561,6 +561,9 @@ pub struct BytecodeCompiler {
     /// Per-type drop kind: tracks whether each type has sync, async, or both drop impls.
     /// Populated during the first-pass registration of impl blocks.
     pub(crate) drop_type_info: HashMap<String, DropKind>,
+    /// Module bindings that need Drop calls at program exit.
+    /// Each entry is (binding_index, is_async).
+    pub(crate) drop_module_bindings: Vec<(u16, bool)>,
     /// Mutable closure captures in the current function being compiled.
     /// Maps captured variable name -> upvalue index (for LoadClosure/StoreClosure).
     /// Only populated while compiling a closure body that has mutable captures.

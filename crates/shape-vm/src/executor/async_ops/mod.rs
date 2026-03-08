@@ -190,17 +190,41 @@ impl VirtualMachine {
 
     /// General-purpose await
     ///
-    /// Pops a value from the stack. If it's a Future(id), suspends execution.
-    /// If it's any other value, pushes it back (sync shortcut — the value is already resolved).
+    /// Pops a value from the stack. If it's a Future(id), attempts to resolve
+    /// the task inline from the task scheduler. If the task's callable is a
+    /// plain value (not a closure/function), it is used directly as the result.
+    /// Otherwise, suspends execution so the host runtime can schedule the task.
+    /// If the value is not a Future, pushes it back (sync shortcut).
     fn op_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let nb = self.pop_vw()?;
         match nb.as_heap_ref() {
             Some(HeapValue::Future(id)) => {
                 let id = *id;
-                Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
-                    wait_type: WaitType::Future { id },
-                    resume_ip: self.ip,
-                }))
+
+                // Try to resolve the task inline from the task scheduler.
+                // For `async let x = expr`, the callable stored by SpawnTask
+                // is the already-evaluated value of `expr`. We resolve it
+                // directly without suspending.
+                let resolved = self.task_scheduler.resolve_task(id, |callable| {
+                    // The callable is the value that was on the stack when
+                    // SpawnTask executed. For simple expressions it's already
+                    // the result value.
+                    Ok(callable)
+                });
+
+                match resolved {
+                    Ok(value) => {
+                        self.push_vw(value)?;
+                        Ok(AsyncExecutionResult::Continue)
+                    }
+                    Err(_) => {
+                        // Could not resolve inline — suspend for host runtime
+                        Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
+                            wait_type: WaitType::Future { id },
+                            resume_ip: self.ip,
+                        }))
+                    }
+                }
             }
             _ => {
                 // Sync shortcut: value is already resolved, push it back

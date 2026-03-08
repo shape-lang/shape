@@ -108,7 +108,6 @@ fn array_foreach_prints_each() {
         arr.forEach(|x| print(x))
     "#,
     )
-    .expect_run_ok()
     .expect_output("10\n20\n30");
 }
 

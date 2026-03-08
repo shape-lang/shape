@@ -711,14 +711,15 @@ fn test_match_nested_if_in_arm() {
 fn test_match_object_destructuring() {
     ShapeTest::new(
         r#"
-        fn classify_point(point) {
+        type Point { x: int, y: int }
+        fn classify_point(point: Point) {
             match point {
                 {x, y} where x > y => "x wins",
                 {x, y} where y > x => "y wins",
                 _ => "tie"
             }
         }
-        classify_point({x: 10, y: 5})
+        classify_point(Point {x: 10, y: 5})
     "#,
     )
     .expect_string("x wins");

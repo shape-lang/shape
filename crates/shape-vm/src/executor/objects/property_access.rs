@@ -439,10 +439,7 @@ impl VirtualMachine {
                         if actual >= 0 && (actual as usize) < arr.len() {
                             return self.push_vw(arr[actual as usize].clone());
                         } else {
-                            return Err(VMError::IndexOutOfBounds {
-                                index: idx as i32,
-                                length: arr.len(),
-                            });
+                            return self.push_vw(ValueWord::none());
                         }
                     }
                 }
@@ -464,10 +461,7 @@ impl VirtualMachine {
                         if actual >= 0 && (actual as usize) < arr.len() {
                             return self.push_vw(ValueWord::from_i64(arr[actual as usize]));
                         } else {
-                            return Err(VMError::IndexOutOfBounds {
-                                index: idx as i32,
-                                length: arr.len(),
-                            });
+                            return self.push_vw(ValueWord::none());
                         }
                     }
                 }
@@ -489,10 +483,7 @@ impl VirtualMachine {
                         if actual >= 0 && (actual as usize) < arr.len() {
                             return self.push_vw(ValueWord::from_f64(arr[actual as usize]));
                         } else {
-                            return Err(VMError::IndexOutOfBounds {
-                                index: idx as i32,
-                                length: arr.len(),
-                            });
+                            return self.push_vw(ValueWord::none());
                         }
                     }
                 }
@@ -514,10 +505,7 @@ impl VirtualMachine {
                         if actual >= 0 && (actual as usize) < arr.len() {
                             return self.push_vw(ValueWord::from_bool(arr[actual as usize] != 0));
                         } else {
-                            return Err(VMError::IndexOutOfBounds {
-                                index: idx as i32,
-                                length: arr.len(),
-                            });
+                            return self.push_vw(ValueWord::none());
                         }
                     }
                 }

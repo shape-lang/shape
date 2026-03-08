@@ -262,7 +262,7 @@ fn test_program_running_statistics() {
         r#"
         var values = []
         fn add_value(v) { values = values.push(v) }
-        fn mean() {
+        fn avg() {
             values.reduce(|acc, x| acc + x, 0) / values.length
         }
         fn min_val() {
@@ -274,7 +274,7 @@ fn test_program_running_statistics() {
         for v in [10, 20, 30, 40, 50] {
             add_value(v)
         }
-        print(mean())
+        print(avg())
         print(min_val())
         print(max_val())
     "#,

@@ -243,7 +243,7 @@ fn test_borrow_assign_after_borrow_release() {
     ShapeTest::new(
         r#"
         fn read(&x) { x }
-        let a = 5
+        var a = 5
         let v = read(&a)
         a = 100
         a + v

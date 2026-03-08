@@ -16,13 +16,13 @@ impl VirtualMachine {
     pub(in crate::executor) fn exec_trait_object_ops(
         &mut self,
         instruction: &Instruction,
-        _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         match instruction.opcode {
             OpCode::BoxTraitObject => self.op_box_trait_object(instruction)?,
             OpCode::DynMethodCall => self.op_dyn_method_call()?,
-            OpCode::DropCall => self.op_drop_call_sync()?,
-            OpCode::DropCallAsync => self.op_drop_call_async()?,
+            OpCode::DropCall => self.op_drop_call_sync(instruction, ctx)?,
+            OpCode::DropCallAsync => self.op_drop_call_async(instruction, ctx)?,
             _ => unreachable!(
                 "exec_trait_object_ops called with non-trait-object opcode: {:?}",
                 instruction.opcode
@@ -188,44 +188,70 @@ impl VirtualMachine {
         Ok(())
     }
 
+    /// Resolve the type name for a DropCall instruction.
+    ///
+    /// If the instruction carries a `Property(str_idx)` operand, use the string
+    /// pool entry (this is the compile-time type name, which is correct for
+    /// TypedObjects whose runtime `type_name()` returns the generic `"object"`).
+    /// Otherwise fall back to the runtime `value.type_name()`.
+    fn resolve_drop_type_name(&self, instruction: &Instruction, value: &ValueWord) -> String {
+        if let Some(Operand::Property(str_idx)) = instruction.operand {
+            if let Some(name) = self.program.strings.get(str_idx as usize) {
+                return name.clone();
+            }
+        }
+        value.type_name().to_string()
+    }
+
     /// Sync drop: look up `TypeName::drop`.
-    fn op_drop_call_sync(&mut self) -> Result<(), VMError> {
+    fn op_drop_call_sync(
+        &mut self,
+        instruction: &Instruction,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
         let value = self.pop_vw()?;
         if let Some(HeapValue::IoHandle(handle_data)) = value.as_heap_ref() {
             handle_data.close();
             return Ok(());
         }
-        let type_name = value.type_name();
+        let type_name = self.resolve_drop_type_name(instruction, &value);
         let drop_fn_name = format!("{}::drop", type_name);
-        self.do_drop_call(value, &drop_fn_name)
+        self.do_drop_call(value, &drop_fn_name, ctx)
     }
 
     /// Async drop: look up `TypeName::drop_async`, falling back to `TypeName::drop`.
-    fn op_drop_call_async(&mut self) -> Result<(), VMError> {
+    fn op_drop_call_async(
+        &mut self,
+        instruction: &Instruction,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
         let value = self.pop_vw()?;
         if let Some(HeapValue::IoHandle(handle_data)) = value.as_heap_ref() {
             handle_data.close();
             return Ok(());
         }
-        let type_name = value.type_name();
+        let type_name = self.resolve_drop_type_name(instruction, &value);
         let async_fn_name = format!("{}::drop_async", type_name);
         // Prefer async variant; fall back to sync if not found
         if self.function_name_index.contains_key(&async_fn_name) {
-            self.do_drop_call(value, &async_fn_name)
+            self.do_drop_call(value, &async_fn_name, ctx)
         } else {
             let sync_fn_name = format!("{}::drop", type_name);
-            self.do_drop_call(value, &sync_fn_name)
+            self.do_drop_call(value, &sync_fn_name, ctx)
         }
     }
 
-    /// Shared drop execution: push value, call the named drop function, swallow errors.
-    fn do_drop_call(&mut self, value: ValueWord, drop_fn_name: &str) -> Result<(), VMError> {
+    /// Shared drop execution: call the named drop function synchronously, swallow errors.
+    fn do_drop_call(
+        &mut self,
+        value: ValueWord,
+        drop_fn_name: &str,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
         if let Some(&func_idx) = self.function_name_index.get(drop_fn_name) {
-            self.push_vw(value)?;
-            match self.call_function_from_stack(func_idx, 1) {
-                Ok(()) => {
-                    let _ = self.pop_vw();
-                }
+            let callee = ValueWord::from_function(func_idx);
+            match self.call_value_immediate_nb(&callee, &[value], ctx) {
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("[drop] Error in {}: {}", drop_fn_name, e);
                 }

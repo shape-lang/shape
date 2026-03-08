@@ -1728,19 +1728,59 @@ impl BytecodeCompiler {
         // Emit DropCall for each tracked local in reverse order
         if let Some(locals) = self.drop_locals.pop() {
             for (local_idx, is_async) in locals.into_iter().rev() {
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(local_idx)),
-                ));
-                let opcode = if is_async {
-                    OpCode::DropCallAsync
-                } else {
-                    OpCode::DropCall
-                };
-                self.emit(Instruction::simple(opcode));
+                self.emit_drop_call_for_local(local_idx, is_async);
             }
         }
         Ok(())
+    }
+
+    /// Emit a single LoadLocal + DropCall pair for a local variable.
+    /// The type name is resolved from the type tracker and encoded as a
+    /// Property operand so the executor can look up `TypeName::drop`.
+    fn emit_drop_call_for_local(&mut self, local_idx: u16, is_async: bool) {
+        let type_name_opt = self
+            .type_tracker
+            .get_local_type(local_idx)
+            .and_then(|info| info.type_name.clone());
+        self.emit(Instruction::new(
+            OpCode::LoadLocal,
+            Some(Operand::Local(local_idx)),
+        ));
+        let opcode = if is_async {
+            OpCode::DropCallAsync
+        } else {
+            OpCode::DropCall
+        };
+        if let Some(type_name) = type_name_opt {
+            let str_idx = self.program.add_string(type_name);
+            self.emit(Instruction::new(opcode, Some(Operand::Property(str_idx))));
+        } else {
+            self.emit(Instruction::simple(opcode));
+        }
+    }
+
+    /// Emit a single LoadModuleBinding + DropCall pair for a module binding.
+    /// Similar to `emit_drop_call_for_local` but loads from module bindings.
+    pub(super) fn emit_drop_call_for_module_binding(&mut self, binding_idx: u16, is_async: bool) {
+        let type_name_opt = self
+            .type_tracker
+            .get_binding_type(binding_idx)
+            .and_then(|info| info.type_name.clone());
+        self.emit(Instruction::new(
+            OpCode::LoadModuleBinding,
+            Some(Operand::ModuleBinding(binding_idx)),
+        ));
+        let opcode = if is_async {
+            OpCode::DropCallAsync
+        } else {
+            OpCode::DropCall
+        };
+        if let Some(type_name) = type_name_opt {
+            let str_idx = self.program.add_string(type_name);
+            self.emit(Instruction::new(opcode, Some(Operand::Property(str_idx))));
+        } else {
+            self.emit(Instruction::simple(opcode));
+        }
     }
 
     /// Track a local variable as needing Drop at scope exit.
@@ -1782,19 +1822,15 @@ impl BytecodeCompiler {
         // Now emit DropCall instructions
         for locals in scopes {
             for (local_idx, is_async) in locals.into_iter().rev() {
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(local_idx)),
-                ));
-                let opcode = if is_async {
-                    OpCode::DropCallAsync
-                } else {
-                    OpCode::DropCall
-                };
-                self.emit(Instruction::simple(opcode));
+                self.emit_drop_call_for_local(local_idx, is_async);
             }
         }
         Ok(())
+    }
+
+    /// Track a module binding as needing Drop at program exit.
+    pub(super) fn track_drop_module_binding(&mut self, binding_idx: u16, is_async: bool) {
+        self.drop_module_bindings.push((binding_idx, is_async));
     }
 }
 

@@ -524,6 +524,41 @@ impl BytecodeCompiler {
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
+
+                    // Propagate type info from annotation or initializer expression
+                    if let Some(ref type_ann) = var_decl.type_annotation {
+                        if let Some(type_name) =
+                            Self::tracked_type_name_from_annotation(type_ann)
+                        {
+                            self.set_module_binding_type_info(binding_idx, &type_name);
+                        }
+                    } else {
+                        let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
+                        self.propagate_initializer_type_to_slot(binding_idx, false, is_mutable);
+                    }
+
+                    // Track for auto-drop at program exit
+                    let binding_type_name = self
+                        .type_tracker
+                        .get_binding_type(binding_idx)
+                        .and_then(|info| info.type_name.clone());
+                    let drop_kind = binding_type_name
+                        .as_ref()
+                        .and_then(|tn| self.drop_type_info.get(tn).copied())
+                        .or_else(|| {
+                            var_decl
+                                .type_annotation
+                                .as_ref()
+                                .and_then(|ann| self.annotation_drop_kind(ann))
+                        });
+                    if drop_kind.is_some() {
+                        let is_async = match drop_kind {
+                            Some(DropKind::AsyncOnly) => true,
+                            Some(DropKind::Both) => false,
+                            Some(DropKind::SyncOnly) | None => false,
+                        };
+                        self.track_drop_module_binding(binding_idx, is_async);
+                    }
                 } else {
                     self.compile_destructure_pattern_global(&var_decl.pattern)?;
                 }
@@ -3170,6 +3205,29 @@ impl BytecodeCompiler {
                         } else {
                             let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
                             self.propagate_initializer_type_to_slot(binding_idx, false, is_mutable);
+                        }
+
+                        // Track for auto-drop at program exit
+                        let binding_type_name = self
+                            .type_tracker
+                            .get_binding_type(binding_idx)
+                            .and_then(|info| info.type_name.clone());
+                        let drop_kind = binding_type_name
+                            .as_ref()
+                            .and_then(|tn| self.drop_type_info.get(tn).copied())
+                            .or_else(|| {
+                                var_decl
+                                    .type_annotation
+                                    .as_ref()
+                                    .and_then(|ann| self.annotation_drop_kind(ann))
+                            });
+                        if drop_kind.is_some() {
+                            let is_async = match drop_kind {
+                                Some(DropKind::AsyncOnly) => true,
+                                Some(DropKind::Both) => false,
+                                Some(DropKind::SyncOnly) | None => false,
+                            };
+                            self.track_drop_module_binding(binding_idx, is_async);
                         }
                     } else {
                         self.compile_destructure_pattern_global(&var_decl.pattern)?;

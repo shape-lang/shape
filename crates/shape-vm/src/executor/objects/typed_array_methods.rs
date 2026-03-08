@@ -557,7 +557,7 @@ pub fn handle_int_filter(
 pub fn handle_float_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
     let arr = extract_float_array(&args)?;
     let callback = args
@@ -566,7 +566,7 @@ pub fn handle_float_for_each(
         .ok_or_else(|| VMError::RuntimeError("forEach() requires a callback".into()))?;
     for &v in arr.iter() {
         let elem_nb = ValueWord::from_f64(v);
-        let _ = vm.call_value_immediate_nb(&callback, &[elem_nb], None)?;
+        let _ = vm.call_value_immediate_nb(&callback, &[elem_nb], ctx.as_deref_mut())?;
     }
     vm.push_vw(ValueWord::none())
 }
@@ -574,7 +574,7 @@ pub fn handle_float_for_each(
 pub fn handle_int_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
     let arr = extract_int_array(&args)?;
     let callback = args
@@ -583,7 +583,7 @@ pub fn handle_int_for_each(
         .ok_or_else(|| VMError::RuntimeError("forEach() requires a callback".into()))?;
     for &v in arr.iter() {
         let elem_nb = ValueWord::from_i64(v);
-        let _ = vm.call_value_immediate_nb(&callback, &[elem_nb], None)?;
+        let _ = vm.call_value_immediate_nb(&callback, &[elem_nb], ctx.as_deref_mut())?;
     }
     vm.push_vw(ValueWord::none())
 }

@@ -514,8 +514,8 @@ fn test_complex_block_expressions_with_control_flow() {
 fn test_complex_string_split_and_process() {
     ShapeTest::new(
         r#"
-        let csv = "Alice,30,NYC"
-        let parts = csv.split(",")
+        let data = "Alice,30,NYC"
+        let parts = data.split(",")
         print(parts[0])
         print(parts[1])
         print(parts[2])

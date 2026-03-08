@@ -315,6 +315,10 @@ impl BytecodeCompiler {
             self.program.strings.len(),
         ));
 
+        // Push a top-level drop scope so that block expressions and
+        // statement-level VarDecls can track locals for auto-drop.
+        self.push_drop_scope();
+
         // Second pass: compile all items (collect errors instead of early-returning)
         let item_count = program.items.len();
         for (idx, item) in program.items.iter().enumerate() {
@@ -330,6 +334,18 @@ impl BytecodeCompiler {
                 return Err(self.errors.remove(0));
             }
             return Err(shape_ast::error::ShapeError::MultiError(self.errors));
+        }
+
+        // Emit drops for top-level locals (from the top-level drop scope)
+        self.pop_drop_scope()?;
+
+        // Emit drops for top-level module bindings that have Drop impls
+        {
+            let bindings: Vec<(u16, bool)> =
+                std::mem::take(&mut self.drop_module_bindings);
+            for (binding_idx, is_async) in bindings.into_iter().rev() {
+                self.emit_drop_call_for_module_binding(binding_idx, is_async);
+            }
         }
 
         // Add halt instruction at the end

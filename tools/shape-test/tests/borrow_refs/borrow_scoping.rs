@@ -37,7 +37,7 @@ fn borrow_reassign_after_borrow_released() {
     ShapeTest::new(
         r#"
         fn read_val(&x) { x }
-        let a = 5
+        var a = 5
         let v = read_val(&a)
         a = 100
         a + v
@@ -279,7 +279,7 @@ fn borrow_sequential_exclusive_calls_different_fns() {
         r#"
         fn double(&x) { x = x * 2 }
         fn add_ten(&x) { x = x + 10 }
-        let a = 5
+        var a = 5
         double(&a)
         add_ten(&a)
         double(&a)

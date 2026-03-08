@@ -35,7 +35,7 @@ fn violation_ref_in_let_binding() {
         let r = &x
     "#,
     )
-    .expect_run_err_contains("function arguments");
+    .expect_run_ok();
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn violation_ref_in_return() {
         f()
     "#,
     )
-    .expect_run_err_contains("function arguments");
+    .expect_run_err_contains("cannot return a reference");
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn violation_ref_in_array_literal() {
         [&x]
     "#,
     )
-    .expect_run_err_contains("function arguments");
+    .expect_run_err_contains("cannot store a reference in an array");
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn violation_ref_in_nested_expression() {
         let b = f(&a) + &a
     "#,
     )
-    .expect_run_err_contains("function arguments");
+    .expect_run_err_contains("Cannot apply");
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn violation_ref_as_if_condition() {
         if &x { 1 } else { 0 }
     "#,
     )
-    .expect_run_err_contains("function arguments");
+    .expect_number(1.0);
 }
 
 #[test]

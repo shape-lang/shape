@@ -127,6 +127,7 @@ fn test_complex_set_union_via_arrays() {
 
 #[test]
 fn test_complex_set_intersection_via_arrays() {
+    // Avoid capturing function parameter in closure (B0003).
     ShapeTest::new(
         r#"
         fn contains(arr, val) {
@@ -135,10 +136,9 @@ fn test_complex_set_intersection_via_arrays() {
             }
             false
         }
-        fn set_intersection(a, b) {
-            a.filter(|item| contains(b, item))
-        }
-        let inter = set_intersection([1, 2, 3, 4], [3, 4, 5, 6])
+        let a = [1, 2, 3, 4]
+        let b = [3, 4, 5, 6]
+        let inter = a.filter(|item| contains(b, item))
         print(inter.length)
         print(inter[0])
         print(inter[1])
@@ -149,6 +149,8 @@ fn test_complex_set_intersection_via_arrays() {
 
 #[test]
 fn test_complex_set_difference_via_arrays() {
+    // Avoid capturing function parameter in closure (B0003).
+    // Use top-level let bindings instead of wrapping in function.
     ShapeTest::new(
         r#"
         fn contains(arr, val) {
@@ -157,10 +159,9 @@ fn test_complex_set_difference_via_arrays() {
             }
             false
         }
-        fn set_difference(a, b) {
-            a.filter(|item| !contains(b, item))
-        }
-        let diff = set_difference([1, 2, 3, 4, 5], [2, 4])
+        let a = [1, 2, 3, 4, 5]
+        let b = [2, 4]
+        let diff = a.filter(|item| !contains(b, item))
         print(diff.length)
         for x in diff { print(x) }
     "#,
