@@ -1,0 +1,582 @@
+// Shape Standard Library - Risk Management and Position Sizing
+// This module provides comprehensive risk management functions for trading
+
+module risk {
+    // Import indicators for calculations
+    from std::finance::indicators::moving_averages use { sma, ema };
+    from std::finance::indicators::volatility use { atr };
+    
+    // Constants for risk management
+    const DEFAULT_RISK_PERCENT = 0.02  // 2% default risk per trade
+    const MAX_RISK_PERCENT = 0.06      // 6% maximum risk per trade
+    const MAX_PORTFOLIO_RISK = 0.20    // 20% maximum portfolio risk
+    const CONFIDENCE_LEVEL_95 = 1.645  // Z-score for 95% confidence
+    const CONFIDENCE_LEVEL_99 = 2.326  // Z-score for 99% confidence
+    
+    // Position Sizing Functions
+    
+    // Fixed Fractional Position Sizing
+    pub fn fixed_fractional_size(account_balance, risk_percent = DEFAULT_RISK_PERCENT, stop_loss_amount) {
+        if risk_percent > MAX_RISK_PERCENT {
+            risk_percent = MAX_RISK_PERCENT;
+        }
+        
+        let risk_amount = account_balance * risk_percent;
+        let position_size = risk_amount / stop_loss_amount;
+        
+        return {
+            size: position_size,
+            risk_amount: risk_amount,
+            risk_percent: risk_percent
+        };
+    }
+    
+    // Kelly Criterion Position Sizing
+    pub fn kelly_criterion(win_probability, avg_win, avg_loss) {
+        // Kelly % = (p * b - q) / b
+        // where p = probability of winning, q = probability of losing (1-p)
+        // b = ratio of win to loss
+        
+        let q = 1 - win_probability;
+        let b = avg_win / avg_loss;
+        let kelly_percent = (win_probability * b - q) / b;
+        
+        // Apply Kelly fraction (typically 25% of full Kelly)
+        let fractional_kelly = kelly_percent * 0.25;
+        
+        // Ensure it's not negative or too large
+        if fractional_kelly < 0 {
+            fractional_kelly = 0;
+        } else if fractional_kelly > 0.25 {
+            fractional_kelly = 0.25;
+        }
+        
+        return {
+            full_kelly: kelly_percent,
+            fractional_kelly: fractional_kelly,
+            recommended_size: fractional_kelly
+        };
+    }
+    
+    // Volatility-Based Position Sizing
+    pub fn volatility_based_size(account_balance, target_volatility = 0.02, current_volatility) {
+        // Size inversely proportional to volatility
+        let base_size = account_balance * target_volatility;
+        let adjusted_size = base_size / current_volatility;
+        
+        return {
+            size: adjusted_size,
+            volatility_ratio: target_volatility / current_volatility
+        };
+    }
+    
+    // Risk Parity Position Sizing
+    pub fn risk_parity_size(account_balance, positions, target_risk = 0.10) {
+        // Equal risk contribution from each position
+        let num_positions = positions.length;
+        let risk_per_position = target_risk / num_positions;
+        
+        let sizes = [];
+        for pos in positions {
+            let size = (account_balance * risk_per_position) / pos.volatility;
+            sizes.push({
+                symbol: pos.symbol,
+                size: size,
+                risk_contribution: risk_per_position
+            });
+        }
+        
+        return sizes;
+    }
+    
+    // Optimal F Position Sizing
+    pub fn optimal_f(trade_results) {
+        // Find the f value that maximizes terminal wealth ratio
+        let best_f = 0;
+        let best_twr = 0;
+        
+        // Test f values from 0.01 to 1.0
+        for f in range(1, 101) {
+            let f_value = f / 100;
+            let twr = calculate_twr(trade_results, f_value);
+            
+            if twr > best_twr {
+                best_twr = twr;
+                best_f = f_value;
+            }
+        }
+        
+        // Use fraction of optimal f for safety
+        return {
+            optimal_f: best_f,
+            safe_f: best_f * 0.25,
+            terminal_wealth_ratio: best_twr
+        };
+    }
+    
+    // Stop Loss Calculations
+    
+    // ATR-Based Stop Loss
+    pub fn atr_stop_loss(entry_price, atr_multiplier = 2.0, atr_period = 14) {
+        let atr_value = atr(atr_period);
+        let stop_distance = atr_value * atr_multiplier;
+        
+        return {
+            long_stop: entry_price - stop_distance,
+            short_stop: entry_price + stop_distance,
+            distance: stop_distance,
+            distance_percent: stop_distance / entry_price
+        };
+    }
+    
+    // Percentage-Based Stop Loss
+    pub fn percent_stop_loss(entry_price, stop_percent = 0.02) {
+        let stop_distance = entry_price * stop_percent;
+        
+        return {
+            long_stop: entry_price - stop_distance,
+            short_stop: entry_price + stop_distance,
+            distance: stop_distance,
+            distance_percent: stop_percent
+        };
+    }
+    
+    // Support/Resistance Based Stop Loss
+    pub fn support_resistance_stop(entry_price, is_long = true, lookback = 20) {
+        if is_long {
+            // Find recent support level
+            let support = lowest(low, lookback);
+            let buffer = atr(14) * 0.5;  // Small buffer below support
+            return {
+                stop: support - buffer,
+                level: support,
+                distance: entry_price - (support - buffer)
+            };
+        } else {
+            // Find recent resistance level
+            let resistance = highest(high, lookback);
+            let buffer = atr(14) * 0.5;  // Small buffer above resistance
+            return {
+                stop: resistance + buffer,
+                level: resistance,
+                distance: (resistance + buffer) - entry_price
+            };
+        }
+    }
+    
+    // Trailing Stop Loss
+    pub fn trailing_stop(entry_price, current_price, trail_percent = 0.02, is_long = true) {
+        if is_long {
+            let highest_price = max(entry_price, current_price);
+            let stop = highest_price * (1 - trail_percent);
+            return {
+                stop: stop,
+                distance: highest_price - stop,
+                locked_profit: stop - entry_price
+            };
+        } else {
+            let lowest_price = min(entry_price, current_price);
+            let stop = lowest_price * (1 + trail_percent);
+            return {
+                stop: stop,
+                distance: stop - lowest_price,
+                locked_profit: entry_price - stop
+            };
+        }
+    }
+    
+    // Risk Metrics
+    
+    // Value at Risk (VaR) - Historical Method
+    pub fn historical_var(returns, confidence_level = 0.95) {
+        // Sort returns in ascending order
+        let sorted_returns = sort_array(returns);
+        let index = floor((1 - confidence_level) * returns.length);
+        
+        return {
+            value_at_risk: sorted_returns[index],
+            confidence_level: confidence_level,
+            calculation_method: "historical"
+        };
+    }
+    
+    // Conditional Value at Risk (CVaR)
+    pub fn cvar(returns, confidence_level = 0.95) {
+        let var_value = historical_var(returns, confidence_level).value_at_risk;
+        
+        // Calculate average of returns worse than VaR
+        let worse_returns = [];
+        for ret in returns {
+            if ret <= var_value {
+                worse_returns.push(ret);
+            }
+        }
+        
+        let cvar_value = mean_array(worse_returns);
+        
+        return {
+            cvar: cvar_value,
+            value_at_risk: var_value,
+            confidence_level: confidence_level
+        };
+    }
+    
+    // Maximum Drawdown
+    pub fn max_drawdown(equity_curve) {
+        let peak = equity_curve[0];
+        let max_dd = 0;
+        let current_dd = 0;
+        let dd_start = 0;
+        let dd_end = 0;
+        
+        for i in range(equity_curve.length) {
+            if equity_curve[i] > peak {
+                peak = equity_curve[i];
+            }
+            
+            current_dd = (peak - equity_curve[i]) / peak;
+            
+            if current_dd > max_dd {
+                max_dd = current_dd;
+                dd_end = i;
+                // Find start of self drawdown
+                for j in range(i, -1, -1) {
+                    if equity_curve[j] == peak {
+                        dd_start = j;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        return {
+            max_drawdown: max_dd,
+            drawdown_start: dd_start,
+            drawdown_end: dd_end,
+            recovery_time: dd_end - dd_start
+        };
+    }
+    
+    // Sharpe Ratio
+    pub fn sharpe_ratio(returns, risk_free_rate = 0.02) {
+        let avg_return = mean_array(returns);
+        let excess_return = avg_return - risk_free_rate / 252;  // Daily risk-free rate
+        let std_dev = stddev_array(returns);
+        
+        if std_dev == 0 {
+            return 0;
+        }
+        
+        return {
+            sharpe: excess_return / std_dev * sqrt(252),  // Annualized
+            avg_return: avg_return,
+            volatility: std_dev * sqrt(252)
+        };
+    }
+    
+    // Sortino Ratio
+    pub fn sortino_ratio(returns, risk_free_rate = 0.02, target_return = 0) {
+        let avg_return = mean_array(returns);
+        let excess_return = avg_return - risk_free_rate / 252;
+        
+        // Calculate downside deviation
+        let downside_returns = [];
+        for ret in returns {
+            if ret < target_return {
+                downside_returns.push(ret - target_return);
+            }
+        }
+        
+        if downside_returns.length == 0 {
+            return {
+                sortino: 999,  // No downside risk
+                avg_return: avg_return,
+                downside_deviation: 0
+            };
+        }
+        
+        let downside_dev = sqrt(mean_array(square_array(downside_returns)));
+        
+        return {
+            sortino: excess_return / downside_dev * sqrt(252),  // Annualized
+            avg_return: avg_return,
+            downside_deviation: downside_dev * sqrt(252)
+        };
+    }
+    
+    // Portfolio Risk Management
+    
+    // Calculate Portfolio Risk
+    pub fn portfolio_risk(positions, correlation_matrix = None) {
+        let total_risk = 0;
+        
+        if correlation_matrix == None {
+            // Simple sum of variances (assumes no correlation)
+            for pos in positions {
+                total_risk = total_risk + (pos.weight * pos.volatility) ** 2;
+            }
+            total_risk = sqrt(total_risk);
+        } else {
+            // Include correlations
+            for i in range(positions.length) {
+                for j in range(positions.length) {
+                    let correlation = correlation_matrix[i][j];
+                    let contribution = positions[i].weight * positions[j].weight * 
+                                     positions[i].volatility * positions[j].volatility * 
+                                     correlation;
+                    total_risk = total_risk + contribution;
+                }
+            }
+            total_risk = sqrt(total_risk);
+        }
+        
+        return {
+            portfolio_volatility: total_risk,
+            diversification_ratio: sum_weights_volatility(positions) / total_risk
+        };
+    }
+    
+    // Position Limits
+    pub fn calculate_position_limits(account_balance, max_position_size = 0.20, max_sector_exposure = 0.40) {
+        return {
+            max_single_position: account_balance * max_position_size,
+            max_sector_exposure: account_balance * max_sector_exposure,
+            max_correlated_exposure: account_balance * 0.30,
+            min_positions: 5,  // For diversification
+            max_positions: 20  // To avoid over-diversification
+        };
+    }
+    
+    // Risk Budget Allocation
+    pub fn risk_budget_allocation(total_risk_budget, strategy_list) {
+        let allocations = [];
+        let total_expected_return = 0;
+        
+        // Calculate total expected return
+        for strat in strategy_list {
+            total_expected_return = total_expected_return + strat.expected_return;
+        }
+        
+        // Allocate risk proportional to expected return
+        for strat in strategy_list {
+            let risk_allocation = (strat.expected_return / total_expected_return) * total_risk_budget;
+            allocations.push({
+                name: strat.name,
+                risk_budget: risk_allocation,
+                expected_return: strat.expected_return,
+                information_ratio: strat.expected_return / strat.tracking_error
+            });
+        }
+        
+        return allocations;
+    }
+    
+    // Money Management Rules
+    
+    // Check if trade meets risk criteria
+    pub fn validate_trade_risk(trade, account_balance, open_positions) {
+        // Check maximum risk per trade
+        let trade_risk = trade.position_size * trade.stop_loss_distance;
+        let max_risk_per_trade = trade_risk <= account_balance * MAX_RISK_PERCENT;
+        
+        // Check total portfolio risk
+        let total_risk = calculate_total_portfolio_risk(open_positions, trade);
+        let max_portfolio_risk = total_risk <= account_balance * MAX_PORTFOLIO_RISK;
+        
+        // Check position sizing limits
+        let position_sizing = trade.position_value <= account_balance * 0.20;
+        
+        // Check correlation limits
+        let correlation_limit = !has_high_correlation(trade, open_positions);
+        
+        let all_passed = max_risk_per_trade and max_portfolio_risk and 
+                        position_sizing and correlation_limit;
+        
+        return {
+            approved: all_passed,
+            checks: {
+                max_risk_per_trade: max_risk_per_trade,
+                max_portfolio_risk: max_portfolio_risk,
+                position_sizing: position_sizing,
+                correlation_limit: correlation_limit
+            },
+            trade_risk_percent: trade_risk / account_balance,
+            portfolio_risk_percent: total_risk / account_balance
+        };
+    }
+    
+    // Pyramiding Rules
+    pub fn pyramiding_rules(initial_position, current_profit_percent) {
+        // Only add to winners
+        if current_profit_percent < 0.02 {  // Less than 2% profit
+            return {
+                can_add: false,
+                add_size: 0,
+                reason: "Position not profitable enough"
+            };
+        }
+        
+        // Scale pyramid sizes
+        let add_size = 0;
+        if current_profit_percent < 0.05 {
+            add_size = initial_position * 0.5;  // Add 50% of initial
+        } else if current_profit_percent < 0.10 {
+            add_size = initial_position * 0.33;  // Add 33% of initial
+        } else {
+            add_size = initial_position * 0.25;  // Add 25% of initial
+        }
+        
+        return {
+            can_add: true,
+            add_size: add_size,
+            reason: "Pyramiding conditions met"
+        };
+    }
+    
+    // Scale Out Strategy
+    pub fn scale_out_levels(entry_price, target_return = 0.10) {
+        return {
+            level_1: {
+                price: entry_price * (1 + target_return * 0.33),
+                size_percent: 0.33,
+                reason: "First profit target"
+            },
+            level_2: {
+                price: entry_price * (1 + target_return * 0.67),
+                size_percent: 0.33,
+                reason: "Second profit target"
+            },
+            level_3: {
+                price: entry_price * (1 + target_return),
+                size_percent: 0.34,
+                reason: "Final profit target"
+            }
+        };
+    }
+    
+    // Helper Functions (private)
+    
+    fn calculate_twr(trades, f) {
+        let twr = 1;
+        let biggest_loss = find_biggest_loss(trades);
+        
+        for trade in trades {
+            let hpr = 1 + f * (trade / abs(biggest_loss));
+            twr = twr * hpr;
+        }
+        
+        return twr;
+    }
+    
+    fn find_biggest_loss(trades) {
+        let biggest_loss = 0;
+        for trade in trades {
+            if trade < biggest_loss {
+                biggest_loss = trade;
+            }
+        }
+        return biggest_loss;
+    }
+    
+    fn sort_array(arr) {
+        // Since we can't modify arrays in place, we'll use a functional approach
+        // This is a simple implementation - in practice, a built-in sort would be better
+        
+        if arr.length <= 1 {
+            return arr;
+        }
+        
+        // Use insertion sort by building a new array
+        let result = [arr[0]];
+        
+        for i in range(1, arr.length) {
+            let value = arr[i];
+            let inserted = false;
+            let new_result = [];
+            
+            for j in range(result.length) {
+                if !inserted and value < result[j] {
+                    new_result = push(new_result, value);
+                    inserted = true;
+                }
+                new_result = push(new_result, result[j]);
+            }
+            
+            if !inserted {
+                new_result = push(new_result, value);
+            }
+            
+            result = new_result;
+        }
+        
+        return result;
+    }
+    
+    fn mean_array(values) {
+        if values.length == 0 {
+            return 0;
+        }
+        
+        let sum = 0;
+        for val in values {
+            sum = sum + val;
+        }
+        return sum / values.length;
+    }
+    
+    fn stddev_array(values) {
+        let mean = mean_array(values);
+        let sum_sq = 0;
+        
+        for val in values {
+            let diff = val - mean;
+            sum_sq = sum_sq + (diff * diff);
+        }
+        
+        return sqrt(sum_sq / values.length);
+    }
+    
+    fn square_array(values) {
+        let squared = [];
+        for val in values {
+            squared.push(val * val);
+        }
+        return squared;
+    }
+    
+    fn sum_weights_volatility(positions) {
+        let sum = 0;
+        for pos in positions {
+            sum = sum + pos.weight * pos.volatility;
+        }
+        return sum;
+    }
+    
+    fn calculate_total_portfolio_risk(open_positions, new_trade) {
+        let total_risk = 0;
+        
+        // Add existing positions risk
+        for pos in open_positions {
+            total_risk = total_risk + pos.current_risk;
+        }
+        
+        // Add new trade risk
+        total_risk = total_risk + new_trade.position_size * new_trade.stop_loss_distance;
+        
+        return total_risk;
+    }
+    
+    fn has_high_correlation(trade, open_positions) {
+        // Simplified correlation check
+        // In practice, would calculate actual correlations
+        let same_sector_count = 0;
+        
+        for pos in open_positions {
+            if pos.sector == trade.sector {
+                same_sector_count = same_sector_count + 1;
+            }
+        }
+        
+        return same_sector_count >= 3;  // Limit correlated positions
+    }
+}

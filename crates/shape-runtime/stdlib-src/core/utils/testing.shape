@@ -1,0 +1,124 @@
+/// @module std::core::utils::testing
+/// Testing Utilities
+///
+/// Assertion functions for unit testing Shape programs.
+/// All assertions return Result<bool> — Ok(true) on success, Err(message) on failure.
+
+/// Assert that a condition is true.
+///
+/// @param condition - The condition to check
+/// @param message - Optional failure message
+/// @returns Ok(true) if condition is true, Err with message otherwise
+///
+/// @example
+/// assert(x > 0, "x must be positive")
+pub fn assert(condition, message) {
+    if condition {
+        Ok(true)
+    } else {
+        let msg = if message != None {
+            message
+        } else {
+            "Assertion failed: condition was false"
+        };
+        Err(msg)
+    }
+}
+
+/// Assert that two values are equal.
+///
+/// @param actual - The actual value
+/// @param expected - The expected value
+/// @param message - Optional failure message
+/// @returns Ok(true) if equal, Err with details otherwise
+///
+/// @example
+/// assert_eq(add(2, 3), 5, "addition should work")
+pub fn assert_eq(actual, expected, message) {
+    if actual == expected {
+        Ok(true)
+    } else {
+        let msg = if message != None {
+            message + " — expected " + expected.toString() + ", got " + actual.toString()
+        } else {
+            "Assertion failed: expected " + expected.toString() + ", got " + actual.toString()
+        };
+        Err(msg)
+    }
+}
+
+/// Assert that two values are not equal.
+///
+/// @param actual - The actual value
+/// @param expected - The value that actual should NOT equal
+/// @param message - Optional failure message
+/// @returns Ok(true) if not equal, Err with details otherwise
+///
+/// @example
+/// assert_ne(result, 0, "result must not be zero")
+pub fn assert_ne(actual, expected, message) {
+    if actual != expected {
+        Ok(true)
+    } else {
+        let msg = if message != None {
+            message + " — values should differ but both were " + actual.toString()
+        } else {
+            "Assertion failed: expected values to differ but both were " + actual.toString()
+        };
+        Err(msg)
+    }
+}
+
+/// Assert that two numbers are approximately equal within a tolerance.
+///
+/// @param actual - The actual number
+/// @param expected - The expected number
+/// @param tolerance - Maximum allowed difference (default: 1e-10)
+/// @returns Ok(true) if within tolerance, Err with details otherwise
+///
+/// @example
+/// assert_approx(sqrt(2) * sqrt(2), 2.0)
+/// assert_approx(pi(), 3.14, 0.01)
+pub fn assert_approx(actual, expected, tolerance) {
+    let tol = if tolerance != None {
+        tolerance
+    } else {
+        1e-10
+    };
+    let diff = abs(actual - expected);
+    if diff <= tol {
+        Ok(true)
+    } else {
+        Err("Assertion failed: expected " + expected.toString() + " (+-" + tol.toString() + "), got " + actual.toString() + " (diff=" + diff.toString() + ")")
+    }
+}
+
+/// Assert that a Result is Ok.
+///
+/// @param result - The Result value to check
+/// @returns Ok(true) if result is Ok, Err with message otherwise
+///
+/// @example
+/// assert_ok(parse_number("42"))
+pub fn assert_ok(result) {
+    if result.isOk() {
+        Ok(true)
+    } else {
+        Err("Assertion failed: expected Ok, got Err")
+    }
+}
+
+/// Assert that a Result is Err.
+///
+/// @param result - The Result value to check
+/// @returns Ok(true) if result is Err, Err with message otherwise
+///
+/// @example
+/// assert_err(parse_number("not a number"))
+pub fn assert_err(result) {
+    if result.isErr() {
+        Ok(true)
+    } else {
+        Err("Assertion failed: expected Err, got Ok")
+    }
+}

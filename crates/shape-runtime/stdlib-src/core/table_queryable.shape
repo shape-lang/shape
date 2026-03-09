@@ -1,0 +1,16 @@
+/// @module std::core::table_queryable
+/// Queryable implementation for Table<T>.
+///
+/// Makes Table<T> a first-class Queryable source, enabling generic code
+/// that works on both in-memory tables and database queries.
+///
+/// Note: Table already has native PHF methods for filter/map/orderBy/limit/execute.
+/// This trait impl provides UFCS dispatch so generic Queryable code resolves correctly.
+
+impl Queryable for Table {
+    method filter(predicate) { self.filter(predicate) }
+    method map(transform) { self.map(transform) }
+    method orderBy(key_fn, direction) { self.orderBy(key_fn, direction) }
+    method limit(n) { self.limit(n) }
+    method execute() { self }
+}

@@ -1,0 +1,400 @@
+// Shape Standard Library - Candlestick Patterns
+// This module provides common candlestick pattern definitions
+
+module patterns {
+    // Import types and indicators for pattern analysis
+    from std::finance::types use { Candle };
+    from std::finance::indicators::moving_averages use { sma };
+    from std::finance::indicators::volatility use { atr };
+
+    // Single candle patterns
+
+    // Note: hammer pattern is defined in patterns/hammer.shape
+
+    // Note: shooting_star pattern is defined in patterns/shooting_star.shape
+
+    // Note: doji pattern is defined in patterns/doji.shape
+
+    pub fn dragonfly_doji(candle: Candle) -> boolean {
+        let body = abs(candle.close - candle.open);
+        let range = candle.high - candle.low;
+        let lower_shadow = min(candle.open, candle.close) - candle.low;
+        let upper_shadow = candle.high - max(candle.open, candle.close);
+
+        return body < range * 0.1 and
+               lower_shadow > range * 0.7 and
+               upper_shadow < range * 0.1;
+    }
+
+    pub fn gravestone_doji(candle: Candle) -> boolean {
+        let body = abs(candle.close - candle.open);
+        let range = candle.high - candle.low;
+        let upper_shadow = candle.high - max(candle.open, candle.close);
+        let lower_shadow = min(candle.open, candle.close) - candle.low;
+
+        return body < range * 0.1 and
+               upper_shadow > range * 0.7 and
+               lower_shadow < range * 0.1;
+    }
+
+    pub fn marubozu(candle: Candle) -> boolean {
+        let body = abs(candle.close - candle.open);
+        let range = candle.high - candle.low;
+
+        return body > range * 0.95;
+    }
+
+    pub fn spinning_top(candle: Candle) -> boolean {
+        let body = abs(candle.close - candle.open);
+        let range = candle.high - candle.low;
+        let upper_shadow = candle.high - max(candle.open, candle.close);
+        let lower_shadow = min(candle.open, candle.close) - candle.low;
+
+        return body < range * 0.4 and
+               upper_shadow > body * 0.5 and
+               lower_shadow > body * 0.5;
+    }
+
+    // Two candle patterns
+
+    // Note: bullish_engulfing pattern is defined in patterns/bullish_engulfing.shape
+
+    // Note: bearish_engulfing pattern is defined in patterns/bearish_engulfing.shape
+
+    pub fn tweezer_top(candle: Candle) -> boolean {
+        return candle[-1].high ~= candle[0].high and    // Same highs (fuzzy match)
+               candle[-1].close > candle[-1].open and   // First is bullish
+               candle[0].close < candle[0].open;        // Second is bearish
+    }
+
+    pub fn tweezer_bottom(candle: Candle) -> boolean {
+        return candle[-1].low ~= candle[0].low and      // Same lows (fuzzy match)
+               candle[-1].close < candle[-1].open and   // First is bearish
+               candle[0].close > candle[0].open;        // Second is bullish
+    }
+
+    pub fn piercing_line(candle: Candle) -> boolean {
+        return candle[-1].close < candle[-1].open and   // Previous is bearish
+               candle[0].close > candle[0].open and     // Current is bullish
+               candle[0].open < candle[-1].low and      // Opens below previous low
+               candle[0].close > candle[-1].open - ((candle[-1].open - candle[-1].close) * 0.5) and
+               candle[0].close < candle[-1].open;       // Closes within previous body
+    }
+
+    pub fn dark_cloud_cover(candle: Candle) -> boolean {
+        return candle[-1].close > candle[-1].open and   // Previous is bullish
+               candle[0].close < candle[0].open and     // Current is bearish
+               candle[0].open > candle[-1].high and     // Opens above previous high
+               candle[0].close < candle[-1].close + ((candle[-1].close - candle[-1].open) * 0.5) and
+               candle[0].close > candle[-1].open;       // Closes within previous body
+    }
+
+    // Three candle patterns
+
+    pub fn morning_star(candle: Candle) -> boolean {
+        // First candle: long bearish
+        return candle[-2].close < candle[-2].open and
+               abs(candle[-2].close - candle[-2].open) > atr(14) * 0.5 and
+               // Second candle: small body (star)
+               abs(candle[-1].close - candle[-1].open) < atr(14) * 0.2 and
+               candle[-1].high < candle[-2].low and     // Gap down
+               // Third candle: long bullish
+               candle[0].close > candle[0].open and
+               abs(candle[0].close - candle[0].open) > atr(14) * 0.5 and
+               candle[0].close > candle[-2].open * 0.5; // Closes at least halfway up first candle
+    }
+
+    pub fn evening_star(candle: Candle) -> boolean {
+        // First candle: long bullish
+        return candle[-2].close > candle[-2].open and
+               abs(candle[-2].close - candle[-2].open) > atr(14) * 0.5 and
+               // Second candle: small body (star)
+               abs(candle[-1].close - candle[-1].open) < atr(14) * 0.2 and
+               candle[-1].low > candle[-2].high and     // Gap up
+               // Third candle: long bearish
+               candle[0].close < candle[0].open and
+               abs(candle[0].close - candle[0].open) > atr(14) * 0.5 and
+               candle[0].close < candle[-2].close * 0.5; // Closes at least halfway down first candle
+    }
+
+    pub fn three_white_soldiers(candle: Candle) -> boolean {
+        // Three consecutive bullish candles
+        return candle[-2].close > candle[-2].open and
+               candle[-1].close > candle[-1].open and
+               candle[0].close > candle[0].open and
+               // Each opens within previous body
+               candle[-1].open > candle[-2].open and
+               candle[-1].open < candle[-2].close and
+               candle[0].open > candle[-1].open and
+               candle[0].open < candle[-1].close and
+               // Progressive higher closes
+               candle[-1].close > candle[-2].close and
+               candle[0].close > candle[-1].close;
+    }
+
+    pub fn three_black_crows(candle: Candle) -> boolean {
+        // Three consecutive bearish candles
+        return candle[-2].close < candle[-2].open and
+               candle[-1].close < candle[-1].open and
+               candle[0].close < candle[0].open and
+               // Each opens within previous body
+               candle[-1].open < candle[-2].open and
+               candle[-1].open > candle[-2].close and
+               candle[0].open < candle[-1].open and
+               candle[0].open > candle[-1].close and
+               // Progressive lower closes
+               candle[-1].close < candle[-2].close and
+               candle[0].close < candle[-1].close;
+    }
+
+    // Additional single candle patterns
+
+    pub fn bullish_marubozu(candle: Candle) -> boolean {
+        let body = candle.close - candle.open;
+        let range = candle.high - candle.low;
+
+        return body > 0 and                    // Bullish
+               body > range * 0.95 and         // Almost no wicks
+               candle.open ~= candle.low and   // Opens at low
+               candle.close ~= candle.high;    // Closes at high
+    }
+
+    pub fn bearish_marubozu(candle: Candle) -> boolean {
+        let body = candle.open - candle.close;
+        let range = candle.high - candle.low;
+
+        return body > 0 and                    // Bearish
+               body > range * 0.95 and         // Almost no wicks
+               candle.open ~= candle.high and  // Opens at high
+               candle.close ~= candle.low;     // Closes at low
+    }
+
+    pub fn long_legged_doji(candle: Candle) -> boolean {
+        let body = abs(candle.close - candle.open);
+        let range = candle.high - candle.low;
+        let upper_shadow = candle.high - max(candle.open, candle.close);
+        let lower_shadow = min(candle.open, candle.close) - candle.low;
+
+        return body < range * 0.1 and          // Very small body
+               upper_shadow > range * 0.4 and  // Long upper shadow
+               lower_shadow > range * 0.4;     // Long lower shadow
+    }
+
+    pub fn bullish_belt_hold(candle: Candle) -> boolean {
+        let body = candle.close - candle.open;
+        let range = candle.high - candle.low;
+
+        return body > range * 0.7 and          // Large bullish body
+               candle.open ~= candle.low and   // Opens at low
+               candle[-1].close < candle[-1].open;  // Previous bearish
+    }
+
+    pub fn bearish_belt_hold(candle: Candle) -> boolean {
+        let body = candle.open - candle.close;
+        let range = candle.high - candle.low;
+
+        return body > range * 0.7 and          // Large bearish body
+               candle.open ~= candle.high and  // Opens at high
+               candle[-1].close > candle[-1].open;  // Previous bullish
+    }
+
+    // Additional two candle patterns
+
+    pub fn harami(candle: Candle) -> boolean {
+        let prev_body = abs(candle[-1].close - candle[-1].open);
+        let curr_body = abs(candle[0].close - candle[0].open);
+
+        // Current candle body is inside previous candle body
+        return max(candle[0].open, candle[0].close) < max(candle[-1].open, candle[-1].close) and
+               min(candle[0].open, candle[0].close) > min(candle[-1].open, candle[-1].close) and
+               curr_body < prev_body * 0.5;    // Current body is small
+    }
+
+    pub fn bullish_harami(candle: Candle) -> boolean {
+        // Harami pattern with bullish implications
+        return harami(candle) and
+               candle[-1].close < candle[-1].open and  // Previous bearish
+               candle[0].close > candle[0].open;       // Current bullish
+    }
+
+    pub fn bearish_harami(candle: Candle) -> boolean {
+        // Harami pattern with bearish implications
+        return harami(candle) and
+               candle[-1].close > candle[-1].open and  // Previous bullish
+               candle[0].close < candle[0].open;       // Current bearish
+    }
+
+    pub fn on_neck_line(candle: Candle) -> boolean {
+        return candle[-1].close < candle[-1].open and   // Previous bearish
+               candle[0].close > candle[0].open and     // Current bullish
+               candle[0].open < candle[-1].low and      // Opens below previous low
+               candle[0].close ~= candle[-1].low;       // Closes near previous low
+    }
+
+    pub fn in_neck_line(candle: Candle) -> boolean {
+        return candle[-1].close < candle[-1].open and   // Previous bearish
+               candle[0].close > candle[0].open and     // Current bullish
+               candle[0].open < candle[-1].low and      // Opens below previous low
+               candle[0].close ~= candle[-1].close;     // Closes near previous close
+    }
+
+    pub fn thrusting_pattern(candle: Candle) -> boolean {
+        return candle[-1].close < candle[-1].open and   // Previous bearish
+               candle[0].close > candle[0].open and     // Current bullish
+               candle[0].open < candle[-1].low and      // Opens below previous low
+               candle[0].close > candle[-1].close and   // Closes above previous close
+               candle[0].close < candle[-1].open - (candle[-1].open - candle[-1].close) * 0.5;
+    }
+
+    // Additional three candle patterns
+
+    pub fn abandoned_baby_bullish(candle: Candle) -> boolean {
+        // First candle: bearish
+        return candle[-2].close < candle[-2].open and
+               // Second candle: doji with gap down
+               abs(candle[-1].close - candle[-1].open) < (candle[-1].high - candle[-1].low) * 0.1 and
+               candle[-1].high < candle[-2].low and
+               // Third candle: bullish with gap up
+               candle[0].close > candle[0].open and
+               candle[0].low > candle[-1].high;
+    }
+
+    pub fn abandoned_baby_bearish(candle: Candle) -> boolean {
+        // First candle: bullish
+        return candle[-2].close > candle[-2].open and
+               // Second candle: doji with gap up
+               abs(candle[-1].close - candle[-1].open) < (candle[-1].high - candle[-1].low) * 0.1 and
+               candle[-1].low > candle[-2].high and
+               // Third candle: bearish with gap down
+               candle[0].close < candle[0].open and
+               candle[0].high < candle[-1].low;
+    }
+
+    pub fn three_inside_up(candle: Candle) -> boolean {
+        // Bullish harami followed by higher close
+        return candle[-2].close < candle[-2].open and                         // First bearish
+               max(candle[-1].open, candle[-1].close) < candle[-2].open and  // Second inside first
+               min(candle[-1].open, candle[-1].close) > candle[-2].close and
+               candle[-1].close > candle[-1].open and                        // Second bullish
+               candle[0].close > candle[0].open and                          // Third bullish
+               candle[0].close > candle[-1].close;                           // Third closes higher
+    }
+
+    pub fn three_inside_down(candle: Candle) -> boolean {
+        // Bearish harami followed by lower close
+        return candle[-2].close > candle[-2].open and                         // First bullish
+               max(candle[-1].open, candle[-1].close) < candle[-2].close and // Second inside first
+               min(candle[-1].open, candle[-1].close) > candle[-2].open and
+               candle[-1].close < candle[-1].open and                        // Second bearish
+               candle[0].close < candle[0].open and                          // Third bearish
+               candle[0].close < candle[-1].close;                           // Third closes lower
+    }
+
+    pub fn three_outside_up(candle: Candle) -> boolean {
+        // Bullish engulfing followed by higher close
+        return candle[-2].close < candle[-2].open and   // First bearish
+               candle[-1].close > candle[-1].open and   // Second bullish
+               candle[-1].open < candle[-2].close and   // Engulfs first
+               candle[-1].close > candle[-2].open and
+               candle[0].close > candle[0].open and     // Third bullish
+               candle[0].close > candle[-1].close;      // Third closes higher
+    }
+
+    pub fn three_outside_down(candle: Candle) -> boolean {
+        // Bearish engulfing followed by lower close
+        return candle[-2].close > candle[-2].open and   // First bullish
+               candle[-1].close < candle[-1].open and   // Second bearish
+               candle[-1].open > candle[-2].close and   // Engulfs first
+               candle[-1].close < candle[-2].open and
+               candle[0].close < candle[0].open and     // Third bearish
+               candle[0].close < candle[-1].close;      // Third closes lower
+    }
+
+    pub fn bullish_tri_star(candle: Candle) -> boolean {
+        // Three dojis with the middle one gapped
+        return abs(candle[-2].close - candle[-2].open) < (candle[-2].high - candle[-2].low) * 0.1 and
+               abs(candle[-1].close - candle[-1].open) < (candle[-1].high - candle[-1].low) * 0.1 and
+               abs(candle[0].close - candle[0].open) < (candle[0].high - candle[0].low) * 0.1 and
+               candle[-1].low > candle[-2].high and    // Middle gaps up
+               candle[0].low > candle[-1].high;        // Third gaps up
+    }
+
+    pub fn bearish_tri_star(candle: Candle) -> boolean {
+        // Three dojis with the middle one gapped
+        return abs(candle[-2].close - candle[-2].open) < (candle[-2].high - candle[-2].low) * 0.1 and
+               abs(candle[-1].close - candle[-1].open) < (candle[-1].high - candle[-1].low) * 0.1 and
+               abs(candle[0].close - candle[0].open) < (candle[0].high - candle[0].low) * 0.1 and
+               candle[-1].high < candle[-2].low and    // Middle gaps down
+               candle[0].high < candle[-1].low;        // Third gaps down
+    }
+
+    // Pattern helper functions
+
+    pub fn is_bullish(candle: Candle) -> boolean {
+        return candle[0].close > candle[0].open;
+    }
+
+    pub fn is_bearish(candle: Candle) -> boolean {
+        return candle[0].close < candle[0].open;
+    }
+
+    pub fn body_size(candle: Candle) -> number {
+        return abs(candle[0].close - candle[0].open);
+    }
+
+    pub fn upper_shadow_size(candle: Candle) -> number {
+        return candle[0].high - max(candle[0].open, candle[0].close);
+    }
+
+    pub fn lower_shadow_size(candle: Candle) -> number {
+        return min(candle[0].open, candle[0].close) - candle[0].low;
+    }
+
+    pub fn is_gap_up(candle: Candle) -> boolean {
+        return candle[0].low > candle[-1].high;
+    }
+
+    pub fn is_gap_down(candle: Candle) -> boolean {
+        return candle[0].high < candle[-1].low;
+    }
+
+    // Pattern strength assessment
+
+    pub fn pattern_strength(candle: Candle, pattern_name: string) -> number {
+        // Returns a strength score 0-100 for the pattern
+        let strength = 0;
+
+        // Add volume confirmation
+        if (candle[0].volume > sma_volume(candle, 20) * 1.5) {
+            strength = strength + 20;
+        }
+
+        // Add trend confirmation
+        if (pattern_name == "hammer" or pattern_name == "bullish_engulfing" or pattern_name == "morning_star") {
+            // Bullish patterns stronger in downtrend
+            if (sma(20) < sma(50)) {
+                strength = strength + 30;
+            }
+        } else if (pattern_name == "shooting_star" or pattern_name == "bearish_engulfing" or pattern_name == "evening_star") {
+            // Bearish patterns stronger in uptrend
+            if (sma(20) > sma(50)) {
+                strength = strength + 30;
+            }
+        }
+
+        // Add location confirmation (support/resistance)
+        // This would need more complex logic in practice
+        strength = strength + 50;
+
+        return min(strength, 100);
+    }
+
+    // Private helper for volume SMA
+    fn sma_volume(candle: Candle, period: number) -> number {
+        let sum = 0;
+        for i in range(period) {
+            sum = sum + candle[-i].volume;
+        }
+        return sum / period;
+    }
+}

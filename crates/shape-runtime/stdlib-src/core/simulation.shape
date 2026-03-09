@@ -1,0 +1,176 @@
+/// @module std::core::simulation
+/// Core Simulation Module - Multi-Table State Machine Operations
+///
+/// Provides simulation primitives for event-driven state machines over time series.
+/// This module is domain-agnostic - finance, IoT, and other industry-specific
+/// simulation wrappers should build on these primitives.
+///
+/// ## SIMD-First Design Philosophy
+///
+/// `simulate()` and `simulate_correlated()` are thin sequential layers for state
+/// machines. Most computation should happen BEFORE simulate using SIMD primitives:
+///
+/// ```shape
+/// // CORRECT: SIMD-first approach
+/// let signals = prices.rolling(20).mean()
+///     .zip_combine(prices.rolling(50).mean(), (f, s) => f > s);
+/// let positions = signals.simulate(state_tracker, { initial_state: 0 });
+/// ```
+///
+/// ## Cross-Domain Applications
+///
+/// - Physics: State machines for PDE boundary conditions
+/// - Signal Processing: Edge detection state, filter initialization
+/// - IoT: Device state tracking, alert accumulation
+/// - Finance: Position tracking, order state management
+
+// ===== Single Table Simulation =====
+
+/// Simulate a state machine over a single series
+///
+/// The handler receives (row, state, index) and should return either:
+/// - The new state directly
+/// - { state: newState, result: optionalResult } for collecting results
+///
+/// @param table - The data table to iterate over
+/// @param handler - Function (row, state, index) => newState or { state, result }
+/// @param config - Optional configuration object:
+///   - initial_state: Initial state value (default: {})
+///   - on_complete: Optional callback when simulation completes
+///   - batch_size: For chunked processing (default: 0 = all at once)
+///   - collect_results: Whether to collect results (default: true)
+///   - mode: "full" for row access, "signal" for numeric values
+///
+/// @returns { final_state, results, elements_processed }
+///
+/// @example
+/// let result = prices.simulate(
+///     (row, state, idx) => {
+///         if row.close > state.threshold {
+///             { state: { ...state, position: 1 }, result: "buy" }
+///         } else {
+///             state
+///         }
+///     },
+///     { initial_state: { position: 0, threshold: 100.0 } }
+/// );
+// Note: simulate() is a method on DataTable, not a standalone function.
+// Usage: table.simulate(handler, config)
+
+// ===== Multi-Table Correlated Simulation =====
+
+/// Simulate a state machine over multiple aligned series
+///
+/// The handler receives (context, state, index) where context is an object
+/// containing the current value from each named series.
+///
+/// @param tables - Object mapping names to tables: { "spy": spy_data, "vix": vix_data }
+/// @param handler - Function (context, state, index) => newState or { state, result }
+/// @param config - Optional configuration (same as simulate())
+///
+/// @returns { final_state, results, elements_processed }
+///
+/// @example
+/// let result = simulate_correlated(
+///     { spy: spy_prices, vix: vix_prices },
+///     (ctx, state, idx) => {
+///         let spread = ctx.spy - ctx.vix * 10;
+///         if spread > 50 && state.position == 0 {
+///             { state: { position: 1 }, result: "enter_long" }
+///         } else if spread < -20 && state.position == 1 {
+///             { state: { position: 0 }, result: "exit" }
+///         } else {
+///             state
+///         }
+///     },
+///     { initial_state: { position: 0 } }
+/// );
+///
+/// @note All series must have the same length (aligned timestamps)
+/// @note JIT: Table names are resolved to indices at compile time for performance
+// simulate_correlated is a built-in function, not exported from self module.
+// Usage: simulate_correlated(series_map, handler, config)
+
+// ===== Configuration Helpers =====
+
+type SimulationConfig {
+    initial_state: object,
+    mode: string,
+    collect_results: bool,
+    collect_event_log: bool
+}
+
+type SimulationResult {
+    final_state: object,
+    results: array,
+    elements_processed: int
+}
+
+/// Create a simulation config with signal mode
+/// Signal mode is optimized for pre-computed SIMD signals
+pub fn signal_mode_config(initial_state = {}) -> SimulationConfig {
+    {
+        initial_state: initial_state,
+        mode: "signal",
+        collect_results: true,
+        collect_event_log: false
+    }
+}
+
+/// Create a simulation config with full row access mode
+pub fn full_mode_config(initial_state = {}) -> SimulationConfig {
+    {
+        initial_state: initial_state,
+        mode: "full",
+        collect_results: true,
+        collect_event_log: false
+    }
+}
+
+/// Create a simulation config without result collection
+/// Use self when you only care about final state (saves memory)
+pub fn state_only_config(initial_state = {}) -> SimulationConfig {
+    {
+        initial_state: initial_state,
+        mode: "full",
+        collect_results: false,
+        collect_event_log: false
+    }
+}
+
+// ===== Result Utilities =====
+
+/// Extract trades/events from simulation results
+pub fn get_results(sim_result: SimulationResult) {
+    sim_result.results
+}
+
+/// Get the final state from simulation results
+pub fn get_final_state(sim_result: SimulationResult) {
+    sim_result.final_state
+}
+
+/// Get count of processed elements
+pub fn get_processed_count(sim_result: SimulationResult) {
+    sim_result.elements_processed
+}
+
+// ===== Replay =====
+
+/// Replay a simulation with event log collection enabled
+///
+/// Re-runs a simulation on the given table using the provided handler and config,
+/// with `collect_event_log: true` forced on. Useful for deterministic replay
+/// and debugging simulation behavior.
+///
+/// @param table - The data table to simulate over
+/// @param handler - Function (row, state, index) => { state, result, event_type }
+/// @param config - Simulation config (collect_event_log will be forced true)
+/// @returns Simulation result with event_log array
+pub fn replay(table, handler, config: SimulationConfig) {
+    let replay_config: SimulationConfig = {
+        ...config,
+        collect_event_log: true
+    };
+    table.simulate(handler, replay_config)
+}

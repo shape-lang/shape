@@ -1,0 +1,91 @@
+/// @module std::finance::indicators::oscillators
+/// Oscillators - Optimized with Intrinsics
+
+from std::core::utils::rolling use { rolling_mean }
+from std::finance::indicators::moving_averages use { ema }
+
+/// Compute the relative strength index.
+///
+/// @see std::finance::indicators::moving_averages::ema
+pub @warmup(period + 1) fn rsi(series, period = 14) {
+    // Calculate price changes using diff intrinsic (FAST!)
+    let changes = __intrinsic_diff(series);
+
+    // Separate gains and losses
+    let gains = changes.map(|x| max(x, 0));
+    let losses = changes.map(|x| max(-x, 0));
+
+    // Calculate average gains and losses using EMA (Wilder's Smoothing is essentially EMA)
+    // Note: Wilder's smoothing is EMA with alpha = 1/period, whereas standard EMA is 2/(period+1).
+    // Standard RSI uses Wilder's.
+    // We should use a specific 'wilders' or 'rma' function if we want exact RSI.
+    // For now, using standard EMA as placeholder or if compatible.
+    // To match RSI exactly: alpha = 1/period.
+    // Standard EMA: alpha = 2/(period+1).
+    // So 'ema' function with period = 2*period - 1 would match?
+    // 2 / ( (2n-1) + 1 ) = 2/2n = 1/n.
+    // So ema(..., 2*period - 1) approximates Wilder's.
+    
+    let wilder_period = 2 * period - 1;
+    let avg_gain = ema(gains, wilder_period);
+    let avg_loss = ema(losses, wilder_period);
+
+    // Calculate RS and RSI
+    let rs = avg_gain / avg_loss;
+    100 - (100 / (1 + rs))
+}
+
+/// Compute the stochastic oscillator `%K` and `%D` series.
+pub @warmup(k_period + d_period) fn stochastic(high, low, close, k_period = 14, d_period = 3) {
+    // Find highest high and lowest low using intrinsics (FAST!)
+    let highest_high = __intrinsic_rolling_max(high, k_period);
+    let lowest_low = __intrinsic_rolling_min(low, k_period);
+
+    // Calculate %K
+    let k = ((close - lowest_low) / (highest_high - lowest_low)) * 100;
+
+    // Calculate %D (SMA of %K) using vector rolling_mean
+    let d = rolling_mean(k, d_period);
+
+    {
+        k: k,
+        d: d
+    }
+}
+
+/// Compute the commodity channel index.
+pub @warmup(period) fn cci(high, low, close, period = 20) {
+    // Typical price
+    let tp = (high + low + close) / 3;
+
+    // SMA of typical price
+    let sma_tp = rolling_mean(tp, period);
+
+    // Mean deviation
+    let deviations = abs(tp - sma_tp);
+    let mean_dev = rolling_mean(deviations, period);
+
+    // CCI formula
+    (tp - sma_tp) / (0.015 * mean_dev)
+}
+
+/// Compute the rate of change in percent.
+pub @warmup(period + 1) fn roc(series, period) {
+    // Use pct_change intrinsic with custom period
+    let pct = __intrinsic_pct_change(series, period);
+    pct * 100  // Convert to percentage
+}
+
+/// Compute the raw momentum over `period`.
+pub @warmup(period + 1) fn momentum(series, period) {
+    // Simple difference over period
+    __intrinsic_diff(series, period)
+}
+
+/// Compute Williams `%R`.
+pub @warmup(period) fn williams_r(high, low, close, period = 14) {
+    let highest_high = __intrinsic_rolling_max(high, period);
+    let lowest_low = __intrinsic_rolling_min(low, period);
+
+    ((highest_high - close) / (highest_high - lowest_low)) * -100
+}

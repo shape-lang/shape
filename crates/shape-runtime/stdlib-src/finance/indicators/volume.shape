@@ -1,0 +1,61 @@
+/// @module std::finance::indicators::volume
+/// Volume Indicators
+/// Volume analysis tools
+
+from std::core::utils::rolling use { rolling_sum }
+from std::core::utils::vector use { select }
+
+/// Compute on-balance volume.
+pub @warmup(1) fn obv(close, volume) {
+    let prev_close = __intrinsic_shift(close, 1);
+    
+    // sign: 1 if close > prev, -1 if close < prev, 0 if equal
+    let up = close > prev_close;
+    let down = close < prev_close;
+    
+    // sign = up ? 1 : (down ? -1 : 0)
+    let sign = select(up, 1.0, select(down, -1.0, 0.0));
+    
+    let signed_volume = sign * volume;
+    
+    __intrinsic_cumsum(signed_volume)
+}
+
+/// Compute cumulative or rolling VWAP depending on `period`.
+///
+/// @note `period = 0` selects cumulative VWAP from the start of the series.
+pub @warmup(period) fn vwap(price, volume, period = 0) {
+    // Standard VWAP is cumulative from start of data (period=0 or omitted)
+    // Rolling VWAP uses a window.
+    
+    if period > 0 {
+        // Rolling VWAP
+        let pv = price * volume;
+        let pv_sum = rolling_sum(pv, period);
+        let v_sum = rolling_sum(volume, period);
+        pv_sum / v_sum
+    } else {
+        // Cumulative VWAP (Anchor: Start of data)
+        // TODO: Session-anchored VWAP requires time inspection (reset at 00:00)
+        let pv = price * volume;
+        let pv_cum = __intrinsic_cumsum(pv);
+        let v_cum = __intrinsic_cumsum(volume);
+        pv_cum / v_cum
+    }
+}
+
+/// Compute the accumulation/distribution line.
+pub @warmup(1) fn ad(high, low, close, volume) {
+    // Money Flow Multiplier = ((Close - Low) - (High - Close)) / (High - Low)
+    // MFM = (2*Close - Low - High) / (High - Low)
+    
+    let mfm_num = (2 * close) - low - high;
+    let mfm_den = high - low;
+    
+    // Handle div by zero if High == Low
+    let mfm = select(mfm_den > 0.0, mfm_num / mfm_den, 0.0);
+    
+    let mfv = mfm * volume;
+    
+    __intrinsic_cumsum(mfv)
+}

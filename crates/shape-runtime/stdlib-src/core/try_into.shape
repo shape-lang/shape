@@ -1,0 +1,93 @@
+/// @module std::core::try_into
+/// Fallible conversion trait used by `as Type?`.
+///
+/// Dispatch uses named impl selectors (`as <TypeName>`) so conversions are
+/// statically validated and resolved without primitive conversion tables.
+
+/// Define a fallible conversion from `Self` into `Target`.
+///
+/// @see std::core::try_from::TryFrom
+trait TryInto<Target> {
+    /// Attempt to convert `self` into `Target`.
+    tryInto(): Result<Target, AnyError>
+}
+
+impl TryInto<number> for int as number {
+    method tryInto() { __try_into_number(self) }
+}
+
+impl TryInto<decimal> for int as decimal {
+    method tryInto() { __try_into_decimal(self) }
+}
+
+impl TryInto<string> for int as string {
+    method tryInto() { __try_into_string(self) }
+}
+
+impl TryInto<bool> for int as bool {
+    method tryInto() { __try_into_bool(self) }
+}
+
+impl TryInto<int> for number as int {
+    method tryInto() { __try_into_int(self) }
+}
+
+impl TryInto<decimal> for number as decimal {
+    method tryInto() { __try_into_decimal(self) }
+}
+
+impl TryInto<string> for number as string {
+    method tryInto() { __try_into_string(self) }
+}
+
+impl TryInto<bool> for number as bool {
+    method tryInto() { __try_into_bool(self) }
+}
+
+impl TryInto<number> for decimal as number {
+    method tryInto() { __try_into_number(self) }
+}
+
+impl TryInto<int> for decimal as int {
+    method tryInto() { __try_into_int(self) }
+}
+
+impl TryInto<string> for decimal as string {
+    method tryInto() { __try_into_string(self) }
+}
+
+impl TryInto<bool> for decimal as bool {
+    method tryInto() { __try_into_bool(self) }
+}
+
+impl TryInto<int> for string as int {
+    method tryInto() { __try_into_int(self) }
+}
+
+impl TryInto<number> for string as number {
+    method tryInto() { __try_into_number(self) }
+}
+
+impl TryInto<decimal> for string as decimal {
+    method tryInto() { __try_into_decimal(self) }
+}
+
+impl TryInto<bool> for string as bool {
+    method tryInto() { __try_into_bool(self) }
+}
+
+impl TryInto<int> for bool as int {
+    method tryInto() { __try_into_int(self) }
+}
+
+impl TryInto<number> for bool as number {
+    method tryInto() { __try_into_number(self) }
+}
+
+impl TryInto<decimal> for bool as decimal {
+    method tryInto() { __try_into_decimal(self) }
+}
+
+impl TryInto<string> for bool as string {
+    method tryInto() { __try_into_string(self) }
+}

@@ -1,0 +1,104 @@
+/// @module std::finance::indicators::volatility
+/// Volatility Indicators - Optimized with Intrinsics
+
+from std::core::utils::rolling use { rolling_mean, rolling_std }
+from std::finance::indicators::moving_averages use { ema }
+
+/// Compute Bollinger Bands and normalized bandwidth.
+///
+/// @see std::core::utils::rolling::rolling_mean
+/// @see std::core::utils::rolling::rolling_std
+pub @warmup(period) fn bollinger_bands(series, period = 20, std_dev = 2.0) {
+    // Middle band (SMA) using vector rolling_mean
+    let middle = rolling_mean(series, period);
+
+    // Standard deviation using vector rolling_std
+    let std = rolling_std(series, period);
+
+    // Upper and lower bands
+    let upper = middle + (std_dev * std);
+    let lower = middle - (std_dev * std);
+
+    {
+        upper: upper,
+        middle: middle,
+        lower: lower,
+        bandwidth: (upper - lower) / middle
+    }
+}
+
+/// Compute the average true range from high, low, and close series.
+///
+/// @see std::finance::indicators::moving_averages::ema
+pub @warmup(period + 1) fn atr(high, low, close, period = 14) {
+    // Calculate true range
+    let prev_close = __intrinsic_shift(close, 1);
+
+    let tr1 = high - low;
+    let tr2 = abs(high - prev_close);
+    let tr3 = abs(low - prev_close);
+
+    // True range is max of the three
+    let tr = max(tr1, max(tr2, tr3));
+
+    // ATR is EMA of true range
+    // Using standard EMA. Wilder's usually used for ATR.
+    // period * 2 - 1 approximates Wilder's.
+    let wilder_period = 2 * period - 1;
+    ema(tr, wilder_period)
+}
+
+/// Compute Keltner Channels around an EMA center line.
+///
+/// @see std::finance::indicators::volatility::atr
+pub @warmup(period + 1) fn keltner_channels(high, low, close, period = 20, atr_mult = 2.0) {
+    // Middle line (EMA of close)
+    let middle = ema(close, period);
+
+    // ATR for channel width
+    let atr_value = atr(high, low, close, period);
+
+    // Upper and lower channels
+    let upper = middle + (atr_mult * atr_value);
+    let lower = middle - (atr_mult * atr_value);
+
+    {
+        upper: upper,
+        middle: middle,
+        lower: lower
+    }
+}
+
+/// Compute historical volatility from percentage returns.
+pub @warmup(period + 1) fn historical_volatility(series, period = 20, annualize = true) {
+    // Calculate returns using pct_change intrinsic
+    let returns = __intrinsic_pct_change(series);
+
+    // Rolling std dev of returns
+    let vol = rolling_std(returns, period);
+
+    // Annualize if requested (assuming daily data, 252 trading days)
+    if annualize {
+        vol * sqrt(252)
+    } else {
+        vol
+    }
+}
+
+/// Compute Donchian Channels over `period`.
+pub @warmup(period) fn donchian_channels(high, low, period = 20) {
+    // Upper channel (highest high) - using intrinsic sliding max (O(n))
+    let upper = __intrinsic_rolling_max(high, period);
+
+    // Lower channel (lowest low) - using intrinsic sliding min (O(n))
+    let lower = __intrinsic_rolling_min(low, period);
+
+    // Middle (average of upper and lower)
+    let middle = (upper + lower) / 2;
+
+    {
+        upper: upper,
+        middle: middle,
+        lower: lower
+    }
+}

@@ -1,0 +1,24 @@
+/// @module std::core::stochastic
+/// Stochastic Processes
+///
+/// Thin wrappers around intrinsic process generators.
+
+/// Brownian motion path
+pub fn brownian_motion(n, dt, sigma) {
+    __intrinsic_brownian_motion(n, dt, sigma)
+}
+
+/// Geometric Brownian Motion (GBM)
+pub fn gbm(n, dt, mu, sigma, s0) {
+    __intrinsic_gbm(n, dt, mu, sigma, s0)
+}
+
+/// Ornstein-Uhlenbeck process
+pub fn ou_process(n, dt, theta, mu, sigma, x0) {
+    __intrinsic_ou_process(n, dt, theta, mu, sigma, x0)
+}
+
+/// Random walk
+pub fn random_walk(n, step_size) {
+    __intrinsic_random_walk(n, step_size)
+}

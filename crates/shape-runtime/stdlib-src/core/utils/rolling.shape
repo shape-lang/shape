@@ -1,0 +1,55 @@
+/// @module std::core::utils::rolling
+/// Rolling Window Operations
+/// Optimized implementations using dedicated intrinsics for performance
+
+/// Compute the rolling sum over a fixed-size window.
+///
+/// @param series Input series.
+/// @param period Window size.
+/// @returns Windowed sum for each position.
+pub fn rolling_sum(series, period) {
+    __intrinsic_rolling_sum(series, period)
+}
+
+/// Compute the rolling arithmetic mean over a fixed-size window.
+///
+/// @param series Input series.
+/// @param period Window size.
+/// @returns Windowed mean for each position.
+/// @see std::finance::indicators::moving_averages::sma
+pub fn rolling_mean(series, period) {
+    __intrinsic_rolling_mean(series, period)
+}
+
+/// Compute the rolling standard deviation over a fixed-size window.
+///
+/// @param series Input series.
+/// @param period Window size.
+/// @returns Windowed standard deviation for each position.
+pub fn rolling_std(series, period) {
+    __intrinsic_rolling_std(series, period)
+}
+
+/// Compute the rolling variance over a fixed-size window.
+///
+/// @param series Input series.
+/// @param period Window size.
+/// @returns Windowed variance for each position.
+/// @see std::core::utils::rolling::rolling_std
+pub fn rolling_variance(series, period) {
+    let std = rolling_std(series, period)
+    __intrinsic_vec_mul(std, std)
+}
+
+/// Apply a first-order linear recurrence across a series.
+///
+/// `y[t] = y[t-1] * decay + input[t]`
+///
+/// @param input Recurrence input term.
+/// @param decay Decay factor applied to the previous output.
+/// @param initial_value Seed value for the recurrence.
+/// @returns Recurrence output series.
+/// @see std::finance::indicators::moving_averages::ema
+pub fn linear_recurrence(input, decay, initial_value) {
+    __intrinsic_linear_recurrence(input, decay, initial_value)
+}

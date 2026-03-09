@@ -1,0 +1,216 @@
+/// Declaration-only intrinsic metadata for built-in types and functions.
+///
+/// These declarations are tooling metadata only. They are not executable Shape
+/// code and do not provide runtime implementations.
+
+/// Numeric type (integer or floating-point).
+builtin type Number;
+/// UTF-8 string type.
+builtin type String;
+/// Boolean type (true/false).
+builtin type Boolean;
+/// Vector container type.
+builtin type Vec;
+/// Dense numeric matrix container.
+builtin type Mat;
+/// Dynamic object/map type.
+builtin type Object;
+/// Typed table container.
+builtin type Table;
+/// Generic row type for tabular data.
+builtin type Row;
+/// Pattern type.
+builtin type Pattern;
+/// Signal type.
+builtin type Signal;
+/// Date/time value.
+builtin type DateTime;
+/// Result type - Ok(value) or Err(error).
+builtin type Result;
+/// Optional type - Some(value) or None.
+builtin type Option;
+/// Universal runtime error type.
+builtin type AnyError;
+/// Hash map with ordered insertion and O(1) key lookup.
+builtin type HashMap<K, V>;
+
+/// Return the absolute value of a number.
+builtin fn abs(value: number) -> number;
+/// Return the square root of a number.
+builtin fn sqrt(value: number) -> number;
+/// Raise base to the power of exponent.
+builtin fn pow(base: number, exponent: number) -> number;
+/// Return the natural logarithm of a number.
+builtin fn log(value: number) -> number;
+/// Return e raised to the power of value.
+builtin fn exp(value: number) -> number;
+/// Round down to the nearest integer.
+builtin fn floor(value: number) -> number;
+/// Round up to the nearest integer.
+builtin fn ceil(value: number) -> number;
+/// Round a number to a fixed number of decimals.
+builtin fn round(value: number, decimals: number = 0) -> number;
+/// Return the larger of two numbers.
+builtin fn max(a: number, b: number) -> number;
+/// Return the smaller of two numbers.
+builtin fn min(a: number, b: number) -> number;
+
+/// Return the sine of an angle (radians).
+builtin fn sin(value: number) -> number;
+/// Return the cosine of an angle (radians).
+builtin fn cos(value: number) -> number;
+/// Return the tangent of an angle (radians).
+builtin fn tan(value: number) -> number;
+/// Return the arc sine (radians).
+builtin fn asin(value: number) -> number;
+/// Return the arc cosine (radians).
+builtin fn acos(value: number) -> number;
+/// Return the arc tangent (radians).
+builtin fn atan(value: number) -> number;
+/// Return the two-argument arc tangent (radians).
+builtin fn atan2(y: number, x: number) -> number;
+/// Return the hyperbolic sine.
+builtin fn sinh(value: number) -> number;
+/// Return the hyperbolic cosine.
+builtin fn cosh(value: number) -> number;
+/// Return the hyperbolic tangent.
+builtin fn tanh(value: number) -> number;
+
+/// Print values to output.
+builtin fn print<T>(values: T) -> void;
+/// Return the length of an array, string, or collection.
+builtin fn len<T>(value: T) -> number;
+/// Alias for len().
+builtin fn length<T>(value: T) -> number;
+/// Generate an array of numbers from start to end.
+builtin fn range(start: number, end: number, step: number = 1) -> Vec<number>;
+
+/// Compute rolling mean.
+builtin fn rolling_mean<T>(
+  table: Table<T>,
+  value: (row: T) => number,
+  period: number
+) -> Table<T>;
+/// Compute rolling sum.
+builtin fn rolling_sum<T>(
+  table: Table<T>,
+  value: (row: T) => number,
+  period: number
+) -> Table<T>;
+/// Compute rolling standard deviation.
+builtin fn rolling_std<T>(
+  table: Table<T>,
+  value: (row: T) => number,
+  period: number
+) -> Table<T>;
+/// Compute rolling minimum.
+builtin fn rolling_min<T>(
+  table: Table<T>,
+  value: (row: T) => number,
+  period: number
+) -> Table<T>;
+/// Compute rolling maximum.
+builtin fn rolling_max<T>(
+  table: Table<T>,
+  value: (row: T) => number,
+  period: number
+) -> Table<T>;
+
+/// Compute average of values in a collection.
+builtin fn avg<T>(collection: T, value: number) -> number;
+/// Compute sum.
+builtin fn sum<T>(table: Table<T>, value: (row: T) => number) -> number;
+/// Compute mean.
+builtin fn mean<T>(table: Table<T>, value: (row: T) => number) -> number;
+/// Compute standard deviation.
+builtin fn stddev<T>(values: T) -> number;
+/// Count elements.
+builtin fn count(array: Vec) -> number;
+/// Return highest value.
+builtin fn highest<T>(collection: T, count: number) -> number;
+/// Return lowest value.
+builtin fn lowest<T>(collection: T, count: number) -> number;
+
+/// Configure the data backend.
+builtin fn configure_data_source(config: object) -> void;
+
+/// Format a value with a template.
+builtin fn format<T>(value: T, template: string) -> string;
+/// Format a number as percent.
+builtin fn format_percent(value: number) -> string;
+/// Format a number with optional decimals.
+builtin fn format_number(value: number, decimals: number = 0) -> string;
+
+/// Shift a table by periods.
+builtin fn shift<T>(table: Table<T>, periods: number) -> Table<T>;
+/// Resample a table to a timeframe using a timestamp selector.
+builtin fn resample<T>(
+  table: Table<T>,
+  key: (row: T) => timestamp,
+  timeframe: string,
+  strategy: string
+) -> Table<T>;
+/// Map rows of a table into another table.
+builtin fn map<T, U>(table: Table<T>, mapper: (row: T) => U) -> Table<U>;
+/// Filter table rows by predicate.
+builtin fn filter<T>(table: Table<T>, predicate: (row: T) => bool) -> Table<T>;
+
+/// Wrap value in Result::Ok.
+builtin fn Ok<T, E>(value: T) -> Result<T, E>;
+/// Wrap error in Result::Err.
+builtin fn Err<T, E>(error: E) -> Result<T, E>;
+
+/// Internal conversion helpers used by std::core::into.
+builtin fn __into_int<T>(value: T) -> int;
+builtin fn __into_number<T>(value: T) -> number;
+builtin fn __into_decimal<T>(value: T) -> decimal;
+builtin fn __into_bool<T>(value: T) -> bool;
+builtin fn __into_string<T>(value: T) -> string;
+
+/// Internal conversion helpers used by std::core::try_into.
+builtin fn __try_into_int<T>(value: T) -> Result<int, AnyError>;
+builtin fn __try_into_number<T>(value: T) -> Result<number, AnyError>;
+builtin fn __try_into_decimal<T>(value: T) -> Result<decimal, AnyError>;
+builtin fn __try_into_bool<T>(value: T) -> Result<bool, AnyError>;
+builtin fn __try_into_string<T>(value: T) -> Result<string, AnyError>;
+
+/// Native pointer size in bytes for the current host.
+builtin fn __native_ptr_size() -> usize;
+/// Allocate a pointer-sized native cell initialized to null.
+builtin fn __native_ptr_new_cell() -> ptr;
+/// Free a pointer-sized native cell previously allocated by `__native_ptr_new_cell`.
+builtin fn __native_ptr_free_cell(cell: ptr) -> void;
+/// Read a pointer-sized value from memory at `addr`.
+builtin fn __native_ptr_read_ptr(addr: ptr) -> ptr;
+/// Write a pointer-sized value to memory at `addr`.
+builtin fn __native_ptr_write_ptr(addr: ptr, value: ptr) -> void;
+/// Import Arrow C Data Interface pointers into a table.
+builtin fn __native_table_from_arrow_c<T>(
+  schema_ptr: ptr,
+  array_ptr: ptr
+) -> Result<Table<T>, AnyError>;
+/// Import Arrow C Data pointers and bind to a named row schema in one step.
+builtin fn __native_table_from_arrow_c_typed<T>(
+  schema_ptr: ptr,
+  array_ptr: ptr,
+  type_name: string
+) -> Result<Table<T>, AnyError>;
+/// Bind/validate a table against a runtime type schema by name.
+builtin fn __native_table_bind_type<T>(
+  table: Table<T>,
+  type_name: string
+) -> Result<Table<T>, AnyError>;
+
+/// Create a snapshot suspension point.
+builtin fn snapshot() -> Snapshot;
+/// Exit process with optional code.
+builtin fn exit(code: number = 0) -> void;
+
+/// Check whether a type implements a trait (comptime only).
+builtin fn implements(type_name: string, trait_name: string) -> bool;
+/// Emit a compile-time warning.
+builtin fn warning(msg: string) -> void;
+/// Emit a compile-time error and abort compilation.
+builtin fn error(msg: string) -> never;
+/// Return build-time configuration.
+builtin fn build_config() -> object;

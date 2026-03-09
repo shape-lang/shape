@@ -1,0 +1,33 @@
+/// @module std::core::distributions
+/// Statistical Distributions
+///
+/// Thin wrappers around intrinsic distribution samplers.
+
+/// Uniform distribution U(lo, hi)
+pub fn dist_uniform(lo, hi) {
+    __intrinsic_dist_uniform(lo, hi)
+}
+
+/// Lognormal distribution with underlying normal (mean, std)
+pub fn dist_lognormal(mean, std) {
+    __intrinsic_dist_lognormal(mean, std)
+}
+
+/// Exponential distribution with rate lambda
+pub fn dist_exponential(lambda) {
+    __intrinsic_dist_exponential(lambda)
+}
+
+/// Poisson distribution with rate lambda
+pub fn dist_poisson(lambda) {
+    __intrinsic_dist_poisson(lambda)
+}
+
+/// Sample n values from a named distribution
+///
+/// @param dist_name - "uniform" | "lognormal" | "exponential" | "poisson"
+/// @param params - array of distribution parameters
+/// @param n - number of samples
+pub fn dist_sample_n(dist_name, params, n) {
+    __intrinsic_dist_sample_n(dist_name, params, n)
+}

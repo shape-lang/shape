@@ -1,0 +1,23 @@
+/// @module std::finance::indicators::moving_averages_v2
+/// Moving Averages - Vector Implementation (Experimental)
+/// Implements moving averages using vector intrinsics instead of dedicated intrinsics.
+
+/// Experimental vectorized simple moving average implementation.
+///
+/// @see std::finance::indicators::moving_averages::sma
+pub @warmup(period) fn sma_vector(series, period) {
+    // Calculate cumulative sum
+    let cs = __intrinsic_cumsum(series);
+    
+    // Shift cumulative sum by period.
+    // Fill with 0.0 so that subtraction works for the first 'period' elements 
+    // (effectively assuming sum before start is 0).
+    // Note: This produces a valid SMA for the first window at index 'period-1'.
+    let cs_shifted = __intrinsic_fillna(__intrinsic_shift(cs, period), 0.0);
+    
+    // Calculate sum of the sliding window
+    let window_sum = __intrinsic_vec_sub(cs, cs_shifted);
+    
+    // Divide by period to get average
+    __intrinsic_vec_div(window_sum, period)
+}

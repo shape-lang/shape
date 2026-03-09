@@ -1,0 +1,90 @@
+/// @module std::core::table_iterable
+/// Iterable implementation for Table<T>.
+///
+/// Makes Table<T> a first-class Iterable, enabling collection operations
+/// on in-memory tables. Delegates to Table's native methods where available.
+
+impl Iterable for Table {
+    method findIndex(predicate) {
+        let i = 0;
+        let rows = self.map(|row| row);
+        while i < rows.len() {
+            if predicate(rows[i]) {
+                return i
+            }
+            i = i + 1;
+        }
+        -1
+    }
+
+    method includes(value) {
+        self.some(|row| row == value)
+    }
+
+    method zip(other) {
+        let self_rows = self.map(|row| row);
+        let other_rows = other.map(|row| row);
+        let n = if self_rows.len() < other_rows.len() { self_rows.len() } else { other_rows.len() };
+        let result = [];
+        let i = 0;
+        while i < n {
+            result.push([self_rows[i], other_rows[i]]);
+            i = i + 1;
+        }
+        result
+    }
+
+    method chunk(size) {
+        let rows = self.map(|row| row);
+        let result = [];
+        let i = 0;
+        while i < rows.len() {
+            result.push(rows.slice(i, i + size));
+            i = i + size;
+        }
+        result
+    }
+
+    method unique() {
+        let rows = self.map(|row| row);
+        rows.unique()
+    }
+
+    method flatten() {
+        let rows = self.map(|row| row);
+        rows.flatten()
+    }
+
+    method slice(start, end) {
+        let rows = self.map(|row| row);
+        rows.slice(start, end)
+    }
+
+    method join(separator) {
+        let rows = self.map(|row| row.toString());
+        rows.join(separator)
+    }
+
+    method sortBy(key_fn) {
+        self.orderBy(key_fn, "asc")
+    }
+
+    method take(n) {
+        self.head(n)
+    }
+
+    method skip(n) {
+        self.tail(self.count() - n)
+    }
+
+    method enumerate() {
+        let rows = self.map(|row| row);
+        let result = [];
+        let i = 0;
+        while i < rows.len() {
+            result.push({ index: i, value: rows[i] });
+            i = i + 1;
+        }
+        result
+    }
+}

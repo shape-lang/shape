@@ -1,0 +1,18 @@
+/// @module std::core::snapshot
+/// Process Snapshotting and Resumability
+
+/// Result of a snapshot operation.
+/// `snapshot()` is a builtin that returns self enum directly.
+pub enum Snapshot {
+    /// The process has just been snapshotted. Contains the Hash ID.
+    Hash(string),
+    /// Execution has resumed from a previous snapshot.
+    Resumed
+}
+
+/// Create a snapshot of the current execution state.
+/// This is a suspension point: the engine saves all state and returns `Snapshot::Hash(id)`.
+/// When resumed from a snapshot, execution continues here and returns `Snapshot::Resumed`.
+pub fn snapshot() -> Snapshot {
+    __intrinsic_snapshot()
+}

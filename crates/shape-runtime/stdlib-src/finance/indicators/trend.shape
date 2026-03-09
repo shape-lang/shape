@@ -1,0 +1,206 @@
+/// @module std::finance::indicators::trend
+/// Trend Indicators
+/// Directional movement and trend strength indicators
+
+from std::finance::indicators::moving_averages use { ema }
+from std::finance::indicators::volatility use { atr }
+from std::core::utils::rolling use { linear_recurrence, rolling_mean }
+from std::core::utils::vector use { select }
+
+// Wilder's Smoothing (Running Moving Average)
+fn rma(series, period) {
+    let alpha = 1.0 / period;
+    let decay = 1.0 - alpha;
+    let init = series[0];
+    linear_recurrence(series * alpha, decay, init)
+}
+
+/// Compute ADX together with `+DI` and `-DI`.
+///
+/// @see std::finance::indicators::volatility::atr
+pub @warmup(period * 3) fn adx(high, low, close, period = 14) {
+    let up_move = high - __intrinsic_shift(high, 1);
+    let down_move = __intrinsic_shift(low, 1) - low;
+
+    // +DM: if up_move > down_move and up_move > 0, then up_move, else 0
+    let up_gt_down = up_move > down_move;
+    let up_gt_zero = up_move > 0.0;
+    let plus_cond = up_gt_down and up_gt_zero;
+    
+    let plus_dm = select(plus_cond, up_move, 0.0);
+
+    // -DM: if down_move > up_move and down_move > 0, then down_move, else 0
+    let down_gt_up = down_move > up_move;
+    let down_gt_zero = down_move > 0.0;
+    let minus_cond = down_gt_up and down_gt_zero;
+    
+    let minus_dm = select(minus_cond, down_move, 0.0);
+
+    // True Range
+    let tr = atr(high, low, close, 1);
+
+    // Smooth everything using Wilder's (RMA)
+    let tr_smooth = rma(tr, period);
+    let plus_dm_smooth = rma(plus_dm, period);
+    let minus_dm_smooth = rma(minus_dm, period);
+
+    // Directional Indicators
+    let plus_di = 100 * plus_dm_smooth / tr_smooth;
+    let minus_di = 100 * minus_dm_smooth / tr_smooth;
+
+    // Directional Index (DX)
+    let sum_di = plus_di + minus_di;
+    // Avoid division by zero
+    let dx = select(sum_di > 0.0, 100 * abs(plus_di - minus_di) / sum_di, 0.0);
+
+    // ADX is smoothed DX
+    let adx_val = rma(dx, period);
+
+    {
+        adx: adx_val,
+        plus_di: plus_di,
+        minus_di: minus_di
+    }
+}
+
+/// Compute the SuperTrend value and trend direction series.
+pub @warmup(period) fn super_trend(high, low, close, period = 10, multiplier = 3.0) {
+    let atr_val = atr(high, low, close, period);
+    let hl2 = (high + low) / 2;
+    
+    let basic_upper = hl2 + (multiplier * atr_val);
+    let basic_lower = hl2 - (multiplier * atr_val);
+
+    // State loop for SuperTrend
+    let len = close.length();
+    let upper = [];
+    let lower = [];
+    let trend = []; // 1 for up, -1 for down
+    
+    // Init arrays
+    for i in 0..len {
+        upper.push(basic_upper[i]);
+        lower.push(basic_lower[i]);
+        trend.push(1);
+    }
+    
+    // Iterate to apply logic
+    // Start from 1 as we look back
+    for i in 1..len {
+        // Upper Band Logic
+        // If current basic upper < previous final upper OR previous close > previous final upper
+        // Then keep basic upper, else previous final upper
+        let prev_upper = upper[i-1];
+        let prev_close = close[i-1];
+        
+        if (basic_upper[i] < prev_upper) or (prev_close > prev_upper) {
+            upper[i] = basic_upper[i];
+        } else {
+            upper[i] = prev_upper;
+        }
+        
+        // Lower Band Logic
+        let prev_lower = lower[i-1];
+        if (basic_lower[i] > prev_lower) or (prev_close < prev_lower) {
+            lower[i] = basic_lower[i];
+        } else {
+            lower[i] = prev_lower;
+        }
+        
+        // Trend Logic
+        let prev_trend = trend[i-1];
+        if prev_trend == 1 {
+            if close[i] <= lower[i] {
+                trend[i] = -1;
+            } else {
+                trend[i] = 1;
+            }
+        } else {
+            if close[i] >= upper[i] {
+                trend[i] = 1;
+            } else {
+                trend[i] = -1;
+            }
+        }
+    }
+    
+    let result_line = [];
+    for i in 0..len {
+        if trend[i] == 1 {
+            result_line.push(lower[i]);
+        } else {
+            result_line.push(upper[i]);
+        }
+    }
+    
+    {
+        trend: trend,
+        value: result_line
+    }
+}
+
+/// Compute the Parabolic SAR series.
+pub @warmup(1) fn parabolic_sar(high, low, start = 0.02, inc = 0.02, max_val = 0.2) {
+    let len = high.length();
+    let sar = [];
+    let is_long = true;
+    let af = start;
+    let ep = high[0]; // Extreme point
+    
+    // Init SAR
+    sar.push(low[0]);
+    
+    for i in 1..len {
+        let prev_sar = sar[i-1];
+        let cur_sar = prev_sar + af * (ep - prev_sar);
+        
+        let cur_high = high[i];
+        let cur_low = low[i];
+        let prev_high = high[i-1];
+        let prev_low = low[i-1];
+        
+        if is_long {
+            // Check switch
+            if cur_low < cur_sar {
+                is_long = false;
+                cur_sar = ep;
+                ep = cur_low;
+                af = start;
+            } else {
+                // Adjust SAR (cannot be above prev low or current low)
+                if cur_sar > prev_low { cur_sar = prev_low; }
+                if cur_sar > cur_low { cur_sar = cur_low; }
+                
+                // Update EP and AF
+                if cur_high > ep {
+                    ep = cur_high;
+                    af = af + inc;
+                    if af > max_val { af = max_val; }
+                }
+            }
+        } else {
+            // Check switch
+            if cur_high > cur_sar {
+                is_long = true;
+                cur_sar = ep;
+                ep = cur_high;
+                af = start;
+            } else {
+                // Adjust SAR (cannot be below prev high or current high)
+                if cur_sar < prev_high { cur_sar = prev_high; }
+                if cur_sar < cur_high { cur_sar = cur_high; }
+                
+                // Update EP and AF
+                if cur_low < ep {
+                    ep = cur_low;
+                    af = af + inc;
+                    if af > max_val { af = max_val; }
+                }
+            }
+        }
+        
+        sar.push(cur_sar);
+    }
+    
+    sar
+}

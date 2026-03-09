@@ -1,0 +1,105 @@
+/// @module std::core::remote
+/// Remote Execution for Shape Serve
+///
+/// High-level API for executing Shape code on remote `shape serve` instances.
+/// Handles wire protocol encoding, transport, and response decoding automatically.
+///
+/// # Example
+///
+/// ```shape
+/// let result = remote.execute("127.0.0.1:9527", "1 + 2 + 3")
+/// match result {
+///     Ok(r) => print(f"Result: {r["value"]}")
+///     Err(e) => print(f"Error: {e}")
+/// }
+/// ```
+
+/// Execute Shape source code on a remote `shape serve` instance.
+///
+/// Sends the code string to the server, which compiles and executes it,
+/// returning the structured result value, any captured stdout, and
+/// error information.
+///
+/// # Arguments
+///
+/// * `addr` - Server address as `host:port` (e.g. `"127.0.0.1:9527"`)
+/// * `code` - Shape source code to execute remotely
+///
+/// # Returns
+///
+/// `Ok({ value, stdout, error })` on success, `Err(message)` on transport/protocol failure.
+/// The `value` field contains the structured return value (not a string).
+/// The `stdout` field contains any `print()` output (or null if none).
+///
+/// # Example
+///
+/// ```shape
+/// let r = remote.execute("localhost:9527", "fn add(a, b) { a + b }\nadd(10, 32)")
+/// match r {
+///     Ok(result) => print(f"Value: {result["value"]}")  // 42
+///     Err(e) => print(f"Failed: {e}")
+/// }
+/// ```
+builtin fn execute(addr: string, code: string) -> Result<HashMap<string, _>, string>;
+
+/// Ping a remote Shape server to check connectivity and get server info.
+///
+/// # Arguments
+///
+/// * `addr` - Server address as `host:port`
+///
+/// # Returns
+///
+/// `Ok({ shape_version, wire_protocol })` with server version info,
+/// or `Err(message)` if the server is unreachable.
+///
+/// # Example
+///
+/// ```shape
+/// match remote.ping("localhost:9527") {
+///     Ok(info) => print(f"Server v{info["shape_version"]}")
+///     Err(e) => print(f"Server down: {e}")
+/// }
+/// ```
+builtin fn ping(addr: string) -> Result<HashMap<string, _>, string>;
+
+/// Call a function on a remote Shape server by reference.
+///
+/// Low-level transport used by the `@remote` annotation. Serializes the
+/// function and arguments via the wire protocol and sends them to the
+/// remote `shape serve` node.
+///
+/// # Arguments
+///
+/// * `addr` - Server address as `host:port`
+/// * `fn_ref` - Function reference to call remotely
+/// * `args` - Arguments to pass to the remote function
+///
+/// # Returns
+///
+/// `Ok(value)` with the function's return value, or `Err(message)` on failure.
+builtin fn __call(addr: string, fn_ref: _, args: Array<_>) -> Result<_, string>;
+
+/// Ship execution to a remote `shape serve` node.
+///
+/// When applied to a function, calling that function will transparently
+/// execute it on the specified remote server instead of locally.
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::remote
+///
+/// @remote("worker:9527")
+/// fn compute(data) { /* ... */ }
+///
+/// let result = compute([1, 2, 3])
+/// ```
+annotation remote(addr) {
+    targets: [function]
+    before(args, ctx) {
+        let target = ctx["__impl"] ?? args[0]
+        let result = remote.__call(addr, target, args)
+        { result: result }
+    }
+}

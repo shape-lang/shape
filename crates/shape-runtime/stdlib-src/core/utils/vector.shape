@@ -1,0 +1,14 @@
+/// @module std::core::utils::vector
+/// Vector Utilities
+/// General purpose vector operations
+
+/// Select values element-wise from `true_val` or `false_val` based on
+/// `condition`.
+///
+/// @param condition Boolean mask used to choose between the two inputs.
+/// @param true_val Value selected where the mask is true.
+/// @param false_val Value selected where the mask is false.
+/// @returns A vector built from the chosen values.
+pub fn select(condition, true_val, false_val) {
+    __intrinsic_vec_select(condition, true_val, false_val)
+}

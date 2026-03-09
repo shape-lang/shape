@@ -1,0 +1,96 @@
+/// @module std::core::json_value
+/// Typed JSON value ADT.
+///
+/// `json.parse(text)` returns `Result<Json>`. Pattern matching and
+/// navigation methods provide typed access to unknown JSON structures.
+/// `TryFrom<Json>` impls auto-derive `TryInto` so `as?` works:
+///
+///   let name = (data.get("name") as? string)?
+
+/// Algebraic data type representing JSON values in Shape.
+pub enum Json {
+    Null,
+    Bool(bool),
+    Number(number),
+    Str(string),
+    Array(any),
+    Object(any),
+}
+
+extend Json {
+    /// Access a field in a JSON object by key. Returns `Json::Null` for
+    /// non-object values or missing keys.
+    method get(key: string) -> Json {
+        match self {
+            Json::Object(obj) => {
+                let result = __json_object_get(obj, key)
+                result
+            },
+            _ => Json::Null,
+        }
+    }
+
+    /// Access an element in a JSON array by index. Returns `Json::Null`
+    /// for non-array values or out-of-range indices.
+    method at(index: number) -> Json {
+        match self {
+            Json::Array(arr) => {
+                let result = __json_array_at(arr, index)
+                result
+            },
+            _ => Json::Null,
+        }
+    }
+
+    /// Check if this value is `Json::Null`.
+    method is_null() -> bool {
+        match self {
+            Json::Null => true,
+            _ => false,
+        }
+    }
+
+    /// Return the keys of a JSON object, or an empty array for non-objects.
+    method keys() -> Array<string> {
+        match self {
+            Json::Object(obj) => __json_object_keys(obj),
+            _ => [],
+        }
+    }
+
+    /// Return the length of a JSON array or object, or 0.
+    method len() -> number {
+        match self {
+            Json::Array(arr) => __json_array_len(arr),
+            Json::Object(obj) => __json_object_len(obj),
+            _ => 0,
+        }
+    }
+}
+
+impl TryFrom<Json> for string {
+    method tryFrom(value: Json) -> Result<string, AnyError> {
+        match value {
+            Json::Str(s) => Ok(s),
+            _ => Err("Json value is not a string"),
+        }
+    }
+}
+
+impl TryFrom<Json> for number {
+    method tryFrom(value: Json) -> Result<number, AnyError> {
+        match value {
+            Json::Number(n) => Ok(n),
+            _ => Err("Json value is not a number"),
+        }
+    }
+}
+
+impl TryFrom<Json> for bool {
+    method tryFrom(value: Json) -> Result<bool, AnyError> {
+        match value {
+            Json::Bool(b) => Ok(b),
+            _ => Err("Json value is not a bool"),
+        }
+    }
+}

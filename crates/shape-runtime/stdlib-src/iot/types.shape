@@ -1,0 +1,215 @@
+/// @module std::iot::types
+/// IoT Type Definitions
+///
+/// Core types for IoT device monitoring, sensor data processing,
+/// and alert management.
+
+// ===== Sensor Data Types =====
+
+/// Generic sensor reading
+pub type SensorReading = {
+    device_id: string;      // Unique device identifier
+    timestamp: timestamp;   // Reading timestamp
+    value: number;          // Primary sensor value
+    unit: string;           // Unit of measurement (e.g., "celsius", "psi", "rpm")
+    quality: number;        // Signal quality 0.0-1.0
+};
+
+/// Multi-value sensor reading (e.g., accelerometer, GPS)
+pub type MultiValueReading = {
+    device_id: string;
+    timestamp: timestamp;
+    values: object;         // { x: number, y: number, z: number } or similar
+    unit: string;
+    quality: number;
+};
+
+/// Create a sensor reading
+pub fn sensor_reading(device_id, value, unit = "", quality = 1.0) {
+    {
+        device_id: device_id,
+        timestamp: now(),
+        value: value,
+        unit: unit,
+        quality: quality
+    }
+}
+
+// ===== Device State Types =====
+
+/// Device operational state tracked during monitoring
+pub type DeviceState = {
+    device_id: string;          // Device identifier
+    status: string;             // "online" | "offline" | "degraded" | "maintenance"
+    last_reading: number;       // Last recorded value
+    last_timestamp: timestamp;  // Timestamp of last reading
+    readings_count: number;     // Total readings processed
+    anomaly_count: number;      // Number of anomalies detected
+    alert_count: number;        // Number of alerts generated
+    cumulative_error: number;   // Accumulated error metric
+    uptime_seconds: number;     // Time device has been online
+};
+
+/// Create initial device state
+pub fn initial_device_state(device_id) {
+    {
+        device_id: device_id,
+        status: "unknown",
+        last_reading: 0.0,
+        last_timestamp: now(),
+        readings_count: 0,
+        anomaly_count: 0,
+        alert_count: 0,
+        cumulative_error: 0.0,
+        uptime_seconds: 0.0
+    }
+}
+
+/// Check if device is online
+pub fn is_online(state) {
+    state.status == "online"
+}
+
+/// Check if device is offline
+pub fn is_offline(state) {
+    state.status == "offline"
+}
+
+/// Check if device is degraded
+pub fn is_degraded(state) {
+    state.status == "degraded"
+}
+
+// ===== Alert Types =====
+
+/// Alert generated from monitoring
+pub type Alert = {
+    severity: string;       // "info" | "warning" | "critical" | "emergency"
+    device_id: string;      // Source device
+    alert_type: string;     // Alert category (e.g., "threshold", "anomaly", "offline")
+    message: string;        // Human-readable message
+    value: number;          // Value that triggered alert
+    threshold: number;      // Threshold that was crossed
+    timestamp: timestamp;   // When alert was generated
+};
+
+/// Create an alert
+pub fn create_alert(severity, device_id, alert_type, message, value = 0.0, threshold = 0.0) {
+    {
+        severity: severity,
+        device_id: device_id,
+        alert_type: alert_type,
+        message: message,
+        value: value,
+        threshold: threshold,
+        timestamp: now()
+    }
+}
+
+/// Create a threshold alert
+pub fn threshold_alert(device_id, value, threshold, is_high = true) {
+    let direction = if is_high { "above" } else { "below" };
+    let severity = if abs(value - threshold) / threshold > 0.2 { "critical" } else { "warning" };
+
+    create_alert(
+        severity,
+        device_id,
+        "threshold",
+        "Value " + direction + " threshold: " + value + " vs " + threshold,
+        value,
+        threshold
+    )
+}
+
+/// Create an offline alert
+pub fn offline_alert(device_id, last_seen_seconds) {
+    create_alert(
+        "critical",
+        device_id,
+        "offline",
+        "Device offline for " + last_seen_seconds + " seconds",
+        last_seen_seconds,
+        0.0
+    )
+}
+
+/// Create an anomaly alert
+pub fn anomaly_alert(device_id, value, expected, deviation) {
+    create_alert(
+        "warning",
+        device_id,
+        "anomaly",
+        "Anomalous reading: " + value + " (expected ~" + expected + ", deviation: " + deviation + ")",
+        value,
+        expected
+    )
+}
+
+// ===== Threshold Configuration =====
+
+/// Threshold configuration for monitoring
+pub type ThresholdConfig = {
+    high_critical: number;  // Critical high threshold
+    high_warning: number;   // Warning high threshold
+    low_warning: number;    // Warning low threshold
+    low_critical: number;   // Critical low threshold
+    deadband: number;       // Hysteresis to prevent oscillation
+};
+
+/// Create threshold configuration
+pub fn threshold_config(high_critical, high_warning, low_warning, low_critical, deadband = 0.0) {
+    {
+        high_critical: high_critical,
+        high_warning: high_warning,
+        low_warning: low_warning,
+        low_critical: low_critical,
+        deadband: deadband
+    }
+}
+
+/// Create symmetric threshold config around a center value
+pub fn symmetric_thresholds(center, warning_delta, critical_delta, deadband = 0.0) {
+    {
+        high_critical: center + critical_delta,
+        high_warning: center + warning_delta,
+        low_warning: center - warning_delta,
+        low_critical: center - critical_delta,
+        deadband: deadband
+    }
+}
+
+/// Check value against thresholds and return severity
+/// Returns: "ok" | "warning" | "critical"
+pub fn check_thresholds(value, config) {
+    if value >= config.high_critical || value <= config.low_critical {
+        "critical"
+    } else if value >= config.high_warning || value <= config.low_warning {
+        "warning"
+    } else {
+        "ok"
+    }
+}
+
+// ===== Monitoring Configuration =====
+
+/// Complete monitoring configuration
+pub type MonitoringConfig = {
+    device_id: string;
+    thresholds: object;         // ThresholdConfig
+    offline_timeout: number;    // Seconds before device is marked offline
+    anomaly_threshold: number;  // Standard deviations for anomaly detection
+    alert_cooldown: number;     // Seconds between repeated alerts
+    collect_alerts: bool;       // Whether to collect alerts in results
+};
+
+/// Create default monitoring configuration
+pub fn default_monitoring_config(device_id) {
+    {
+        device_id: device_id,
+        thresholds: None,
+        offline_timeout: 300.0,
+        anomaly_threshold: 3.0,
+        alert_cooldown: 60.0,
+        collect_alerts: true
+    }
+}

@@ -1,0 +1,16 @@
+// Auto-imported prelude — available without explicit `use`
+//
+// Note: Trig functions (sin, cos, tan, etc.) and math constants (PI, E, TAU)
+// are NOT included here because math_trig.shape references __intrinsic_sin etc.
+// which are runtime intrinsics, not compile-time builtins. These trig functions
+// are already available as builtins (BuiltinFunction::Sin/Cos/Tan/etc.).
+from std::core::math use { sum, mean, std, variance, correlation, covariance, percentile, median, coefficient_of_variation, zscore, parallel_map, parallel_filter }
+from std::core::snapshot use { Snapshot, snapshot }
+from std::core::display use { Display }
+from std::core::serializable use { Serializable }
+from std::core::distributable use { Distributable }
+from std::core::iterable use { Iterable }
+from std::core::from use { From }
+from std::core::into use { Into }
+from std::core::try_from use { TryFrom }
+from std::core::try_into use { TryInto }

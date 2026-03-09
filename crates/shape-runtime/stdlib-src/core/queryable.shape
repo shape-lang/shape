@@ -1,0 +1,46 @@
+/// @module std::core::queryable
+/// Queryable trait — uniform query interface for all data sources.
+///
+/// Any type that implements Queryable can be queried with filter/map/orderBy/limit/execute.
+/// Built-in Table<T> uses SIMD-optimized PHF methods directly.
+/// Database extensions provide their own impl (e.g., DuckDbQuery generates SQL).
+///
+/// ## Known Implementations (audited 2026-02-12)
+///
+/// | Type         | Location                                  | Filter Pushdown                | Status   |
+/// |--------------|-------------------------------------------|--------------------------------|----------|
+/// | Table        | stdlib/core/table_queryable.shape          | Native SIMD (no proxy needed)  | Verified |
+/// | DuckDbQuery  | extensions/duckdb/src/duckdb.shape         | ExprProxy -> filter_to_sql     | Verified |
+/// | PgQuery      | extensions/postgres/src/postgres.shape     | ExprProxy -> filter_to_sql     | Verified |
+/// | ApiQuery     | extensions/openapi/src/openapi.shape       | ExprProxy -> filter_to_params  | Verified |
+///
+/// ## Extension Pattern
+///
+/// Each extension provides:
+/// 1. Native Rust primitives: make_proxy, column_name, filter_to_*, execute_*
+/// 2. Bundled .shape file: impl Queryable + extend block with build_sql/build_params
+/// 3. Lazy query objects: methods return `{ ...self, field: newval }` (immutable chaining)
+/// 4. execute() builds the final query and calls the native execution function
+///
+/// SQL backends share `shape_runtime::query_builder::filter_to_sql()`.
+/// See extensions/QUERY_COOKBOOK.md for the full extension authoring guide.
+
+/// Uniform query-building interface for lazily executed data sources.
+///
+/// `Queryable` is intentionally narrower than `std::core::iterable::Iterable`:
+/// it captures pushdown-friendly operations that can be translated into native
+/// backend execution plans.
+///
+/// @see std::core::iterable::Iterable
+trait Queryable<T> {
+    /// Return a query filtered by `predicate`.
+    filter(predicate: (T) => bool): Self,
+    /// Project each row with `transform`.
+    map(transform): Self,
+    /// Apply backend ordering by `column` and `direction`.
+    orderBy(column: string, direction: string): Self,
+    /// Restrict the result set to at most `n` rows.
+    limit(n: int): Self,
+    /// Execute the query and materialize the result.
+    execute(): Array<T>
+}

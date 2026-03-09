@@ -1,0 +1,112 @@
+/// @module std::core::utils::property_testing
+/// Property-Based Testing
+///
+/// Generates random inputs to test invariants (properties) that should
+/// hold for all inputs. Inspired by QuickCheck/Hypothesis.
+
+/// Run a property test with random inputs.
+///
+/// @param name - Test name for reporting
+/// @param n_trials - Number of random inputs to try
+/// @param gen_fn - Generator function () => input value
+/// @param prop_fn - Property function (input) => bool
+/// @returns { passed, name, trials, counterexample }
+pub fn property(name, n_trials, gen_fn, prop_fn) {
+    var counterexample = None;
+    var passed = true;
+
+    for i in range(0, n_trials) {
+        let input = gen_fn();
+        let result = prop_fn(input);
+        if !result {
+            counterexample = input;
+            passed = false;
+            break;
+        }
+    }
+
+    {
+        passed: passed,
+        name: name,
+        trials: n_trials,
+        counterexample: counterexample
+    }
+}
+
+/// Run multiple property tests and return a summary.
+///
+/// @param tests - Array of { name, trials, gen, prop } objects
+/// @returns { passed, failed, results }
+pub fn run_properties(tests) {
+    let results = [];
+    var passed_count = 0;
+    var failed_count = 0;
+
+    for test in tests {
+        let result = property(test.name, test.trials, test.gen, test.prop);
+        results.push(result);
+        if result.passed {
+            passed_count = passed_count + 1;
+        } else {
+            failed_count = failed_count + 1;
+        }
+    }
+
+    {
+        passed: passed_count,
+        failed: failed_count,
+        total: len(tests),
+        results: results
+    }
+}
+
+// ===== Built-in Generators =====
+
+/// Generate random integer in [lo, hi]
+pub fn gen_int(lo, hi) {
+    || __intrinsic_random_int(lo, hi)
+}
+
+/// Generate random float in [lo, hi)
+pub fn gen_float(lo, hi) {
+    || lo + __intrinsic_random() * (hi - lo)
+}
+
+/// Generate random boolean
+pub fn gen_bool() {
+    || __intrinsic_random() < 0.5
+}
+
+/// Generate random string of given length from ascii letters
+pub fn gen_string(max_len) {
+    || {
+        let chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let n = __intrinsic_random_int(0, max_len);
+        var s = "";
+        for i in range(0, n) {
+            let idx = __intrinsic_random_int(0, 61);
+            s = s + chars[idx];
+        }
+        s
+    }
+}
+
+/// Generate random array of given max length using element generator
+pub fn gen_array(max_len, elem_gen) {
+    || {
+        let n = __intrinsic_random_int(0, max_len);
+        let arr = [];
+        for i in range(0, n) {
+            arr.push(elem_gen());
+        }
+        arr
+    }
+}
+
+/// Generate a value picked uniformly from a list of choices
+pub fn gen_one_of(choices) {
+    || {
+        let idx = __intrinsic_random_int(0, len(choices) - 1);
+        choices[idx]
+    }
+}
