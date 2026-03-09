@@ -42,7 +42,7 @@ ahash = "0.8"
 smallvec = "1.13"
 
 # Wire protocol for data exchange
-shape-wire = { version = "0.1.1", path = "../../shape-wire" }
+shape-wire = { workspace = true }
 
 [features]
 default = ["text-rendering"]

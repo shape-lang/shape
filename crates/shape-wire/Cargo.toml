@@ -22,8 +22,8 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 sha2 = "0.10"
 zstd = "0.13"
-shape-ast = { version = "0.1.1", path = "../shape-ast", optional = true }
-shape-value = { version = "0.1.1", path = "../shape-value" }
+shape-ast = { workspace = true, optional = true }
+shape-value = { workspace = true }
 
 # QUIC transport (optional)
 quinn = { version = "0.11", optional = true }

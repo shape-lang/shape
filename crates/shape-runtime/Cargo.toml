@@ -82,10 +82,10 @@ parquet = { workspace = true }
 reqwest = { workspace = true }
 
 # Internal
-shape-ast = { version = "0.1.1", path = "../shape-ast" }
-shape-value = { version = "0.1.1", path = "../shape-value" }
+shape-ast = { workspace = true }
+shape-value = { workspace = true }
 shape-macros = { workspace = true }
-shape-wire = { version = "0.1.1", path = "../shape-wire" }
+shape-wire = { workspace = true }
 
 [features]
 default = ["simd"]

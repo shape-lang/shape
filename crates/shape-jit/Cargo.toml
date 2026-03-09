@@ -8,11 +8,11 @@ repository.workspace = true
 description = "Tiered JIT compiler (Cranelift) for the Shape virtual machine"
 
 [dependencies]
-shape-ast = { version = "0.1.1", path = "../shape-ast" }
-shape-runtime = { version = "0.1.1", path = "../shape-runtime" }
-shape-value = { version = "0.1.1", path = "../shape-value" }
-shape-vm = { version = "0.1.1", path = "../shape-vm" }
-shape-wire = { version = "0.1.1", path = "../shape-wire" }
+shape-ast = { workspace = true }
+shape-runtime = { workspace = true }
+shape-value = { workspace = true }
+shape-vm = { workspace = true }
+shape-wire = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 serde = { workspace = true }
@@ -30,7 +30,7 @@ cranelift-jit = "0.110"
 cranelift-module = "0.110"
 cranelift-native = "0.110"
 target-lexicon = "0.12"
-shape-gc = { version = "0.1.1", path = "../shape-gc", optional = true }
+shape-gc = { workspace = true, optional = true }
 
 [features]
 default = []
