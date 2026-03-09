@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "AST types and Pest grammar for the Shape programming language"
 
+[features]
+default = []
+deep-tests = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

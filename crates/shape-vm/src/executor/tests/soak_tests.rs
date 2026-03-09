@@ -24,6 +24,7 @@ fn expected_sum(n: i64) -> i64 {
 // ── Soak: trusted int arithmetic in tight loop ─────────────────────
 
 #[test]
+#[ignore]
 fn soak_trusted_int_add_100k() {
     let source = r#"
         let mut sum = 0
@@ -43,6 +44,7 @@ fn soak_trusted_int_add_100k() {
 }
 
 #[test]
+#[ignore]
 fn soak_trusted_int_mul_sub_100k() {
     // Compute sum of (i * 2 - i) for i in 0..100000, which equals sum of i
     let source = r#"
@@ -63,6 +65,7 @@ fn soak_trusted_int_mul_sub_100k() {
 }
 
 #[test]
+#[ignore]
 fn soak_trusted_int_div_100k() {
     // Sum of (i * 4 / 4) for i in 0..100000 == sum of i
     let source = r#"
@@ -85,6 +88,7 @@ fn soak_trusted_int_div_100k() {
 // ── Soak: mixed int and float arithmetic ────────────────────────────
 
 #[test]
+#[ignore]
 fn soak_mixed_types_100k() {
     // Accumulate float sum alongside int counter to verify no type confusion
     let source = r#"
@@ -106,6 +110,7 @@ fn soak_mixed_types_100k() {
 }
 
 #[test]
+#[ignore]
 fn soak_float_arithmetic_100k() {
     // Compute pi approximation using Leibniz formula (many float ops)
     let source = r#"
@@ -133,6 +138,7 @@ fn soak_float_arithmetic_100k() {
 // ── Soak: nested loops with all four operations ─────────────────────
 
 #[test]
+#[ignore]
 fn soak_nested_loops_10k() {
     // Nested loop: sum of (i + j) for i in 0..100, j in 0..100
     // = 100 * sum(0..100) + 100 * sum(0..100)
@@ -157,6 +163,7 @@ fn soak_nested_loops_10k() {
 // ── Soak: function calls in loop ────────────────────────────────────
 
 #[test]
+#[ignore]
 fn soak_function_call_loop_50k() {
     // Call a function 50K times from a loop
     let source = r#"
@@ -184,6 +191,7 @@ fn soak_function_call_loop_50k() {
 // ── Soak: comparison operations in tight loop ───────────────────────
 
 #[test]
+#[ignore]
 fn soak_comparison_loop_100k() {
     // Count how many i < 50000 for i in 0..100000
     let source = r#"

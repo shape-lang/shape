@@ -55,6 +55,7 @@ target-lexicon = { version = "0.12", optional = true }
 
 [features]
 default = []
+deep-tests = []
 jit = ["cranelift", "cranelift-jit", "cranelift-module", "cranelift-native", "target-lexicon"]
 gc = ["shape-gc", "shape-value/gc"]
 gc_barrier_debug = [] # Debug-mode write barrier coverage counters

@@ -32,9 +32,37 @@ fmt:
 clippy:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-test:
-	cargo test --workspace
+# --- Test Tiers ---
 
+# Tier 0: Compile all tests without running them (~5-8s)
+test-check:
+	cargo check --workspace --tests --all-targets
+
+# Tier 1: Fast unit tests — no deep/soak, no integration
+test-fast:
+	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib
+
+# Tier 2: Unit + deep tests, no integration
+test:
+	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests
+
+# Tier 3: Everything — unit + deep + soak + integration (~10-15 min)
+test-all:
+	cargo test --workspace --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
+
+# Run only deep/soak tests
+test-deep:
+	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- deep --include-ignored
+
+# Run only shape-test integration suite
+test-integration:
+	cargo test -p shape-test
+
+# Run all tests for a single crate
+test-crate crate:
+	cargo test -p {{crate}} --features deep-tests 2>/dev/null || cargo test -p {{crate}}
+
+# CI: full suite
 ci-test:
-	cargo test --workspace --all-targets
+	cargo test --workspace --all-targets --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
 	cargo run -p xtask -- workspace-smoke

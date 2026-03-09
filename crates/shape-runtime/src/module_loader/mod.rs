@@ -6,7 +6,7 @@
 mod cache;
 mod loading;
 mod resolution;
-#[cfg(test)]
+#[cfg(all(test, feature = "deep-tests"))]
 mod resolution_deep_tests;
 mod resolver;
 

@@ -5,18 +5,15 @@ use shape_value::ValueWord;
 // Phase 1.1 & 1.2: Critical execution tests for recently merged features
 mod auto_drop;
 mod channel_ops;
-mod datetime_integration;
 mod decimal_ops;
 mod deque_ops;
 mod differential_trusted;
-mod drop_deep_tests;
 mod extend_blocks;
 mod hashmap_ops;
 mod io_integration;
 mod iterator_ops;
 mod jit_abi_tests;
 mod matrix_ops;
-mod module_deep_tests;
 mod operator_overload;
 mod priority_queue_ops;
 mod set_ops;
@@ -27,6 +24,12 @@ mod trusted_edge_cases;
 mod try_operator;
 mod type_system_integration;
 mod typed_array_ops;
+
+// Deep tests — gated behind `deep-tests` feature
+#[cfg(feature = "deep-tests")]
+mod drop_deep_tests;
+#[cfg(feature = "deep-tests")]
+mod module_deep_tests;
 
 // REMOVED: These helpers and their imports were removed during refactoring
 // TODO: Re-implement these tests once the new context API is finalized

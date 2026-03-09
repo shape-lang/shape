@@ -67,7 +67,7 @@ pub mod pattern_state_machine;
 pub mod plugins;
 pub mod progress;
 pub mod project;
-#[cfg(test)]
+#[cfg(all(test, feature = "deep-tests"))]
 mod project_deep_tests;
 pub mod provider_registry;
 pub mod query_builder;

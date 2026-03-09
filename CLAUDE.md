@@ -44,18 +44,21 @@ cargo run --bin shape -- repl                # Start REPL
 
 ### Test Tiers (use `just`)
 
-The test suite has 4,400+ tests. Use tiered commands to avoid long waits during iteration:
+The test suite has ~11,800 tests. Use tiered commands to avoid long waits during iteration:
 
 ```bash
-just test-check              # Tier 0: compile all tests only (~5s)
-just test-fast               # Tier 1: unit tests, skip deep/integration (~5s) ← use while iterating
-just test                    # Tier 2: full suite — lib + integration + doc tests ← before committing
-just test-all                # Tier 3: everything including soak/fuzz
+just test-check              # Tier 0: compile all tests only (~5-8s)
+just test-fast               # Tier 1: unit tests only, no deep/soak/integration (~15-30s) ← use while iterating
+just test                    # Tier 2: unit + deep tests, no integration (~2-4 min) ← before committing
+just test-all                # Tier 3: everything — unit + deep + soak + integration (~10-15 min)
 just test-crate shape-vm     # All tests for a single crate
-just test-deep               # Only the slow deep/integration tests
+just test-deep               # Only deep/soak tests
+just test-integration        # Only shape-test integration suite
 ```
 
 **Default workflow**: `just test-fast` during development, `just test` before committing.
+
+Deep tests are gated behind a `deep-tests` Cargo feature on shape-vm, shape-runtime, and shape-ast. Soak tests use `#[ignore]` and only run with `--include-ignored`.
 
 ```bash
 # Run a specific test by name

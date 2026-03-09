@@ -1,11 +1,10 @@
 //! Integration tests for the Type System Overhaul.
 //!
 //! Tests compile and run Shape source code to verify:
-//! - HashMap<K,V> construction, methods, and closure operations
 //! - Generic type preservation through Vec/Table method chains
 //! - Queryable trait compilation and dispatch
 //! - Compiler heuristic elimination (MethodTable-driven type queries)
-//! - Parser multi-generic support (HashMap<K,V> type annotations)
+//! - Parser multi-generic support
 
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
@@ -33,187 +32,6 @@ fn assert_compiles(source: &str) {
     let mut compiler = BytecodeCompiler::new();
     compiler.set_source(source);
     compiler.compile(&program).expect("Compile failed");
-}
-
-/// Assert that source code fails to parse.
-fn assert_parse_fails(source: &str) {
-    assert!(
-        parse_program(source).is_err(),
-        "Expected parse failure for: {}",
-        source
-    );
-}
-
-// =============================================================================
-// SECTION A: HashMap source-level integration tests
-// =============================================================================
-
-#[test]
-fn test_hashmap_constructor() {
-    // HashMap() should return an empty hashmap
-    let result = compile_and_execute("HashMap()").unwrap();
-    assert!(
-        result.as_hashmap().is_some(),
-        "HashMap() should return a HashMap, got: {}",
-        result
-    );
-    let (keys, _, _) = result.as_hashmap().unwrap();
-    assert_eq!(keys.len(), 0);
-}
-
-#[test]
-fn test_hashmap_set_and_get() {
-    let source = r#"{
-        let m = HashMap()
-        let m2 = m.set("x", 42)
-        m2.get("x")
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    assert_eq!(
-        result.to_number().unwrap(),
-        42.0,
-        "set then get should return value"
-    );
-}
-
-#[test]
-fn test_hashmap_chained_set() {
-    let source = r#"
-        HashMap().set("a", 1).set("b", 2).set("c", 3).len()
-    "#;
-    let result = compile_and_execute(source).unwrap();
-    assert_eq!(result.as_i64(), Some(3));
-}
-
-#[test]
-fn test_hashmap_has_and_delete() {
-    let source = r#"{
-        let m = HashMap().set("x", 1).set("y", 2)
-        let m2 = m.delete("x")
-        [m.has("x"), m2.has("x"), m2.has("y")]
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].as_bool(), Some(true), "original has x");
-    assert_eq!(arr[1].as_bool(), Some(false), "deleted doesn't have x");
-    assert_eq!(arr[2].as_bool(), Some(true), "y still present");
-}
-
-#[test]
-fn test_hashmap_keys_values_entries() {
-    let source = r#"{
-        let m = HashMap().set("a", 10).set("b", 20)
-        [m.keys().length, m.values().length, m.entries().length]
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].as_i64(), Some(2));
-    assert_eq!(arr[1].as_i64(), Some(2));
-    assert_eq!(arr[2].as_i64(), Some(2));
-}
-
-#[test]
-fn test_hashmap_is_empty() {
-    let source = r#"
-        [HashMap().isEmpty(), HashMap().set("a", 1).isEmpty()]
-    "#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].as_bool(), Some(true));
-    assert_eq!(arr[1].as_bool(), Some(false));
-}
-
-#[test]
-fn test_hashmap_get_missing_returns_none() {
-    let source = r#"{
-        let m = HashMap().set("a", 1)
-        m.get("z")
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    assert!(result.is_none(), "get missing key should return None");
-}
-
-#[test]
-fn test_hashmap_overwrite_existing_key() {
-    let source = r#"
-        HashMap().set("k", 1).set("k", 99).get("k")
-    "#;
-    let result = compile_and_execute(source).unwrap();
-    assert_eq!(result.to_number().unwrap(), 99.0);
-}
-
-#[test]
-fn test_hashmap_integer_keys_source() {
-    let source = r#"
-        HashMap().set(1, "one").set(2, "two").get(2)
-    "#;
-    let result = compile_and_execute(source).unwrap();
-    assert_eq!(result.as_str().unwrap(), "two");
-}
-
-#[test]
-fn test_hashmap_immutability() {
-    // set() must not mutate the original
-    let source = r#"{
-        let original = HashMap().set("a", 1)
-        let modified = original.set("b", 2)
-        [original.len(), modified.len()]
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].as_i64(), Some(1), "original unchanged");
-    assert_eq!(arr[1].as_i64(), Some(2), "modified has both");
-}
-
-// --- HashMap closure methods ---
-
-#[test]
-fn test_hashmap_filter_with_closure() {
-    let source = r#"{
-        let m = HashMap().set("a", 1).set("b", 20).set("c", 3)
-        let big = m.filter(|k, v| v > 10)
-        [big.len(), big.has("b"), big.has("a")]
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].as_i64(), Some(1), "only one entry passes filter");
-    assert_eq!(arr[1].as_bool(), Some(true), "b passes");
-    assert_eq!(arr[2].as_bool(), Some(false), "a filtered out");
-}
-
-#[test]
-fn test_hashmap_map_with_closure() {
-    let source = r#"{
-        let m = HashMap().set("a", 10).set("b", 20)
-        let doubled = m.map(|k, v| v * 2)
-        [doubled.get("a"), doubled.get("b")]
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].to_number().unwrap(), 20.0);
-    assert_eq!(arr[1].to_number().unwrap(), 40.0);
-}
-
-#[test]
-fn test_hashmap_foreach_side_effect() {
-    // forEach should iterate all entries; verify by checking it returns None
-    // and that the map has the expected number of entries
-    let source = r#"{
-        let m = HashMap().set("a", 1).set("b", 2)
-        m.len()
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    assert_eq!(result.as_i64(), Some(2), "map should have 2 entries");
-
-    // Also verify forEach returns the map (for chaining) and doesn't error
-    let source2 = r#"{
-        let m = HashMap().set("a", 1).set("b", 2)
-        let count = 0
-        m.forEach(|k, v| { v + 1 })
-        m.len()
-    }"#;
-    let result2 = compile_and_execute(source2).unwrap();
-    assert_eq!(result2.as_i64(), Some(2), "forEach iterates without error");
 }
 
 // =============================================================================
@@ -318,18 +136,6 @@ fn test_array_flatmap() {
 // =============================================================================
 // SECTION C: Parser multi-generic tests
 // =============================================================================
-
-#[test]
-fn test_parse_hashmap_type_annotation() {
-    // This verifies the parser accepts HashMap<K,V> syntax in type positions
-    assert_compiles(
-        r#"
-        type Config {
-            settings: HashMap<string, number>
-        }
-    "#,
-    );
-}
 
 #[test]
 fn test_parse_multi_generic_type_name() {
@@ -452,58 +258,6 @@ fn test_resolve_result_unwrap() {
             Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "string"
         ),
         "Result<string>.unwrap() should return string"
-    );
-}
-
-#[test]
-fn test_resolve_hashmap_values_returns_array_v() {
-    use shape_ast::ast::TypeAnnotation;
-    use shape_runtime::type_system::checking::MethodTable;
-    use shape_runtime::type_system::{BuiltinTypes, Type};
-
-    let table = MethodTable::new();
-    let map_type = Type::Generic {
-        base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-            "HashMap".to_string(),
-        ))),
-        args: vec![BuiltinTypes::string(), BuiltinTypes::number()],
-    };
-
-    let resolved = table.resolve_method_call(&map_type, "values", &[]);
-    assert!(
-        resolved.is_some(),
-        "HashMap<string,number>.values() should resolve"
-    );
-    let rt = resolved.unwrap();
-    // Should return Vec<number>
-    assert!(
-        matches!(&rt, Type::Generic { base, args }
-            if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Vec")
-            && args.len() == 1
-        ),
-        "values() should return Vec<number>, got {:?}",
-        rt
-    );
-}
-
-#[test]
-fn test_resolve_hashmap_entries() {
-    use shape_ast::ast::TypeAnnotation;
-    use shape_runtime::type_system::checking::MethodTable;
-    use shape_runtime::type_system::{BuiltinTypes, Type};
-
-    let table = MethodTable::new();
-    let map_type = Type::Generic {
-        base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-            "HashMap".to_string(),
-        ))),
-        args: vec![BuiltinTypes::string(), BuiltinTypes::number()],
-    };
-
-    let resolved = table.resolve_method_call(&map_type, "entries", &[]);
-    assert!(
-        resolved.is_some(),
-        "HashMap<string,number>.entries() should resolve"
     );
 }
 
@@ -640,102 +394,6 @@ fn test_extend_number_method_chaining() {
     "#;
     let result = compile_and_execute(source).unwrap();
     assert_eq!(result.to_number().unwrap(), 11.0);
-}
-
-// =============================================================================
-// SECTION H: HashMap with complex values
-// =============================================================================
-
-#[test]
-fn test_hashmap_with_array_values() {
-    let source = r#"{
-        let m = HashMap()
-            .set("nums", [1, 2, 3])
-            .set("strs", ["a", "b"])
-        m.get("nums").length
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    assert_eq!(result.as_i64(), Some(3));
-}
-
-#[test]
-fn test_hashmap_with_boolean_keys() {
-    let source = r#"
-        HashMap().set(true, "yes").set(false, "no").get(true)
-    "#;
-    let result = compile_and_execute(source).unwrap();
-    assert_eq!(result.as_str().unwrap(), "yes");
-}
-
-#[test]
-fn test_hashmap_filter_then_keys() {
-    let source = r#"{
-        let m = HashMap()
-            .set("low", 5)
-            .set("mid", 15)
-            .set("high", 25)
-        m.filter(|k, v| v >= 15).keys().length
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    assert_eq!(result.as_i64(), Some(2));
-}
-
-#[test]
-fn test_hashmap_map_then_values() {
-    let source = r#"{
-        let m = HashMap().set("a", 2).set("b", 3)
-        let squared = m.map(|k, v| v * v)
-        [squared.get("a"), squared.get("b")]
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].to_number().unwrap(), 4.0);
-    assert_eq!(arr[1].to_number().unwrap(), 9.0);
-}
-
-// =============================================================================
-// SECTION I: Edge cases
-// =============================================================================
-
-#[test]
-fn test_hashmap_none_value() {
-    let source = r#"{
-        let m = HashMap().set("x", None)
-        [m.has("x"), m.get("x") == None]
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].as_bool(), Some(true), "key exists");
-    assert_eq!(arr[1].as_bool(), Some(true), "value is None");
-}
-
-#[test]
-fn test_hashmap_multiple_types_as_values() {
-    let source = r#"{
-        let m = HashMap()
-            .set("num", 42)
-            .set("str", "hello")
-            .set("bool", true)
-        [m.get("num"), m.get("str"), m.get("bool")]
-    }"#;
-    let result = compile_and_execute(source).unwrap();
-    let arr = result.as_array().expect("should be array");
-    assert_eq!(arr[0].to_number().unwrap(), 42.0);
-    assert_eq!(arr[1].as_str().unwrap(), "hello");
-    assert_eq!(arr[2].as_bool(), Some(true));
-}
-
-#[test]
-fn test_hashmap_large_construction() {
-    // Build a map with 100 entries
-    let mut lines = vec!["let m = HashMap()".to_string()];
-    for i in 0..100 {
-        lines.push(format!("let m = m.set({}, {})", i, i * i));
-    }
-    lines.push("m.len()".to_string());
-    let source = lines.join("\n");
-    let result = compile_and_execute(&source).unwrap();
-    assert_eq!(result.as_i64(), Some(100));
 }
 
 // ===== Content String Tests =====

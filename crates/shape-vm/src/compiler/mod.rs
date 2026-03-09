@@ -661,10 +661,10 @@ pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPas
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "deep-tests"))]
 #[path = "compiler_tests.rs"]
-mod tests;
+mod compiler_deep;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "deep-tests"))]
 #[path = "borrow_deep_tests.rs"]
 mod borrow_deep_tests;

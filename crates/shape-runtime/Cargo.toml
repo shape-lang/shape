@@ -89,6 +89,7 @@ shape-wire = { version = "0.1.1", path = "../shape-wire" }
 
 [features]
 default = ["simd"]
+deep-tests = []
 simd = []
 jit = []
 tokio-runtime = []
