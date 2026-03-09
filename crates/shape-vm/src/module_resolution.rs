@@ -304,7 +304,7 @@ impl BytecodeExecutor {
     pub(crate) fn append_imported_module_items(
         &mut self,
         program: &mut Program,
-    ) -> std::collections::HashSet<String> {
+    ) -> Result<std::collections::HashSet<String>> {
         use shape_ast::ast::ImportItems;
         // Track which specific names have been inlined from each module path.
         // For namespace (wildcard) imports, the path is stored with None (= all items).
@@ -390,21 +390,19 @@ impl BytecodeExecutor {
                     if let Some(module) = loader.get_module(module_path) {
                         Some(module.ast.items.clone())
                     } else {
-                        match loader.load_module(module_path) {
-                            Ok(module) => Some(module.ast.items.clone()),
-                            Err(_) => None,
-                        }
+                        Some(loader.load_module(module_path)?.ast.items.clone())
                     }
                 } else {
                     None
                 };
 
-                let ast_items = ast_items.or_else(|| {
-                    self.virtual_modules
-                        .get(module_path.as_str())
-                        .and_then(|source| parse_program(source).ok())
-                        .map(|parsed| parsed.items)
-                });
+                let ast_items = match ast_items {
+                    Some(items) => Some(items),
+                    None => match self.virtual_modules.get(module_path.as_str()) {
+                        Some(source) => Some(parse_program(source)?.items),
+                        None => None,
+                    },
+                };
 
                 if let Some(items) = ast_items {
                     if is_std {
@@ -441,7 +439,7 @@ impl BytecodeExecutor {
             }
         }
 
-        stdlib_names
+        Ok(stdlib_names)
     }
 
     /// Create a Program from imported functions in ModuleBindingRegistry

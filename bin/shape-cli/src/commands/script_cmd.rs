@@ -2,14 +2,16 @@ use super::{ExecutionMode, ExecutionModeArg, ProviderOptions};
 use crate::extension_loading;
 use anyhow::{Context, Result, bail};
 use shape_runtime::hashing::HashDigest;
-use shape_runtime::project::{
-    ExternalLockMode, NativeDependencyProvider, NativeDependencySpec,
-};
+use shape_runtime::project::ExternalLockMode;
+#[cfg(test)]
+use shape_runtime::project::{NativeDependencyProvider, NativeDependencySpec};
 use shape_runtime::snapshot::{SnapshotStore, VmSnapshot};
 use shape_runtime::engine::{ExecutionResult, ShapeEngine};
 use shape_vm::BytecodeExecutor;
 use shape_wire::{WireValue, render_wire_terminal};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+#[cfg(test)]
+use std::collections::{BTreeMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -499,9 +501,12 @@ fn resolve_dependencies_for_root(
     }
 }
 
+#[cfg(test)]
 const NATIVE_LIB_NAMESPACE: &str = "external.native.library";
+#[cfg(test)]
 const NATIVE_LIB_PRODUCER: &str = "shape-cli/native_dependencies@v1";
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct NativeLibraryProbe {
     provider: NativeDependencyProvider,
@@ -517,6 +522,7 @@ struct NativeLibraryProbe {
     error: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct NativeDependencyScope {
     package_name: String,
@@ -526,6 +532,7 @@ struct NativeDependencyScope {
     dependencies: HashMap<String, NativeDependencySpec>,
 }
 
+#[cfg(test)]
 fn native_host_id() -> &'static str {
     #[cfg(target_os = "linux")]
     {
@@ -545,6 +552,7 @@ fn native_host_id() -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn is_path_like_library_spec(spec: &str) -> bool {
     let path = Path::new(spec);
     path.is_absolute()
@@ -555,6 +563,7 @@ fn is_path_like_library_spec(spec: &str) -> bool {
         || (spec.len() >= 2 && spec.as_bytes()[1] == b':')
 }
 
+#[cfg(test)]
 fn native_provider_label(provider: NativeDependencyProvider) -> &'static str {
     match provider {
         NativeDependencyProvider::System => "system",
@@ -563,6 +572,7 @@ fn native_provider_label(provider: NativeDependencyProvider) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn normalize_package_identity(
     project: &shape_runtime::project::ShapeProject,
     fallback_name: &str,
@@ -582,10 +592,12 @@ fn normalize_package_identity(
     (package_name, package_version, package_key)
 }
 
+#[cfg(test)]
 fn native_artifact_key(package_key: &str, alias: &str) -> String {
     format!("{package_key}::{alias}")
 }
 
+#[cfg(test)]
 fn collect_native_dependency_scopes(
     root_path: &Path,
     project: &shape_runtime::project::ShapeProject,
@@ -737,12 +749,14 @@ fn collect_native_dependency_scopes(
     Ok(scopes)
 }
 
+#[cfg(test)]
 fn native_cache_root() -> PathBuf {
     dirs::cache_dir()
         .map(|dir| dir.join("shape").join("native"))
         .unwrap_or_else(|| PathBuf::from(".shape").join("native"))
 }
 
+#[cfg(test)]
 fn stage_vendored_library(
     root_path: &Path,
     alias: &str,
@@ -819,6 +833,7 @@ fn stage_vendored_library(
     ))
 }
 
+#[cfg(test)]
 fn probe_native_library(
     root_path: &Path,
     alias: &str,
@@ -933,6 +948,7 @@ fn probe_native_library(
     })
 }
 
+#[cfg(test)]
 fn native_artifact_inputs(
     package_name: &str,
     package_version: &str,
@@ -977,6 +993,7 @@ fn native_artifact_inputs(
     (inputs, determinism)
 }
 
+#[cfg(test)]
 fn resolve_native_dependencies_for_root(
     root_path: &Path,
     project: &shape_runtime::project::ShapeProject,
