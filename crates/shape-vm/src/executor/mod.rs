@@ -454,6 +454,11 @@ pub(crate) fn create_transport_module_exports() -> shape_runtime::module_exports
     builtins::transport_builtins::create_transport_module()
 }
 
+/// Create the VM-backed `remote` module exports.
+pub(crate) fn create_remote_module_exports() -> shape_runtime::module_exports::ModuleExports {
+    builtins::remote_builtins::create_remote_module()
+}
+
 /// Remap constant and string pool indices in a single instruction operand after
 /// a hot-patch splice. `const_offset` and `string_offset` are the starting
 /// indices in the global pools where the blob's local pools were appended.

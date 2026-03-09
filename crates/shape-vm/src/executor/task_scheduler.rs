@@ -27,7 +27,9 @@ pub enum TaskStatus {
 /// The VM's `SpawnTask` opcode registers a callable here. When the VM later
 /// suspends on `WaitType::Future { id }`, the host looks up the callable,
 /// executes it, and stores the result so the VM can resume.
-#[derive(Debug)]
+///
+/// Supports both inline tasks (callable executed synchronously at await-time)
+/// and external tasks (completed by background Tokio tasks via oneshot channels).
 pub struct TaskScheduler {
     /// Map from task_id to the callable value (Closure or Function) that
     /// was passed to `spawn`. Consumed on first execution.
@@ -35,6 +37,10 @@ pub struct TaskScheduler {
 
     /// Map from task_id to its completion status.
     results: HashMap<u64, TaskStatus>,
+
+    /// External completion channels — Tokio background tasks send results here.
+    /// Used for remote calls and other externally-completed futures.
+    external_receivers: HashMap<u64, tokio::sync::oneshot::Receiver<Result<ValueWord, String>>>,
 }
 
 impl TaskScheduler {
@@ -43,6 +49,7 @@ impl TaskScheduler {
         Self {
             callables: HashMap::new(),
             results: HashMap::new(),
+            external_receivers: HashMap::new(),
         }
     }
 
@@ -86,6 +93,69 @@ impl TaskScheduler {
             self.results.get(&task_id),
             Some(TaskStatus::Completed(_)) | Some(TaskStatus::Cancelled)
         )
+    }
+
+    /// Register an externally-completed task (e.g., remote call).
+    ///
+    /// Returns a `oneshot::Sender` that the background task uses to deliver the
+    /// result. The scheduler marks the task as Pending and stores the receiver.
+    pub fn register_external(
+        &mut self,
+        task_id: u64,
+    ) -> tokio::sync::oneshot::Sender<Result<ValueWord, String>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.results.insert(task_id, TaskStatus::Pending);
+        self.external_receivers.insert(task_id, rx);
+        tx
+    }
+
+    /// Try to resolve an external task (non-blocking check).
+    ///
+    /// Returns `Some(Ok(val))` if the external task completed successfully,
+    /// `Some(Err(..))` on error/cancellation, or `None` if still pending.
+    pub fn try_resolve_external(&mut self, task_id: u64) -> Option<Result<ValueWord, VMError>> {
+        if let Some(TaskStatus::Completed(val)) = self.results.get(&task_id) {
+            return Some(Ok(val.clone()));
+        }
+        if let Some(rx) = self.external_receivers.get_mut(&task_id) {
+            match rx.try_recv() {
+                Ok(Ok(val)) => {
+                    self.results
+                        .insert(task_id, TaskStatus::Completed(val.clone()));
+                    self.external_receivers.remove(&task_id);
+                    Some(Ok(val))
+                }
+                Ok(Err(e)) => {
+                    self.external_receivers.remove(&task_id);
+                    Some(Err(VMError::RuntimeError(e)))
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.external_receivers.remove(&task_id);
+                    Some(Err(VMError::RuntimeError(
+                        "Remote task cancelled".to_string(),
+                    )))
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Check whether a task has an external receiver (is externally-completed).
+    pub fn has_external(&self, task_id: u64) -> bool {
+        self.external_receivers.contains_key(&task_id)
+    }
+
+    /// Take the external receiver for async awaiting.
+    ///
+    /// Used by `execute_with_async` when it needs to truly `.await` an external
+    /// task's completion.
+    pub fn take_external_receiver(
+        &mut self,
+        task_id: u64,
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<ValueWord, String>>> {
+        self.external_receivers.remove(&task_id)
     }
 
     /// Resolve a single task by executing its callable on a fresh VM executor.
@@ -216,6 +286,19 @@ impl TaskScheduler {
     }
 }
 
+impl std::fmt::Debug for TaskScheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskScheduler")
+            .field("callables", &self.callables)
+            .field("results", &self.results)
+            .field(
+                "external_receivers",
+                &format!("[{} pending]", self.external_receivers.len()),
+            )
+            .finish()
+    }
+}
+
 impl Default for TaskScheduler {
     fn default() -> Self {
         Self::new()
@@ -296,5 +379,64 @@ mod tests {
         assert!(result.is_ok());
         let val = result.unwrap();
         assert_eq!(val.as_str().unwrap(), "first");
+    }
+
+    #[test]
+    fn test_register_external_and_resolve() {
+        let mut sched = TaskScheduler::new();
+        let tx = sched.register_external(100);
+        assert!(sched.has_external(100));
+        assert!(matches!(sched.get_result(100), Some(TaskStatus::Pending)));
+
+        // Not yet resolved
+        assert!(sched.try_resolve_external(100).is_none());
+
+        // Send result from "background task"
+        tx.send(Ok(ValueWord::from_f64(42.0))).unwrap();
+
+        // Now resolves
+        let result = sched.try_resolve_external(100);
+        assert!(result.is_some());
+        let val = result.unwrap().unwrap();
+        assert!((val.as_f64().unwrap() - 42.0).abs() < f64::EPSILON);
+
+        // Receiver removed after resolution
+        assert!(!sched.has_external(100));
+    }
+
+    #[test]
+    fn test_external_task_error() {
+        let mut sched = TaskScheduler::new();
+        let tx = sched.register_external(200);
+
+        tx.send(Err("connection refused".to_string())).unwrap();
+
+        let result = sched.try_resolve_external(200);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_external_task_cancelled() {
+        let mut sched = TaskScheduler::new();
+        let tx = sched.register_external(300);
+
+        // Drop sender to simulate cancellation
+        drop(tx);
+
+        let result = sched.try_resolve_external(300);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_take_external_receiver() {
+        let mut sched = TaskScheduler::new();
+        let _tx = sched.register_external(400);
+
+        assert!(sched.has_external(400));
+        let rx = sched.take_external_receiver(400);
+        assert!(rx.is_some());
+        assert!(!sched.has_external(400));
     }
 }

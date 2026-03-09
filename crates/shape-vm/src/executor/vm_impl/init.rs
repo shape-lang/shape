@@ -75,6 +75,7 @@ impl VirtualMachine {
         // user-installed extension plugins.
         vm.register_stdlib_module(state_builtins::create_state_module());
         vm.register_stdlib_module(create_transport_module_exports());
+        vm.register_stdlib_module(create_remote_module_exports());
         vm.register_stdlib_module(shape_runtime::stdlib::regex::create_regex_module());
         vm.register_stdlib_module(shape_runtime::stdlib::http::create_http_module());
         vm.register_stdlib_module(shape_runtime::stdlib::crypto::create_crypto_module());

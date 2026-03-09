@@ -210,6 +210,17 @@ impl BytecodeCompiler {
         Ok(false)
     }
 
+    /// Apply the before-handler result contract.
+    ///
+    /// The before handler can return:
+    /// - An array → replaces args
+    /// - An object `{ args?, state?, result? }` → updates args/state, and if
+    ///   `result` is non-null, short-circuits (skips impl call / expression eval)
+    ///
+    /// When `result_local` is `Some`, the `result` field is extracted and stored
+    /// there, and a short-circuit jump is emitted. The returned `Option<usize>`
+    /// is the jump address that must be patched by the caller to skip past the
+    /// impl call / expression evaluation.
     fn apply_before_result_contract(
         &mut self,
         before_result_local: u16,
@@ -217,6 +228,47 @@ impl BytecodeCompiler {
         ctx_local: u16,
         ctx_schema_id: u32,
     ) -> Result<()> {
+        self.apply_before_result_contract_inner(
+            before_result_local,
+            args_local,
+            ctx_local,
+            ctx_schema_id,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    /// Like `apply_before_result_contract` but with short-circuit support.
+    ///
+    /// When `short_circuit_result_local` is provided, the `result` field of the
+    /// before-handler object is extracted. If non-null, the value is stored in
+    /// the given local and a jump is emitted. The returned `Option<usize>` is
+    /// the jump that must be patched to skip past the impl/expression.
+    fn apply_before_result_contract_with_short_circuit(
+        &mut self,
+        before_result_local: u16,
+        args_local: u16,
+        ctx_local: u16,
+        ctx_schema_id: u32,
+        short_circuit_result_local: u16,
+    ) -> Result<Option<usize>> {
+        self.apply_before_result_contract_inner(
+            before_result_local,
+            args_local,
+            ctx_local,
+            ctx_schema_id,
+            Some(short_circuit_result_local),
+        )
+    }
+
+    fn apply_before_result_contract_inner(
+        &mut self,
+        before_result_local: u16,
+        args_local: u16,
+        ctx_local: u16,
+        ctx_schema_id: u32,
+        short_circuit_result_local: Option<u16>,
+    ) -> Result<Option<usize>> {
         self.emit(Instruction::new(
             OpCode::LoadLocal,
             Some(Operand::Local(before_result_local)),
@@ -257,11 +309,13 @@ impl BytecodeCompiler {
         ));
         let skip_obj = self.emit_jump(OpCode::JumpIfFalse, 0);
 
+        // Schema includes `result` field for short-circuit support
         let before_contract_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
             ("args", FieldType::Any),
+            ("result", FieldType::Any),
             ("state", FieldType::Any),
         ]);
-        let (args_operand, state_operand) = {
+        let (args_operand, state_operand, result_operand) = {
             let schema = self
                 .type_tracker
                 .schema_registry()
@@ -284,7 +338,18 @@ impl BytecodeCompiler {
                             .to_string(),
                         location: None,
                     })?;
-            if args_field.offset > u16::MAX as usize || state_field.offset > u16::MAX as usize {
+            let result_field =
+                schema
+                    .get_field("result")
+                    .ok_or_else(|| ShapeError::RuntimeError {
+                        message: "Internal error: before-handler schema missing 'result'"
+                            .to_string(),
+                        location: None,
+                    })?;
+            if args_field.offset > u16::MAX as usize
+                || state_field.offset > u16::MAX as usize
+                || result_field.offset > u16::MAX as usize
+            {
                 return Err(ShapeError::RuntimeError {
                     message: "Internal error: before-handler field offset/index overflow"
                         .to_string(),
@@ -302,8 +367,38 @@ impl BytecodeCompiler {
                     field_idx: state_field.index as u16,
                     field_type_tag: field_type_to_tag(&state_field.field_type),
                 },
+                Operand::TypedField {
+                    type_id: before_contract_schema_id as u16,
+                    field_idx: result_field.index as u16,
+                    field_type_tag: field_type_to_tag(&result_field.field_type),
+                },
             )
         };
+
+        // Check `result` field for short-circuit
+        let mut short_circuit_jump = None;
+        if let Some(sc_local) = short_circuit_result_local {
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(before_result_local)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::GetFieldTyped,
+                Some(result_operand),
+            ));
+            self.emit(Instruction::simple(OpCode::Dup));
+            self.emit(Instruction::simple(OpCode::PushNull));
+            self.emit(Instruction::simple(OpCode::Eq));
+            let skip_short_circuit = self.emit_jump(OpCode::JumpIfTrue, 0);
+            // result is non-null → store it and jump past impl
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(sc_local)),
+            ));
+            short_circuit_jump = Some(self.emit_jump(OpCode::Jump, 0));
+            self.patch_jump(skip_short_circuit);
+            self.emit(Instruction::simple(OpCode::Pop)); // discard null result
+        }
 
         self.emit(Instruction::new(
             OpCode::LoadLocal,
@@ -351,7 +446,7 @@ impl BytecodeCompiler {
 
         self.patch_jump(skip_obj);
         self.patch_jump(skip_obj_check);
-        Ok(())
+        Ok(short_circuit_jump)
     }
 
     fn compile_annotated_expr(
@@ -588,31 +683,18 @@ impl BytecodeCompiler {
                     Some(Operand::Local(ctx_local)),
                 ));
 
-                if let Expr::Annotated {
-                    annotation: inner_annotation,
-                    target: inner_target,
-                    span: inner_span,
-                } = target
-                {
-                    self.compile_annotated_await_expr(inner_annotation, inner_target, *inner_span)?;
-                } else {
-                    self.compile_expr(target)?;
-                }
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(subject_local)),
-                ));
-
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(subject_local)),
-                ));
-                self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(1))));
+                // Initialize args as empty array (before handler gets annotation
+                // args + ctx, not the evaluated expression)
+                self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
                 self.emit(Instruction::new(
                     OpCode::StoreLocal,
                     Some(Operand::Local(args_local)),
                 ));
 
+                // Call before handler FIRST (before evaluating inner expression).
+                // This allows short-circuit: if before returns { result: value },
+                // we skip the inner expression eval + await entirely.
+                let mut short_circuit_jump = None;
                 if let Some(before_id) = compiled.before_handler {
                     let self_ref = self.program.add_constant(Constant::Number(0.0));
                     self.emit(Instruction::new(
@@ -649,24 +731,27 @@ impl BytecodeCompiler {
                         OpCode::StoreLocal,
                         Some(Operand::Local(before_result_local)),
                     ));
-                    self.apply_before_result_contract(
-                        before_result_local,
-                        args_local,
-                        ctx_local,
-                        ctx_schema_id,
-                    )?;
+                    short_circuit_jump =
+                        self.apply_before_result_contract_with_short_circuit(
+                            before_result_local,
+                            args_local,
+                            ctx_local,
+                            ctx_schema_id,
+                            result_local,
+                        )?;
                 }
 
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(args_local)),
-                ));
-                let zero_const = self.program.add_constant(Constant::Number(0.0));
-                self.emit(Instruction::new(
-                    OpCode::PushConst,
-                    Some(Operand::Const(zero_const)),
-                ));
-                self.emit(Instruction::simple(OpCode::GetProp));
+                // --- Normal path: evaluate inner expression + await ---
+                if let Expr::Annotated {
+                    annotation: inner_annotation,
+                    target: inner_target,
+                    span: inner_span,
+                } = target
+                {
+                    self.compile_annotated_await_expr(inner_annotation, inner_target, *inner_span)?;
+                } else {
+                    self.compile_expr(target)?;
+                }
                 self.emit(Instruction::new(
                     OpCode::StoreLocal,
                     Some(Operand::Local(subject_local)),
@@ -681,6 +766,11 @@ impl BytecodeCompiler {
                     OpCode::StoreLocal,
                     Some(Operand::Local(result_local)),
                 ));
+
+                // Patch the short-circuit jump to land here (after await, at result usage)
+                if let Some(jump_addr) = short_circuit_jump {
+                    self.patch_jump(jump_addr);
+                }
 
                 if let Some(after_id) = compiled.after_handler {
                     let self_ref = self.program.add_constant(Constant::Number(0.0));

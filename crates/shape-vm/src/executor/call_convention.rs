@@ -162,6 +162,9 @@ impl VirtualMachine {
     /// - NanTag::Function -> calls via call_function_with_nb_args
     /// - HeapValue::Closure -> calls via call_closure_with_nb_args
     /// - Other values -> returns them directly (already-resolved value)
+    ///
+    /// For externally-completed tasks (remote calls), checks the oneshot
+    /// receiver first (non-blocking).
     fn resolve_spawned_task(&mut self, task_id: u64) -> Result<ValueWord, VMError> {
         // Check if already resolved (cached)
         if let Some(task_scheduler::TaskStatus::Completed(val)) =
@@ -175,6 +178,25 @@ impl VirtualMachine {
                 "Task {} was cancelled",
                 task_id
             )));
+        }
+
+        // Check external receivers (non-blocking) before inline execution
+        if let Some(result) = self.task_scheduler.try_resolve_external(task_id) {
+            return result;
+        }
+
+        // If this is an external task that hasn't completed yet, block on it
+        // using tokio's block_in_place to avoid deadlocking the runtime.
+        if self.task_scheduler.has_external(task_id) {
+            if let Some(rx) = self.task_scheduler.take_external_receiver(task_id) {
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(rx)
+                })
+                .map_err(|_| VMError::RuntimeError("Remote task dropped".to_string()))?
+                .map_err(VMError::RuntimeError)?;
+                self.task_scheduler.complete(task_id, result.clone());
+                return Ok(result);
+            }
         }
 
         // Take the callable

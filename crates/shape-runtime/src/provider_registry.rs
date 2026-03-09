@@ -370,6 +370,14 @@ impl ProviderRegistry {
         runtimes.get(language_id).cloned()
     }
 
+    /// Return all loaded language runtimes, keyed by language identifier.
+    pub fn language_runtimes(
+        &self,
+    ) -> std::collections::HashMap<String, Arc<crate::plugins::language_runtime::PluginLanguageRuntime>> {
+        let runtimes = self.language_runtimes.read().unwrap();
+        runtimes.clone()
+    }
+
     /// Return child-LSP configurations declared by loaded language runtimes.
     pub fn language_runtime_lsp_configs(
         &self,

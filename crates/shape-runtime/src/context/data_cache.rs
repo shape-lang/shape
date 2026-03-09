@@ -236,6 +236,14 @@ impl super::ExecutionContext {
         self.provider_registry.get_language_runtime(language_id)
     }
 
+    /// Return all loaded language runtimes, keyed by language identifier.
+    pub fn language_runtimes(
+        &self,
+    ) -> std::collections::HashMap<String, std::sync::Arc<super::super::plugins::language_runtime::PluginLanguageRuntime>>
+    {
+        self.provider_registry.language_runtimes()
+    }
+
     /// Build VM extension modules from loaded extension module capabilities.
     pub fn module_exports_from_extensions(
         &self,

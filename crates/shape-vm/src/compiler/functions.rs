@@ -2190,7 +2190,16 @@ impl BytecodeCompiler {
             Some(Operand::Local(args_local)),
         ));
 
-        // --- Build ctx object: { state: {}, event_log: [] } ---
+        // --- Build ctx object: { __impl: Function, state: {}, event_log: [] } ---
+        // Push fields in schema order: __impl, state, event_log
+        // __impl = reference to the implementation function
+        let impl_ref_const = self
+            .program
+            .add_constant(Constant::Number(impl_idx as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(impl_ref_const)),
+        ));
         let empty_schema_id = self.type_tracker.register_inline_object_schema(&[]);
         self.emit(Instruction::new(
             OpCode::NewTypedObject,
@@ -2203,6 +2212,7 @@ impl BytecodeCompiler {
         self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
 
         let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
+            ("__impl", FieldType::Any),
             ("state", FieldType::Any),
             ("event_log", FieldType::Array(Box::new(FieldType::Any))),
         ]);
@@ -2210,7 +2220,7 @@ impl BytecodeCompiler {
             OpCode::NewTypedObject,
             Some(Operand::TypedObjectAlloc {
                 schema_id: ctx_schema_id as u16,
-                field_count: 2,
+                field_count: 3,
             }),
         ));
         self.emit(Instruction::new(
@@ -2219,6 +2229,7 @@ impl BytecodeCompiler {
         ));
 
         // --- Call before handler if present ---
+        let mut short_circuit_jump: Option<usize> = None;
         if let Some(before_id) = compiled_ann.before_handler {
             let fn_ref = self
                 .program
@@ -2307,11 +2318,13 @@ impl BytecodeCompiler {
 
             let skip_obj = self.emit_jump(OpCode::JumpIfFalse, 0);
 
-            // Strict contract: before-handler object form uses typed fields {args, state}.
-            // No generic string-key property lookup in hot paths.
+            // Strict contract: before-handler object form uses typed fields
+            // {args, result, state}. The `result` field enables short-circuit:
+            // if the before handler returns { result: value }, skip the impl call.
             let before_contract_schema_id =
                 self.type_tracker.register_inline_object_schema_typed(&[
                     ("args", FieldType::Any),
+                    ("result", FieldType::Any),
                     ("state", FieldType::Any),
                 ]);
             if before_contract_schema_id > u16::MAX as u32 {
@@ -2320,7 +2333,7 @@ impl BytecodeCompiler {
                     location: None,
                 });
             }
-            let (args_operand, state_operand) = {
+            let (args_operand, state_operand, result_operand) = {
                 let schema = self
                     .type_tracker
                     .schema_registry()
@@ -2345,7 +2358,18 @@ impl BytecodeCompiler {
                                 .to_string(),
                             location: None,
                         })?;
-                if args_field.offset > u16::MAX as usize || state_field.offset > u16::MAX as usize {
+                let result_field =
+                    schema
+                        .get_field("result")
+                        .ok_or_else(|| ShapeError::RuntimeError {
+                            message: "Internal error: before-handler schema missing 'result'"
+                                .to_string(),
+                            location: None,
+                        })?;
+                if args_field.offset > u16::MAX as usize
+                    || state_field.offset > u16::MAX as usize
+                    || result_field.offset > u16::MAX as usize
+                {
                     return Err(ShapeError::RuntimeError {
                         message: "Internal error: before-handler field offset/index overflow"
                             .to_string(),
@@ -2363,8 +2387,35 @@ impl BytecodeCompiler {
                         field_idx: state_field.index as u16,
                         field_type_tag: field_type_to_tag(&state_field.field_type),
                     },
+                    Operand::TypedField {
+                        type_id: before_contract_schema_id as u16,
+                        field_idx: result_field.index as u16,
+                        field_type_tag: field_type_to_tag(&result_field.field_type),
+                    },
                 )
             };
+
+            // Check `result` field for short-circuit: if non-null, skip impl call
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(before_result)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::GetFieldTyped,
+                Some(result_operand),
+            ));
+            self.emit(Instruction::simple(OpCode::Dup));
+            self.emit(Instruction::simple(OpCode::PushNull));
+            self.emit(Instruction::simple(OpCode::Eq));
+            let skip_short_circuit = self.emit_jump(OpCode::JumpIfTrue, 0);
+            // result is non-null → store it and jump past impl call
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(result_local)),
+            ));
+            short_circuit_jump = Some(self.emit_jump(OpCode::Jump, 0));
+            self.patch_jump(skip_short_circuit);
+            self.emit(Instruction::simple(OpCode::Pop)); // discard null result
 
             self.emit(Instruction::new(
                 OpCode::LoadLocal,
@@ -2474,6 +2525,11 @@ impl BytecodeCompiler {
             OpCode::StoreLocal,
             Some(Operand::Local(result_local)),
         ));
+
+        // Patch short-circuit jump: lands here, after impl call + result store
+        if let Some(jump_addr) = short_circuit_jump {
+            self.patch_jump(jump_addr);
+        }
 
         // --- Call after handler if present ---
         if let Some(after_id) = compiled_ann.after_handler {

@@ -114,7 +114,10 @@ impl VirtualMachine {
                 }),
             };
 
+            // Set thread-local program reference so remote.__call() can access it.
+            crate::executor::builtins::remote_builtins::set_current_program(&(*vm_ptr).program);
             let result = module_fn(args, &ctx).map_err(VMError::RuntimeError);
+            crate::executor::builtins::remote_builtins::clear_current_program();
 
             // Check if the module function requested a VM state resume.
             // If so, return a special error that the dispatch loop intercepts.

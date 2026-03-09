@@ -14,6 +14,7 @@ mod matrix_intrinsics;
 mod object_ops;
 mod runtime_delegated;
 mod special_ops;
+pub mod remote_builtins;
 pub mod transport_builtins;
 pub mod transport_provider;
 mod type_ops;

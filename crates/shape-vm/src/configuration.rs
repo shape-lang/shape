@@ -96,6 +96,10 @@ impl BytecodeExecutor {
             .push(shape_runtime::stdlib::msgpack_module::create_msgpack_module());
         self.extensions
             .push(shape_runtime::stdlib::set_module::create_set_module());
+        self.extensions
+            .push(crate::executor::create_transport_module_exports());
+        self.extensions
+            .push(crate::executor::create_remote_module_exports());
     }
 
     /// Register an external/user extension module (e.g. loaded from a .so plugin).

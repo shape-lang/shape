@@ -14,11 +14,15 @@ use shape_vm::remote::{
     ExecuteResponse, ExecutionMetrics, ServerInfo, ValidateRequest, ValidateResponse,
     WireDiagnostic, WireMessage,
 };
+use shape_wire::WireValue;
 use shape_wire::transport::framing::{decode_framed, encode_framed};
 
 use crate::cli_args::ExecutionModeArg;
 use crate::commands::ProviderOptions;
 use crate::extension_loading;
+
+/// Pre-loaded language runtimes for polyglot remote execution.
+type LanguageRuntimes = HashMap<String, Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>>;
 
 /// Server configuration derived from CLI flags.
 struct ServeConfig {
@@ -100,6 +104,36 @@ pub async fn run_serve(
 
     let _ = (tls_cert, tls_key); // TLS support is a future enhancement
 
+    // Load language runtimes at startup for polyglot remote execution.
+    // Extensions are loaded once via the full discovery + load path;
+    // the runtimes are Arc-wrapped and shared across all connections.
+    let language_runtimes: Arc<LanguageRuntimes> = {
+        let mut engine = ShapeEngine::new()
+            .map_err(|e| anyhow::anyhow!("failed to create engine for extension loading: {}", e))?;
+        // Use the standard extension discovery path (auto-scans ~/.shape/extensions/)
+        let specs = extension_loading::collect_startup_specs(
+            provider_opts, None, None, None, &extensions,
+        );
+        let loaded = extension_loading::load_specs(
+            &mut engine, &specs,
+            |spec, info| {
+                eprintln!("  Loaded extension: {} ({})", info.name, spec.path.display());
+            },
+            |spec, err| {
+                eprintln!("  Failed to load extension {}: {}", spec.path.display(), err);
+            },
+        );
+        if loaded > 0 {
+            eprintln!("  {} extension(s) loaded", loaded);
+        }
+        let runtimes = engine.language_runtimes();
+        if !runtimes.is_empty() {
+            let names: Vec<&str> = runtimes.keys().map(|s| s.as_str()).collect();
+            eprintln!("  language runtimes: {}", names.join(", "));
+        }
+        Arc::new(runtimes)
+    };
+
     let config = Arc::new(ServeConfig {
         auth_token,
         max_concurrent,
@@ -126,9 +160,10 @@ pub async fn run_serve(
 
         let config = config.clone();
         let semaphore = semaphore.clone();
+        let language_runtimes = language_runtimes.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, &config, &semaphore).await {
+            if let Err(e) = handle_connection(socket, &config, &semaphore, &language_runtimes).await {
                 eprintln!("Connection error from {}: {}", peer, e);
             }
         });
@@ -139,6 +174,7 @@ async fn handle_connection(
     mut socket: tokio::net::TcpStream,
     config: &ServeConfig,
     semaphore: &Semaphore,
+    language_runtimes: &LanguageRuntimes,
 ) -> Result<()> {
     let mut state = ConnectionState::new();
 
@@ -177,8 +213,11 @@ async fn handle_connection(
                     Some(WireMessage::ExecuteResponse(ExecuteResponse {
                         request_id: req.request_id,
                         success: false,
-                        output: None,
+                        value: WireValue::Null,
+                        stdout: None,
                         error: Some("Authentication required. Send Auth message first.".to_string()),
+                        content_terminal: None,
+                        content_html: None,
                         diagnostics: vec![],
                         metrics: None,
                     }))
@@ -215,7 +254,7 @@ async fn handle_connection(
                 } else {
                     let _permit = semaphore.acquire().await
                         .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
-                    Some(handle_call(req, &mut state))
+                    Some(handle_call(req, &mut state, language_runtimes))
                 }
             }
             WireMessage::BlobNegotiation(req) => {
@@ -302,15 +341,18 @@ async fn handle_execute(req: ExecuteRequest, config: &ServeConfig) -> WireMessag
     .await;
 
     match result {
-        Ok(Ok((output, wall_time_ms))) => WireMessage::ExecuteResponse(ExecuteResponse {
+        Ok(Ok(r)) => WireMessage::ExecuteResponse(ExecuteResponse {
             request_id,
             success: true,
-            output: Some(output),
+            value: r.value,
+            stdout: r.stdout,
             error: None,
+            content_terminal: r.content_terminal,
+            content_html: r.content_html,
             diagnostics: vec![],
             metrics: Some(ExecutionMetrics {
                 instructions_executed: 0,
-                wall_time_ms,
+                wall_time_ms: r.wall_time_ms,
                 memory_bytes_peak: 0,
             }),
         }),
@@ -319,8 +361,11 @@ async fn handle_execute(req: ExecuteRequest, config: &ServeConfig) -> WireMessag
             WireMessage::ExecuteResponse(ExecuteResponse {
                 request_id,
                 success: false,
-                output: None,
+                value: WireValue::Null,
+                stdout: None,
                 error: Some(message),
+                content_terminal: None,
+                content_html: None,
                 diagnostics,
                 metrics: None,
             })
@@ -328,8 +373,11 @@ async fn handle_execute(req: ExecuteRequest, config: &ServeConfig) -> WireMessag
         Err(join_err) => WireMessage::ExecuteResponse(ExecuteResponse {
             request_id,
             success: false,
-            output: None,
+            value: WireValue::Null,
+            stdout: None,
             error: Some(format!("Execution panicked: {}", join_err)),
+            content_terminal: None,
+            content_html: None,
             diagnostics: vec![],
             metrics: None,
         }),
@@ -359,11 +407,16 @@ fn handle_validate(req: ValidateRequest) -> WireMessage {
 fn handle_call(
     req: shape_vm::remote::RemoteCallRequest,
     _state: &mut ConnectionState,
+    language_runtimes: &LanguageRuntimes,
 ) -> WireMessage {
     let tmp_dir = std::env::temp_dir().join("shape-serve-snapshots");
     match shape_runtime::snapshot::SnapshotStore::new(&tmp_dir) {
         Ok(store) => {
-            let response = shape_vm::remote::execute_remote_call(req, &store);
+            let response = if language_runtimes.is_empty() {
+                shape_vm::remote::execute_remote_call(req, &store)
+            } else {
+                shape_vm::remote::execute_remote_call_with_runtimes(req, &store, language_runtimes)
+            };
             WireMessage::CallResponse(response)
         }
         Err(e) => WireMessage::CallResponse(shape_vm::remote::RemoteCallResponse {
@@ -383,12 +436,21 @@ fn handle_negotiation(
     WireMessage::BlobNegotiationReply(response)
 }
 
+/// Result from in-process execution, carrying structured data.
+struct InProcessResult {
+    value: WireValue,
+    stdout: Option<String>,
+    content_terminal: Option<String>,
+    content_html: Option<String>,
+    wall_time_ms: u64,
+}
+
 /// Execute Shape code in-process using the full engine pipeline.
 fn execute_code_in_process(
     code: &str,
     _extensions: &[std::path::PathBuf],
     _provider_opts: &ProviderOptions,
-) -> Result<(String, u64)> {
+) -> Result<InProcessResult> {
     use std::time::Instant;
 
     let start = Instant::now();
@@ -416,30 +478,17 @@ fn execute_code_in_process(
 
     let wall_time_ms = start.elapsed().as_millis() as u64;
 
-    // Format output
-    let mut output = String::new();
-    for msg in &result.messages {
-        output.push_str(&format!("{}\n", msg.text));
-    }
+    // Collect print output — NOT the return value
+    let stdout: String = result.messages.iter()
+        .map(|m| format!("{}\n", m.text)).collect();
 
-    // Render the result value (matches script_cmd.rs logic):
-    // 1. content_terminal (pre-rendered Content nodes)
-    // 2. render_wire_terminal (adapter-rendered types like AnyError)
-    // 3. serde_json (plain values: numbers, strings, arrays, objects)
-    if let Some(ref terminal_str) = result.content_terminal {
-        output.push_str(terminal_str);
-    } else if let Some(rendered) = shape_wire::render_wire_terminal(&result.value) {
-        if !rendered.is_empty() && rendered != "()" {
-            output.push_str(&rendered);
-        }
-    } else if !matches!(&result.value, shape_wire::WireValue::Null) {
-        match serde_json::to_string(&result.value) {
-            Ok(json) => output.push_str(&json),
-            Err(_) => output.push_str(&format!("{:?}", result.value)),
-        }
-    }
-
-    Ok((output, wall_time_ms))
+    Ok(InProcessResult {
+        value: result.value,
+        stdout: if stdout.is_empty() { None } else { Some(stdout) },
+        content_terminal: result.content_terminal,
+        content_html: result.content_html,
+        wall_time_ms,
+    })
 }
 
 /// Extract error message and diagnostics from an anyhow error.
@@ -483,7 +532,7 @@ fn extract_location(err: &shape_runtime::error::ShapeError) -> (Option<u32>, Opt
 mod tests {
     use super::*;
     use shape_vm::remote::{
-        ExecuteRequest, ExecuteResponse, ServerInfo, WireMessage,
+        ExecuteRequest, WireMessage,
         build_call_request,
     };
     use shape_runtime::snapshot::SerializableVMValue;
@@ -504,14 +553,16 @@ mod tests {
             provider_opts: ProviderOptions::default(),
         });
         let semaphore = Arc::new(Semaphore::new(4));
+        let language_runtimes: Arc<LanguageRuntimes> = Arc::new(HashMap::new());
 
         tokio::spawn(async move {
             loop {
                 let (socket, _) = listener.accept().await.unwrap();
                 let config = config.clone();
                 let semaphore = semaphore.clone();
+                let language_runtimes = language_runtimes.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(socket, &config, &semaphore).await;
+                    let _ = handle_connection(socket, &config, &semaphore, &language_runtimes).await;
                 });
             }
         });
@@ -568,8 +619,11 @@ mod tests {
             WireMessage::ExecuteResponse(r) => {
                 assert_eq!(r.request_id, 1);
                 assert!(r.success, "execute failed: {:?}", r.error);
-                let output = r.output.unwrap_or_default();
-                assert!(output.contains("42"), "expected 42 in output, got: {}", output);
+                // Shape infers integer addition for integer literals
+                let is_42 = matches!(r.value, WireValue::Integer(42))
+                    || matches!(r.value, WireValue::Number(n) if n == 42.0);
+                assert!(is_42, "expected 42 in value, got: {:?}", r.value);
+                assert!(r.stdout.is_none(), "no print output expected");
             }
             other => panic!("Expected ExecuteResponse, got {:?}", other),
         }
@@ -652,14 +706,16 @@ mod tests {
             provider_opts: ProviderOptions::default(),
         });
         let semaphore = Arc::new(Semaphore::new(4));
+        let language_runtimes: Arc<LanguageRuntimes> = Arc::new(HashMap::new());
 
         tokio::spawn(async move {
             loop {
                 let (socket, _) = listener.accept().await.unwrap();
                 let config = config.clone();
                 let semaphore = semaphore.clone();
+                let language_runtimes = language_runtimes.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(socket, &config, &semaphore).await;
+                    let _ = handle_connection(socket, &config, &semaphore, &language_runtimes).await;
                 });
             }
         });

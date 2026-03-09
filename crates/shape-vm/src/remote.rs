@@ -30,6 +30,8 @@ use shape_runtime::snapshot::{
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::ValueWord;
 
+use shape_wire::WireValue;
+
 use crate::bytecode::{BytecodeProgram, FunctionBlob, FunctionHash, Program};
 use crate::executor::{VMConfig, VirtualMachine};
 
@@ -202,10 +204,18 @@ pub struct ExecuteResponse {
     pub request_id: u64,
     /// Whether execution completed successfully.
     pub success: bool,
-    /// Standard output from execution (if any).
-    pub output: Option<String>,
+    /// Structured return value from execution.
+    pub value: WireValue,
+    /// Print/log output captured during execution (NOT the return value).
+    pub stdout: Option<String>,
     /// Error message (if execution failed).
     pub error: Option<String>,
+    /// Pre-rendered Content terminal representation (if value is Content).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub content_terminal: Option<String>,
+    /// Pre-rendered Content HTML representation (if value is Content).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub content_html: Option<String>,
     /// Diagnostics (parse errors, type errors, warnings).
     pub diagnostics: Vec<WireDiagnostic>,
     /// Execution metrics (if available).
@@ -520,6 +530,23 @@ pub fn execute_remote_call(
     }
 }
 
+/// Execute a remote call with pre-loaded language runtime extensions.
+///
+/// `language_runtimes` maps language IDs (e.g. "python") to pre-loaded
+/// runtime handles. The server loads these once at startup from installed
+/// extensions. The bytecode carries foreign function source text; the
+/// runtime on the server compiles and executes it.
+pub fn execute_remote_call_with_runtimes(
+    request: RemoteCallRequest,
+    store: &SnapshotStore,
+    language_runtimes: &std::collections::HashMap<String, std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>>,
+) -> RemoteCallResponse {
+    match execute_inner_with_runtimes(request, store, language_runtimes) {
+        Ok(value) => RemoteCallResponse { result: Ok(value) },
+        Err(err) => RemoteCallResponse { result: Err(err) },
+    }
+}
+
 fn execute_inner(
     request: RemoteCallRequest,
     store: &SnapshotStore,
@@ -671,6 +698,198 @@ fn execute_inner(
     };
 
     // 5. Serialize result
+    nanboxed_to_serializable(&result, store).map_err(|e| RemoteCallError {
+        message: format!("Failed to serialize result: {}", e),
+        kind: RemoteErrorKind::RuntimeError,
+    })
+}
+
+fn execute_inner_with_runtimes(
+    request: RemoteCallRequest,
+    store: &SnapshotStore,
+    language_runtimes: &std::collections::HashMap<String, std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>>,
+) -> Result<SerializableVMValue, RemoteCallError> {
+    // 1. Reconstruct program with type schemas (same logic as execute_inner)
+    let mut program = if let Some(blobs) = request.function_blobs {
+        let entry_hash = request
+            .function_hash
+            .or_else(|| {
+                if let Some(fid) = request.function_id {
+                    request
+                        .program
+                        .function_blob_hashes
+                        .get(fid as usize)
+                        .copied()
+                        .flatten()
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                request.program.content_addressed.as_ref().and_then(|ca| {
+                    let mut matches = ca.function_store.iter().filter_map(|(hash, blob)| {
+                        if blob.name == request.function_name {
+                            Some(*hash)
+                        } else {
+                            None
+                        }
+                    });
+                    let first = matches.next()?;
+                    if matches.next().is_some() {
+                        None
+                    } else {
+                        Some(first)
+                    }
+                })
+            })
+            .ok_or_else(|| RemoteCallError {
+                message: format!(
+                    "Could not resolve entry hash for remote function '{}'",
+                    request.function_name
+                ),
+                kind: RemoteErrorKind::FunctionNotFound,
+            })?;
+
+        let ca_program = program_from_blobs_by_hash(blobs, entry_hash, &request.program)
+            .ok_or_else(|| RemoteCallError {
+                message: format!(
+                    "Could not reconstruct program from blobs for '{}'",
+                    request.function_name
+                ),
+                kind: RemoteErrorKind::FunctionNotFound,
+            })?;
+        let linked = crate::linker::link(&ca_program).map_err(|e| RemoteCallError {
+            message: format!("Linker error: {}", e),
+            kind: RemoteErrorKind::RuntimeError,
+        })?;
+        crate::linker::linked_to_bytecode_program(&linked)
+    } else {
+        request.program
+    };
+    program.type_schema_registry = request.type_schemas;
+
+    // 2. Convert arguments from serializable form
+    let args: Vec<ValueWord> = request
+        .arguments
+        .iter()
+        .map(|sv| {
+            serializable_to_nanboxed(sv, store).map_err(|e| RemoteCallError {
+                message: format!("Failed to deserialize argument: {}", e),
+                kind: RemoteErrorKind::ArgumentError,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // 3. Create VM and load program
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.populate_module_objects();
+
+    // 4. Link foreign functions from pre-loaded language runtimes
+    if !vm.program.foreign_functions.is_empty() && !language_runtimes.is_empty() {
+        let entries = vm.program.foreign_functions.clone();
+        let mut handles = Vec::with_capacity(entries.len());
+
+        for (idx, entry) in entries.iter().enumerate() {
+            // Skip native ABI entries (not supported in remote context)
+            if entry.native_abi.is_some() {
+                handles.push(None);
+                continue;
+            }
+
+            if let Some(lang_runtime) = language_runtimes.get(&entry.language) {
+                vm.program.foreign_functions[idx].dynamic_errors =
+                    lang_runtime.has_dynamic_errors();
+
+                let compiled = lang_runtime.compile(
+                    &entry.name,
+                    &entry.body_text,
+                    &entry.param_names,
+                    &entry.param_types,
+                    entry.return_type.as_deref(),
+                    entry.is_async,
+                ).map_err(|e| RemoteCallError {
+                    message: format!("Failed to compile foreign function '{}': {}", entry.name, e),
+                    kind: RemoteErrorKind::RuntimeError,
+                })?;
+                handles.push(Some(crate::executor::ForeignFunctionHandle::Runtime {
+                    runtime: std::sync::Arc::clone(lang_runtime),
+                    compiled,
+                }));
+            } else {
+                return Err(RemoteCallError {
+                    message: format!(
+                        "No language runtime for '{}' on this server. \
+                         Install the {} extension.",
+                        entry.language, entry.language
+                    ),
+                    kind: RemoteErrorKind::RuntimeError,
+                });
+            }
+        }
+        vm.foreign_fn_handles = handles;
+    }
+
+    // 5. Execute — closure or named function (same as execute_inner)
+    let result = if let Some(ref upvalue_data) = request.upvalues {
+        let upvalues: Vec<shape_value::Upvalue> = upvalue_data
+            .iter()
+            .map(|sv| {
+                let nb = serializable_to_nanboxed(sv, store).map_err(|e| RemoteCallError {
+                    message: format!("Failed to deserialize upvalue: {}", e),
+                    kind: RemoteErrorKind::ArgumentError,
+                })?;
+                Ok(shape_value::Upvalue::new(nb))
+            })
+            .collect::<Result<Vec<_>, RemoteCallError>>()?;
+
+        let function_id = request.function_id.ok_or_else(|| RemoteCallError {
+            message: "Closure call requires function_id".to_string(),
+            kind: RemoteErrorKind::FunctionNotFound,
+        })?;
+
+        vm.execute_closure(function_id, upvalues, args, None)
+            .map_err(|e| RemoteCallError {
+                message: e.to_string(),
+                kind: RemoteErrorKind::RuntimeError,
+            })?
+    } else if let Some(func_id) = request.function_id {
+        vm.execute_function_by_id(func_id, args, None)
+            .map_err(|e| RemoteCallError {
+                message: e.to_string(),
+                kind: RemoteErrorKind::RuntimeError,
+            })?
+    } else if let Some(hash) = request.function_hash {
+        let func_id = vm
+            .program()
+            .function_blob_hashes
+            .iter()
+            .enumerate()
+            .find_map(|(idx, maybe_hash)| {
+                if maybe_hash == &Some(hash) {
+                    Some(idx as u16)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| RemoteCallError {
+                message: format!("Function hash not found in program: {}", hash),
+                kind: RemoteErrorKind::FunctionNotFound,
+            })?;
+        vm.execute_function_by_id(func_id, args, None)
+            .map_err(|e| RemoteCallError {
+                message: e.to_string(),
+                kind: RemoteErrorKind::RuntimeError,
+            })?
+    } else {
+        vm.execute_function_by_name(&request.function_name, args, None)
+            .map_err(|e| RemoteCallError {
+                message: e.to_string(),
+                kind: RemoteErrorKind::RuntimeError,
+            })?
+    };
+
+    // 6. Serialize result
     nanboxed_to_serializable(&result, store).map_err(|e| RemoteCallError {
         message: format!("Failed to serialize result: {}", e),
         kind: RemoteErrorKind::RuntimeError,
@@ -1600,8 +1819,11 @@ mod tests {
         let msg = WireMessage::ExecuteResponse(ExecuteResponse {
             request_id: 7,
             success: true,
-            output: Some("42".to_string()),
+            value: WireValue::Number(42.0),
+            stdout: Some("hello\n".to_string()),
             error: None,
+            content_terminal: None,
+            content_html: None,
             diagnostics: vec![WireDiagnostic {
                 severity: "warning".to_string(),
                 message: "unused variable".to_string(),
@@ -1621,7 +1843,8 @@ mod tests {
             WireMessage::ExecuteResponse(resp) => {
                 assert_eq!(resp.request_id, 7);
                 assert!(resp.success);
-                assert_eq!(resp.output.as_deref(), Some("42"));
+                assert!(matches!(resp.value, WireValue::Number(n) if n == 42.0));
+                assert_eq!(resp.stdout.as_deref(), Some("hello\n"));
                 assert!(resp.error.is_none());
                 assert_eq!(resp.diagnostics.len(), 1);
                 assert_eq!(resp.diagnostics[0].severity, "warning");

@@ -698,6 +698,18 @@ impl ShapeEngine {
         }
     }
 
+    /// Return all loaded language runtimes, keyed by language identifier.
+    pub fn language_runtimes(
+        &self,
+    ) -> std::collections::HashMap<String, std::sync::Arc<crate::plugins::language_runtime::PluginLanguageRuntime>>
+    {
+        if let Some(ctx) = self.runtime.persistent_context() {
+            ctx.language_runtimes()
+        } else {
+            std::collections::HashMap::new()
+        }
+    }
+
     /// Invoke one loaded module export via module namespace.
     pub fn invoke_extension_module_nb(
         &self,
