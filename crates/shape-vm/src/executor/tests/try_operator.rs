@@ -36,8 +36,9 @@ fn execute_bytecode_with_vm(
 fn compile_source(source: &str) -> Result<BytecodeProgram, VMError> {
     let mut program =
         parse_program(source).map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
-    crate::module_resolution::prepend_prelude_items(&mut program);
+    let stdlib_names = crate::module_resolution::prepend_prelude_items(&mut program);
     let mut compiler = BytecodeCompiler::new();
+    compiler.stdlib_function_names = stdlib_names;
     compiler.set_source(source);
     let bytecode = compiler
         .compile(&program)

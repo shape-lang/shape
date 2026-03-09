@@ -573,24 +573,45 @@ impl TypeEnvironment {
         );
     }
 
-    fn define_builtin_any(&mut self, name: &str, arity: usize) {
-        self.define_builtin(name, vec![BuiltinTypes::any(); arity], BuiltinTypes::any());
-    }
-
-    /// Add built-in financial analysis functions
+    /// Add built-in functions
     pub fn define_builtin_functions(&mut self) {
         // Core utility functions available without imports
-        self.define_builtin("print", vec![BuiltinTypes::any()], BuiltinTypes::void());
-        self.define_builtin("len", vec![BuiltinTypes::any()], BuiltinTypes::integer());
-        self.define_builtin(
-            "fold",
-            vec![
-                BuiltinTypes::any(),
-                BuiltinTypes::any(),
-                BuiltinTypes::any(),
-            ],
-            BuiltinTypes::any(),
-        );
+        // print: <T>(T) -> void — genuinely accepts any type
+        {
+            let t = TypeVar::new("T".to_string());
+            self.define_polymorphic(
+                "print",
+                vec![t.clone()],
+                vec![Type::Variable(t)],
+                BuiltinTypes::void(),
+            );
+        }
+
+        // len: <T>(T) -> int — works on arrays, strings, hashmaps, etc.
+        {
+            let t = TypeVar::new("T".to_string());
+            self.define_polymorphic(
+                "len",
+                vec![t.clone()],
+                vec![Type::Variable(t)],
+                BuiltinTypes::integer(),
+            );
+        }
+
+        // fold: <T, U>(Array<T>, U, (U, T) -> U) -> U
+        {
+            let t = TypeVar::new("T".to_string());
+            let u = TypeVar::new("U".to_string());
+            let t_ty = Type::Variable(t.clone());
+            let u_ty = Type::Variable(u.clone());
+            let callback = BuiltinTypes::function(vec![u_ty.clone(), t_ty.clone()], u_ty.clone());
+            self.define_polymorphic(
+                "fold",
+                vec![t, u],
+                vec![BuiltinTypes::array(t_ty), u_ty.clone(), callback],
+                u_ty,
+            );
+        }
 
         // HashMap constructor: HashMap() -> HashMap<any, any>
         self.define_builtin(
@@ -700,121 +721,9 @@ impl TypeEnvironment {
         define_try_into_input_poly(self, "__try_into_bool", BuiltinTypes::boolean());
         define_try_into_input_poly(self, "__try_into_string", BuiltinTypes::string());
 
-        // Position management
-        self.define_builtin(
-            "open_position",
-            vec![
-                Type::Concrete(TypeAnnotation::Basic("string".to_string())), // symbol
-                BuiltinTypes::number(),                                      // size
-                Type::Concrete(TypeAnnotation::Basic("string".to_string())), // side
-            ],
-            Type::Concrete(TypeAnnotation::Basic("position".to_string())),
-        );
-
-        self.define_builtin(
-            "close_position",
-            vec![Type::Concrete(TypeAnnotation::Basic(
-                "position".to_string(),
-            ))],
-            BuiltinTypes::void(),
-        );
-
-        // Risk management
-        self.define_builtin(
-            "calculate_position_size",
-            vec![
-                BuiltinTypes::number(), // account_balance
-                BuiltinTypes::number(), // risk_percent
-                BuiltinTypes::number(), // stop_loss
-            ],
-            BuiltinTypes::number(),
-        );
-
-        // Market data access
-        self.define_builtin(
-            "get_rows",
-            vec![
-                Type::Concrete(TypeAnnotation::Basic("string".to_string())), // symbol
-                Type::Concrete(TypeAnnotation::Basic("timeframe".to_string())),
-                BuiltinTypes::number(), // count
-            ],
-            BuiltinTypes::array(BuiltinTypes::row()),
-        );
-
-        // Intrinsics mirrored from VM helper dispatch (typed loosely in the
-        // shared analyzer to avoid undefined-function false positives).
-        for name in ["map", "__intrinsic_map", "filter", "__intrinsic_filter"] {
-            self.define_builtin_any(name, 2);
-        }
-        for name in ["reduce", "__intrinsic_reduce"] {
-            self.define_builtin_any(name, 3);
-        }
-
-        for name in [
-            "__intrinsic_sum",
-            "__intrinsic_mean",
-            "__intrinsic_min",
-            "__intrinsic_max",
-            "__intrinsic_std",
-            "__intrinsic_variance",
-            "__intrinsic_median",
-            "__intrinsic_random_seed",
-            "__intrinsic_random_array",
-            "__intrinsic_dist_exponential",
-            "__intrinsic_dist_poisson",
-            "__intrinsic_shift",
-            "__intrinsic_diff",
-            "__intrinsic_pct_change",
-            "__intrinsic_cumsum",
-            "__intrinsic_cumprod",
-            "__intrinsic_vec_abs",
-            "__intrinsic_vec_sqrt",
-            "__intrinsic_vec_ln",
-            "__intrinsic_vec_exp",
-            "__intrinsic_snapshot",
-            "__intrinsic_rolling_sum",
-            "__intrinsic_rolling_mean",
-            "__intrinsic_rolling_std",
-            "__intrinsic_rolling_min",
-            "__intrinsic_rolling_max",
-            "__intrinsic_ema",
-        ] {
-            self.define_builtin_any(name, 1);
-        }
-
-        for name in [
-            "__intrinsic_correlation",
-            "__intrinsic_covariance",
-            "__intrinsic_percentile",
-            "__intrinsic_random_int",
-            "__intrinsic_random_normal",
-            "__intrinsic_dist_uniform",
-            "__intrinsic_dist_lognormal",
-            "__intrinsic_random_walk",
-            "__intrinsic_fillna",
-            "__intrinsic_vec_add",
-            "__intrinsic_vec_sub",
-            "__intrinsic_vec_mul",
-            "__intrinsic_vec_div",
-            "__intrinsic_vec_max",
-            "__intrinsic_vec_min",
-        ] {
-            self.define_builtin_any(name, 2);
-        }
-
-        for name in [
-            "__intrinsic_dist_sample_n",
-            "__intrinsic_vec_select",
-            "__intrinsic_clip",
-            "__intrinsic_linear_recurrence",
-            "__intrinsic_brownian_motion",
-        ] {
-            self.define_builtin_any(name, 3);
-        }
-
-        self.define_builtin_any("__intrinsic_gbm", 5);
-        self.define_builtin_any("__intrinsic_ou_process", 6);
-        self.define_builtin_any("__intrinsic_random", 0);
+        // Note: trading builtins (open_position, close_position, etc.) removed — use packages.
+        // Note: __intrinsic_* type registrations removed — stdlib has allow_internal_builtins.
+        // Note: top-level map/filter/reduce removed — use method syntax: arr.map(fn).
     }
 
     /// Define a variable in the current scope

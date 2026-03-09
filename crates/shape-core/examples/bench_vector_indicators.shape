@@ -1,24 +1,26 @@
-// Benchmark: Intrinsic vs Vector SMA
+// Benchmark: SMA implementations
+import { rolling_mean, rolling_sum } from std::core::utils::rolling
 
-// Inline reference implementation using stdlib intrinsic
+// Intrinsic-based SMA via stdlib wrapper
 function bench_sma(data, period) {
-    return __intrinsic_rolling_mean(data, period)
+    return rolling_mean(data, period)
 }
 
-// Vector implementation using vector operations
-function bench_sma_vector(data, period) {
-    // Calculate cumulative sum
-    let cs = __intrinsic_cumsum(data);
-
-    // Shift cumulative sum by period.
-    // Fill with 0.0 so that subtraction works for the first 'period' elements
-    let cs_shifted = __intrinsic_fillna(__intrinsic_shift(cs, period), 0.0);
-
-    // Calculate sum of the sliding window
-    let window_sum = __intrinsic_vec_sub(cs, cs_shifted);
-
-    // Divide by period to get average
-    return __intrinsic_vec_div(window_sum, period)
+// Manual SMA implementation
+function bench_sma_manual(data, period) {
+    var result = []
+    for i in 0..data.len() {
+        if i < period - 1 {
+            result.push(0.0 / 0.0)  // NaN for incomplete windows
+        } else {
+            var sum = 0.0
+            for j in 0..period {
+                sum = sum + data[i - j]
+            }
+            result.push(sum / period)
+        }
+    }
+    result
 }
 
 // Test with a small series
@@ -26,9 +28,9 @@ let prices = series([100.0, 102.0, 104.0, 103.0, 105.0, 107.0, 106.0, 108.0, 110
 
 print("Testing SMA on 10-point series...");
 let sma_result = bench_sma(prices, 3);
-let sma_vec_result = bench_sma_vector(prices, 3);
+let sma_manual_result = bench_sma_manual([100.0, 102.0, 104.0, 103.0, 105.0, 107.0, 106.0, 108.0, 110.0, 109.0], 3);
 
-print("Intrinsic SMA(3):", sma_result);
-print("Vector SMA(3):", sma_vec_result);
+print("Stdlib SMA(3):", sma_result);
+print("Manual SMA(3):", sma_manual_result);
 
 "Benchmark complete";

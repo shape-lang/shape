@@ -1,18 +1,18 @@
-// Test the first intrinsic - __intrinsic_sum
-// This validates end-to-end integration
+// Test sum via stdlib wrapper
+import { sum } from std::core::math
 
 // Create test data
 let data = series([1.0, 2.0, 3.0, 4.0, 5.0]);
 
-// Call intrinsic directly
-let total = __intrinsic_sum(data);
+// Call via stdlib
+let total = sum(data);
 
 // Expected: 15.0
 print("Sum of [1,2,3,4,5]:", total);
 
 // Verify result
 {
-    test: "intrinsic_sum",
+    test: "sum",
     input: "[1, 2, 3, 4, 5]",
     result: total,
     expected: 15.0,

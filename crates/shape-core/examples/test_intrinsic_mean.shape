@@ -1,13 +1,14 @@
-// Test __intrinsic_mean
+// Test mean via stdlib wrapper
+import { mean } from std::core::math
 
 let data = series([10.0, 20.0, 30.0, 40.0, 50.0]);
 
-let average = __intrinsic_mean(data);
+let average = mean(data);
 
 print("Mean of [10,20,30,40,50]:", average);
 
 {
-    test: "intrinsic_mean",
+    test: "mean",
     result: average,
     expected: 30.0,
     passed: average == 30.0

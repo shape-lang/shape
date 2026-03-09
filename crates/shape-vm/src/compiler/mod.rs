@@ -614,7 +614,7 @@ pub struct BytecodeCompiler {
 
     /// Function names that originate from `std::*` modules.
     /// Functions in this set are allowed to call `__*` internal builtins.
-    pub(crate) stdlib_function_names: HashSet<String>,
+    pub stdlib_function_names: HashSet<String>,
 
     /// Per-function flag: when true, `get_builtin_function` resolves `__*` names.
     /// Toggled during compilation based on `stdlib_function_names` membership.

@@ -3955,4 +3955,38 @@ mod tests {
             msg
         );
     }
+
+    #[test]
+    fn test_intrinsic_builtin_blocked_from_user_code() {
+        // Verify that __intrinsic_* and __json_* builtins are gated from user code.
+        // Note: __into_*/__try_into_* are NOT gated (compiler-generated for type assertions).
+        for intrinsic in &[
+            "__intrinsic_sum",
+            "__intrinsic_mean",
+            "__json_object_get",
+        ] {
+            let code = format!(
+                r#"
+                fn test() {{
+                    let x = {}([1, 2, 3])
+                    x
+                }}
+            "#,
+                intrinsic
+            );
+            let mut compiler = BytecodeCompiler::new();
+            let program = shape_ast::parser::parse_program(&code).unwrap();
+            let err = compiler.compile(&program).expect_err(&format!(
+                "{} should be blocked from user code",
+                intrinsic
+            ));
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains(&format!("Undefined function: {}", intrinsic)),
+                "Expected undefined function error for {}, got: {}",
+                intrinsic,
+                msg
+            );
+        }
+    }
 }

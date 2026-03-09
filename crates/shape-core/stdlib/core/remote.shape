@@ -78,7 +78,7 @@ builtin fn ping(addr: string) -> Result<HashMap<string, _>, string>;
 /// # Returns
 ///
 /// `Ok(value)` with the function's return value, or `Err(message)` on failure.
-builtin fn __call(addr: string, fn_ref: Function, args: Array<_>) -> Result<_, string>;
+builtin fn __call(addr: string, fn_ref: _, args: Array<_>) -> Result<_, string>;
 
 /// Ship execution to a remote `shape serve` node.
 ///

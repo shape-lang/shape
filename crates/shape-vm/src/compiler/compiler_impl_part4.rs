@@ -434,7 +434,9 @@ impl BytecodeCompiler {
     pub fn compile_module_ast(
         module_ast: &Program,
     ) -> Result<(BytecodeProgram, HashMap<String, usize>)> {
-        let compiler = BytecodeCompiler::new();
+        let mut compiler = BytecodeCompiler::new();
+        // Stdlib modules need access to __* builtins (intrinsics, into, etc.)
+        compiler.allow_internal_builtins = true;
         let bytecode = compiler.compile(module_ast)?;
 
         // Build name → function index mapping for exported functions

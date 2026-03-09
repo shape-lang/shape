@@ -48,11 +48,13 @@ impl ProgramExecutor for JITExecutor {
         // Merge with main program
         let mut merged_program = imported_program;
         merged_program.items.extend(program.items.clone());
-        shape_vm::module_resolution::prepend_prelude_items(&mut merged_program);
+        let stdlib_names =
+            shape_vm::module_resolution::prepend_prelude_items(&mut merged_program);
 
         // Compile to bytecode (with source text if available for better error messages)
         let bytecode_compile_start = Instant::now();
         let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
         compiler.register_known_bindings(&known_bindings);
         let mut bytecode = if let Some(source) = &source_for_compilation {
             compiler.compile_with_source(&merged_program, source)

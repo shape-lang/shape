@@ -1070,9 +1070,15 @@ impl BytecodeCompiler {
 
     /// Get built-in function by name
     pub(super) fn get_builtin_function(&self, name: &str) -> Option<BuiltinFunction> {
-        // Native pointer builtins (`__native_*`) are only accessible from stdlib
-        // functions. User code must use the safe wrappers in std::core::native.
-        if name.starts_with("__native_") && !self.allow_internal_builtins {
+        // Internal builtins are only accessible from stdlib functions.
+        // User code must use the safe wrappers (e.g. std::core::math).
+        // Note: __into_* and __try_into_* are NOT gated — the compiler generates
+        // calls to them for type assertions (x as int, x try as int).
+        if !self.allow_internal_builtins
+            && (name.starts_with("__native_")
+                || name.starts_with("__intrinsic_")
+                || name.starts_with("__json_"))
+        {
             return None;
         }
         match name {
@@ -1127,21 +1133,9 @@ impl BytecodeCompiler {
             "acos" => Some(BuiltinFunction::Acos),
             "atan" => Some(BuiltinFunction::Atan),
             "stddev" => Some(BuiltinFunction::StdDev),
-            "slice" => Some(BuiltinFunction::Slice),
-            "push" => Some(BuiltinFunction::Push),
-            "pop" => Some(BuiltinFunction::Pop),
-            "first" => Some(BuiltinFunction::First),
-            "last" => Some(BuiltinFunction::Last),
-            "zip" => Some(BuiltinFunction::Zip),
-            "filled" => Some(BuiltinFunction::Filled),
-            "map" | "__intrinsic_map" => Some(BuiltinFunction::Map),
-            "filter" | "__intrinsic_filter" => Some(BuiltinFunction::Filter),
-            "reduce" | "__intrinsic_reduce" => Some(BuiltinFunction::Reduce),
-            "forEach" => Some(BuiltinFunction::ForEach),
-            "find" => Some(BuiltinFunction::Find),
-            "findIndex" => Some(BuiltinFunction::FindIndex),
-            "some" => Some(BuiltinFunction::Some),
-            "every" => Some(BuiltinFunction::Every),
+            "__intrinsic_map" => Some(BuiltinFunction::Map),
+            "__intrinsic_filter" => Some(BuiltinFunction::Filter),
+            "__intrinsic_reduce" => Some(BuiltinFunction::Reduce),
             "print" => Some(BuiltinFunction::Print),
             "format" => Some(BuiltinFunction::Format),
             "len" | "count" => Some(BuiltinFunction::Len),
@@ -1181,12 +1175,12 @@ impl BytecodeCompiler {
             "fold" => Some(BuiltinFunction::ControlFold),
 
             // Math intrinsics
-            "__intrinsic_sum" | "sum" => Some(BuiltinFunction::IntrinsicSum),
-            "__intrinsic_mean" | "mean" => Some(BuiltinFunction::IntrinsicMean),
+            "__intrinsic_sum" => Some(BuiltinFunction::IntrinsicSum),
+            "__intrinsic_mean" => Some(BuiltinFunction::IntrinsicMean),
             "__intrinsic_min" => Some(BuiltinFunction::IntrinsicMin),
             "__intrinsic_max" => Some(BuiltinFunction::IntrinsicMax),
-            "__intrinsic_std" | "std" => Some(BuiltinFunction::IntrinsicStd),
-            "__intrinsic_variance" | "variance" => Some(BuiltinFunction::IntrinsicVariance),
+            "__intrinsic_std" => Some(BuiltinFunction::IntrinsicStd),
+            "__intrinsic_variance" => Some(BuiltinFunction::IntrinsicVariance),
 
             // Random intrinsics
             "__intrinsic_random" => Some(BuiltinFunction::IntrinsicRandom),
