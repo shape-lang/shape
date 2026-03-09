@@ -71,6 +71,11 @@ impl BytecodeCompiler {
         // Track whether __original__ alias is active so we can clean it up.
         let has_original_alias = self.function_aliases.contains_key("__original__");
 
+        // Enable __* builtin access for stdlib functions (or preserve if globally enabled).
+        let saved_allow_internal = self.allow_internal_builtins;
+        self.allow_internal_builtins =
+            saved_allow_internal || self.stdlib_function_names.contains(&effective_def.name);
+
         // Check for annotation-based wrapping BEFORE compiling
         let annotations = self.find_compiled_annotations(&effective_def);
         if annotations.len() == 1 {
@@ -83,6 +88,9 @@ impl BytecodeCompiler {
         } else {
             self.compile_function_body(&effective_def)?;
         }
+
+        // Restore previous flag (safe for nested compilation).
+        self.allow_internal_builtins = saved_allow_internal;
 
         // Clean up __original__ alias after the replacement body is compiled.
         if has_original_alias {
@@ -98,6 +106,9 @@ impl BytecodeCompiler {
         &mut self,
         def: &shape_ast::ast::ForeignFunctionDef,
     ) -> Result<()> {
+        // Validate `out` params: only allowed on extern C, must be ptr, no const/&/default.
+        self.validate_out_params(def)?;
+
         // Foreign function bodies are opaque — require explicit type annotations.
         // Dynamic-language runtimes require Result<T> returns; native ABI
         // declarations (`extern "C"`) do not.
@@ -136,6 +147,17 @@ impl BytecodeCompiler {
                 location: None,
             })?;
 
+        // Determine out-param indices.
+        let out_param_indices: Vec<usize> = def
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_out)
+            .map(|(i, _)| i)
+            .collect();
+        let has_out_params = !out_param_indices.is_empty();
+        let non_out_count = def.params.len() - out_param_indices.len();
+
         // Create the ForeignFunctionEntry
         let param_names: Vec<String> = def
             .params
@@ -153,7 +175,7 @@ impl BytecodeCompiler {
             })
             .collect();
         let return_type = def.return_type.as_ref().map(|t| t.to_type_string());
-        let arg_count = def.params.len() as u16;
+        let total_c_arg_count = def.params.len() as u16;
 
         let native_abi = if let Some(native) = &def.native_abi {
             let signature = self.build_native_c_signature(def)?;
@@ -226,7 +248,7 @@ impl BytecodeCompiler {
             param_names: param_names.clone(),
             param_types,
             return_type,
-            arg_count,
+            arg_count: total_c_arg_count,
             is_async: def.is_async,
             dynamic_errors: dynamic_language,
             return_type_schema_id,
@@ -253,35 +275,72 @@ impl BytecodeCompiler {
         // Record entry point of the stub function body
         let entry_point = self.program.instructions.len();
 
-        // Emit stub function body:
-        //   LoadLocal(0), LoadLocal(1), ..., LoadLocal(N-1)
-        //   PushConst(N)  -- push arg count
-        //   CallForeign(foreign_idx)
-        //   ReturnValue
-        for i in 0..arg_count {
-            self.emit(Instruction::new(OpCode::LoadLocal, Some(Operand::Local(i))));
+        if has_out_params {
+            self.emit_out_param_stub(def, func_idx, foreign_idx, &out_param_indices)?;
+        } else {
+            // Simple stub: LoadLocal(0..N), PushConst(N), CallForeign, ReturnValue
+            let arg_count = total_c_arg_count;
+            for i in 0..arg_count {
+                self.emit(Instruction::new(OpCode::LoadLocal, Some(Operand::Local(i))));
+            }
+            let arg_count_const = self
+                .program
+                .add_constant(Constant::Number(arg_count as f64));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(arg_count_const)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::CallForeign,
+                Some(Operand::ForeignFunction(foreign_idx)),
+            ));
+            self.emit(Instruction::simple(OpCode::ReturnValue));
         }
 
-        let arg_count_const = self
-            .program
-            .add_constant(Constant::Number(arg_count as f64));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(arg_count_const)),
-        ));
-        self.emit(Instruction::new(
-            OpCode::CallForeign,
-            Some(Operand::ForeignFunction(foreign_idx)),
-        ));
-        self.emit(Instruction::simple(OpCode::ReturnValue));
-
         // Update function metadata before finalizing blob.
+        let caller_visible_arity = if has_out_params {
+            non_out_count as u16
+        } else {
+            total_c_arg_count
+        };
         let func = &mut self.program.functions[func_idx];
         func.entry_point = entry_point;
-        func.locals_count = arg_count;
+        func.arity = caller_visible_arity;
+        if has_out_params {
+            // locals_count covers: caller args + cells + c_return + out values
+            let out_count = out_param_indices.len() as u16;
+            func.locals_count = non_out_count as u16 + out_count + 1 + out_count;
+        } else {
+            func.locals_count = total_c_arg_count;
+        }
         let (ref_params, ref_mutates) = Self::native_param_reference_contract(def);
-        func.ref_params = ref_params;
-        func.ref_mutates = ref_mutates;
+        if has_out_params {
+            // Filter ref_params/ref_mutates to only include non-out params
+            let mut filtered_ref_params = Vec::new();
+            let mut filtered_ref_mutates = Vec::new();
+            for (i, (rp, rm)) in ref_params.iter().zip(ref_mutates.iter()).enumerate() {
+                if !out_param_indices.contains(&i) {
+                    filtered_ref_params.push(*rp);
+                    filtered_ref_mutates.push(*rm);
+                }
+            }
+            func.ref_params = filtered_ref_params;
+            func.ref_mutates = filtered_ref_mutates;
+        } else {
+            func.ref_params = ref_params;
+            func.ref_mutates = ref_mutates;
+        }
+        // Update param_names to only include non-out params for caller-visible signature
+        if has_out_params {
+            let visible_names: Vec<String> = def
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !out_param_indices.contains(i))
+                .flat_map(|(_, p)| p.get_identifiers())
+                .collect();
+            func.param_names = visible_names;
+        }
 
         // Finalize and register the extern stub blob.
         self.finalize_current_blob(func_idx);
@@ -304,6 +363,244 @@ impl BytecodeCompiler {
             Some(Operand::ModuleBinding(binding_idx)),
         ));
 
+        Ok(())
+    }
+
+    /// Validate `out` parameter constraints on a foreign function definition.
+    fn validate_out_params(&self, def: &shape_ast::ast::ForeignFunctionDef) -> Result<()> {
+        for param in &def.params {
+            if !param.is_out {
+                continue;
+            }
+            let param_name = param.simple_name().unwrap_or("_");
+
+            // out params only valid on extern C functions
+            if !def.is_native_abi() {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Function '{}': `out` parameter '{}' is only valid on `extern C` declarations",
+                        def.name, param_name
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                });
+            }
+
+            // Must have type ptr
+            let is_ptr = param
+                .type_annotation
+                .as_ref()
+                .map(|ann| matches!(ann, shape_ast::ast::TypeAnnotation::Basic(n) if n == "ptr"))
+                .unwrap_or(false);
+            if !is_ptr {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Function '{}': `out` parameter '{}' must have type `ptr`",
+                        def.name, param_name
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                });
+            }
+
+            // Cannot combine with const or &
+            if param.is_const {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Function '{}': `out` parameter '{}' cannot be `const`",
+                        def.name, param_name
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                });
+            }
+            if param.is_reference {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Function '{}': `out` parameter '{}' cannot be a reference (`&`)",
+                        def.name, param_name
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                });
+            }
+
+            // Cannot have default value
+            if param.default_value.is_some() {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Function '{}': `out` parameter '{}' cannot have a default value",
+                        def.name, param_name
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit the out-param stub: allocate cells, call C, read back, free cells, build tuple.
+    ///
+    /// Local layout:
+    ///   [0..N)           = caller-visible (non-out) params
+    ///   [N..N+M)         = cells for out params
+    ///   [N+M]            = C return value
+    ///   [N+M+1..N+2M+1) = out param read-back values
+    fn emit_out_param_stub(
+        &mut self,
+        def: &shape_ast::ast::ForeignFunctionDef,
+        _func_idx: usize,
+        foreign_idx: u16,
+        out_param_indices: &[usize],
+    ) -> Result<()> {
+        use crate::bytecode::BuiltinFunction;
+
+        let out_count = out_param_indices.len() as u16;
+        let non_out_count = (def.params.len() - out_count as usize) as u16;
+        let total_c_args = def.params.len() as u16;
+
+        // Locals: [caller_args(0..N), cells(N..N+M), c_ret(N+M), out_vals(N+M+1..N+2M+1)]
+        let cell_base = non_out_count;
+        let c_ret_local = non_out_count + out_count;
+        let out_val_base = c_ret_local + 1;
+
+        // Helper to emit a builtin call with arg count
+        macro_rules! emit_builtin {
+            ($builtin:expr, $argc:expr) => {{
+                let argc_const = self
+                    .program
+                    .add_constant(Constant::Number($argc as f64));
+                self.emit(Instruction::new(
+                    OpCode::PushConst,
+                    Some(Operand::Const(argc_const)),
+                ));
+                self.emit(Instruction::new(
+                    OpCode::BuiltinCall,
+                    Some(Operand::Builtin($builtin)),
+                ));
+            }};
+        }
+
+        // 1. Allocate and initialize cells for each out param
+        for i in 0..out_count {
+            // ptr_new_cell() -> cell
+            emit_builtin!(BuiltinFunction::NativePtrNewCell, 0);
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(cell_base + i)),
+            ));
+
+            // ptr_write(cell, 0) — initialize to 0
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(cell_base + i)),
+            ));
+            let zero_const = self.program.add_constant(Constant::Number(0.0));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(zero_const)),
+            ));
+            emit_builtin!(BuiltinFunction::NativePtrWritePtr, 2);
+        }
+
+        // 2. Push C call args in the original parameter order.
+        //    Non-out params come from caller locals, out params use cell addresses.
+        let mut out_idx = 0u16;
+        for (i, param) in def.params.iter().enumerate() {
+            if param.is_out {
+                // Load the cell address for this out param
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(cell_base + out_idx)),
+                ));
+                out_idx += 1;
+            } else {
+                // Load the caller-visible arg. We need to compute the caller-local index.
+                let caller_local = def.params[..i]
+                    .iter()
+                    .filter(|p| !p.is_out)
+                    .count() as u16;
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(caller_local)),
+                ));
+            }
+        }
+
+        // 3. Call foreign function with total C arg count
+        let c_arg_count_const = self
+            .program
+            .add_constant(Constant::Number(total_c_args as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(c_arg_count_const)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::CallForeign,
+            Some(Operand::ForeignFunction(foreign_idx)),
+        ));
+
+        // Store C return value
+        self.emit(Instruction::new(
+            OpCode::StoreLocal,
+            Some(Operand::Local(c_ret_local)),
+        ));
+
+        // 4. Read back out param values from cells
+        for i in 0..out_count {
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(cell_base + i)),
+            ));
+            emit_builtin!(BuiltinFunction::NativePtrReadPtr, 1);
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(out_val_base + i)),
+            ));
+        }
+
+        // 5. Free cells
+        for i in 0..out_count {
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(cell_base + i)),
+            ));
+            emit_builtin!(BuiltinFunction::NativePtrFreeCell, 1);
+        }
+
+        // 6. Build return value
+        let is_void_return = def.return_type.as_ref().map_or(false, |ann| {
+            matches!(ann, shape_ast::ast::TypeAnnotation::Basic(n) if n == "void")
+        });
+
+        if out_count == 1 && is_void_return {
+            // Single out param + void return → return the out value directly
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(out_val_base)),
+            ));
+        } else {
+            // Build tuple: (return_val, out_val1, out_val2, ...)
+            // Push return value first (unless void)
+            let mut tuple_size = out_count;
+            if !is_void_return {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(c_ret_local)),
+                ));
+                tuple_size += 1;
+            }
+            // Push out values
+            for i in 0..out_count {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(out_val_base + i)),
+                ));
+            }
+            // Create array (used as tuple)
+            self.emit(Instruction::new(
+                OpCode::NewArray,
+                Some(Operand::Count(tuple_size)),
+            ));
+        }
+
+        self.emit(Instruction::simple(OpCode::ReturnValue));
         Ok(())
     }
 
@@ -2526,7 +2823,8 @@ mod tests {
 
     fn eval(code: &str) -> ValueWord {
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
-        let compiler = BytecodeCompiler::new();
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
         let bytecode = compiler.compile(&program).expect("compile failed");
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(bytecode);
@@ -2536,7 +2834,8 @@ mod tests {
     fn compiles(code: &str) -> Result<crate::bytecode::BytecodeProgram, String> {
         let program =
             shape_ast::parser::parse_program(code).map_err(|e| format!("parse: {}", e))?;
-        let compiler = BytecodeCompiler::new();
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
         compiler
             .compile(&program)
             .map_err(|e| format!("compile: {}", e))
@@ -3431,5 +3730,83 @@ mod tests {
             }
         "#;
         compiles(code).expect("duckdb package-style native code should compile");
+    }
+
+    #[test]
+    fn test_out_param_extern_c_compiles() {
+        let code = r#"
+            extern C fn duckdb_open(path: string, out out_db: ptr) -> i32 from "duckdb";
+            extern C fn duckdb_connect(db: ptr, out out_conn: ptr) -> i32 from "duckdb";
+
+            fn test() {
+                let [status, db] = duckdb_open("test.db")
+                let [s2, conn] = duckdb_connect(db)
+                conn
+            }
+        "#;
+        compiles(code).expect("out param extern C should compile");
+    }
+
+    #[test]
+    fn test_out_param_void_return_single_out() {
+        let code = r#"
+            extern C fn duckdb_close(out db_p: ptr) -> void from "duckdb";
+
+            fn test() {
+                let db = duckdb_close()
+                db
+            }
+        "#;
+        // Single out + void return → return type is out value directly
+        compiles(code).expect("single out param with void return should compile");
+    }
+
+    #[test]
+    fn test_out_param_not_allowed_on_non_extern_c() {
+        let code = r#"
+            fn python test(out x: ptr) -> i32 { "pass" }
+        "#;
+        let err = compiles(code).expect_err("out params should not work on non-extern-C");
+        assert!(
+            err.contains("`out` parameter") && err.contains("only valid on `extern C`"),
+            "Expected out-param validation error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_out_param_must_be_ptr_type() {
+        let code = r#"
+            extern C fn foo(out x: i32) -> void from "lib";
+        "#;
+        let err = compiles(code).expect_err("out params must be ptr type");
+        assert!(
+            err.contains("must have type `ptr`"),
+            "Expected ptr type error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_native_builtin_blocked_from_user_code() {
+        // Verify that __native_ptr_new_cell is not accessible from user code.
+        let code = r#"
+            fn test() {
+                let cell = __native_ptr_new_cell()
+                cell
+            }
+        "#;
+        let mut compiler = BytecodeCompiler::new();
+        // Do NOT set allow_internal_builtins — simulates user code
+        let program = shape_ast::parser::parse_program(code).unwrap();
+        let err = compiler
+            .compile(&program)
+            .expect_err("__native_* should be blocked from user code");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Undefined function: __native_ptr_new_cell"),
+            "Expected undefined function error, got: {}",
+            msg
+        );
     }
 }

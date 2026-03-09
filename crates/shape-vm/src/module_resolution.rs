@@ -46,6 +46,27 @@ pub(crate) fn should_include_item(item: &Item, names: &std::collections::HashSet
     }
 }
 
+/// Extract function names from a list of AST items.
+pub(crate) fn collect_function_names_from_items(items: &[Item]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for item in items {
+        match item {
+            Item::Function(func_def, _) => {
+                names.insert(func_def.name.clone());
+            }
+            Item::Export(export, _) => {
+                if let ExportItem::Function(f) = &export.item {
+                    names.insert(f.name.clone());
+                } else if let ExportItem::ForeignFunction(f) = &export.item {
+                    names.insert(f.name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 /// Prepend fully-resolved prelude module AST items into the program.
 ///
 /// Loads `std::core::prelude`, parses its import statements to discover which
@@ -56,7 +77,10 @@ pub(crate) fn should_include_item(item: &Item, names: &std::collections::HashSet
 ///
 /// The resolved prelude is cached globally via `OnceLock` so parsing + loading
 /// happens only once per process.
-pub fn prepend_prelude_items(program: &mut Program) {
+///
+/// Returns the set of function names originating from `std::*` modules
+/// (used to gate `__*` internal builtin access).
+pub fn prepend_prelude_items(program: &mut Program) -> std::collections::HashSet<String> {
     use shape_ast::ast::ImportItems;
     use std::sync::OnceLock;
 
@@ -64,20 +88,21 @@ pub fn prepend_prelude_items(program: &mut Program) {
     for item in &program.items {
         if let Item::Import(import_stmt, _) = item {
             if import_stmt.from == "std::core::prelude" || import_stmt.from == "std::prelude" {
-                return;
+                return std::collections::HashSet::new();
             }
         }
     }
 
-    static RESOLVED_PRELUDE: OnceLock<Vec<Item>> = OnceLock::new();
+    static RESOLVED_PRELUDE: OnceLock<(Vec<Item>, std::collections::HashSet<String>)> =
+        OnceLock::new();
 
-    let items = RESOLVED_PRELUDE.get_or_init(|| {
+    let (items, stdlib_names) = RESOLVED_PRELUDE.get_or_init(|| {
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
 
         // Load the prelude module to discover which modules it imports
         let prelude = match loader.load_module("std::core::prelude") {
             Ok(m) => m,
-            Err(_) => return Vec::new(),
+            Err(_) => return (Vec::new(), std::collections::HashSet::new()),
         };
 
         let mut all_items = Vec::new();
@@ -113,7 +138,8 @@ pub fn prepend_prelude_items(program: &mut Program) {
             }
         }
 
-        all_items
+        let stdlib_names = collect_function_names_from_items(&all_items);
+        (all_items, stdlib_names)
     });
 
     if !items.is_empty() {
@@ -121,6 +147,8 @@ pub fn prepend_prelude_items(program: &mut Program) {
         prelude_items.extend(std::mem::take(&mut program.items));
         program.items = prelude_items;
     }
+
+    stdlib_names.clone()
 }
 
 impl BytecodeExecutor {
@@ -266,59 +294,84 @@ impl BytecodeExecutor {
         }
     }
 
-    pub(crate) fn append_imported_module_items(&self, program: &mut Program) {
+    /// Inline AST items from imported modules into the program.
+    ///
+    /// Uses an iterative fixed-point loop to resolve transitive imports
+    /// (imports within inlined module items).
+    ///
+    /// Returns the set of function names originating from `std::*` modules.
+    pub(crate) fn append_imported_module_items(
+        &self,
+        program: &mut Program,
+    ) -> std::collections::HashSet<String> {
         use shape_ast::ast::ImportItems;
-        let mut module_items = Vec::new();
         let mut seen_paths = std::collections::HashSet::new();
+        let mut stdlib_names = std::collections::HashSet::new();
 
-        for item in &program.items {
-            let Item::Import(import_stmt, _) = item else {
-                continue;
-            };
-            let module_path = import_stmt.from.as_str();
-            if module_path.is_empty() || !seen_paths.insert(module_path.to_string()) {
-                continue;
-            }
+        loop {
+            let mut module_items = Vec::new();
+            let mut found_new = false;
 
-            // Build filter from Named imports
-            let named_filter: Option<std::collections::HashSet<&str>> =
-                match &import_stmt.items {
-                    ImportItems::Named(specs) => {
-                        Some(specs.iter().map(|s| s.name.as_str()).collect())
-                    }
-                    ImportItems::Namespace { .. } => None,
+            for item in &program.items {
+                let Item::Import(import_stmt, _) = item else {
+                    continue;
                 };
+                let module_path = import_stmt.from.as_str();
+                if module_path.is_empty() || !seen_paths.insert(module_path.to_string()) {
+                    continue;
+                }
+                found_new = true;
+                let is_std = module_path.starts_with("std::");
 
-            let ast_items: Option<Vec<Item>> =
-                if let Some(loader) = self.module_loader.as_ref()
-                    && let Some(module) = loader.get_module(module_path)
-                {
-                    Some(module.ast.items.clone())
-                } else if let Some(source) = self.virtual_modules.get(module_path)
-                    && let Ok(parsed) = parse_program(source)
-                {
-                    Some(parsed.items)
-                } else {
-                    None
-                };
-
-            if let Some(items) = ast_items {
-                if let Some(ref names) = named_filter {
-                    for ast_item in items {
-                        if should_include_item(&ast_item, names) {
-                            module_items.push(ast_item);
+                // Build filter from Named imports
+                let named_filter: Option<std::collections::HashSet<&str>> =
+                    match &import_stmt.items {
+                        ImportItems::Named(specs) => {
+                            Some(specs.iter().map(|s| s.name.as_str()).collect())
                         }
+                        ImportItems::Namespace { .. } => None,
+                    };
+
+                let ast_items: Option<Vec<Item>> =
+                    if let Some(loader) = self.module_loader.as_ref()
+                        && let Some(module) = loader.get_module(module_path)
+                    {
+                        Some(module.ast.items.clone())
+                    } else if let Some(source) = self.virtual_modules.get(module_path)
+                        && let Ok(parsed) = parse_program(source)
+                    {
+                        Some(parsed.items)
+                    } else {
+                        None
+                    };
+
+                if let Some(items) = ast_items {
+                    if is_std {
+                        stdlib_names.extend(collect_function_names_from_items(&items));
                     }
-                } else {
-                    module_items.extend(items);
+                    if let Some(ref names) = named_filter {
+                        for ast_item in items {
+                            if should_include_item(&ast_item, names) {
+                                module_items.push(ast_item);
+                            }
+                        }
+                    } else {
+                        module_items.extend(items);
+                    }
                 }
             }
+
+            if !module_items.is_empty() {
+                module_items.extend(std::mem::take(&mut program.items));
+                program.items = module_items;
+            }
+
+            if !found_new {
+                break;
+            }
         }
 
-        if !module_items.is_empty() {
-            module_items.extend(std::mem::take(&mut program.items));
-            program.items = module_items;
-        }
+        stdlib_names
     }
 
     /// Create a Program from imported functions in ModuleBindingRegistry

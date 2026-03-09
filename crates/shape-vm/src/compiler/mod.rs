@@ -611,6 +611,14 @@ pub struct BytecodeCompiler {
     /// Used by match exhaustiveness checking to fall back to type annotations
     /// when the type inference engine cannot resolve a parameter's type.
     pub(crate) current_function_params: Vec<shape_ast::ast::FunctionParameter>,
+
+    /// Function names that originate from `std::*` modules.
+    /// Functions in this set are allowed to call `__*` internal builtins.
+    pub(crate) stdlib_function_names: HashSet<String>,
+
+    /// Per-function flag: when true, `get_builtin_function` resolves `__*` names.
+    /// Toggled during compilation based on `stdlib_function_names` membership.
+    pub(crate) allow_internal_builtins: bool,
 }
 
 impl Default for BytecodeCompiler {

@@ -399,10 +399,12 @@ impl BytecodeExecutor {
 
         let mut merged_program = imported_program;
         merged_program.items.extend(program.items.clone());
-        crate::module_resolution::prepend_prelude_items(&mut merged_program);
-        self.append_imported_module_items(&mut merged_program);
+        let mut stdlib_names =
+            crate::module_resolution::prepend_prelude_items(&mut merged_program);
+        stdlib_names.extend(self.append_imported_module_items(&mut merged_program));
 
         let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
         compiler.register_known_bindings(&known_bindings);
 
         if !self.extensions.is_empty() {
@@ -555,10 +557,12 @@ impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
         };
 
         // Inject prelude and resolve imports
-        crate::module_resolution::prepend_prelude_items(&mut program);
+        let stdlib_names =
+            crate::module_resolution::prepend_prelude_items(&mut program);
 
         // Compile and execute
-        let compiler = BytecodeCompiler::new();
+        let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
         let bytecode = compiler.compile(&program)?;
 
         let module_binding_names = bytecode.module_binding_names.clone();
@@ -636,11 +640,13 @@ impl ProgramExecutor for BytecodeExecutor {
             // Merge imported functions into the main program
             let mut merged_program = imported_program;
             merged_program.items.extend(program.items.clone());
-            crate::module_resolution::prepend_prelude_items(&mut merged_program);
-            self.append_imported_module_items(&mut merged_program);
+            let mut stdlib_names =
+                crate::module_resolution::prepend_prelude_items(&mut merged_program);
+            stdlib_names.extend(self.append_imported_module_items(&mut merged_program));
 
             // Compile AST to Bytecode with knowledge of existing module_bindings
             let mut compiler = BytecodeCompiler::new();
+            compiler.stdlib_function_names = stdlib_names;
             compiler.register_known_bindings(&known_bindings);
 
             // Wire extension registry into compiler for comptime execution

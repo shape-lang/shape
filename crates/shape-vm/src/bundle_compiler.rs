@@ -69,13 +69,15 @@ impl BundleCompiler {
             let export_names = collect_export_names(&ast);
 
             // Inject stdlib prelude items
-            crate::module_resolution::prepend_prelude_items(&mut ast);
+            let mut stdlib_names =
+                crate::module_resolution::prepend_prelude_items(&mut ast);
 
             // Resolve explicit imports via ModuleLoader
-            resolve_and_inline_imports(&mut ast, &mut loader);
+            stdlib_names.extend(resolve_and_inline_imports(&mut ast, &mut loader));
 
             // Compile to bytecode with known bindings
             let mut compiler = BytecodeCompiler::new();
+            compiler.stdlib_function_names = stdlib_names;
             compiler.register_known_bindings(&known_bindings);
             let bytecode = compiler
                 .compile(&ast)
@@ -251,46 +253,67 @@ impl BundleCompiler {
 fn resolve_and_inline_imports(
     ast: &mut shape_ast::Program,
     loader: &mut shape_runtime::module_loader::ModuleLoader,
-) {
+) -> std::collections::HashSet<String> {
     use shape_ast::ast::{ImportItems, Item};
-    let mut module_items = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
+    let mut stdlib_names = std::collections::HashSet::new();
 
-    for item in &ast.items {
-        let Item::Import(import_stmt, _) = item else {
-            continue;
-        };
-        let module_path = import_stmt.from.as_str();
-        if module_path.is_empty() || !seen_paths.insert(module_path.to_string()) {
-            continue;
-        }
+    loop {
+        let mut module_items = Vec::new();
+        let mut found_new = false;
 
-        // Load module (errors are non-fatal — module might resolve at runtime)
-        let _ = loader.load_module(module_path);
+        for item in &ast.items {
+            let Item::Import(import_stmt, _) = item else {
+                continue;
+            };
+            let module_path = import_stmt.from.as_str();
+            if module_path.is_empty() || !seen_paths.insert(module_path.to_string()) {
+                continue;
+            }
+            found_new = true;
+            let is_std = module_path.starts_with("std::");
 
-        let named_filter: Option<std::collections::HashSet<&str>> = match &import_stmt.items {
-            ImportItems::Named(specs) => Some(specs.iter().map(|s| s.name.as_str()).collect()),
-            ImportItems::Namespace { .. } => None,
-        };
+            // Load module (errors are non-fatal — module might resolve at runtime)
+            let _ = loader.load_module(module_path);
 
-        if let Some(module) = loader.get_module(module_path) {
-            let items = module.ast.items.clone();
-            if let Some(ref names) = named_filter {
-                for ast_item in items {
-                    if should_include_item(&ast_item, names) {
-                        module_items.push(ast_item);
+            let named_filter: Option<std::collections::HashSet<&str>> =
+                match &import_stmt.items {
+                    ImportItems::Named(specs) => {
+                        Some(specs.iter().map(|s| s.name.as_str()).collect())
                     }
+                    ImportItems::Namespace { .. } => None,
+                };
+
+            if let Some(module) = loader.get_module(module_path) {
+                let items = module.ast.items.clone();
+                if is_std {
+                    stdlib_names.extend(
+                        crate::module_resolution::collect_function_names_from_items(&items),
+                    );
                 }
-            } else {
-                module_items.extend(items);
+                if let Some(ref names) = named_filter {
+                    for ast_item in items {
+                        if should_include_item(&ast_item, names) {
+                            module_items.push(ast_item);
+                        }
+                    }
+                } else {
+                    module_items.extend(items);
+                }
             }
         }
+
+        if !module_items.is_empty() {
+            module_items.extend(std::mem::take(&mut ast.items));
+            ast.items = module_items;
+        }
+
+        if !found_new {
+            break;
+        }
     }
 
-    if !module_items.is_empty() {
-        module_items.extend(std::mem::take(&mut ast.items));
-        ast.items = module_items;
-    }
+    stdlib_names
 }
 
 fn normalize_package_identity(

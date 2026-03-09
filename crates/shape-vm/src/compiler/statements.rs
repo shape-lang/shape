@@ -178,20 +178,35 @@ impl BytecodeCompiler {
                 Ok(())
             }
             Item::ForeignFunction(def, _) => {
-                // Register as a normal function so call sites resolve the name
-                let total_params = def.params.len();
+                // Register as a normal function so call sites resolve the name.
+                // Caller-visible arity excludes `out` params.
+                let caller_visible = def.params.iter().filter(|p| !p.is_out).count();
                 self.function_arity_bounds
-                    .insert(def.name.clone(), (total_params, total_params));
+                    .insert(def.name.clone(), (caller_visible, caller_visible));
                 self.function_const_params
                     .insert(def.name.clone(), Vec::new());
                 let (ref_params, ref_mutates) = Self::native_param_reference_contract(def);
+                let (vis_ref_params, vis_ref_mutates) = if def.params.iter().any(|p| p.is_out) {
+                    let mut vrp = Vec::new();
+                    let mut vrm = Vec::new();
+                    for (i, p) in def.params.iter().enumerate() {
+                        if !p.is_out {
+                            vrp.push(ref_params.get(i).copied().unwrap_or(false));
+                            vrm.push(ref_mutates.get(i).copied().unwrap_or(false));
+                        }
+                    }
+                    (vrp, vrm)
+                } else {
+                    (ref_params, ref_mutates)
+                };
 
                 let func = crate::bytecode::Function {
                     name: def.name.clone(),
-                    arity: def.params.len() as u16,
+                    arity: caller_visible as u16,
                     param_names: def
                         .params
                         .iter()
+                        .filter(|p| !p.is_out)
                         .flat_map(|p| p.get_identifiers())
                         .collect(),
                     locals_count: 0,
@@ -200,8 +215,8 @@ impl BytecodeCompiler {
                     is_closure: false,
                     captures_count: 0,
                     is_async: def.is_async,
-                    ref_params,
-                    ref_mutates,
+                    ref_params: vis_ref_params,
+                    ref_mutates: vis_ref_mutates,
                     mutable_captures: Vec::new(),
                     frame_descriptor: None,
                     osr_entry_points: Vec::new(),
@@ -225,19 +240,34 @@ impl BytecodeCompiler {
                 }
                 ExportItem::ForeignFunction(def) => {
                     // Same registration as Item::ForeignFunction
-                    let total_params = def.params.len();
+                    let caller_visible = def.params.iter().filter(|p| !p.is_out).count();
                     self.function_arity_bounds
-                        .insert(def.name.clone(), (total_params, total_params));
+                        .insert(def.name.clone(), (caller_visible, caller_visible));
                     self.function_const_params
                         .insert(def.name.clone(), Vec::new());
                     let (ref_params, ref_mutates) = Self::native_param_reference_contract(def);
+                    let (vis_ref_params, vis_ref_mutates) =
+                        if def.params.iter().any(|p| p.is_out) {
+                            let mut vrp = Vec::new();
+                            let mut vrm = Vec::new();
+                            for (i, p) in def.params.iter().enumerate() {
+                                if !p.is_out {
+                                    vrp.push(ref_params.get(i).copied().unwrap_or(false));
+                                    vrm.push(ref_mutates.get(i).copied().unwrap_or(false));
+                                }
+                            }
+                            (vrp, vrm)
+                        } else {
+                            (ref_params, ref_mutates)
+                        };
 
                     let func = crate::bytecode::Function {
                         name: def.name.clone(),
-                        arity: def.params.len() as u16,
+                        arity: caller_visible as u16,
                         param_names: def
                             .params
                             .iter()
+                            .filter(|p| !p.is_out)
                             .flat_map(|p| p.get_identifiers())
                             .collect(),
                         locals_count: 0,
@@ -246,8 +276,8 @@ impl BytecodeCompiler {
                         is_closure: false,
                         captures_count: 0,
                         is_async: def.is_async,
-                        ref_params,
-                        ref_mutates,
+                        ref_params: vis_ref_params,
+                        ref_mutates: vis_ref_mutates,
                         mutable_captures: Vec::new(),
                         frame_descriptor: None,
                         osr_entry_points: Vec::new(),
@@ -1202,6 +1232,7 @@ impl BytecodeCompiler {
             is_const: false,
             is_reference: false,
             is_mut_reference: false,
+            is_out: false,
             type_annotation: receiver_type,
             default_value: None,
         }];
@@ -1472,6 +1503,7 @@ impl BytecodeCompiler {
                 is_const: false,
                 is_reference: false,
                 is_mut_reference: false,
+                is_out: false,
                 type_annotation: None,
                 default_value: None,
             }],
@@ -1577,6 +1609,7 @@ impl BytecodeCompiler {
                 is_const: false,
                 is_reference: false,
                 is_mut_reference: false,
+                is_out: false,
                 type_annotation: None,
                 default_value: None,
             }];
@@ -1638,6 +1671,7 @@ impl BytecodeCompiler {
                     is_const: false,
                     is_reference: false,
                     is_mut_reference: false,
+                    is_out: false,
                     type_annotation: inferred_type,
                     default_value: None,
                 });
@@ -2340,6 +2374,7 @@ impl BytecodeCompiler {
                 is_const: false,
                 is_reference: false,
                 is_mut_reference: false,
+                is_out: false,
                 type_annotation: Some(TypeAnnotation::Reference(source_type.to_string())),
                 default_value: None,
             }],

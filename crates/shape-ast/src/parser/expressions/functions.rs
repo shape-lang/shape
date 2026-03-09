@@ -96,6 +96,7 @@ pub fn parse_arrow_function(pair: Pair<Rule>) -> Result<Expr> {
                     is_const: false,
                     is_reference: false,
                     is_mut_reference: false,
+                    is_out: false,
                     type_annotation: None,
                     default_value: None,
                 });

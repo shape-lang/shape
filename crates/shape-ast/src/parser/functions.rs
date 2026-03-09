@@ -66,6 +66,7 @@ pub fn parse_function_param(pair: Pair<Rule>) -> Result<FunctionParameter> {
     let mut is_const = false;
     let mut is_reference = false;
     let mut is_mut_reference = false;
+    let mut is_out = false;
     let mut type_annotation = None;
     let mut default_value = None;
 
@@ -82,6 +83,9 @@ pub fn parse_function_param(pair: Pair<Rule>) -> Result<FunctionParameter> {
                         is_mut_reference = true;
                     }
                 }
+            }
+            Rule::param_out_keyword => {
+                is_out = true;
             }
             Rule::destructure_pattern => {
                 pattern = Some(super::items::parse_pattern(inner_pair)?);
@@ -106,6 +110,7 @@ pub fn parse_function_param(pair: Pair<Rule>) -> Result<FunctionParameter> {
         is_const,
         is_reference,
         is_mut_reference,
+        is_out,
         type_annotation,
         default_value,
     })

@@ -94,6 +94,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     is_const: false,
                     is_reference: false,
                     is_mut_reference: false,
+                    is_out: false,
                     type_annotation: None,
                     default_value: None,
                 })
@@ -510,6 +511,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
             is_const: false,
             is_reference: false,
             is_mut_reference: false,
+            is_out: false,
             type_annotation: if idx == 0 {
                 Some(comptime_target_param_type())
             } else if idx == 1 {
@@ -582,6 +584,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
                     is_const: false,
                     is_reference: false,
                     is_mut_reference: false,
+                    is_out: false,
                     type_annotation: None,
                     default_value: None,
                 });
@@ -1315,6 +1318,7 @@ mod tests {
                 is_const: false,
                 is_reference: false,
                 is_mut_reference: false,
+                is_out: false,
                 type_annotation: Some(TypeAnnotation::Basic("string".to_string())),
                 default_value: None,
             }],

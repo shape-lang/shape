@@ -73,6 +73,7 @@ impl BytecodeCompiler {
                 is_const: false,
                 is_reference: false,
                 is_mut_reference: false,
+                is_out: false,
                 type_annotation: None,
                 default_value: None,
             });

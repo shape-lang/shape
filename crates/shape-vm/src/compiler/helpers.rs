@@ -1070,6 +1070,11 @@ impl BytecodeCompiler {
 
     /// Get built-in function by name
     pub(super) fn get_builtin_function(&self, name: &str) -> Option<BuiltinFunction> {
+        // Native pointer builtins (`__native_*`) are only accessible from stdlib
+        // functions. User code must use the safe wrappers in std::core::native.
+        if name.starts_with("__native_") && !self.allow_internal_builtins {
+            return None;
+        }
         match name {
             // Option type constructor
             "Some" => Some(BuiltinFunction::SomeCtor),

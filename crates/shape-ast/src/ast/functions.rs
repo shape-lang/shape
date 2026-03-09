@@ -153,6 +153,11 @@ pub struct FunctionParameter {
     /// Only meaningful when `is_reference` is true.
     #[serde(default)]
     pub is_mut_reference: bool,
+    /// Whether this is an `out` parameter (C out-pointer pattern).
+    /// Only valid on `extern C fn` declarations. The compiler auto-generates
+    /// cell allocation, C call, value readback, and cell cleanup.
+    #[serde(default)]
+    pub is_out: bool,
     pub type_annotation: Option<TypeAnnotation>,
     pub default_value: Option<Expr>,
 }

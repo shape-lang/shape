@@ -456,11 +456,12 @@ function_params = {
 }
 
 function_param = {
-    param_const_keyword? ~ param_ref_keyword? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ expression)?
+    param_const_keyword? ~ param_ref_keyword? ~ param_out_keyword? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ expression)?
 }
 
 param_const_keyword = { "const" }
 param_ref_keyword = { "&" ~ param_mut_keyword? }
+param_out_keyword = @{ "out" ~ !(ASCII_ALPHANUMERIC | "_") }
 param_mut_keyword = @{ "mut" ~ !(ASCII_ALPHANUMERIC | "_") }
 
 function_body = { (statement_or_error)* }

@@ -94,6 +94,8 @@ impl BytecodeCompiler {
             blob_cache: None,
             function_aliases: HashMap::new(),
             current_function_params: Vec::new(),
+            stdlib_function_names: HashSet::new(),
+            allow_internal_builtins: false,
         }
     }
 

@@ -9,7 +9,10 @@ use shape_value::{ValueWord, heap_value::NativeScalar};
 /// Compile and run Shape code, returning the top-level result.
 fn compile_and_run(code: &str) -> ValueWord {
     let program = parse_program(code).unwrap();
-    let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+    let mut compiler = BytecodeCompiler::new();
+    // Allow __* builtins in tests (Rust-level unit tests, not user code)
+    compiler.allow_internal_builtins = true;
+    let bytecode = compiler.compile(&program).unwrap();
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
     vm.execute(None).unwrap().clone()
