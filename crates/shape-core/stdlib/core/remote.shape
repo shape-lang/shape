@@ -82,24 +82,24 @@ builtin fn __call(addr: string, fn_ref: _, args: Array<_>) -> Result<_, string>;
 
 /// Ship execution to a remote `shape serve` node.
 ///
-/// When applied to a function, the before handler intercepts the call and
-/// sends it to the remote address. When applied to an `await` expression,
-/// the expression evaluation is skipped entirely and replaced with the
-/// remote call result.
+/// When applied to a function, calling that function will transparently
+/// execute it on the specified remote server instead of locally.
 ///
 /// # Example
 ///
 /// ```shape
-/// let r = await @remote("worker:9527") compute([1.0, 2.0, 3.0])
+/// use std::core::remote
+///
+/// @remote("worker:9527")
+/// fn compute(data) { /* ... */ }
+///
+/// let result = compute([1, 2, 3])
 /// ```
-@target(function, await_expr)
 annotation remote(addr) {
+    targets: [function]
     before(args, ctx) {
         let target = ctx["__impl"] ?? args[0]
         let result = remote.__call(addr, target, args)
         { result: result }
-    }
-    metadata() {
-        { is_remote: true, remote_addr: addr }
     }
 }

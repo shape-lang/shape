@@ -279,9 +279,20 @@ impl VirtualMachine {
         let locals_count = function.locals_count as usize;
         let param_count = function.arity as usize;
         let entry_point = function.entry_point;
+        let ref_params = function.ref_params.clone();
+
+        // Count ref params that need shadow slots for their actual values.
+        // DerefLoad/DerefStore expect the param slot to contain a TAG_REF
+        // pointing to a *different* slot that holds the real value.
+        let ref_shadow_count = ref_params
+            .iter()
+            .enumerate()
+            .filter(|&(i, &is_ref)| is_ref && i < param_count && i < locals_count)
+            .count();
 
         let bp = self.sp;
-        let needed = bp + locals_count;
+        let total_slots = locals_count + ref_shadow_count;
+        let needed = bp + total_slots;
         if needed > self.stack.len() {
             self.stack.resize_with(needed * 2 + 1, ValueWord::none);
         }
@@ -292,13 +303,27 @@ impl VirtualMachine {
             }
         }
 
+        // For ref-inferred parameters: move the actual value to a shadow slot
+        // beyond locals_count, then replace the param slot with a TAG_REF
+        // pointing to the shadow slot. This way DerefLoad follows the ref
+        // to the actual value (not a circular self-reference).
+        let mut shadow_idx = 0;
+        for (i, &is_ref) in ref_params.iter().enumerate() {
+            if is_ref && i < param_count && i < locals_count {
+                let shadow_slot = bp + locals_count + shadow_idx;
+                self.stack[shadow_slot] = self.stack[bp + i].clone();
+                self.stack[bp + i] = ValueWord::from_ref(shadow_slot);
+                shadow_idx += 1;
+            }
+        }
+
         self.sp = needed;
 
         let blob_hash = self.blob_hash_for_function(func_id);
         let frame = CallFrame {
             return_ip: self.ip,
             base_pointer: bp,
-            locals_count,
+            locals_count: total_slots,
             function_id: Some(func_id),
             upvalues: None,
             blob_hash,

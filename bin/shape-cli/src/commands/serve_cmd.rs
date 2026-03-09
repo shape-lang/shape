@@ -207,7 +207,7 @@ async fn handle_connection(
         // Dispatch
         let response = match message {
             WireMessage::Auth(req) => Some(handle_auth(req, config, &mut state)),
-            WireMessage::Ping => Some(handle_ping()),
+            WireMessage::Ping(_) => Some(handle_ping()),
             WireMessage::Execute(req) => {
                 if requires_auth(config) && !state.authenticated {
                     Some(WireMessage::ExecuteResponse(ExecuteResponse {
@@ -593,7 +593,7 @@ mod tests {
         let addr = start_test_server().await;
         let mut stream = TcpStream::connect(addr).await.unwrap();
 
-        let resp = roundtrip(&mut stream, &WireMessage::Ping).await;
+        let resp = roundtrip(&mut stream, &WireMessage::Ping(shape_vm::remote::PingRequest {})).await;
         match resp {
             WireMessage::Pong(info) => {
                 assert_eq!(info.wire_protocol, shape_wire::WIRE_PROTOCOL_V2);

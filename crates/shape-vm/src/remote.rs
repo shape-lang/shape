@@ -155,10 +155,14 @@ pub enum WireMessage {
     /// Response to an Auth request.
     AuthResponse(AuthResponse),
     /// Ping the server for liveness / capability discovery.
-    Ping,
+    Ping(PingRequest),
     /// Pong reply with server info.
     Pong(ServerInfo),
 }
+
+/// Ping request (empty payload for wire format consistency).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PingRequest {}
 
 /// Request to check which function blobs the remote side already has cached.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,6 +639,13 @@ fn execute_inner(
     vm.populate_module_objects();
 
     // 4. Execute — closure or named function
+    //
+    // Dispatch priority:
+    //   1. Closure call (upvalues present) — needs function_id for upvalue binding
+    //   2. Hash-first — preferred for non-closure calls because function_id from the
+    //      client may be stale after blob-based relinking on the server
+    //   3. Function ID — fallback when no hash is available (legacy path)
+    //   4. Function name — last resort
     let result = if let Some(ref upvalue_data) = request.upvalues {
         // Closure call: reconstruct upvalues as Upvalue structs
         let upvalues: Vec<shape_value::Upvalue> = upvalue_data
@@ -658,15 +669,10 @@ fn execute_inner(
                 message: e.to_string(),
                 kind: RemoteErrorKind::RuntimeError,
             })?
-    } else if let Some(func_id) = request.function_id {
-        // Call by function ID
-        vm.execute_function_by_id(func_id, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
     } else if let Some(hash) = request.function_hash {
-        // Hash-first call path.
+        // Hash-first call path — resolve the function by its content hash
+        // in the server's linked program. This is correct even when the program
+        // was reconstructed from blobs (where client-side function_ids are stale).
         let func_id = vm
             .program()
             .function_blob_hashes
@@ -683,6 +689,13 @@ fn execute_inner(
                 message: format!("Function hash not found in program: {}", hash),
                 kind: RemoteErrorKind::FunctionNotFound,
             })?;
+        vm.execute_function_by_id(func_id, args, None)
+            .map_err(|e| RemoteCallError {
+                message: e.to_string(),
+                kind: RemoteErrorKind::RuntimeError,
+            })?
+    } else if let Some(func_id) = request.function_id {
+        // Call by function ID (legacy — only valid when program was not reconstructed)
         vm.execute_function_by_id(func_id, args, None)
             .map_err(|e| RemoteCallError {
                 message: e.to_string(),
@@ -830,7 +843,7 @@ fn execute_inner_with_runtimes(
         vm.foreign_fn_handles = handles;
     }
 
-    // 5. Execute — closure or named function (same as execute_inner)
+    // 5. Execute — closure or named function (same dispatch priority as execute_inner)
     let result = if let Some(ref upvalue_data) = request.upvalues {
         let upvalues: Vec<shape_value::Upvalue> = upvalue_data
             .iter()
@@ -853,13 +866,9 @@ fn execute_inner_with_runtimes(
                 message: e.to_string(),
                 kind: RemoteErrorKind::RuntimeError,
             })?
-    } else if let Some(func_id) = request.function_id {
-        vm.execute_function_by_id(func_id, args, None)
-            .map_err(|e| RemoteCallError {
-                message: e.to_string(),
-                kind: RemoteErrorKind::RuntimeError,
-            })?
     } else if let Some(hash) = request.function_hash {
+        // Hash-first: resolve by content hash in the server's linked program.
+        // Client-side function_ids are stale after blob-based relinking.
         let func_id = vm
             .program()
             .function_blob_hashes
@@ -876,6 +885,12 @@ fn execute_inner_with_runtimes(
                 message: format!("Function hash not found in program: {}", hash),
                 kind: RemoteErrorKind::FunctionNotFound,
             })?;
+        vm.execute_function_by_id(func_id, args, None)
+            .map_err(|e| RemoteCallError {
+                message: e.to_string(),
+                kind: RemoteErrorKind::RuntimeError,
+            })?
+    } else if let Some(func_id) = request.function_id {
         vm.execute_function_by_id(func_id, args, None)
             .map_err(|e| RemoteCallError {
                 message: e.to_string(),
@@ -1859,11 +1874,11 @@ mod tests {
 
     #[test]
     fn test_ping_pong_roundtrip() {
-        let ping = WireMessage::Ping;
+        let ping = WireMessage::Ping(PingRequest {});
         let bytes = shape_wire::encode_message(&ping).expect("encode Ping");
         let decoded: WireMessage =
             shape_wire::decode_message(&bytes).expect("decode Ping");
-        assert!(matches!(decoded, WireMessage::Ping));
+        assert!(matches!(decoded, WireMessage::Ping(_)));
 
         let pong = WireMessage::Pong(ServerInfo {
             shape_version: "0.1.3".to_string(),
@@ -1949,6 +1964,49 @@ mod tests {
                 assert_eq!(r.diagnostics.len(), 1);
             }
             _ => panic!("Expected ValidateResponse"),
+        }
+    }
+
+    #[test]
+    fn test_ping_framing_roundtrip() {
+        use shape_wire::transport::framing::{encode_framed, decode_framed};
+
+        let ping = WireMessage::Ping(PingRequest {});
+        let mp = shape_wire::encode_message(&ping).expect("encode Ping");
+        eprintln!("Ping msgpack bytes ({} bytes): {:02x?}", mp.len(), &mp);
+
+        let framed = encode_framed(&mp);
+        eprintln!("Framed bytes ({} bytes): {:02x?}", framed.len(), &framed);
+
+        let decompressed = decode_framed(&framed).expect("decode_framed");
+        assert_eq!(mp, decompressed, "framing roundtrip should preserve bytes");
+
+        let decoded: WireMessage =
+            shape_wire::decode_message(&decompressed).expect("decode Ping after framing");
+        assert!(matches!(decoded, WireMessage::Ping(_)));
+    }
+
+    #[test]
+    fn test_execute_framing_roundtrip() {
+        use shape_wire::transport::framing::{encode_framed, decode_framed};
+
+        let exec = WireMessage::Execute(ExecuteRequest {
+            code: "42".to_string(),
+            request_id: 1,
+        });
+        let mp = shape_wire::encode_message(&exec).expect("encode Execute");
+        eprintln!("Execute msgpack bytes ({} bytes): {:02x?}", mp.len(), &mp);
+
+        let framed = encode_framed(&mp);
+        let decompressed = decode_framed(&framed).expect("decode_framed");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&decompressed).expect("decode Execute after framing");
+        match decoded {
+            WireMessage::Execute(req) => {
+                assert_eq!(req.code, "42");
+                assert_eq!(req.request_id, 1);
+            }
+            _ => panic!("Expected Execute"),
         }
     }
 
