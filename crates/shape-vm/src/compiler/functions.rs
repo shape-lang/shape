@@ -2271,11 +2271,23 @@ impl BytecodeCompiler {
         let ctx_local = self.declare_local("__ctx")?;
 
         // --- Build args array from function params ---
+        // The wrapper function may have ref-inferred params (inherited from
+        // the original function definition). Callers emit MakeRef for those
+        // params, so local slots contain TAG_REF values. We must DerefLoad
+        // to get the actual values before putting them in the args array.
+        let wrapper_ref_params = self.program.functions[wrapper_func_idx].ref_params.clone();
         for (i, _param) in func_def.params.iter().enumerate() {
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(i as u16)),
-            ));
+            if wrapper_ref_params.get(i).copied().unwrap_or(false) {
+                self.emit(Instruction::new(
+                    OpCode::DerefLoad,
+                    Some(Operand::Local(i as u16)),
+                ));
+            } else {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(i as u16)),
+                ));
+            }
         }
         self.emit(Instruction::new(
             OpCode::NewArray,
