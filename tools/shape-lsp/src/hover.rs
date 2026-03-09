@@ -191,6 +191,16 @@ fn get_hover_for_word(
         return Some(hover);
     }
 
+    // Check if it's a method name inside an impl block — show trait method signature
+    // (checked before builtins so impl context takes priority over coincidentally-named builtins)
+    if let Some(hover) = get_impl_method_hover(text, word, position, module_cache, current_file) {
+        return Some(hover);
+    }
+
+    if let Some(hover) = get_extend_method_hover(text, word, position, module_cache, current_file) {
+        return Some(hover);
+    }
+
     // Check if it's a built-in function
     if let Some(hover) = get_builtin_function_hover(word) {
         return Some(hover);
@@ -208,15 +218,6 @@ fn get_hover_for_word(
 
     // Check if it's a bounded type parameter — show required traits
     if let Some(hover) = get_type_param_hover(text, word, position) {
-        return Some(hover);
-    }
-
-    // Check if it's a method name inside an impl block — show trait method signature
-    if let Some(hover) = get_impl_method_hover(text, word, position, module_cache, current_file) {
-        return Some(hover);
-    }
-
-    if let Some(hover) = get_extend_method_hover(text, word, position, module_cache, current_file) {
         return Some(hover);
     }
 
@@ -2884,8 +2885,8 @@ fn get_property_access_hover(text: &str, hovered_word: &str, position: Position)
     // Try user-defined struct fields from AST (including generic instantiations).
     if let Some(field_type) = resolve_struct_field_type(&program, &object_type, &property) {
         let content = format!(
-            "**Property**: `{}.{}`\n\n**Type:** `{}`",
-            object_name, property, field_type
+            "**Property**: `{}.{}`\n\n**Type:** `{}`\n\n**Defined on:** `{}`",
+            object_name, property, field_type, object_type
         );
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -2901,8 +2902,8 @@ fn get_property_access_hover(text: &str, hovered_word: &str, position: Position)
     if let Some(fields) = struct_fields.get(&object_type) {
         if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == &property) {
             let content = format!(
-                "**Property**: `{}.{}`\n\n**Type:** `{}`",
-                object_name, property, field_type
+                "**Property**: `{}.{}`\n\n**Type:** `{}`\n\n**Defined on:** `{}`",
+                object_name, property, field_type, object_type
             );
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -2918,8 +2919,8 @@ fn get_property_access_hover(text: &str, hovered_word: &str, position: Position)
     if let Some(fields) = parse_object_shape_fields(&object_type) {
         if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == &property) {
             let content = format!(
-                "**Property**: `{}.{}`\n\n**Type:** `{}`",
-                object_name, property, field_type
+                "**Property**: `{}.{}`\n\n**Type:** `{}`\n\n**Defined on:** `{}`",
+                object_name, property, field_type, object_type
             );
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {

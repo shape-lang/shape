@@ -64,3 +64,59 @@ pub(crate) fn handle_reverse(
     vm.push_vw(ValueWord::from_array(Arc::new(reversed)))?;
     Ok(())
 }
+
+pub(crate) fn handle_push(
+    vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<(), VMError> {
+    let arr = require_any_array_arg(&args)?.to_generic();
+    let value = args.get(1).cloned().unwrap_or_else(ValueWord::none);
+
+    let mut result = arr.to_vec();
+    result.push(value);
+
+    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
+    Ok(())
+}
+
+pub(crate) fn handle_pop(
+    vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<(), VMError> {
+    let arr = require_any_array_arg(&args)?.to_generic();
+
+    let mut result = arr.to_vec();
+    result.pop();
+
+    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
+    Ok(())
+}
+
+pub(crate) fn handle_zip(
+    vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<(), VMError> {
+    let arr_a = require_any_array_arg(&args)?.to_generic();
+    let arr_b = args
+        .get(1)
+        .ok_or(VMError::StackUnderflow)?
+        .as_any_array()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "array",
+            got: "other",
+        })?
+        .to_generic();
+
+    let len = arr_a.len().min(arr_b.len());
+    let mut result = Vec::with_capacity(len);
+    for i in 0..len {
+        let pair: Vec<ValueWord> = vec![arr_a[i].clone(), arr_b[i].clone()];
+        result.push(ValueWord::from_array(Arc::new(pair)));
+    }
+
+    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
+    Ok(())
+}

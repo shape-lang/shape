@@ -1473,6 +1473,19 @@ fn configured_extensions_from_lsp_value(
     options: Option<&serde_json::Value>,
     workspace_root: Option<&std::path::Path>,
 ) -> Vec<crate::foreign_lsp::ConfiguredExtensionSpec> {
+    let mut specs = collect_configured_extensions_from_options(options, workspace_root);
+
+    // Auto-discover globally installed extensions from ~/.shape/extensions/
+    collect_global_extensions(&mut specs);
+
+    dedup_extension_specs(specs)
+}
+
+/// Parse configured extensions from LSP options JSON only (no global discovery).
+fn collect_configured_extensions_from_options(
+    options: Option<&serde_json::Value>,
+    workspace_root: Option<&std::path::Path>,
+) -> Vec<crate::foreign_lsp::ConfiguredExtensionSpec> {
     let mut specs = Vec::new();
 
     if let Some(options) = options {
@@ -1501,9 +1514,12 @@ fn configured_extensions_from_lsp_value(
         }
     }
 
-    // Auto-discover globally installed extensions from ~/.shape/extensions/
-    collect_global_extensions(&mut specs);
+    specs
+}
 
+fn dedup_extension_specs(
+    specs: Vec<crate::foreign_lsp::ConfiguredExtensionSpec>,
+) -> Vec<crate::foreign_lsp::ConfiguredExtensionSpec> {
     let mut seen = HashSet::new();
     specs
         .into_iter()
@@ -1818,7 +1834,7 @@ print("hello")
         });
         let workspace_root = std::path::Path::new("/workspace");
 
-        let specs = configured_extensions_from_lsp_value(Some(&value), Some(workspace_root));
+        let specs = collect_configured_extensions_from_options(Some(&value), Some(workspace_root));
         assert_eq!(specs.len(), 2);
         assert_eq!(
             specs[0].path,
@@ -1844,7 +1860,7 @@ print("hello")
             }
         });
 
-        let specs = configured_extensions_from_lsp_value(Some(&value), None);
+        let specs = dedup_extension_specs(collect_configured_extensions_from_options(Some(&value), None));
         assert_eq!(specs.len(), 1);
         assert_eq!(
             specs[0].path,

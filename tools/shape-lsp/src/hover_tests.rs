@@ -825,8 +825,8 @@ fn test_hover_locally_defined_annotation_usage_with_module_cache() {
     let hover = get_hover(
         code,
         Position {
-            line: 1,
-            character: 2,
+            line: 2,
+            character: 1,
         },
         Some(&cache),
         Some(current_file.as_path()),
