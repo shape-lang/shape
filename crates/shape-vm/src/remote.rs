@@ -138,6 +138,24 @@ pub enum WireMessage {
     CallResponse(RemoteCallResponse),
     /// A large blob sent as a separate message before the call (Phase 3).
     Sidecar(BlobSidecar),
+
+    // --- Execution server messages (V2) ---
+    /// Execute Shape source code on the server.
+    Execute(ExecuteRequest),
+    /// Response to an Execute request.
+    ExecuteResponse(ExecuteResponse),
+    /// Validate Shape source code (parse + type-check) without executing.
+    Validate(ValidateRequest),
+    /// Response to a Validate request.
+    ValidateResponse(ValidateResponse),
+    /// Authenticate with the server (required for non-localhost).
+    Auth(AuthRequest),
+    /// Response to an Auth request.
+    AuthResponse(AuthResponse),
+    /// Ping the server for liveness / capability discovery.
+    Ping,
+    /// Pong reply with server info.
+    Pong(ServerInfo),
 }
 
 /// Request to check which function blobs the remote side already has cached.
@@ -162,6 +180,107 @@ pub struct BlobNegotiationResponse {
 pub struct BlobSidecar {
     pub sidecar_id: u32,
     pub data: Vec<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// Execution server message types (V2)
+// ---------------------------------------------------------------------------
+
+/// Request to execute Shape source code on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteRequest {
+    /// Shape source code to execute.
+    pub code: String,
+    /// Client-assigned request ID for correlation.
+    pub request_id: u64,
+}
+
+/// Response from executing Shape source code.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteResponse {
+    /// The request ID this response corresponds to.
+    pub request_id: u64,
+    /// Whether execution completed successfully.
+    pub success: bool,
+    /// Standard output from execution (if any).
+    pub output: Option<String>,
+    /// Error message (if execution failed).
+    pub error: Option<String>,
+    /// Diagnostics (parse errors, type errors, warnings).
+    pub diagnostics: Vec<WireDiagnostic>,
+    /// Execution metrics (if available).
+    pub metrics: Option<ExecutionMetrics>,
+}
+
+/// Request to validate Shape source code without executing it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateRequest {
+    /// Shape source code to validate.
+    pub code: String,
+    /// Client-assigned request ID for correlation.
+    pub request_id: u64,
+}
+
+/// Response from validating Shape source code.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateResponse {
+    /// The request ID this response corresponds to.
+    pub request_id: u64,
+    /// Whether the code is valid (no errors).
+    pub success: bool,
+    /// Diagnostics (parse errors, type errors, warnings).
+    pub diagnostics: Vec<WireDiagnostic>,
+}
+
+/// Authentication request for non-localhost connections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthRequest {
+    /// Bearer token for authentication.
+    pub token: String,
+}
+
+/// Authentication response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    /// Whether authentication succeeded.
+    pub authenticated: bool,
+    /// Error message if authentication failed.
+    pub error: Option<String>,
+}
+
+/// Server information returned in Pong responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerInfo {
+    /// Shape language version.
+    pub shape_version: String,
+    /// Wire protocol version.
+    pub wire_protocol: u32,
+    /// Server capabilities (e.g., "execute", "validate", "call", "blob-negotiation").
+    pub capabilities: Vec<String>,
+}
+
+/// A diagnostic message (error, warning, info).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireDiagnostic {
+    /// Severity: "error", "warning", "info".
+    pub severity: String,
+    /// Human-readable diagnostic message.
+    pub message: String,
+    /// Source line number (1-indexed), if available.
+    pub line: Option<u32>,
+    /// Source column number (1-indexed), if available.
+    pub column: Option<u32>,
+}
+
+/// Execution performance metrics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionMetrics {
+    /// Number of VM instructions executed.
+    pub instructions_executed: u64,
+    /// Wall-clock time in milliseconds.
+    pub wall_time_ms: u64,
+    /// Peak memory usage in bytes.
+    pub memory_bytes_peak: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1453,6 +1572,160 @@ mod tests {
                 assert_eq!(req.offered_hashes.len(), 2);
             }
             _ => panic!("Expected BlobNegotiation"),
+        }
+    }
+
+    // ---- V2 execution server message tests ----
+
+    #[test]
+    fn test_execute_request_roundtrip() {
+        let msg = WireMessage::Execute(ExecuteRequest {
+            code: "fn main() { 42 }".to_string(),
+            request_id: 7,
+        });
+        let bytes = shape_wire::encode_message(&msg).expect("encode Execute");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&bytes).expect("decode Execute");
+        match decoded {
+            WireMessage::Execute(req) => {
+                assert_eq!(req.code, "fn main() { 42 }");
+                assert_eq!(req.request_id, 7);
+            }
+            _ => panic!("Expected Execute"),
+        }
+    }
+
+    #[test]
+    fn test_execute_response_roundtrip() {
+        let msg = WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: 7,
+            success: true,
+            output: Some("42".to_string()),
+            error: None,
+            diagnostics: vec![WireDiagnostic {
+                severity: "warning".to_string(),
+                message: "unused variable".to_string(),
+                line: Some(1),
+                column: Some(5),
+            }],
+            metrics: Some(ExecutionMetrics {
+                instructions_executed: 100,
+                wall_time_ms: 3,
+                memory_bytes_peak: 4096,
+            }),
+        });
+        let bytes = shape_wire::encode_message(&msg).expect("encode ExecuteResponse");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&bytes).expect("decode ExecuteResponse");
+        match decoded {
+            WireMessage::ExecuteResponse(resp) => {
+                assert_eq!(resp.request_id, 7);
+                assert!(resp.success);
+                assert_eq!(resp.output.as_deref(), Some("42"));
+                assert!(resp.error.is_none());
+                assert_eq!(resp.diagnostics.len(), 1);
+                assert_eq!(resp.diagnostics[0].severity, "warning");
+                assert_eq!(resp.diagnostics[0].line, Some(1));
+                let m = resp.metrics.unwrap();
+                assert_eq!(m.instructions_executed, 100);
+                assert_eq!(m.wall_time_ms, 3);
+            }
+            _ => panic!("Expected ExecuteResponse"),
+        }
+    }
+
+    #[test]
+    fn test_ping_pong_roundtrip() {
+        let ping = WireMessage::Ping;
+        let bytes = shape_wire::encode_message(&ping).expect("encode Ping");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&bytes).expect("decode Ping");
+        assert!(matches!(decoded, WireMessage::Ping));
+
+        let pong = WireMessage::Pong(ServerInfo {
+            shape_version: "0.1.3".to_string(),
+            wire_protocol: 2,
+            capabilities: vec!["execute".to_string(), "validate".to_string()],
+        });
+        let bytes = shape_wire::encode_message(&pong).expect("encode Pong");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&bytes).expect("decode Pong");
+        match decoded {
+            WireMessage::Pong(info) => {
+                assert_eq!(info.shape_version, "0.1.3");
+                assert_eq!(info.wire_protocol, 2);
+                assert_eq!(info.capabilities.len(), 2);
+            }
+            _ => panic!("Expected Pong"),
+        }
+    }
+
+    #[test]
+    fn test_auth_roundtrip() {
+        let msg = WireMessage::Auth(AuthRequest {
+            token: "secret-token".to_string(),
+        });
+        let bytes = shape_wire::encode_message(&msg).expect("encode Auth");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&bytes).expect("decode Auth");
+        match decoded {
+            WireMessage::Auth(req) => assert_eq!(req.token, "secret-token"),
+            _ => panic!("Expected Auth"),
+        }
+
+        let resp = WireMessage::AuthResponse(AuthResponse {
+            authenticated: true,
+            error: None,
+        });
+        let bytes = shape_wire::encode_message(&resp).expect("encode AuthResponse");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&bytes).expect("decode AuthResponse");
+        match decoded {
+            WireMessage::AuthResponse(r) => {
+                assert!(r.authenticated);
+                assert!(r.error.is_none());
+            }
+            _ => panic!("Expected AuthResponse"),
+        }
+    }
+
+    #[test]
+    fn test_validate_roundtrip() {
+        let msg = WireMessage::Validate(ValidateRequest {
+            code: "let x = 1".to_string(),
+            request_id: 99,
+        });
+        let bytes = shape_wire::encode_message(&msg).expect("encode Validate");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&bytes).expect("decode Validate");
+        match decoded {
+            WireMessage::Validate(req) => {
+                assert_eq!(req.code, "let x = 1");
+                assert_eq!(req.request_id, 99);
+            }
+            _ => panic!("Expected Validate"),
+        }
+
+        let resp = WireMessage::ValidateResponse(ValidateResponse {
+            request_id: 99,
+            success: false,
+            diagnostics: vec![WireDiagnostic {
+                severity: "error".to_string(),
+                message: "parse error".to_string(),
+                line: None,
+                column: None,
+            }],
+        });
+        let bytes = shape_wire::encode_message(&resp).expect("encode ValidateResponse");
+        let decoded: WireMessage =
+            shape_wire::decode_message(&bytes).expect("decode ValidateResponse");
+        match decoded {
+            WireMessage::ValidateResponse(r) => {
+                assert_eq!(r.request_id, 99);
+                assert!(!r.success);
+                assert_eq!(r.diagnostics.len(), 1);
+            }
+            _ => panic!("Expected ValidateResponse"),
         }
     }
 

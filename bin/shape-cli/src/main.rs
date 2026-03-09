@@ -26,8 +26,8 @@ use commands::{
     ProviderOptions, run_add, run_build, run_doctest, run_expand_comptime, run_ext_install,
     run_ext_list, run_ext_remove, run_info, run_jit_parity, run_keys_generate, run_keys_list,
     run_keys_trust, run_publish, run_remove, run_repl, run_schema_fetch, run_schema_status,
-    run_script, run_search, run_sign, run_snapshot_delete, run_snapshot_info, run_snapshot_list,
-    run_tree, run_tui, run_verify, run_wire_serve,
+    run_script, run_search, run_serve, run_sign, run_snapshot_delete, run_snapshot_info,
+    run_snapshot_list, run_tree, run_tui, run_verify, run_wire_serve,
 };
 
 #[tokio::main]
@@ -227,6 +227,41 @@ async fn main() -> Result<()> {
                 extension_dir,
             };
             run_wire_serve(address, mode, extensions, &provider_opts).await?;
+        }
+        (
+            Some(Commands::Serve {
+                address,
+                tls_cert,
+                tls_key,
+                auth_token,
+                sandbox,
+                max_concurrent,
+                opts,
+            }),
+            _,
+        ) => {
+            let cli_args::RuntimeCommandOptions { mode, provider } = opts;
+            let cli_args::ProviderCommandOptions {
+                extensions,
+                providers_config,
+                extension_dir,
+            } = provider;
+            let provider_opts = ProviderOptions {
+                config_path: providers_config,
+                extension_dir,
+            };
+            run_serve(
+                address,
+                mode,
+                extensions,
+                &provider_opts,
+                tls_cert,
+                tls_key,
+                auth_token,
+                sandbox,
+                max_concurrent,
+            )
+            .await?;
         }
 
         // File mode: `shape foo.shape`

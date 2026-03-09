@@ -54,3 +54,7 @@ pub use shape_value::content::{self as content, ContentNode};
 /// with the shape CLI. Bump this when the wire framing or message format changes
 /// in a backward-incompatible way.
 pub const WIRE_PROTOCOL_V1: u32 = 1;
+
+/// Wire protocol version 2: adds Execute, Validate, Auth, Ping/Pong messages
+/// and JSON framing support for lightweight clients.
+pub const WIRE_PROTOCOL_V2: u32 = 2;

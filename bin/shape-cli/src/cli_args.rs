@@ -209,6 +209,30 @@ pub enum Commands {
         #[command(flatten)]
         opts: RuntimeCommandOptions,
     },
+
+    /// Start the Shape execution server (in-process VM, replaces wire-serve)
+    Serve {
+        /// Address to listen on
+        #[arg(long, default_value = "127.0.0.1:9527")]
+        address: String,
+        /// TLS certificate file (PEM). Required for non-localhost addresses.
+        #[arg(long, value_name = "PATH")]
+        tls_cert: Option<std::path::PathBuf>,
+        /// TLS private key file (PEM). Required for non-localhost addresses.
+        #[arg(long, value_name = "PATH")]
+        tls_key: Option<std::path::PathBuf>,
+        /// Bearer token for authentication. Required for non-localhost unless explicitly omitted.
+        #[arg(long, value_name = "TOKEN")]
+        auth_token: Option<String>,
+        /// Sandbox level: strict (default), permissive, or none
+        #[arg(long, default_value = "strict")]
+        sandbox: String,
+        /// Maximum number of concurrent executions
+        #[arg(long, default_value = "4")]
+        max_concurrent: usize,
+        #[command(flatten)]
+        opts: RuntimeCommandOptions,
+    },
 }
 
 #[derive(Args)]
