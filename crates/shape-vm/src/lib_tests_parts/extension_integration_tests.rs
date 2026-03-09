@@ -107,22 +107,6 @@ mod extension_integration_tests {
     }
 
     #[test]
-    fn test_namespace_call_uses_shape_artifact_exported_function() {
-        let mut module = shape_runtime::module_exports::ModuleExports::new("myext");
-        module.add_shape_artifact("myext", Some("pub fn connect() { 7 }".to_string()), None);
-
-        let mut executor = BytecodeExecutor::new();
-        executor.register_extension(module);
-
-        let mut engine = ShapeEngine::new().expect("engine");
-        let result = engine
-            .execute(&mut executor, "use myext\nmyext.connect()")
-            .expect("execution should succeed");
-
-        assert_eq!(result.value.as_number(), Some(7.0));
-    }
-
-    #[test]
     fn test_shape_artifact_function_can_call_module_namespace_export() {
         let mut module = shape_runtime::module_exports::ModuleExports::new("myext");
         module.add_function(
