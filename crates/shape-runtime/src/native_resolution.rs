@@ -79,6 +79,18 @@ impl NativeResolutionSet {
     }
 }
 
+#[derive(Debug, Clone)]
+struct NativeResolutionIssue {
+    package_key: String,
+    detail: String,
+}
+
+#[derive(Debug)]
+struct NativeResolutionEntry {
+    dependency: ResolvedNativeDependency,
+    artifact: Option<LockedArtifact>,
+}
+
 fn native_provider_label(provider: NativeDependencyProvider) -> &'static str {
     match provider {
         NativeDependencyProvider::System => "system",
@@ -449,6 +461,161 @@ fn artifact_payload(
     ]))
 }
 
+fn format_native_resolution_issues(
+    target: &NativeTarget,
+    issues: &[NativeResolutionIssue],
+) -> String {
+    let mut grouped: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for issue in issues {
+        grouped
+            .entry(issue.package_key.as_str())
+            .or_default()
+            .push(issue.detail.as_str());
+    }
+
+    let mut lines = vec![format!(
+        "native dependency preflight failed for target '{}':",
+        native_target_id(target)
+    )];
+    for (package_key, package_issues) in grouped {
+        lines.push(format!("package '{}':", package_key));
+        for detail in package_issues {
+            lines.push(format!("  - {}", detail));
+        }
+    }
+    lines.join("\n")
+}
+
+fn resolve_native_dependency_entry(
+    scope: &NativeDependencyScope,
+    alias: &str,
+    spec: &NativeDependencySpec,
+    target: &NativeTarget,
+    lock: &PackageLock,
+    external_mode: ExternalLockMode,
+) -> Result<NativeResolutionEntry, String> {
+    let target_id = native_target_id(target);
+    let resolved = spec
+        .resolve_for_target(target)
+        .ok_or_else(|| format!("alias '{}' has no value for target '{}'", alias, target_id))?;
+    let provider = spec.provider_for_target(target);
+    let provider_label = native_provider_label(provider);
+    let probe =
+        probe_native_library(target, &scope.root_path, alias, spec, &resolved).map_err(|e| {
+            format!(
+                "alias '{}' ({}) could not be prepared from '{}' for target '{}': {}",
+                alias, provider_label, resolved, target_id, e
+            )
+        })?;
+
+    if matches!(probe.provider, NativeDependencyProvider::System)
+        && !probe.is_path
+        && probe.declared_version.is_none()
+        && matches!(external_mode, ExternalLockMode::Frozen)
+    {
+        return Err(format!(
+            "alias '{}' (system) uses loader alias '{}' without a declared version. Add `[native-dependencies.{}].version = \"...\"` in package '{}'.",
+            alias, resolved, alias, scope.package_name
+        ));
+    }
+
+    let artifact_key = native_artifact_key(&scope.package_key, alias);
+    let (inputs, determinism) = native_artifact_inputs(
+        target,
+        &scope.package_name,
+        &scope.package_version,
+        &scope.package_key,
+        alias,
+        &probe,
+    );
+    let inputs_hash =
+        PackageLock::artifact_inputs_hash(inputs.clone(), &determinism).map_err(|e| {
+            format!(
+                "alias '{}' could not compute lock fingerprint: {}",
+                alias, e
+            )
+        })?;
+
+    if !probe.available {
+        if probe.is_path && !probe.path_exists {
+            return Err(format!(
+                "alias '{}' ({}) path not found: {}",
+                alias,
+                native_provider_label(probe.provider),
+                probe.load_target
+            ));
+        }
+        return Err(format!(
+            "alias '{}' ({}) failed to load from '{}': {}",
+            alias,
+            native_provider_label(probe.provider),
+            probe.load_target,
+            probe.error.as_deref().unwrap_or("unknown load error")
+        ));
+    }
+
+    if matches!(external_mode, ExternalLockMode::Frozen)
+        && lock
+            .artifact(NATIVE_LIB_NAMESPACE, &artifact_key, &inputs_hash)
+            .is_none()
+    {
+        return Err(format!(
+            "alias '{}' ({}) is not locked for target '{}' and fingerprint '{}'. Switch build.external.mode to 'update' and rerun to refresh shape.lock.",
+            alias,
+            native_provider_label(probe.provider),
+            target_id,
+            probe.fingerprint
+        ));
+    }
+
+    let provenance = if matches!(external_mode, ExternalLockMode::Frozen) {
+        NativeProvenance::LockValidated
+    } else {
+        NativeProvenance::UpdateResolved
+    };
+
+    let artifact = if matches!(external_mode, ExternalLockMode::Update) {
+        Some(
+            LockedArtifact::new(
+                NATIVE_LIB_NAMESPACE,
+                artifact_key,
+                NATIVE_LIB_PRODUCER,
+                determinism,
+                inputs,
+                artifact_payload(target, scope, alias, &probe),
+            )
+            .map_err(|e| {
+                format!(
+                    "alias '{}' ({}) could not be recorded in shape.lock: {}",
+                    alias,
+                    native_provider_label(probe.provider),
+                    e
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+
+    Ok(NativeResolutionEntry {
+        dependency: ResolvedNativeDependency {
+            package_name: scope.package_name.clone(),
+            package_version: scope.package_version.clone(),
+            package_key: scope.package_key.clone(),
+            alias: alias.to_string(),
+            target: target.clone(),
+            provider: probe.provider,
+            resolved_value: probe.resolved.clone(),
+            load_target: probe.load_target.clone(),
+            fingerprint: probe.fingerprint.clone(),
+            declared_version: probe.declared_version.clone(),
+            cache_key: probe.cache_key.clone(),
+            provenance,
+        },
+        artifact,
+    })
+}
+
 pub fn collect_native_dependency_scopes(
     root_path: &Path,
     project: &ShapeProject,
@@ -581,6 +748,7 @@ pub fn resolve_native_dependency_scopes(
         .and_then(PackageLock::read)
         .unwrap_or_else(PackageLock::new);
     let mut resolutions = NativeResolutionSet::default();
+    let mut issues = Vec::new();
 
     let mut sorted_scopes = scopes.to_vec();
     sorted_scopes.sort_by(|a, b| {
@@ -594,114 +762,39 @@ pub fn resolve_native_dependency_scopes(
         entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         for (alias, spec) in entries {
-            let resolved = spec.resolve_for_target(&target).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "native dependency '{}::{}' has no value for target '{}'",
-                    scope.package_key,
-                    alias,
-                    native_target_id(&target)
-                )
-            })?;
-            let probe = probe_native_library(&target, &scope.root_path, alias, spec, &resolved)?;
-            if matches!(probe.provider, NativeDependencyProvider::System)
-                && !probe.is_path
-                && probe.declared_version.is_none()
-                && matches!(external_mode, ExternalLockMode::Frozen)
-            {
-                bail!(
-                    "native dependency '{}::{}' uses system alias '{}' without a declared version. \
-                     Add `[native-dependencies.{}].version = \"...\"` in package '{}' for frozen-mode lock safety.",
-                    scope.package_key,
-                    alias,
-                    resolved,
-                    alias,
-                    scope.package_name
-                );
-            }
-
-            let artifact_key = native_artifact_key(&scope.package_key, alias);
-            let (inputs, determinism) = native_artifact_inputs(
+            match resolve_native_dependency_entry(
+                &scope,
+                alias.as_str(),
+                spec,
                 &target,
-                &scope.package_name,
-                &scope.package_version,
-                &scope.package_key,
-                alias,
-                &probe,
-            );
-            let inputs_hash = PackageLock::artifact_inputs_hash(inputs.clone(), &determinism)
-                .map_err(|e| anyhow::anyhow!("failed to hash native dependency inputs: {e}"))?;
-
-            if !probe.available {
-                if probe.is_path && !probe.path_exists {
-                    bail!(
-                        "native dependency '{}::{}' path not found for target '{}': {}",
-                        scope.package_key,
-                        alias,
-                        native_target_id(&target),
-                        probe.load_target
-                    );
+                &lock,
+                external_mode,
+            ) {
+                Ok(entry) => {
+                    if let Some(artifact) = entry.artifact {
+                        if let Err(err) = lock.upsert_artifact_variant(artifact) {
+                            issues.push(NativeResolutionIssue {
+                                package_key: scope.package_key.clone(),
+                                detail: format!(
+                                    "alias '{}' could not be stored in shape.lock: {}",
+                                    alias, err
+                                ),
+                            });
+                            continue;
+                        }
+                    }
+                    resolutions.insert(entry.dependency);
                 }
-                bail!(
-                    "native dependency '{}::{}' failed to load for target '{}' from '{}': {}",
-                    scope.package_key,
-                    alias,
-                    native_target_id(&target),
-                    probe.load_target,
-                    probe.error.as_deref().unwrap_or("unknown load error")
-                );
-            }
-
-            if matches!(external_mode, ExternalLockMode::Frozen)
-                && lock
-                    .artifact(NATIVE_LIB_NAMESPACE, &artifact_key, &inputs_hash)
-                    .is_none()
-            {
-                bail!(
-                    "native dependency '{}::{}' is not locked for target '{}' and fingerprint '{}'. \
-                     Switch build.external.mode to 'update' and rerun to refresh shape.lock.",
-                    scope.package_key,
-                    alias,
-                    native_target_id(&target),
-                    probe.fingerprint
-                );
-            }
-
-            let provenance = if matches!(external_mode, ExternalLockMode::Frozen) {
-                NativeProvenance::LockValidated
-            } else {
-                NativeProvenance::UpdateResolved
-            };
-
-            resolutions.insert(ResolvedNativeDependency {
-                package_name: scope.package_name.clone(),
-                package_version: scope.package_version.clone(),
-                package_key: scope.package_key.clone(),
-                alias: alias.clone(),
-                target: target.clone(),
-                provider: probe.provider,
-                resolved_value: probe.resolved.clone(),
-                load_target: probe.load_target.clone(),
-                fingerprint: probe.fingerprint.clone(),
-                declared_version: probe.declared_version.clone(),
-                cache_key: probe.cache_key.clone(),
-                provenance,
-            });
-
-            if matches!(external_mode, ExternalLockMode::Update) {
-                let artifact = LockedArtifact::new(
-                    NATIVE_LIB_NAMESPACE,
-                    artifact_key,
-                    NATIVE_LIB_PRODUCER,
-                    determinism,
-                    inputs,
-                    artifact_payload(&target, &scope, alias, &probe),
-                )
-                .map_err(|e| anyhow::anyhow!("failed to create native dependency artifact: {e}"))?;
-                lock.upsert_artifact_variant(artifact).map_err(|e| {
-                    anyhow::anyhow!("failed to store native dependency artifact: {e}")
-                })?;
+                Err(detail) => issues.push(NativeResolutionIssue {
+                    package_key: scope.package_key.clone(),
+                    detail,
+                }),
             }
         }
+    }
+
+    if !issues.is_empty() {
+        bail!(format_native_resolution_issues(&target, &issues));
     }
 
     if persist_lock && matches!(external_mode, ExternalLockMode::Update) {
@@ -720,4 +813,63 @@ pub fn resolve_native_dependencies_for_project(
 ) -> Result<NativeResolutionSet> {
     let scopes = collect_native_dependency_scopes(&project.root_path, &project.config)?;
     resolve_native_dependency_scopes(&scopes, Some(lock_path), external_mode, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+
+    fn test_scope(
+        root_path: PathBuf,
+        package_name: &str,
+        package_version: &str,
+        alias: &str,
+        spec: NativeDependencySpec,
+    ) -> NativeDependencyScope {
+        NativeDependencyScope {
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            package_key: format!("{package_name}@{package_version}"),
+            root_path,
+            dependencies: HashMap::from([(alias.to_string(), spec)]),
+        }
+    }
+
+    #[test]
+    fn test_native_resolution_reports_all_preflight_failures() {
+        let tmp = tempdir().expect("tempdir");
+        let alpha_root = tmp.path().join("alpha");
+        let beta_root = tmp.path().join("beta");
+        std::fs::create_dir_all(&alpha_root).expect("alpha root");
+        std::fs::create_dir_all(&beta_root).expect("beta root");
+
+        let scopes = vec![
+            test_scope(
+                alpha_root,
+                "alpha",
+                "0.1.0",
+                "alpha_native",
+                NativeDependencySpec::Simple("./missing-alpha.so".to_string()),
+            ),
+            test_scope(
+                beta_root,
+                "beta",
+                "0.2.0",
+                "beta_native",
+                NativeDependencySpec::Simple("./missing-beta.so".to_string()),
+            ),
+        ];
+
+        let err = resolve_native_dependency_scopes(&scopes, None, ExternalLockMode::Update, false)
+            .expect_err("preflight should aggregate failures");
+        let message = err.to_string();
+
+        assert!(message.contains("native dependency preflight failed for target '"));
+        assert!(message.contains("package 'alpha@0.1.0':"));
+        assert!(message.contains("alias 'alpha_native' (path) path not found:"));
+        assert!(message.contains("package 'beta@0.2.0':"));
+        assert!(message.contains("alias 'beta_native' (path) path not found:"));
+    }
 }
