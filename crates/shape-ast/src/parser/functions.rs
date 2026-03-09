@@ -177,6 +177,7 @@ pub fn parse_function_def(pair: Pair<Rule>) -> Result<FunctionDef> {
     Ok(FunctionDef {
         name,
         name_span,
+        declaring_module_path: None,
         doc_comment: None,
         type_params,
         params,

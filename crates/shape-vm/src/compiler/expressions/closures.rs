@@ -21,6 +21,7 @@ impl BytecodeCompiler {
         let proto_def = FunctionDef {
             name: closure_name.clone(),
             name_span: Span::DUMMY,
+            declaring_module_path: None,
             doc_comment: None,
             type_params: None,
             params: params.to_vec(),
@@ -83,6 +84,7 @@ impl BytecodeCompiler {
         let closure_def = FunctionDef {
             name: closure_name.clone(),
             name_span: Span::DUMMY,
+            declaring_module_path: None,
             doc_comment: None,
             type_params: None,
             params: closure_params,

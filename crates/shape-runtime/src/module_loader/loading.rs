@@ -316,6 +316,7 @@ pub(super) fn process_export_with_scope(
                 Export::Function(Arc::new(shape_ast::ast::FunctionDef {
                     name: function.name.clone(),
                     name_span: function.name_span,
+                    declaring_module_path: None,
                     doc_comment: function.doc_comment.clone(),
                     type_params: function.type_params.clone(),
                     params: function.params.clone(),

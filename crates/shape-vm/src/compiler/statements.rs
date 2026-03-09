@@ -1135,6 +1135,7 @@ impl BytecodeCompiler {
         Ok(FunctionDef {
             name: format!("{}.{}", type_str, method.name),
             name_span: Span::DUMMY,
+            declaring_module_path: method.declaring_module_path.clone(),
             doc_comment: None,
             params,
             return_type: method.return_type.clone(),
@@ -1184,6 +1185,7 @@ impl BytecodeCompiler {
         Ok(FunctionDef {
             name: fn_name,
             name_span: Span::DUMMY,
+            declaring_module_path: method.declaring_module_path.clone(),
             doc_comment: None,
             params,
             return_type: method.return_type.clone(),
@@ -1453,6 +1455,7 @@ impl BytecodeCompiler {
         Ok(FunctionDef {
             name: fn_name,
             name_span: Span::DUMMY,
+            declaring_module_path: method.declaring_module_path.clone(),
             doc_comment: None,
             params: method.params.clone(),
             return_type: method.return_type.clone(),
@@ -1497,6 +1500,7 @@ impl BytecodeCompiler {
         let func_def = FunctionDef {
             name: wrapper_name.clone(),
             name_span: span,
+            declaring_module_path: None,
             doc_comment: None,
             params: vec![FunctionParameter {
                 pattern: DestructurePattern::Identifier("value".to_string(), span),
@@ -1683,6 +1687,7 @@ impl BytecodeCompiler {
             let func_def = FunctionDef {
                 name: func_name,
                 name_span: Span::DUMMY,
+                declaring_module_path: None,
                 doc_comment: None,
                 params,
                 return_type: handler.return_type.clone(),
@@ -2368,6 +2373,7 @@ impl BytecodeCompiler {
         let fn_def = FunctionDef {
             name: fn_name.clone(),
             name_span: span,
+            declaring_module_path: None,
             doc_comment: None,
             params: vec![FunctionParameter {
                 pattern: DestructurePattern::Identifier("value".to_string(), span),

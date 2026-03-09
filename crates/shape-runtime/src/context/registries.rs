@@ -168,6 +168,7 @@ mod tests {
         let func = FunctionDef {
             name: "my_func".to_string(),
             name_span: Span::DUMMY,
+            declaring_module_path: None,
             doc_comment: None,
             type_params: None,
             params: vec![],
@@ -194,6 +195,7 @@ mod tests {
         let func = FunctionDef {
             name: "annotated_func".to_string(),
             name_span: Span::DUMMY,
+            declaring_module_path: None,
             doc_comment: None,
             type_params: None,
             params: vec![],
@@ -251,6 +253,7 @@ mod tests {
         let func = FunctionDef {
             name: "tracked_func".to_string(),
             name_span: Span::DUMMY,
+            declaring_module_path: None,
             doc_comment: None,
             type_params: None,
             params: vec![],

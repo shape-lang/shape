@@ -516,6 +516,7 @@ impl ModuleLoader {
             module_path: None,
         })?;
         let mut ast = ast;
+        annotate_program_declaring_module_path(&mut ast, compile_module_path);
         annotate_program_native_abi_package_key(
             &mut ast,
             self.package_key_for_origin_path(Some(&file_path))
@@ -557,6 +558,7 @@ impl ModuleLoader {
             module_path: origin_path.clone(),
         })?;
         let mut ast = ast;
+        annotate_program_declaring_module_path(&mut ast, compile_module_path);
         annotate_program_native_abi_package_key(
             &mut ast,
             self.package_key_for_origin_path(origin_path.as_deref())
@@ -742,6 +744,7 @@ impl ModuleLoader {
                     let placeholder_fn = shape_ast::ast::FunctionDef {
                         name: export_name.clone(),
                         name_span: shape_ast::ast::Span::default(),
+                        declaring_module_path: None,
                         doc_comment: None,
                         params: vec![],
                         body: vec![],
@@ -1028,6 +1031,12 @@ fn annotate_program_native_abi_package_key(program: &mut Program, package_key: O
     }
 }
 
+fn annotate_program_declaring_module_path(program: &mut Program, module_path: &str) {
+    for item in &mut program.items {
+        annotate_item_declaring_module_path(item, module_path);
+    }
+}
+
 fn annotate_item_native_abi_package_key(item: &mut shape_ast::ast::Item, package_key: &str) {
     use shape_ast::ast::{ExportItem, Item};
 
@@ -1050,6 +1059,48 @@ fn annotate_item_native_abi_package_key(item: &mut shape_ast::ast::Item, package
         Item::Module(module, _) => {
             for nested in &mut module.items {
                 annotate_item_native_abi_package_key(nested, package_key);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn annotate_item_declaring_module_path(item: &mut shape_ast::ast::Item, module_path: &str) {
+    use shape_ast::ast::{ExportItem, Item};
+
+    match item {
+        Item::Function(def, _) => {
+            if def.declaring_module_path.is_none() {
+                def.declaring_module_path = Some(module_path.to_string());
+            }
+        }
+        Item::Export(export, _) => match &mut export.item {
+            ExportItem::Function(def) => {
+                if def.declaring_module_path.is_none() {
+                    def.declaring_module_path = Some(module_path.to_string());
+                }
+            }
+            ExportItem::ForeignFunction(_) => {}
+            _ => {}
+        },
+        Item::Extend(extend, _) => {
+            for method in &mut extend.methods {
+                if method.declaring_module_path.is_none() {
+                    method.declaring_module_path = Some(module_path.to_string());
+                }
+            }
+        }
+        Item::Impl(impl_block, _) => {
+            for method in &mut impl_block.methods {
+                if method.declaring_module_path.is_none() {
+                    method.declaring_module_path = Some(module_path.to_string());
+                }
+            }
+        }
+        Item::Module(module, _) => {
+            let nested_path = format!("{}::{}", module_path, module.name);
+            for nested in &mut module.items {
+                annotate_item_declaring_module_path(nested, &nested_path);
             }
         }
         _ => {}
@@ -1140,6 +1191,34 @@ pub fn ping() { 1 }
         let names = collect_exported_function_names_from_source("duckdb", source)
             .expect("should collect exported functions");
         assert_eq!(names, vec!["connect".to_string(), "ping".to_string()]);
+    }
+
+    #[test]
+    fn test_stdlib_methods_are_annotated_with_declaring_module_path() {
+        let mut loader = ModuleLoader::new();
+        let module = loader
+            .load_module("std::core::json_value")
+            .expect("load stdlib module");
+
+        let extend = module
+            .ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Extend(extend, _) => Some(extend),
+                _ => None,
+            })
+            .expect("json_value module should contain an extend block");
+        let method = extend
+            .methods
+            .iter()
+            .find(|method| method.name == "get")
+            .expect("json_value extend block should contain get()");
+
+        assert_eq!(
+            method.declaring_module_path.as_deref(),
+            Some("std::core::json_value")
+        );
     }
 
     #[test]

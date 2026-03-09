@@ -133,6 +133,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                 FunctionDef {
                     name: (*name).to_string(),
                     name_span: Span::DUMMY,
+                    declaring_module_path: None,
                     doc_comment: None,
                     params,
                     return_type,
@@ -251,6 +252,7 @@ pub(crate) fn execute_comptime(
     let func_def = FunctionDef {
         name: func_name.clone(),
         name_span: Span::DUMMY,
+        declaring_module_path: None,
         doc_comment: None,
         params: Vec::new(),
         return_type: None,
@@ -601,6 +603,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     let func_def = FunctionDef {
         name: func_name.clone(),
         name_span: Span::DUMMY,
+        declaring_module_path: None,
         doc_comment: None,
         params,
         return_type: None,
@@ -1312,6 +1315,7 @@ mod tests {
         let func = FunctionDef {
             name: "greet".to_string(),
             name_span: Span::DUMMY,
+            declaring_module_path: None,
             doc_comment: None,
             params: vec![FunctionParameter {
                 pattern: DestructurePattern::Identifier("name".to_string(), Span::DUMMY),

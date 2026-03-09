@@ -71,10 +71,14 @@ impl BytecodeCompiler {
         // Track whether __original__ alias is active so we can clean it up.
         let has_original_alias = self.function_aliases.contains_key("__original__");
 
-        // Enable __* builtin access for stdlib functions (or preserve if globally enabled).
+        // Enable __* builtin access only for stdlib-origin functions
+        // (or preserve if an enclosing stdlib compilation context already enabled it).
         let saved_allow_internal = self.allow_internal_builtins;
-        self.allow_internal_builtins =
-            saved_allow_internal || self.stdlib_function_names.contains(&effective_def.name);
+        self.allow_internal_builtins = saved_allow_internal
+            || effective_def
+                .declaring_module_path
+                .as_deref()
+                .is_some_and(|module_path| module_path.starts_with("std::"));
 
         // Check for annotation-based wrapping BEFORE compiling
         let annotations = self.find_compiled_annotations(&effective_def);
@@ -427,6 +431,7 @@ impl BytecodeCompiler {
             let synthetic_def = FunctionDef {
                 name: def.name.clone(),
                 name_span: def.name_span,
+                declaring_module_path: None,
                 doc_comment: None,
                 params: wrapper_params,
                 return_type: def.return_type.clone(),
@@ -1966,6 +1971,7 @@ impl BytecodeCompiler {
                     let shadow_def = FunctionDef {
                         name: shadow_name.clone(),
                         name_span: func_def.name_span,
+                        declaring_module_path: func_def.declaring_module_path.clone(),
                         doc_comment: None,
                         params: func_def.params.clone(),
                         return_type: func_def.return_type.clone(),
@@ -2071,6 +2077,7 @@ impl BytecodeCompiler {
         let impl_def = FunctionDef {
             name: impl_name.clone(),
             name_span: func_def.name_span,
+            declaring_module_path: func_def.declaring_module_path.clone(),
             doc_comment: None,
             params: func_def.params.clone(),
             return_type: func_def.return_type.clone(),
@@ -2126,6 +2133,7 @@ impl BytecodeCompiler {
                 let wrapper_def = FunctionDef {
                     name: wrapper_name.clone(),
                     name_span: func_def.name_span,
+                    declaring_module_path: func_def.declaring_module_path.clone(),
                     doc_comment: None,
                     params: func_def.params.clone(),
                     return_type: func_def.return_type.clone(),
@@ -2181,6 +2189,7 @@ impl BytecodeCompiler {
         let impl_def = FunctionDef {
             name: impl_name.clone(),
             name_span: func_def.name_span,
+            declaring_module_path: func_def.declaring_module_path.clone(),
             doc_comment: None,
             params: func_def.params.clone(),
             return_type: func_def.return_type.clone(),
@@ -4112,5 +4121,30 @@ mod tests {
                 msg
             );
         }
+    }
+
+    #[test]
+    fn test_internal_builtin_not_unlocked_by_stdlib_name_collision() {
+        let code = r#"
+            type Json { payload: any }
+
+            extend Json {
+                method get(key: string) -> any {
+                    __json_object_get(self.payload, key)
+                }
+            }
+        "#;
+        let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names.insert("Json.get".to_string());
+        let program = shape_ast::parser::parse_program(code).unwrap();
+        let err = compiler
+            .compile(&program)
+            .expect_err("user-defined Json.get must not gain __* access");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Undefined function: __json_object_get"),
+            "Expected undefined internal builtin error, got: {}",
+            msg
+        );
     }
 }

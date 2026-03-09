@@ -89,6 +89,7 @@ fn collect_items(items: &[Item], program: &Program, module_path: &[String], docs
                     &FunctionDef {
                         name: function.name.clone(),
                         name_span: function.name_span,
+                        declaring_module_path: None,
                         doc_comment: function.doc_comment.clone(),
                         type_params: function.type_params.clone(),
                         params: function.params.clone(),

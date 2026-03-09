@@ -13,6 +13,12 @@ pub use super::types::TypeParam;
 pub struct FunctionDef {
     pub name: String,
     pub name_span: Span,
+    /// Declaring module path for compiler/runtime provenance checks.
+    ///
+    /// This is injected by the module loader for loaded modules and is not part
+    /// of user-authored source syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaring_module_path: Option<String>,
     #[serde(default)]
     pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,

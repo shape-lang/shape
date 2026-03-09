@@ -342,6 +342,7 @@ mod tests {
         let func = FunctionDef {
             name: "greet".to_string(),
             name_span: Span::DUMMY,
+            declaring_module_path: None,
             doc_comment: None,
             params: vec![FunctionParameter {
                 pattern: DestructurePattern::Identifier("name".to_string(), Span::DUMMY),
@@ -541,6 +542,7 @@ mod tests {
         let func = FunctionDef {
             name: "add".to_string(),
             name_span: Span::DUMMY,
+            declaring_module_path: None,
             doc_comment: None,
             params: vec![
                 FunctionParameter {

@@ -612,12 +612,14 @@ pub struct BytecodeCompiler {
     /// when the type inference engine cannot resolve a parameter's type.
     pub(crate) current_function_params: Vec<shape_ast::ast::FunctionParameter>,
 
-    /// Function names that originate from `std::*` modules.
-    /// Functions in this set are allowed to call `__*` internal builtins.
+    /// Legacy cache of function names collected from stdlib-loaded modules.
+    ///
+    /// Internal builtin access is now gated by per-definition declaring-module
+    /// provenance, not by membership in this set.
     pub stdlib_function_names: HashSet<String>,
 
     /// Per-function flag: when true, `get_builtin_function` resolves `__*` names.
-    /// Toggled during compilation based on `stdlib_function_names` membership.
+    /// Toggled during compilation for definitions originating from `std::*`.
     pub(crate) allow_internal_builtins: bool,
 
     /// Package-scoped native library resolutions for the current host.

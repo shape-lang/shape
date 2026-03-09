@@ -1101,6 +1101,7 @@ pub(crate) fn parse_method_def_shared(pair: Pair<Rule>) -> Result<crate::ast::ty
     Ok(MethodDef {
         name,
         span,
+        declaring_module_path: None,
         doc_comment: None,
         annotations: Vec::new(),
         params,

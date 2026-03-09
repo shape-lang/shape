@@ -980,6 +980,24 @@ match marker {
     }
 
     #[test]
+    fn stdlib_json_value_methods_can_use_internal_json_builtins() {
+        let source = r#"
+use std::core::json_value
+
+let value = Json::Null
+value.is_null()
+"#;
+
+        let mut engine = ShapeEngine::new().expect("engine");
+        engine.load_stdlib().expect("load stdlib");
+        let mut executor = BytecodeExecutor::new();
+        let result = engine
+            .execute(&mut executor, source)
+            .expect("json_value module should execute successfully");
+        assert_eq!(result.value.as_bool(), Some(true));
+    }
+
+    #[test]
     fn snapshot_resume_direct_vm_from_snapshot_with_marker() {
         let source = r#"
 from std::core::snapshot use { Snapshot }
