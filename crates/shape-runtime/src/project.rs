@@ -118,7 +118,9 @@ impl NativeTargetValue {
     pub fn resolve(&self) -> Option<String> {
         match self {
             NativeTargetValue::Simple(value) => Some(value.clone()),
-            NativeTargetValue::Detailed(detail) => detail.path.clone().or_else(|| detail.value.clone()),
+            NativeTargetValue::Detailed(detail) => {
+                detail.path.clone().or_else(|| detail.value.clone())
+            }
         }
     }
 }
@@ -192,7 +194,11 @@ impl NativeDependencySpec {
             NativeDependencySpec::Simple(value) => Some(value.clone()),
             NativeDependencySpec::Detailed(detail) => {
                 for candidate in target.fallback_ids() {
-                    if let Some(value) = detail.targets.get(&candidate).and_then(NativeTargetValue::resolve) {
+                    if let Some(value) = detail
+                        .targets
+                        .get(&candidate)
+                        .and_then(NativeTargetValue::resolve)
+                    {
                         return Some(value);
                     }
                 }
@@ -775,6 +781,42 @@ impl ShapeProject {
             }
         }
     }
+}
+
+/// Normalize project metadata into a canonical package identity with explicit fallbacks.
+pub fn normalize_package_identity_with_fallback(
+    _root_path: &Path,
+    project: &ShapeProject,
+    fallback_name: &str,
+    fallback_version: &str,
+) -> (String, String, String) {
+    let package_name = if project.project.name.trim().is_empty() {
+        fallback_name.to_string()
+    } else {
+        project.project.name.trim().to_string()
+    };
+    let package_version = if project.project.version.trim().is_empty() {
+        fallback_version.to_string()
+    } else {
+        project.project.version.trim().to_string()
+    };
+    let package_key = format!("{package_name}@{package_version}");
+    (package_name, package_version, package_key)
+}
+
+/// Normalize project metadata into a canonical package identity.
+///
+/// Empty names/versions fall back to the root directory name and `0.0.0`.
+pub fn normalize_package_identity(
+    root_path: &Path,
+    project: &ShapeProject,
+) -> (String, String, String) {
+    let fallback_root_name = root_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("root");
+    normalize_package_identity_with_fallback(root_path, project, fallback_root_name, "0.0.0")
 }
 
 /// A discovered project root with its parsed configuration

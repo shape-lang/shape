@@ -17,8 +17,12 @@ pub fn wire_vm_executor_module_loading(
         executor.set_dependency_paths(dep_paths);
     }
 
-    if let Some(resolutions) = resolve_native_libraries_for_context(context_file, source)? {
-        executor.set_native_library_overrides(resolutions.alias_load_targets()?);
+    if let Some((resolutions, root_package_key)) =
+        resolve_native_libraries_for_context(context_file, source)?
+    {
+        executor.set_native_resolution_context(resolutions, Some(root_package_key));
+    } else {
+        executor.clear_native_resolution_context();
     }
 
     let mut loader = engine.get_runtime_mut().configured_module_loader();
@@ -37,7 +41,12 @@ pub fn wire_vm_executor_module_loading(
 fn resolve_native_libraries_for_context(
     context_file: Option<&Path>,
     source: Option<&str>,
-) -> Result<Option<shape_runtime::native_resolution::NativeResolutionSet>> {
+) -> Result<
+    Option<(
+        shape_runtime::native_resolution::NativeResolutionSet,
+        String,
+    )>,
+> {
     let Some(context_file) = context_file else {
         return Ok(None);
     };
@@ -49,12 +58,16 @@ fn resolve_native_libraries_for_context(
 
     if let Some(project) = shape_runtime::project::find_project_root(&base_dir) {
         let lock_path = project.root_path.join("shape.lock");
-        let resolutions = shape_runtime::native_resolution::resolve_native_dependencies_for_project(
-            &project,
-            &lock_path,
-            project.config.build.external.mode,
-        )?;
-        return Ok(Some(resolutions));
+        let resolutions =
+            shape_runtime::native_resolution::resolve_native_dependencies_for_project(
+                &project,
+                &lock_path,
+                project.config.build.external.mode,
+            )?;
+        let root_package_key =
+            shape_runtime::project::normalize_package_identity(&project.root_path, &project.config)
+                .2;
+        return Ok(Some((resolutions, root_package_key)));
     }
 
     let Some(source) = source else {
@@ -65,8 +78,10 @@ fn resolve_native_libraries_for_context(
     let Some(frontmatter) = frontmatter else {
         return Ok(None);
     };
-    let scopes =
-        shape_runtime::native_resolution::collect_native_dependency_scopes(&base_dir, &frontmatter)?;
+    let scopes = shape_runtime::native_resolution::collect_native_dependency_scopes(
+        &base_dir,
+        &frontmatter,
+    )?;
     if scopes.is_empty() {
         return Ok(None);
     }
@@ -77,7 +92,9 @@ fn resolve_native_libraries_for_context(
         shape_runtime::project::ExternalLockMode::Update,
         true,
     )?;
-    Ok(Some(resolutions))
+    let root_package_key =
+        shape_runtime::project::normalize_package_identity(&base_dir, &frontmatter).2;
+    Ok(Some((resolutions, root_package_key)))
 }
 
 fn standalone_script_lock_path(script_path: &Path) -> PathBuf {

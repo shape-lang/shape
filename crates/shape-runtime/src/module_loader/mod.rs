@@ -10,7 +10,7 @@ mod resolution;
 mod resolution_deep_tests;
 mod resolver;
 
-use crate::project::{DependencySpec, ProjectRoot, find_project_root};
+use crate::project::{DependencySpec, ProjectRoot, find_project_root, normalize_package_identity};
 use shape_ast::ast::{FunctionDef, ImportStmt, Program, Span};
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::parser::parse_program;
@@ -117,6 +117,8 @@ pub struct ModuleLoader {
     stdlib_path: PathBuf,
     /// User module search paths
     module_paths: Vec<PathBuf>,
+    /// Active project root used to attribute loaded filesystem modules.
+    current_project_root: Option<PathBuf>,
     /// Module cache and dependency tracking
     cache: ModuleCache,
     /// Resolved dependency paths (name -> local path).
@@ -141,6 +143,7 @@ impl ModuleLoader {
         let mut loader = Self {
             stdlib_path: Self::default_stdlib_path(),
             module_paths: Self::default_module_paths(),
+            current_project_root: None,
             cache: ModuleCache::new(),
             dependency_paths: HashMap::new(),
             extension_resolver: InMemoryResolver::default(),
@@ -172,6 +175,7 @@ impl ModuleLoader {
         Self {
             stdlib_path: self.stdlib_path.clone(),
             module_paths: self.module_paths.clone(),
+            current_project_root: self.current_project_root.clone(),
             cache: ModuleCache::new(),
             dependency_paths: self.dependency_paths.clone(),
             extension_resolver: self.extension_resolver.clone(),
@@ -226,6 +230,7 @@ impl ModuleLoader {
     /// front of the search list so project modules take priority.
     pub fn set_project_root(&mut self, root: &std::path::Path, extra_paths: &[PathBuf]) {
         let root_buf = root.to_path_buf();
+        self.current_project_root = Some(root_buf.clone());
         // Insert project root first, then extra paths, all at front
         let mut to_prepend = vec![root_buf];
         to_prepend.extend(extra_paths.iter().cloned());
@@ -510,6 +515,12 @@ impl ModuleLoader {
             message: format!("Failed to parse module: {}: {}", compile_module_path, e),
             module_path: None,
         })?;
+        let mut ast = ast;
+        annotate_program_native_abi_package_key(
+            &mut ast,
+            self.package_key_for_origin_path(Some(&file_path))
+                .as_deref(),
+        );
 
         // Process imports to track dependencies
         let dependencies = resolution::extract_dependencies(&ast);
@@ -545,6 +556,12 @@ impl ModuleLoader {
             message: format!("Failed to parse module: {}: {}", compile_module_path, e),
             module_path: origin_path.clone(),
         })?;
+        let mut ast = ast;
+        annotate_program_native_abi_package_key(
+            &mut ast,
+            self.package_key_for_origin_path(origin_path.as_deref())
+                .as_deref(),
+        );
 
         // Process imports to track dependencies
         let dependencies = resolution::extract_dependencies(&ast);
@@ -971,6 +988,72 @@ impl ModuleLoader {
     pub fn get_all_dependencies(&self, module_path: &str) -> Vec<String> {
         self.cache.get_all_dependencies(module_path)
     }
+
+    fn package_key_for_origin_path(&self, origin_path: Option<&Path>) -> Option<String> {
+        let origin_path = origin_path?;
+        let origin = origin_path
+            .canonicalize()
+            .unwrap_or_else(|_| origin_path.to_path_buf());
+
+        for dep_root in self.dependency_paths.values() {
+            let dep_root = dep_root.canonicalize().unwrap_or_else(|_| dep_root.clone());
+            if origin.starts_with(&dep_root)
+                && let Some(project) = find_project_root(&dep_root)
+            {
+                return Some(normalize_package_identity(&project.root_path, &project.config).2);
+            }
+        }
+
+        if let Some(project_root) = &self.current_project_root {
+            let project_root = project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.clone());
+            if origin.starts_with(&project_root)
+                && let Some(project) = find_project_root(&project_root)
+            {
+                return Some(normalize_package_identity(&project.root_path, &project.config).2);
+            }
+        }
+
+        None
+    }
+}
+
+fn annotate_program_native_abi_package_key(program: &mut Program, package_key: Option<&str>) {
+    let Some(package_key) = package_key else {
+        return;
+    };
+    for item in &mut program.items {
+        annotate_item_native_abi_package_key(item, package_key);
+    }
+}
+
+fn annotate_item_native_abi_package_key(item: &mut shape_ast::ast::Item, package_key: &str) {
+    use shape_ast::ast::{ExportItem, Item};
+
+    match item {
+        Item::ForeignFunction(def, _) => {
+            if let Some(native) = def.native_abi.as_mut()
+                && native.package_key.is_none()
+            {
+                native.package_key = Some(package_key.to_string());
+            }
+        }
+        Item::Export(export, _) => {
+            if let ExportItem::ForeignFunction(def) = &mut export.item
+                && let Some(native) = def.native_abi.as_mut()
+                && native.package_key.is_none()
+            {
+                native.package_key = Some(package_key.to_string());
+            }
+        }
+        Item::Module(module, _) => {
+            for nested in &mut module.items {
+                annotate_item_native_abi_package_key(nested, package_key);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl Default for ModuleLoader {
@@ -1122,6 +1205,62 @@ pub fn helper(x) {{
             "Expected 'helper' export, got: {:?}",
             module.exports.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_loaded_dependency_module_annotates_native_abi_with_package_key() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dep_root = root.path().join("dep_pkg");
+
+        std::fs::create_dir_all(&dep_root).expect("create dep root");
+        std::fs::write(
+            root.path().join("shape.toml"),
+            r#"
+[project]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+dep_pkg = { path = "./dep_pkg" }
+"#,
+        )
+        .expect("write root shape.toml");
+        std::fs::write(
+            dep_root.join("shape.toml"),
+            r#"
+[project]
+name = "dep_pkg"
+version = "1.2.3"
+"#,
+        )
+        .expect("write dep shape.toml");
+        std::fs::write(
+            dep_root.join("index.shape"),
+            r#"
+extern C fn dep_call() -> i32 from "shared";
+"#,
+        )
+        .expect("write dep source");
+
+        let mut loader = ModuleLoader::new();
+        loader.set_project_root(root.path(), &[]);
+        loader.set_dependency_paths(HashMap::from([("dep_pkg".to_string(), dep_root.clone())]));
+
+        let module = loader.load_module("dep_pkg").expect("load dep module");
+        let foreign = module
+            .ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::ForeignFunction(def, _) => Some(def),
+                _ => None,
+            })
+            .expect("foreign function should exist");
+        let native = foreign
+            .native_abi
+            .as_ref()
+            .expect("native abi should exist");
+        assert_eq!(native.package_key.as_deref(), Some("dep_pkg@1.2.3"));
     }
 
     #[test]

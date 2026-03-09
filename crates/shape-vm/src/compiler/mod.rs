@@ -620,9 +620,9 @@ pub struct BytecodeCompiler {
     /// Toggled during compilation based on `stdlib_function_names` membership.
     pub(crate) allow_internal_builtins: bool,
 
-    /// Pre-resolved native library aliases from dependency packages' `[native-dependencies]`.
-    /// Maps library alias (e.g. `"duckdb"`) to resolved library path (e.g. `"libduckdb.so"`).
-    pub(crate) native_library_overrides: HashMap<String, String>,
+    /// Package-scoped native library resolutions for the current host.
+    pub(crate) native_resolution_context:
+        Option<shape_runtime::native_resolution::NativeResolutionSet>,
 }
 
 impl Default for BytecodeCompiler {

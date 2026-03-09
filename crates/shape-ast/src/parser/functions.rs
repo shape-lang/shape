@@ -417,6 +417,7 @@ pub fn parse_extern_native_function_def(pair: Pair<Rule>) -> Result<ForeignFunct
             abi,
             library,
             symbol,
+            package_key: None,
         }),
     })
 }

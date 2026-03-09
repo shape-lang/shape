@@ -69,6 +69,11 @@ pub struct NativeAbiBinding {
     pub library: String,
     /// Symbol name to resolve in the library.
     pub symbol: String,
+    /// Declaring package identity for package-scoped native resolution.
+    ///
+    /// This is compiler/runtime metadata, not source syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_key: Option<String>,
 }
 
 impl ForeignFunctionDef {

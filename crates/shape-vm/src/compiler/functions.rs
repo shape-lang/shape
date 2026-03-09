@@ -181,7 +181,8 @@ impl BytecodeCompiler {
             let signature = self.build_native_c_signature(def)?;
             Some(crate::bytecode::NativeAbiSpec {
                 abi: native.abi.clone(),
-                library: self.resolve_native_library_alias(&native.library)?,
+                library: self
+                    .resolve_native_library_alias(&native.library, native.package_key.as_deref())?,
                 symbol: native.symbol.clone(),
                 signature,
             })
@@ -463,9 +464,7 @@ impl BytecodeCompiler {
         // Helper to emit a builtin call with arg count
         macro_rules! emit_builtin {
             ($builtin:expr, $argc:expr) => {{
-                let argc_const = self
-                    .program
-                    .add_constant(Constant::Number($argc as f64));
+                let argc_const = self.program.add_constant(Constant::Number($argc as f64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(argc_const)),
@@ -512,10 +511,7 @@ impl BytecodeCompiler {
                 out_idx += 1;
             } else {
                 // Load the caller-visible arg. We need to compute the caller-local index.
-                let caller_local = def.params[..i]
-                    .iter()
-                    .filter(|p| !p.is_out)
-                    .count() as u16;
+                let caller_local = def.params[..i].iter().filter(|p| !p.is_out).count() as u16;
                 self.emit(Instruction::new(
                     OpCode::LoadLocal,
                     Some(Operand::Local(caller_local)),
@@ -565,9 +561,10 @@ impl BytecodeCompiler {
         }
 
         // 6. Build return value
-        let is_void_return = def.return_type.as_ref().map_or(false, |ann| {
-            matches!(ann, shape_ast::ast::TypeAnnotation::Basic(n) if n == "void")
-        });
+        let is_void_return = def.return_type.as_ref().map_or(
+            false,
+            |ann| matches!(ann, shape_ast::ast::TypeAnnotation::Basic(n) if n == "void"),
+        );
 
         if out_count == 1 && is_void_return {
             // Single out param + void return → return the out value directly
@@ -830,7 +827,11 @@ impl BytecodeCompiler {
         Ok(format!("fn({}) -> {}", param_types.join(", "), ret_type))
     }
 
-    fn resolve_native_library_alias(&self, requested: &str) -> Result<String> {
+    fn resolve_native_library_alias(
+        &self,
+        requested: &str,
+        declaring_package_key: Option<&str>,
+    ) -> Result<String> {
         // Well-known aliases for standard system libraries.
         match requested {
             "c" | "libc" => {
@@ -844,14 +845,20 @@ impl BytecodeCompiler {
             _ => {}
         }
 
-        // 1. Check pre-resolved overrides from dependency packages' [native-dependencies].
-        if let Some(resolved) = self.native_library_overrides.get(requested) {
-            return Ok(resolved.clone());
+        // Resolve package-local aliases through the shared native resolution context.
+        if let Some(package_key) = declaring_package_key
+            && let Some(resolutions) = &self.native_resolution_context
+            && let Some(resolved) = resolutions
+                .by_package_alias
+                .get(&(package_key.to_string(), requested.to_string()))
+        {
+            return Ok(resolved.load_target.clone());
         }
 
-        // 2. Try [native-dependencies] lookup from project shape.toml when available.
-        // If no mapping is found, use the declared string verbatim.
-        if let Some(ref source_dir) = self.source_dir
+        // Fall back to root-project native dependency declarations when compiling
+        // a program that was not annotated with explicit package provenance.
+        if declaring_package_key.is_none()
+            && let Some(ref source_dir) = self.source_dir
             && let Some(project) = shape_runtime::project::find_project_root(source_dir)
             && let Ok(native_deps) = project.config.native_dependencies()
             && let Some(spec) = native_deps.get(requested)
@@ -2576,10 +2583,8 @@ impl BytecodeCompiler {
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
         let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
         let saved_param_locals = std::mem::take(&mut self.param_locals);
-        let saved_function_params = std::mem::replace(
-            &mut self.current_function_params,
-            func_def.params.clone(),
-        );
+        let saved_function_params =
+            std::mem::replace(&mut self.current_function_params, func_def.params.clone());
 
         // Set up isolated locals for function compilation
         self.current_function = Some(func_idx);
@@ -3748,6 +3753,73 @@ mod tests {
             }
         "#;
         compiles(code).expect("duckdb package-style native code should compile");
+    }
+
+    #[test]
+    fn test_extern_c_resolution_is_package_scoped_not_global() {
+        let code = r#"
+            extern C fn dep_a_call() -> i32 from "shared";
+            extern C fn dep_b_call() -> i32 from "shared";
+        "#;
+        let mut program = shape_ast::parser::parse_program(code).expect("parse failed");
+        for item in &mut program.items {
+            if let shape_ast::ast::Item::ForeignFunction(def, _) = item
+                && let Some(native) = def.native_abi.as_mut()
+            {
+                native.package_key = Some(match def.name.as_str() {
+                    "dep_a_call" => "dep_a@1.0.0".to_string(),
+                    "dep_b_call" => "dep_b@1.0.0".to_string(),
+                    other => panic!("unexpected foreign function '{}'", other),
+                });
+            }
+        }
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+
+        let mut resolutions = shape_runtime::native_resolution::NativeResolutionSet::default();
+        resolutions.insert(shape_runtime::native_resolution::ResolvedNativeDependency {
+            package_name: "dep_a".to_string(),
+            package_version: "1.0.0".to_string(),
+            package_key: "dep_a@1.0.0".to_string(),
+            alias: "shared".to_string(),
+            target: shape_runtime::project::NativeTarget::current(),
+            provider: shape_runtime::project::NativeDependencyProvider::System,
+            resolved_value: "libdep_a_shared.so".to_string(),
+            load_target: "/tmp/libdep_a_shared.so".to_string(),
+            fingerprint: "test-a".to_string(),
+            declared_version: Some("1.0.0".to_string()),
+            cache_key: None,
+            provenance: shape_runtime::native_resolution::NativeProvenance::UpdateResolved,
+        });
+        resolutions.insert(shape_runtime::native_resolution::ResolvedNativeDependency {
+            package_name: "dep_b".to_string(),
+            package_version: "1.0.0".to_string(),
+            package_key: "dep_b@1.0.0".to_string(),
+            alias: "shared".to_string(),
+            target: shape_runtime::project::NativeTarget::current(),
+            provider: shape_runtime::project::NativeDependencyProvider::System,
+            resolved_value: "libdep_b_shared.so".to_string(),
+            load_target: "/tmp/libdep_b_shared.so".to_string(),
+            fingerprint: "test-b".to_string(),
+            declared_version: Some("1.0.0".to_string()),
+            cache_key: None,
+            provenance: shape_runtime::native_resolution::NativeProvenance::UpdateResolved,
+        });
+        compiler.native_resolution_context = Some(resolutions);
+
+        let bytecode = compiler.compile(&program).expect("compile should succeed");
+        let dep_a = bytecode.foreign_functions[0]
+            .native_abi
+            .as_ref()
+            .expect("dep_a native ABI");
+        let dep_b = bytecode.foreign_functions[1]
+            .native_abi
+            .as_ref()
+            .expect("dep_b native ABI");
+
+        assert_eq!(dep_a.library, "/tmp/libdep_a_shared.so");
+        assert_eq!(dep_b.library, "/tmp/libdep_b_shared.so");
     }
 
     #[test]

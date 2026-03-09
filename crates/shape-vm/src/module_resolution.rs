@@ -48,7 +48,9 @@ pub(crate) fn should_include_item(item: &Item, names: &std::collections::HashSet
 }
 
 /// Extract function names from a list of AST items.
-pub(crate) fn collect_function_names_from_items(items: &[Item]) -> std::collections::HashSet<String> {
+pub(crate) fn collect_function_names_from_items(
+    items: &[Item],
+) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
     for item in items {
         match item {
@@ -66,6 +68,45 @@ pub(crate) fn collect_function_names_from_items(items: &[Item]) -> std::collecti
         }
     }
     names
+}
+
+/// Attach declaring package provenance to `extern C` items in a program.
+pub(crate) fn annotate_program_native_abi_package_key(
+    program: &mut Program,
+    package_key: Option<&str>,
+) {
+    let Some(package_key) = package_key else {
+        return;
+    };
+    for item in &mut program.items {
+        annotate_item_native_abi_package_key(item, package_key);
+    }
+}
+
+fn annotate_item_native_abi_package_key(item: &mut Item, package_key: &str) {
+    match item {
+        Item::ForeignFunction(def, _) => {
+            if let Some(native) = def.native_abi.as_mut()
+                && native.package_key.is_none()
+            {
+                native.package_key = Some(package_key.to_string());
+            }
+        }
+        Item::Export(export, _) => {
+            if let ExportItem::ForeignFunction(def) = &mut export.item
+                && let Some(native) = def.native_abi.as_mut()
+                && native.package_key.is_none()
+            {
+                native.package_key = Some(package_key.to_string());
+            }
+        }
+        Item::Module(module, _) => {
+            for nested in &mut module.items {
+                annotate_item_native_abi_package_key(nested, package_key);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Prepend fully-resolved prelude module AST items into the program.
@@ -308,8 +349,10 @@ impl BytecodeExecutor {
         use shape_ast::ast::ImportItems;
         // Track which specific names have been inlined from each module path.
         // For namespace (wildcard) imports, the path is stored with None (= all items).
-        let mut inlined_names: std::collections::HashMap<String, Option<std::collections::HashSet<String>>> =
-            std::collections::HashMap::new();
+        let mut inlined_names: std::collections::HashMap<
+            String,
+            Option<std::collections::HashSet<String>>,
+        > = std::collections::HashMap::new();
         let mut stdlib_names = std::collections::HashSet::new();
 
         loop {
@@ -320,8 +363,10 @@ impl BytecodeExecutor {
             // A module path that was previously inlined with a wildcard import
             // needs no further processing. Named imports only need to resolve
             // names not yet inlined.
-            let mut merged: std::collections::HashMap<String, Option<std::collections::HashSet<String>>> =
-                std::collections::HashMap::new();
+            let mut merged: std::collections::HashMap<
+                String,
+                Option<std::collections::HashSet<String>>,
+            > = std::collections::HashMap::new();
 
             for item in program.items.iter() {
                 let Item::Import(import_stmt, _) = item else {
@@ -337,12 +382,13 @@ impl BytecodeExecutor {
                     continue;
                 }
 
-                let named_filter: Option<std::collections::HashSet<String>> = match &import_stmt.items {
-                    ImportItems::Named(specs) => {
-                        Some(specs.iter().map(|s| s.name.clone()).collect())
-                    }
-                    ImportItems::Namespace { .. } => None,
-                };
+                let named_filter: Option<std::collections::HashSet<String>> =
+                    match &import_stmt.items {
+                        ImportItems::Named(specs) => {
+                            Some(specs.iter().map(|s| s.name.clone()).collect())
+                        }
+                        ImportItems::Namespace { .. } => None,
+                    };
 
                 // Filter out already-inlined names
                 let new_filter = match &named_filter {
@@ -366,7 +412,9 @@ impl BytecodeExecutor {
                 };
 
                 // Merge into this iteration's work
-                let entry = merged.entry(module_path.to_string()).or_insert_with(|| Some(std::collections::HashSet::new()));
+                let entry = merged
+                    .entry(module_path.to_string())
+                    .or_insert_with(|| Some(std::collections::HashSet::new()));
                 match new_filter {
                     None => {
                         // Upgrade to wildcard
@@ -386,7 +434,8 @@ impl BytecodeExecutor {
                 let is_std = module_path.starts_with("std::");
 
                 // Try loading the module
-                let ast_items: Option<Vec<Item>> = if let Some(loader) = self.module_loader.as_mut() {
+                let ast_items: Option<Vec<Item>> = if let Some(loader) = self.module_loader.as_mut()
+                {
                     if let Some(module) = loader.get_module(module_path) {
                         Some(module.ast.items.clone())
                     } else {
@@ -417,7 +466,9 @@ impl BytecodeExecutor {
                             }
                         }
                         // Record inlined names
-                        let entry = inlined_names.entry(module_path.clone()).or_insert_with(|| Some(std::collections::HashSet::new()));
+                        let entry = inlined_names
+                            .entry(module_path.clone())
+                            .or_insert_with(|| Some(std::collections::HashSet::new()));
                         if let Some(existing) = entry {
                             existing.extend(names.iter().cloned());
                         }
@@ -530,8 +581,7 @@ mod tests {
         // The prelude injects module AST items (Display trait, Snapshot enum, math
         // functions, etc.) directly into the program.
         let mut executor = crate::configuration::BytecodeExecutor::new();
-        let mut engine =
-            shape_runtime::engine::ShapeEngine::new().expect("engine creation failed");
+        let mut engine = shape_runtime::engine::ShapeEngine::new().expect("engine creation failed");
         engine.load_stdlib().expect("load stdlib");
 
         // Compile a simple program — the prelude items should be inlined.

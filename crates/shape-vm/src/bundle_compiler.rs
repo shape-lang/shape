@@ -4,7 +4,7 @@
 
 use crate::bytecode;
 use crate::compiler::BytecodeCompiler;
-use crate::module_resolution::should_include_item;
+use crate::module_resolution::{annotate_program_native_abi_package_key, should_include_item};
 use sha2::{Digest, Sha256};
 use shape_ast::parser::parse_program;
 use shape_runtime::module_manifest::ModuleManifest;
@@ -40,7 +40,35 @@ impl BundleCompiler {
             Vec::new();
 
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        loader.set_project_root(root, &project.resolved_module_paths());
+        let dependency_paths: HashMap<String, PathBuf> = project
+            .config
+            .dependencies
+            .iter()
+            .filter_map(|(name, spec)| match spec {
+                shape_runtime::project::DependencySpec::Detailed(detail) => {
+                    detail.path.as_ref().map(|path| {
+                        let dep_path = root.join(path);
+                        let canonical = dep_path.canonicalize().unwrap_or(dep_path);
+                        (name.clone(), canonical)
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        if !dependency_paths.is_empty() {
+            loader.set_dependency_paths(dependency_paths);
+        }
         let known_bindings = crate::stdlib::core_binding_names();
+        let native_resolution_context =
+            shape_runtime::native_resolution::resolve_native_dependencies_for_project(
+                project,
+                &root.join("shape.lock"),
+                project.config.build.external.mode,
+            )
+            .map_err(|e| format!("Failed to resolve native dependencies for bundle: {}", e))?;
+        let root_package_key =
+            shape_runtime::project::normalize_package_identity(root, &project.config).2;
 
         for (file_path, module_path) in &shape_files {
             let source = std::fs::read_to_string(file_path)
@@ -57,10 +85,10 @@ impl BundleCompiler {
             // Parse
             let mut ast = parse_program(&source)
                 .map_err(|e| format!("Failed to parse '{}': {}", file_path.display(), e))?;
+            annotate_program_native_abi_package_key(&mut ast, Some(root_package_key.as_str()));
 
             // Extract documentation from source + AST (must use original AST)
-            let module_docs =
-                shape_runtime::doc_extract::extract_docs_from_ast(&source, &ast);
+            let module_docs = shape_runtime::doc_extract::extract_docs_from_ast(&source, &ast);
             if !module_docs.is_empty() {
                 docs.insert(module_path.clone(), module_docs);
             }
@@ -69,8 +97,7 @@ impl BundleCompiler {
             let export_names = collect_export_names(&ast);
 
             // Inject stdlib prelude items
-            let mut stdlib_names =
-                crate::module_resolution::prepend_prelude_items(&mut ast);
+            let mut stdlib_names = crate::module_resolution::prepend_prelude_items(&mut ast);
 
             // Resolve explicit imports via ModuleLoader
             stdlib_names.extend(resolve_and_inline_imports(&mut ast, &mut loader));
@@ -79,6 +106,8 @@ impl BundleCompiler {
             let mut compiler = BytecodeCompiler::new();
             compiler.stdlib_function_names = stdlib_names;
             compiler.register_known_bindings(&known_bindings);
+            compiler.native_resolution_context = Some(native_resolution_context.clone());
+            compiler.set_source_dir(root.clone());
             let bytecode = compiler
                 .compile(&ast)
                 .map_err(|e| format!("Failed to compile '{}': {}", file_path.display(), e))?;
@@ -95,11 +124,7 @@ impl BundleCompiler {
                 )
             })?;
 
-            compiled_programs.push((
-                module_path.clone(),
-                export_names.clone(),
-                content_addressed,
-            ));
+            compiled_programs.push((module_path.clone(), export_names.clone(), content_addressed));
 
             modules.push(BundledModule {
                 module_path: module_path.clone(),
@@ -276,13 +301,10 @@ fn resolve_and_inline_imports(
             // Load module (errors are non-fatal — module might resolve at runtime)
             let _ = loader.load_module(module_path);
 
-            let named_filter: Option<std::collections::HashSet<&str>> =
-                match &import_stmt.items {
-                    ImportItems::Named(specs) => {
-                        Some(specs.iter().map(|s| s.name.as_str()).collect())
-                    }
-                    ImportItems::Namespace { .. } => None,
-                };
+            let named_filter: Option<std::collections::HashSet<&str>> = match &import_stmt.items {
+                ImportItems::Named(specs) => Some(specs.iter().map(|s| s.name.as_str()).collect()),
+                ImportItems::Namespace { .. } => None,
+            };
 
             if let Some(module) = loader.get_module(module_path) {
                 let items = module.ast.items.clone();
@@ -316,25 +338,6 @@ fn resolve_and_inline_imports(
     stdlib_names
 }
 
-fn normalize_package_identity(
-    project: &shape_runtime::project::ShapeProject,
-    fallback_name: &str,
-    fallback_version: &str,
-) -> (String, String, String) {
-    let package_name = if project.project.name.trim().is_empty() {
-        fallback_name.to_string()
-    } else {
-        project.project.name.trim().to_string()
-    };
-    let package_version = if project.project.version.trim().is_empty() {
-        fallback_version.to_string()
-    } else {
-        project.project.version.trim().to_string()
-    };
-    let package_key = format!("{package_name}@{package_version}");
-    (package_name, package_version, package_key)
-}
-
 fn merge_native_scope(
     scopes: &mut HashMap<String, BundledNativeDependencyScope>,
     scope: BundledNativeDependencyScope,
@@ -350,13 +353,8 @@ fn collect_native_dependency_scopes(
     root_path: &Path,
     project: &shape_runtime::project::ShapeProject,
 ) -> Result<Vec<BundledNativeDependencyScope>, String> {
-    let fallback_root_name = root_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("root");
     let (root_name, root_version, root_key) =
-        normalize_package_identity(project, fallback_root_name, "0.0.0");
+        shape_runtime::project::normalize_package_identity(root_path, project);
 
     let mut queue: VecDeque<(
         PathBuf,
@@ -457,7 +455,12 @@ fn collect_native_dependency_scopes(
                     )
                 })?;
             let (dep_name, dep_version, dep_key) =
-                normalize_package_identity(&dep_project, &resolved_dep.name, &resolved_dep.version);
+                shape_runtime::project::normalize_package_identity_with_fallback(
+                    &dep_root,
+                    &dep_project,
+                    &resolved_dep.name,
+                    &resolved_dep.version,
+                );
             queue.push_back((dep_root, dep_project, dep_name, dep_version, dep_key));
         }
     }
@@ -480,7 +483,11 @@ fn native_spec_is_portable(spec: &shape_runtime::project::NativeDependencySpec) 
                 return false;
             }
             for target in detail.targets.values() {
-                if target.resolve().as_deref().is_some_and(is_path_like_native_spec) {
+                if target
+                    .resolve()
+                    .as_deref()
+                    .is_some_and(is_path_like_native_spec)
+                {
                     return false;
                 }
             }

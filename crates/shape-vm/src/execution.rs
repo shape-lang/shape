@@ -396,11 +396,15 @@ impl BytecodeExecutor {
 
         let module_binding_registry = runtime.module_binding_registry();
         let imported_program = Self::create_program_from_imports(&module_binding_registry)?;
+        let mut root_program = program.clone();
+        crate::module_resolution::annotate_program_native_abi_package_key(
+            &mut root_program,
+            self.root_package_key.as_deref(),
+        );
 
         let mut merged_program = imported_program;
-        merged_program.items.extend(program.items.clone());
-        let mut stdlib_names =
-            crate::module_resolution::prepend_prelude_items(&mut merged_program);
+        merged_program.items.extend(root_program.items);
+        let mut stdlib_names = crate::module_resolution::prepend_prelude_items(&mut merged_program);
         stdlib_names.extend(self.append_imported_module_items(&mut merged_program)?);
 
         let mut compiler = BytecodeCompiler::new();
@@ -415,7 +419,7 @@ impl BytecodeExecutor {
             compiler.set_source_dir(cwd);
         }
 
-        compiler.native_library_overrides = self.native_library_overrides.clone();
+        compiler.native_resolution_context = self.native_resolution_context.clone();
 
         let bytecode = if let Some(source) = &source_for_compilation {
             compiler.compile_with_source(&merged_program, source)?
@@ -557,15 +561,18 @@ impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
             items,
             docs: shape_ast::ast::ProgramDocs::default(),
         };
+        crate::module_resolution::annotate_program_native_abi_package_key(
+            &mut program,
+            self.root_package_key.as_deref(),
+        );
 
         // Inject prelude and resolve imports
-        let stdlib_names =
-            crate::module_resolution::prepend_prelude_items(&mut program);
+        let stdlib_names = crate::module_resolution::prepend_prelude_items(&mut program);
 
         // Compile and execute
         let mut compiler = BytecodeCompiler::new();
         compiler.stdlib_function_names = stdlib_names;
-        compiler.native_library_overrides = self.native_library_overrides.clone();
+        compiler.native_resolution_context = self.native_resolution_context.clone();
         let bytecode = compiler.compile(&program)?;
 
         let module_binding_names = bytecode.module_binding_names.clone();
@@ -639,10 +646,15 @@ impl ProgramExecutor for BytecodeExecutor {
             // Extract imported functions from ModuleBindingRegistry and add them to the program
             let module_binding_registry = runtime.module_binding_registry();
             let imported_program = Self::create_program_from_imports(&module_binding_registry)?;
+            let mut root_program = program.clone();
+            crate::module_resolution::annotate_program_native_abi_package_key(
+                &mut root_program,
+                self.root_package_key.as_deref(),
+            );
 
             // Merge imported functions into the main program
             let mut merged_program = imported_program;
-            merged_program.items.extend(program.items.clone());
+            merged_program.items.extend(root_program.items);
             let mut stdlib_names =
                 crate::module_resolution::prepend_prelude_items(&mut merged_program);
             stdlib_names.extend(self.append_imported_module_items(&mut merged_program)?);
@@ -662,7 +674,7 @@ impl ProgramExecutor for BytecodeExecutor {
                 compiler.set_source_dir(cwd);
             }
 
-            compiler.native_library_overrides = self.native_library_overrides.clone();
+            compiler.native_resolution_context = self.native_resolution_context.clone();
 
             // Use compile_with_source if source text is available for better error messages
             let bytecode = if let Some(source) = &source_for_compilation {
@@ -991,7 +1003,9 @@ checkpointed(41)
         engine.enable_snapshot_store(store.clone());
 
         let mut executor = BytecodeExecutor::new();
-        let _ = engine.execute(&mut executor, source).expect("first execute");
+        let _ = engine
+            .execute(&mut executor, source)
+            .expect("first execute");
 
         let snapshot_id = engine
             .last_snapshot()

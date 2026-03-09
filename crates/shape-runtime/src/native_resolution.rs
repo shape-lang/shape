@@ -77,30 +77,6 @@ impl NativeResolutionSet {
         self.by_package_alias
             .insert((item.package_key.clone(), item.alias.clone()), item);
     }
-
-    /// Collapse the package-aware resolution set into alias -> load target,
-    /// failing fast if two packages expose the same alias with different targets.
-    pub fn alias_load_targets(&self) -> Result<HashMap<String, String>> {
-        let mut aliases = HashMap::new();
-        for resolved in self.by_package_alias.values() {
-            match aliases.get(&resolved.alias) {
-                Some(existing) if existing != &resolved.load_target => {
-                    bail!(
-                        "ambiguous native dependency alias '{}': both '{}' and '{}' are active; \
-                         package-scoped extern C aliasing is required before these can coexist",
-                        resolved.alias,
-                        existing,
-                        resolved.load_target
-                    );
-                }
-                Some(_) => {}
-                None => {
-                    aliases.insert(resolved.alias.clone(), resolved.load_target.clone());
-                }
-            }
-        }
-        Ok(aliases)
-    }
 }
 
 fn native_provider_label(provider: NativeDependencyProvider) -> &'static str {
@@ -359,17 +335,17 @@ fn native_artifact_inputs(
     package_key: &str,
     alias: &str,
     probe: &NativeLibraryProbe,
-) -> (
-    BTreeMap<String, String>,
-    ArtifactDeterminism,
-) {
+) -> (BTreeMap<String, String>, ArtifactDeterminism) {
     let mut inputs = BTreeMap::new();
     inputs.insert("package_name".to_string(), package_name.to_string());
     inputs.insert("package_version".to_string(), package_version.to_string());
     inputs.insert("package_key".to_string(), package_key.to_string());
     inputs.insert("alias".to_string(), alias.to_string());
     inputs.insert("resolved".to_string(), probe.resolved.clone());
-    inputs.insert("provider".to_string(), native_provider_label(probe.provider).to_string());
+    inputs.insert(
+        "provider".to_string(),
+        native_provider_label(probe.provider).to_string(),
+    );
     inputs.insert("target".to_string(), native_target_id(target));
     inputs.insert("os".to_string(), target.os.clone());
     inputs.insert("arch".to_string(), target.arch.clone());
@@ -446,7 +422,10 @@ fn artifact_payload(
         ("available".to_string(), WireValue::Bool(probe.available)),
         ("cached".to_string(), WireValue::Bool(probe.cached)),
         ("path_like".to_string(), WireValue::Bool(probe.is_path)),
-        ("path_exists".to_string(), WireValue::Bool(probe.path_exists)),
+        (
+            "path_exists".to_string(),
+            WireValue::Bool(probe.path_exists),
+        ),
         (
             "fingerprint".to_string(),
             WireValue::String(probe.fingerprint.clone()),
@@ -525,9 +504,9 @@ pub fn collect_native_dependency_scopes(
             continue;
         }
 
-        let Some(resolver) = crate::dependency_resolver::DependencyResolver::new(
-            canonical_root.clone(),
-        ) else {
+        let Some(resolver) =
+            crate::dependency_resolver::DependencyResolver::new(canonical_root.clone())
+        else {
             continue;
         };
         let resolved = resolver.resolve(&package.dependencies).map_err(|e| {
@@ -718,8 +697,9 @@ pub fn resolve_native_dependency_scopes(
                     artifact_payload(&target, &scope, alias, &probe),
                 )
                 .map_err(|e| anyhow::anyhow!("failed to create native dependency artifact: {e}"))?;
-                lock.upsert_artifact_variant(artifact)
-                    .map_err(|e| anyhow::anyhow!("failed to store native dependency artifact: {e}"))?;
+                lock.upsert_artifact_variant(artifact).map_err(|e| {
+                    anyhow::anyhow!("failed to store native dependency artifact: {e}")
+                })?;
             }
         }
     }
