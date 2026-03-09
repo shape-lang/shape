@@ -96,6 +96,7 @@ impl BytecodeCompiler {
             current_function_params: Vec::new(),
             stdlib_function_names: HashSet::new(),
             allow_internal_builtins: false,
+            native_library_overrides: HashMap::new(),
         }
     }
 

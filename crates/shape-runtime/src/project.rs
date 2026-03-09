@@ -66,6 +66,72 @@ pub enum ExternalLockMode {
     Frozen,
 }
 
+/// Normalized native target used for host-aware native dependency resolution.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub struct NativeTarget {
+    pub os: String,
+    pub arch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+}
+
+impl NativeTarget {
+    /// Build the target description for the current host.
+    pub fn current() -> Self {
+        let env = option_env!("CARGO_CFG_TARGET_ENV")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        Self {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            env,
+        }
+    }
+
+    /// Stable ID used in package metadata and lockfile inputs.
+    pub fn id(&self) -> String {
+        match &self.env {
+            Some(env) => format!("{}-{}-{}", self.os, self.arch, env),
+            None => format!("{}-{}", self.os, self.arch),
+        }
+    }
+
+    fn fallback_ids(&self) -> impl Iterator<Item = String> {
+        let mut ids = Vec::with_capacity(3);
+        ids.push(self.id());
+        ids.push(format!("{}-{}", self.os, self.arch));
+        ids.push(self.os.clone());
+        ids.into_iter()
+    }
+}
+
+/// Target-qualified native dependency value.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum NativeTargetValue {
+    Simple(String),
+    Detailed(NativeTargetValueDetail),
+}
+
+impl NativeTargetValue {
+    pub fn resolve(&self) -> Option<String> {
+        match self {
+            NativeTargetValue::Simple(value) => Some(value.clone()),
+            NativeTargetValue::Detailed(detail) => detail.path.clone().or_else(|| detail.value.clone()),
+        }
+    }
+}
+
+/// Detailed target-qualified native dependency value.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct NativeTargetValueDetail {
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 /// Entry in `[native-dependencies]`.
 ///
 /// Supports either a shorthand string:
@@ -103,6 +169,10 @@ pub struct NativeDependencyDetail {
     pub windows: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
+    /// Target-qualified entries keyed by normalized target IDs like
+    /// `linux-x86_64-gnu` or `darwin-aarch64`.
+    #[serde(default)]
+    pub targets: HashMap<String, NativeTargetValue>,
     /// Source/provider strategy for this dependency.
     #[serde(default)]
     pub provider: Option<NativeDependencyProvider>,
@@ -116,53 +186,53 @@ pub struct NativeDependencyDetail {
 }
 
 impl NativeDependencySpec {
-    /// Resolve this dependency for the current host target.
-    pub fn resolve_for_host(&self) -> Option<String> {
+    /// Resolve this dependency for an explicit target.
+    pub fn resolve_for_target(&self, target: &NativeTarget) -> Option<String> {
         match self {
             NativeDependencySpec::Simple(value) => Some(value.clone()),
             NativeDependencySpec::Detailed(detail) => {
-                #[cfg(target_os = "linux")]
-                {
-                    detail
+                for candidate in target.fallback_ids() {
+                    if let Some(value) = detail.targets.get(&candidate).and_then(NativeTargetValue::resolve) {
+                        return Some(value);
+                    }
+                }
+                match target.os.as_str() {
+                    "linux" => detail
                         .linux
                         .clone()
                         .or_else(|| detail.path.clone())
                         .or_else(|| detail.macos.clone())
-                        .or_else(|| detail.windows.clone())
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    detail
+                        .or_else(|| detail.windows.clone()),
+                    "macos" => detail
                         .macos
                         .clone()
                         .or_else(|| detail.path.clone())
                         .or_else(|| detail.linux.clone())
-                        .or_else(|| detail.windows.clone())
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    detail
+                        .or_else(|| detail.windows.clone()),
+                    "windows" => detail
                         .windows
                         .clone()
                         .or_else(|| detail.path.clone())
                         .or_else(|| detail.linux.clone())
-                        .or_else(|| detail.macos.clone())
-                }
-                #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-                {
-                    detail
+                        .or_else(|| detail.macos.clone()),
+                    _ => detail
                         .path
                         .clone()
                         .or_else(|| detail.linux.clone())
                         .or_else(|| detail.macos.clone())
-                        .or_else(|| detail.windows.clone())
+                        .or_else(|| detail.windows.clone()),
                 }
             }
         }
     }
 
-    /// Provider strategy for current host resolution.
-    pub fn provider_for_host(&self) -> NativeDependencyProvider {
+    /// Resolve this dependency for the current host target.
+    pub fn resolve_for_host(&self) -> Option<String> {
+        self.resolve_for_target(&NativeTarget::current())
+    }
+
+    /// Provider strategy for an explicit target resolution.
+    pub fn provider_for_target(&self, target: &NativeTarget) -> NativeDependencyProvider {
         match self {
             NativeDependencySpec::Simple(value) => {
                 if native_dep_looks_path_like(value) {
@@ -175,6 +245,13 @@ impl NativeDependencySpec {
                 if let Some(provider) = &detail.provider {
                     return provider.clone();
                 }
+                if self
+                    .resolve_for_target(target)
+                    .as_deref()
+                    .is_some_and(native_dep_looks_path_like)
+                {
+                    return NativeDependencyProvider::Path;
+                }
                 if detail
                     .path
                     .as_deref()
@@ -186,6 +263,11 @@ impl NativeDependencySpec {
                 }
             }
         }
+    }
+
+    /// Provider strategy for current host resolution.
+    pub fn provider_for_host(&self) -> NativeDependencyProvider {
+        self.provider_for_target(&NativeTarget::current())
     }
 
     /// Optional declared version for lock safety.
@@ -1321,6 +1403,50 @@ vendored = { provider = "vendored", path = "./vendor/libduckdb.so", version = "1
         );
         assert_eq!(vendored.declared_version(), Some("1.2.0"));
         assert_eq!(vendored.cache_key(), Some("duckdb-1.2.0"));
+    }
+
+    #[test]
+    fn test_native_dependency_target_specific_resolution() {
+        let section: toml::Value = toml::from_str(
+            r#"
+duckdb = { provider = "vendored", targets = { "linux-x86_64-gnu" = "native/linux-x86_64-gnu/libduckdb.so", "linux-aarch64-gnu" = "native/linux-aarch64-gnu/libduckdb.so", linux = "legacy-linux.so" } }
+"#,
+        )
+        .expect("valid native dependency section");
+
+        let parsed =
+            parse_native_dependencies_section(&section).expect("native dependencies should parse");
+        let duckdb = parsed.get("duckdb").expect("duckdb");
+
+        let linux_x86 = NativeTarget {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            env: Some("gnu".to_string()),
+        };
+        assert_eq!(
+            duckdb.resolve_for_target(&linux_x86).as_deref(),
+            Some("native/linux-x86_64-gnu/libduckdb.so")
+        );
+
+        let linux_arm = NativeTarget {
+            os: "linux".to_string(),
+            arch: "aarch64".to_string(),
+            env: Some("gnu".to_string()),
+        };
+        assert_eq!(
+            duckdb.resolve_for_target(&linux_arm).as_deref(),
+            Some("native/linux-aarch64-gnu/libduckdb.so")
+        );
+
+        let linux_unknown = NativeTarget {
+            os: "linux".to_string(),
+            arch: "riscv64".to_string(),
+            env: Some("gnu".to_string()),
+        };
+        assert_eq!(
+            duckdb.resolve_for_target(&linux_unknown).as_deref(),
+            Some("legacy-linux.so")
+        );
     }
 
     #[test]

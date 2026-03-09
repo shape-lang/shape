@@ -9,10 +9,10 @@ mod runtime_error_payload_tests {
         let mut engine = ShapeEngine::new().expect("engine should create");
         engine.load_stdlib().expect("stdlib should load");
 
-        let executor = BytecodeExecutor::new();
+        let mut executor = BytecodeExecutor::new();
         let source = "let c = \"s\"\nmatch c {\n  c: int => c\n}";
 
-        let result = engine.execute(&executor, source);
+        let result = engine.execute(&mut executor, source);
         assert!(result.is_err(), "execution should fail");
 
         let payload = engine

@@ -619,6 +619,10 @@ pub struct BytecodeCompiler {
     /// Per-function flag: when true, `get_builtin_function` resolves `__*` names.
     /// Toggled during compilation based on `stdlib_function_names` membership.
     pub(crate) allow_internal_builtins: bool,
+
+    /// Pre-resolved native library aliases from dependency packages' `[native-dependencies]`.
+    /// Maps library alias (e.g. `"duckdb"`) to resolved library path (e.g. `"libduckdb.so"`).
+    pub(crate) native_library_overrides: HashMap<String, String>,
 }
 
 impl Default for BytecodeCompiler {

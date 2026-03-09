@@ -31,9 +31,9 @@ const COMPLEX_STRATEGY: Strategy = Strategy {
 fn test_engine_executes_simple() {
     init_runtime();
     let mut engine = ShapeEngine::new().expect("Failed to create engine");
-    let executor = BytecodeExecutor::new();
+    let mut executor = BytecodeExecutor::new();
 
-    let result = engine.execute(&executor, SIMPLE_STRATEGY.code);
+    let result = engine.execute(&mut executor, SIMPLE_STRATEGY.code);
     assert!(result.is_ok(), "Simple strategy failed: {:?}", result);
 }
 
@@ -41,9 +41,9 @@ fn test_engine_executes_simple() {
 fn test_engine_executes_medium() {
     init_runtime();
     let mut engine = ShapeEngine::new().expect("Failed to create engine");
-    let executor = BytecodeExecutor::new();
+    let mut executor = BytecodeExecutor::new();
 
-    let result = engine.execute(&executor, MEDIUM_STRATEGY.code);
+    let result = engine.execute(&mut executor, MEDIUM_STRATEGY.code);
     assert!(result.is_ok(), "Medium strategy failed: {:?}", result);
 }
 
@@ -51,9 +51,9 @@ fn test_engine_executes_medium() {
 fn test_engine_executes_complex() {
     init_runtime();
     let mut engine = ShapeEngine::new().expect("Failed to create engine");
-    let executor = BytecodeExecutor::new();
+    let mut executor = BytecodeExecutor::new();
 
-    let result = engine.execute(&executor, COMPLEX_STRATEGY.code);
+    let result = engine.execute(&mut executor, COMPLEX_STRATEGY.code);
     assert!(result.is_ok(), "Complex strategy failed: {:?}", result);
 }
 
@@ -68,16 +68,16 @@ fn execution_benchmark() {
 
     for strategy in [&SIMPLE_STRATEGY, &MEDIUM_STRATEGY, &COMPLEX_STRATEGY] {
         let mut engine = ShapeEngine::new().expect("Failed to create engine");
-        let executor = BytecodeExecutor::new();
+        let mut executor = BytecodeExecutor::new();
 
         // Warm up
-        let _ = engine.execute(&executor, strategy.code);
+        let _ = engine.execute(&mut executor, strategy.code);
 
         // Benchmark
         let iterations = 100;
         let start = Instant::now();
         for _ in 0..iterations {
-            let _ = engine.execute(&executor, strategy.code);
+            let _ = engine.execute(&mut executor, strategy.code);
         }
         let elapsed = start.elapsed();
 

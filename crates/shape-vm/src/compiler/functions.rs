@@ -181,7 +181,7 @@ impl BytecodeCompiler {
             let signature = self.build_native_c_signature(def)?;
             Some(crate::bytecode::NativeAbiSpec {
                 abi: native.abi.clone(),
-                library: self.resolve_native_library_alias(&native.library),
+                library: self.resolve_native_library_alias(&native.library)?,
                 symbol: native.symbol.clone(),
                 signature,
             })
@@ -830,8 +830,26 @@ impl BytecodeCompiler {
         Ok(format!("fn({}) -> {}", param_types.join(", "), ret_type))
     }
 
-    fn resolve_native_library_alias(&self, requested: &str) -> String {
-        // Try [native-dependencies] lookup from project shape.toml when available.
+    fn resolve_native_library_alias(&self, requested: &str) -> Result<String> {
+        // Well-known aliases for standard system libraries.
+        match requested {
+            "c" | "libc" => {
+                #[cfg(target_os = "linux")]
+                return Ok("libc.so.6".to_string());
+                #[cfg(target_os = "macos")]
+                return Ok("libSystem.B.dylib".to_string());
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                return Ok("msvcrt.dll".to_string());
+            }
+            _ => {}
+        }
+
+        // 1. Check pre-resolved overrides from dependency packages' [native-dependencies].
+        if let Some(resolved) = self.native_library_overrides.get(requested) {
+            return Ok(resolved.clone());
+        }
+
+        // 2. Try [native-dependencies] lookup from project shape.toml when available.
         // If no mapping is found, use the declared string verbatim.
         if let Some(ref source_dir) = self.source_dir
             && let Some(project) = shape_runtime::project::find_project_root(source_dir)
@@ -839,9 +857,9 @@ impl BytecodeCompiler {
             && let Some(spec) = native_deps.get(requested)
             && let Some(resolved) = spec.resolve_for_host()
         {
-            return resolved;
+            return Ok(resolved);
         }
-        requested.to_string()
+        Ok(requested.to_string())
     }
 
     fn emit_annotation_lifecycle_calls(&mut self, func_def: &FunctionDef) -> Result<()> {

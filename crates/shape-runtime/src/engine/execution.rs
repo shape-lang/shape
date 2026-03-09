@@ -11,7 +11,7 @@ impl super::ShapeEngine {
     /// For scripts/backtests, use execute_async() instead.
     pub fn execute(
         &mut self,
-        executor: &impl super::ProgramExecutor,
+        executor: &mut impl super::ProgramExecutor,
         source: &str,
     ) -> Result<ExecutionResult> {
         // Set REPL/sync mode - allow blocking loads
@@ -40,7 +40,7 @@ impl super::ShapeEngine {
     /// ```
     pub async fn execute_async(
         &mut self,
-        executor: &impl super::ProgramExecutor,
+        executor: &mut impl super::ProgramExecutor,
         source: &str,
     ) -> Result<ExecutionResult> {
         // Set async mode - runtime data requests must use cache
@@ -117,7 +117,7 @@ impl super::ShapeEngine {
     /// the first call to this method.
     pub async fn execute_repl(
         &mut self,
-        executor: &impl super::ProgramExecutor,
+        executor: &mut impl super::ProgramExecutor,
         source: &str,
     ) -> Result<ExecutionResult> {
         // Set async mode - runtime data requests must use cache
@@ -204,7 +204,7 @@ impl super::ShapeEngine {
     /// Execute a Shape program with options
     pub(super) fn execute_with_options(
         &mut self,
-        executor: &impl super::ProgramExecutor,
+        executor: &mut impl super::ProgramExecutor,
         source: &str,
         _is_stdlib: bool,
     ) -> Result<ExecutionResult> {
@@ -270,7 +270,7 @@ impl super::ShapeEngine {
     /// Execute a REPL command
     pub fn execute_repl_command(
         &mut self,
-        executor: &impl super::ProgramExecutor,
+        executor: &mut impl super::ProgramExecutor,
         command: &str,
     ) -> Result<ExecutionResult> {
         let mut result = self.execute(executor, command)?;

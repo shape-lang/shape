@@ -24,6 +24,8 @@ pub struct BytecodeExecutor {
     pub(crate) bytecode_cache: Option<crate::bytecode_cache::BytecodeCache>,
     /// Resolved dependency paths from shape.toml, mirrored into the module loader.
     pub(crate) dependency_paths: HashMap<String, std::path::PathBuf>,
+    /// Concrete native library load targets resolved for the current host.
+    pub(crate) native_library_overrides: HashMap<String, String>,
     /// Module loader for resolving file-based imports.
     /// When set, imports that don't match virtual modules are resolved via the loader.
     pub(crate) module_loader: Option<shape_runtime::module_loader::ModuleLoader>,
@@ -45,6 +47,7 @@ impl BytecodeExecutor {
             interrupt: Arc::new(AtomicU8::new(0)),
             bytecode_cache: None,
             dependency_paths: HashMap::new(),
+            native_library_overrides: HashMap::new(),
             module_loader: None,
         };
         executor.register_stdlib_modules();
@@ -200,6 +203,33 @@ impl BytecodeExecutor {
         if let Some(loader) = self.module_loader.as_mut() {
             loader.set_dependency_paths(paths);
         }
+        // Auto-collect native library overrides from dependency packages.
+        self.native_library_overrides = self.collect_native_library_overrides();
+    }
+
+    /// Collect native library overrides from all dependency packages' `[native-dependencies]`.
+    ///
+    /// Scans each dependency path for a `shape.toml`, parses its `[native-dependencies]`
+    /// section, and resolves aliases to host-specific library paths.
+    fn collect_native_library_overrides(&self) -> HashMap<String, String> {
+        let mut overrides = HashMap::new();
+        for (_dep_name, dep_path) in &self.dependency_paths {
+            if let Some(project_root) = shape_runtime::project::find_project_root(dep_path) {
+                if let Ok(native_deps) = project_root.config.native_dependencies() {
+                    for (alias, spec) in native_deps {
+                        if let Some(resolved) = spec.resolve_for_host() {
+                            overrides.insert(alias, resolved);
+                        }
+                    }
+                }
+            }
+        }
+        overrides
+    }
+
+    /// Install the native library load targets resolved for the current host.
+    pub fn set_native_library_overrides(&mut self, overrides: HashMap<String, String>) {
+        self.native_library_overrides = overrides;
     }
 
 }

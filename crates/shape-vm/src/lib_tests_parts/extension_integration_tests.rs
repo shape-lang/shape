@@ -116,7 +116,7 @@ mod extension_integration_tests {
 
         let mut engine = ShapeEngine::new().expect("engine");
         let result = engine
-            .execute(&executor, "use myext\nmyext.connect()")
+            .execute(&mut executor, "use myext\nmyext.connect()")
             .expect("execution should succeed");
 
         assert_eq!(result.value.as_number(), Some(7.0));
@@ -145,7 +145,7 @@ mod extension_integration_tests {
 
         let mut engine = ShapeEngine::new().expect("engine");
         let result = engine
-            .execute(&executor, "use myext\nmyext.connect()")
+            .execute(&mut executor, "use myext\nmyext.connect()")
             .expect("execution should succeed");
 
         assert_eq!(result.value.as_number(), Some(7.0));

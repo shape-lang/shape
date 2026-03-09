@@ -83,7 +83,7 @@ pub async fn run_expand_comptime(
         &mut executor,
         Some(script.as_path()),
         Some(source),
-    );
+    )?;
 
     let bytecode = executor.compile_program_for_inspection(&mut engine, &program);
 

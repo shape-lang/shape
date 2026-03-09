@@ -479,6 +479,11 @@ fn native_spec_is_portable(spec: &shape_runtime::project::NativeDependencySpec) 
             ) {
                 return false;
             }
+            for target in detail.targets.values() {
+                if target.resolve().as_deref().is_some_and(is_path_like_native_spec) {
+                    return false;
+                }
+            }
             for value in [&detail.path, &detail.linux, &detail.macos, &detail.windows] {
                 if value.as_deref().is_some_and(is_path_like_native_spec) {
                     return false;

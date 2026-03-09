@@ -186,8 +186,8 @@ mod tests {
         let mut engine = ShapeEngine::new()?;
         engine.load_stdlib()?;
 
-        let executor = BytecodeExecutor::new();
-        let _result = engine.execute(&executor, content)?;
+        let mut executor = BytecodeExecutor::new();
+        let _result = engine.execute(&mut executor, content)?;
 
         Ok(())
     }

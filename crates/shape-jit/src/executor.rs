@@ -15,7 +15,7 @@ pub struct JITExecutor;
 
 impl ProgramExecutor for JITExecutor {
     fn execute_program(
-        &self,
+        &mut self,
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {

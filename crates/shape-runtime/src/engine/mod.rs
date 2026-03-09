@@ -65,7 +65,7 @@ pub struct ProgramExecutorResult {
 /// Trait for executing Shape programs
 pub trait ProgramExecutor {
     fn execute_program(
-        &self,
+        &mut self,
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<ProgramExecutorResult>;

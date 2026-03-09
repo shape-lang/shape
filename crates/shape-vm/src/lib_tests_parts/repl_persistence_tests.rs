@@ -12,7 +12,7 @@ mod repl_persistence_tests {
         let program = shape_ast::parser::parse_program(source)?;
 
         // Execute via VM (type checking happens during bytecode compilation)
-        let executor = BytecodeExecutor::new();
+        let mut executor = BytecodeExecutor::new();
         let result = executor.execute_program(engine, &program)?;
         Ok(result.wire_value)
     }
@@ -78,7 +78,7 @@ mod repl_persistence_tests {
         engine.load_stdlib().expect("stdlib should load");
         engine.init_repl();
 
-        let executor = BytecodeExecutor::new();
+        let mut executor = BytecodeExecutor::new();
 
         // Cell 1: define variable
         let program1 = shape_ast::parser::parse_program("let x = 42").expect("parse");

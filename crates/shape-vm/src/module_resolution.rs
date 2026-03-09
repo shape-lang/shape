@@ -7,6 +7,7 @@ use crate::configuration::BytecodeExecutor;
 
 use shape_ast::Program;
 use shape_ast::ast::{DestructurePattern, ExportItem, Item};
+use shape_ast::error::Result;
 use shape_ast::parser::parse_program;
 use shape_runtime::module_loader::ModuleCode;
 
@@ -301,62 +302,131 @@ impl BytecodeExecutor {
     ///
     /// Returns the set of function names originating from `std::*` modules.
     pub(crate) fn append_imported_module_items(
-        &self,
+        &mut self,
         program: &mut Program,
     ) -> std::collections::HashSet<String> {
         use shape_ast::ast::ImportItems;
-        let mut seen_paths = std::collections::HashSet::new();
+        // Track which specific names have been inlined from each module path.
+        // For namespace (wildcard) imports, the path is stored with None (= all items).
+        let mut inlined_names: std::collections::HashMap<String, Option<std::collections::HashSet<String>>> =
+            std::collections::HashMap::new();
         let mut stdlib_names = std::collections::HashSet::new();
 
         loop {
             let mut module_items = Vec::new();
             let mut found_new = false;
 
-            for item in &program.items {
+            // Collect import statements, merging named filters per module path.
+            // A module path that was previously inlined with a wildcard import
+            // needs no further processing. Named imports only need to resolve
+            // names not yet inlined.
+            let mut merged: std::collections::HashMap<String, Option<std::collections::HashSet<String>>> =
+                std::collections::HashMap::new();
+
+            for item in program.items.iter() {
                 let Item::Import(import_stmt, _) = item else {
                     continue;
                 };
                 let module_path = import_stmt.from.as_str();
-                if module_path.is_empty() || !seen_paths.insert(module_path.to_string()) {
+                if module_path.is_empty() {
                     continue;
                 }
+
+                // If this path was already fully inlined (wildcard), skip
+                if matches!(inlined_names.get(module_path), Some(None)) {
+                    continue;
+                }
+
+                let named_filter: Option<std::collections::HashSet<String>> = match &import_stmt.items {
+                    ImportItems::Named(specs) => {
+                        Some(specs.iter().map(|s| s.name.clone()).collect())
+                    }
+                    ImportItems::Namespace { .. } => None,
+                };
+
+                // Filter out already-inlined names
+                let new_filter = match &named_filter {
+                    None => {
+                        // Wildcard import — only new if not previously wildcarded
+                        if matches!(inlined_names.get(module_path), Some(None)) {
+                            continue;
+                        }
+                        None
+                    }
+                    Some(names) => {
+                        let mut new_names = names.clone();
+                        if let Some(Some(already)) = inlined_names.get(module_path) {
+                            new_names.retain(|n| !already.contains(n));
+                        }
+                        if new_names.is_empty() {
+                            continue;
+                        }
+                        Some(new_names)
+                    }
+                };
+
+                // Merge into this iteration's work
+                let entry = merged.entry(module_path.to_string()).or_insert_with(|| Some(std::collections::HashSet::new()));
+                match new_filter {
+                    None => {
+                        // Upgrade to wildcard
+                        *entry = None;
+                    }
+                    Some(ref new) => {
+                        if let Some(existing) = entry {
+                            existing.extend(new.iter().cloned());
+                        }
+                        // If entry is None (wildcard), keep it
+                    }
+                }
+            }
+
+            for (module_path, merged_filter) in &merged {
                 found_new = true;
                 let is_std = module_path.starts_with("std::");
 
-                // Build filter from Named imports
-                let named_filter: Option<std::collections::HashSet<&str>> =
-                    match &import_stmt.items {
-                        ImportItems::Named(specs) => {
-                            Some(specs.iter().map(|s| s.name.as_str()).collect())
-                        }
-                        ImportItems::Namespace { .. } => None,
-                    };
-
-                let ast_items: Option<Vec<Item>> =
-                    if let Some(loader) = self.module_loader.as_ref()
-                        && let Some(module) = loader.get_module(module_path)
-                    {
+                // Try loading the module
+                let ast_items: Option<Vec<Item>> = if let Some(loader) = self.module_loader.as_mut() {
+                    if let Some(module) = loader.get_module(module_path) {
                         Some(module.ast.items.clone())
-                    } else if let Some(source) = self.virtual_modules.get(module_path)
-                        && let Ok(parsed) = parse_program(source)
-                    {
-                        Some(parsed.items)
                     } else {
-                        None
-                    };
+                        match loader.load_module(module_path) {
+                            Ok(module) => Some(module.ast.items.clone()),
+                            Err(_) => None,
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let ast_items = ast_items.or_else(|| {
+                    self.virtual_modules
+                        .get(module_path.as_str())
+                        .and_then(|source| parse_program(source).ok())
+                        .map(|parsed| parsed.items)
+                });
 
                 if let Some(items) = ast_items {
                     if is_std {
                         stdlib_names.extend(collect_function_names_from_items(&items));
                     }
-                    if let Some(ref names) = named_filter {
+                    if let Some(names) = merged_filter {
+                        let names_ref: std::collections::HashSet<&str> =
+                            names.iter().map(|s| s.as_str()).collect();
                         for ast_item in items {
-                            if should_include_item(&ast_item, names) {
+                            if should_include_item(&ast_item, &names_ref) {
                                 module_items.push(ast_item);
                             }
                         }
+                        // Record inlined names
+                        let entry = inlined_names.entry(module_path.clone()).or_insert_with(|| Some(std::collections::HashSet::new()));
+                        if let Some(existing) = entry {
+                            existing.extend(names.iter().cloned());
+                        }
                     } else {
                         module_items.extend(items);
+                        // Record as fully inlined
+                        inlined_names.insert(module_path.clone(), None);
                     }
                 }
             }
@@ -461,7 +531,7 @@ mod tests {
         // Test that compile_program_impl succeeds when prelude items are injected.
         // The prelude injects module AST items (Display trait, Snapshot enum, math
         // functions, etc.) directly into the program.
-        let executor = crate::configuration::BytecodeExecutor::new();
+        let mut executor = crate::configuration::BytecodeExecutor::new();
         let mut engine =
             shape_runtime::engine::ShapeEngine::new().expect("engine creation failed");
         engine.load_stdlib().expect("load stdlib");

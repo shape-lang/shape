@@ -52,6 +52,7 @@ pub mod join_executor;
 pub mod leakage;
 pub mod lookahead_guard;
 pub mod metadata;
+pub mod native_resolution;
 pub mod module_bindings;
 pub mod module_exports;
 pub mod module_loader;

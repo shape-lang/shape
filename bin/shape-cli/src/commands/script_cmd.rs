@@ -238,7 +238,7 @@ pub async fn run_script(
                 &mut executor,
                 Some(file),
                 Some(source),
-            );
+            )?;
 
             let result =
                 executor.recompile_and_resume(&mut engine, vm_snapshot, old_bytecode, &program)?;
@@ -269,7 +269,7 @@ pub async fn run_script(
                 &mut executor,
                 file.as_deref(),
                 None,
-            );
+            )?;
 
             let result = executor.resume_snapshot(&mut engine, vm_snapshot, bytecode)?;
 
@@ -330,9 +330,8 @@ fn resolve_project_dependencies(
         &project.config.dependencies,
         &lock_path,
     );
-    resolve_native_dependencies_for_root(
-        &project.root_path,
-        &project.config,
+    let _ = shape_runtime::native_resolution::resolve_native_dependencies_for_project(
+        project,
         &lock_path,
         project.config.build.external.mode,
     )?;
@@ -357,11 +356,13 @@ fn resolve_frontmatter_dependencies(
 
     let lock_path = standalone_script_lock_path(script_path);
     resolve_dependencies_for_root(engine, &root_path, &frontmatter.dependencies, &lock_path);
-    resolve_native_dependencies_for_root(
-        &root_path,
-        frontmatter,
-        &lock_path,
+    let scopes =
+        shape_runtime::native_resolution::collect_native_dependency_scopes(&root_path, frontmatter)?;
+    let _ = shape_runtime::native_resolution::resolve_native_dependency_scopes(
+        &scopes,
+        Some(&lock_path),
         ExternalLockMode::Update,
+        true,
     )?;
     Ok(())
 }
@@ -1335,13 +1336,13 @@ async fn run_engine(
                 &mut executor,
                 context_file.as_deref(),
                 Some(source),
-            );
-            engine.execute(&executor, source)?
+            )?;
+            engine.execute(&mut executor, source)?
         }
         #[cfg(feature = "jit")]
         ExecutionMode::JIT => {
-            let executor = shape_jit::JITExecutor;
-            engine.execute(&executor, source)?
+            let mut executor = shape_jit::JITExecutor;
+            engine.execute(&mut executor, source)?
         }
     };
     Ok(response)

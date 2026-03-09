@@ -14,8 +14,8 @@ pub fn init_runtime() {
 pub fn eval(code: &str) -> Result<serde_json::Value, String> {
     let mut engine = ShapeEngine::new().map_err(|e| e.to_string())?;
     engine.load_stdlib().map_err(|e| e.to_string())?;
-    let executor = BytecodeExecutor::new();
-    let result = engine.execute(&executor, code).map_err(|e| e.to_string())?;
+    let mut executor = BytecodeExecutor::new();
+    let result = engine.execute(&mut executor, code).map_err(|e| e.to_string())?;
     serde_json::to_value(&result.value).map_err(|e| e.to_string())
 }
 

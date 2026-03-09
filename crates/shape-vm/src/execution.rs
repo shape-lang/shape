@@ -366,7 +366,7 @@ impl BytecodeExecutor {
     /// (merging core stdlib, extensions, virtual modules) but stops
     /// before creating a VM or executing.
     pub(crate) fn compile_program_impl(
-        &self,
+        &mut self,
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<BytecodeProgram> {
@@ -401,7 +401,7 @@ impl BytecodeExecutor {
         merged_program.items.extend(program.items.clone());
         let mut stdlib_names =
             crate::module_resolution::prepend_prelude_items(&mut merged_program);
-        stdlib_names.extend(self.append_imported_module_items(&mut merged_program));
+        stdlib_names.extend(self.append_imported_module_items(&mut merged_program)?);
 
         let mut compiler = BytecodeCompiler::new();
         compiler.stdlib_function_names = stdlib_names;
@@ -414,6 +414,8 @@ impl BytecodeExecutor {
         if let Ok(cwd) = std::env::current_dir() {
             compiler.set_source_dir(cwd);
         }
+
+        compiler.native_library_overrides = self.native_library_overrides.clone();
 
         let bytecode = if let Some(source) = &source_for_compilation {
             compiler.compile_with_source(&merged_program, source)?
@@ -434,7 +436,7 @@ impl BytecodeExecutor {
     /// The returned bytecode includes tooling artifacts such as
     /// `expanded_function_defs` for comptime inspection.
     pub fn compile_program_for_inspection(
-        &self,
+        &mut self,
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<BytecodeProgram> {
@@ -448,7 +450,7 @@ impl BytecodeExecutor {
     /// instruction pointer, then resumes execution from the snapshot point
     /// using the new bytecode.
     pub fn recompile_and_resume(
-        &self,
+        &mut self,
         engine: &mut ShapeEngine,
         mut vm_snapshot: shape_runtime::snapshot::VmSnapshot,
         old_bytecode: BytecodeProgram,
@@ -563,6 +565,7 @@ impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
         // Compile and execute
         let mut compiler = BytecodeCompiler::new();
         compiler.stdlib_function_names = stdlib_names;
+        compiler.native_library_overrides = self.native_library_overrides.clone();
         let bytecode = compiler.compile(&program)?;
 
         let module_binding_names = bytecode.module_binding_names.clone();
@@ -611,7 +614,7 @@ impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
 
 impl ProgramExecutor for BytecodeExecutor {
     fn execute_program(
-        &self,
+        &mut self,
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
@@ -642,7 +645,7 @@ impl ProgramExecutor for BytecodeExecutor {
             merged_program.items.extend(program.items.clone());
             let mut stdlib_names =
                 crate::module_resolution::prepend_prelude_items(&mut merged_program);
-            stdlib_names.extend(self.append_imported_module_items(&mut merged_program));
+            stdlib_names.extend(self.append_imported_module_items(&mut merged_program)?);
 
             // Compile AST to Bytecode with knowledge of existing module_bindings
             let mut compiler = BytecodeCompiler::new();
@@ -658,6 +661,8 @@ impl ProgramExecutor for BytecodeExecutor {
             if let Ok(cwd) = std::env::current_dir() {
                 compiler.set_source_dir(cwd);
             }
+
+            compiler.native_library_overrides = self.native_library_overrides.clone();
 
             // Use compile_with_source if source text is available for better error messages
             let bytecode = if let Some(source) = &source_for_compilation {
@@ -830,9 +835,9 @@ checkpointed(41)
         engine.load_stdlib().expect("load stdlib");
         engine.enable_snapshot_store(store.clone());
 
-        let executor_first = BytecodeExecutor::new();
+        let mut executor_first = BytecodeExecutor::new();
         let first_result = engine
-            .execute(&executor_first, source)
+            .execute(&mut executor_first, source)
             .expect("first execute should succeed");
         assert!(
             first_result.value.as_str().is_some(),
@@ -953,8 +958,8 @@ match marker {
 
         let mut engine = ShapeEngine::new().expect("engine");
         engine.load_stdlib().expect("load stdlib");
-        let executor = BytecodeExecutor::new();
-        let result = engine.execute(&executor, source).expect("execute");
+        let mut executor = BytecodeExecutor::new();
+        let result = engine.execute(&mut executor, source).expect("execute");
         assert_eq!(
             result.value.as_number(),
             Some(1.0),
@@ -985,8 +990,8 @@ checkpointed(41)
         engine.load_stdlib().expect("load stdlib");
         engine.enable_snapshot_store(store.clone());
 
-        let executor = BytecodeExecutor::new();
-        let _ = engine.execute(&executor, source).expect("first execute");
+        let mut executor = BytecodeExecutor::new();
+        let _ = engine.execute(&mut executor, source).expect("first execute");
 
         let snapshot_id = engine
             .last_snapshot()

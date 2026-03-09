@@ -153,8 +153,8 @@ async fn run_doctests(path: &Path, verbose: bool) -> Result<()> {
                     &mut executor,
                     Some(&context_file),
                     Some(&test.code),
-                );
-                test_engine.execute(&executor, &test.code)
+                )?;
+                test_engine.execute(&mut executor, &test.code)
             };
 
             let test_passed = match (&result, test.should_fail) {

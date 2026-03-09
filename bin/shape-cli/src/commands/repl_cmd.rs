@@ -518,13 +518,13 @@ impl Repl {
                     &mut executor,
                     Some(&current_file),
                     Some(source),
-                );
-                self.engine.execute_repl(&executor, source).await?
+                )?;
+                self.engine.execute_repl(&mut executor, source).await?
             }
             #[cfg(feature = "jit")]
             ExecutionMode::JIT => {
-                let executor = shape_jit::JITExecutor;
-                self.engine.execute_repl(&executor, source).await?
+                let mut executor = shape_jit::JITExecutor;
+                self.engine.execute_repl(&mut executor, source).await?
             }
         };
         Ok(response)

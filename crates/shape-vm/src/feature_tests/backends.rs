@@ -37,7 +37,7 @@ where
 }
 
 /// Execute code with an executor
-fn execute_with_executor<E: ProgramExecutor>(executor: &E, test: &FeatureTest) -> ExecutionResult {
+fn execute_with_executor<E: ProgramExecutor>(executor: &mut E, test: &FeatureTest) -> ExecutionResult {
     let mut engine = match ShapeEngine::new() {
         Ok(e) => e,
         Err(e) => return ExecutionResult::Error(format!("Engine init failed: {}", e)),
@@ -78,7 +78,7 @@ impl BackendExecutor for InterpreterBackend {
 
     fn execute(&self, test: &FeatureTest) -> ExecutionResult {
         // Interpreter is retired - use VM for all execution
-        execute_with_executor(&crate::BytecodeExecutor::new(), test)
+        execute_with_executor(&mut crate::BytecodeExecutor::new(), test)
     }
 
     fn is_available(&self) -> bool {
@@ -95,7 +95,7 @@ impl BackendExecutor for VMBackend {
     }
 
     fn execute(&self, test: &FeatureTest) -> ExecutionResult {
-        execute_with_executor(&crate::BytecodeExecutor::new(), test)
+        execute_with_executor(&mut crate::BytecodeExecutor::new(), test)
     }
 
     fn is_available(&self) -> bool {
@@ -121,7 +121,7 @@ impl BackendExecutor for JITBackend {
 
         // JIT execution via the VM with JIT compilation
         // For now, delegate to VM since JIT is integrated there
-        execute_with_executor(&crate::BytecodeExecutor::new(), test)
+        execute_with_executor(&mut crate::BytecodeExecutor::new(), test)
     }
 
     fn is_available(&self) -> bool {

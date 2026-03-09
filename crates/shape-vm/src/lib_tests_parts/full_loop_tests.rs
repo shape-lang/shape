@@ -12,10 +12,10 @@ mod full_loop_tests {
             .load_stdlib()
             .map_err(|e| format!("Stdlib load failed: {}", e))?;
 
-        let executor = BytecodeExecutor::new();
+        let mut executor = BytecodeExecutor::new();
 
         engine
-            .execute(&executor, source)
+            .execute(&mut executor, source)
             .map_err(|e| format!("Execution failed: {}", e))
     }
 

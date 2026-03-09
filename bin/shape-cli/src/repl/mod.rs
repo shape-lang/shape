@@ -475,17 +475,17 @@ impl<'a> ReplApp<'a> {
                     &mut executor,
                     Some(&current_file),
                     Some(source),
-                );
+                )?;
                 self.engine
-                    .execute_repl(&executor, source)
+                    .execute_repl(&mut executor, source)
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))
             }
             #[cfg(feature = "jit")]
             ExecutionMode::JIT => {
-                let executor = shape_jit::JITExecutor;
+                let mut executor = shape_jit::JITExecutor;
                 self.engine
-                    .execute_repl(&executor, source)
+                    .execute_repl(&mut executor, source)
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))
             }

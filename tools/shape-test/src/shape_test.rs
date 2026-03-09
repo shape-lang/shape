@@ -214,9 +214,9 @@ impl ShapeTest {
             ctx.set_output_adapter(Box::new(adapter));
         }
 
-        let executor = BytecodeExecutor::new();
+        let mut executor = BytecodeExecutor::new();
         let result = engine
-            .execute(&executor, &self.text)
+            .execute(&mut executor, &self.text)
             .map_err(|e| e.to_string())?;
         let value = serde_json::to_value(&result.value).map_err(|e| e.to_string())?;
         let output = captured_lines.lock().unwrap().clone();

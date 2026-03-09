@@ -270,6 +270,25 @@ impl PackageLock {
         Ok(())
     }
 
+    /// Upsert a compile-time artifact by `(namespace, key, inputs_hash)`.
+    ///
+    /// This is used for host-bound artifacts such as native dependency locks,
+    /// where multiple variants for the same logical key may coexist across
+    /// targets or fingerprints in a single committed lockfile.
+    pub fn upsert_artifact_variant(&mut self, artifact: LockedArtifact) -> Result<(), String> {
+        Self::validate_artifact(&artifact)?;
+        if let Some(existing) = self.artifacts.iter_mut().find(|a| {
+            a.namespace == artifact.namespace
+                && a.key == artifact.key
+                && a.inputs_hash == artifact.inputs_hash
+        }) {
+            *existing = artifact;
+        } else {
+            self.artifacts.push(artifact);
+        }
+        Ok(())
+    }
+
     /// Lookup artifact by `(namespace, key, inputs_hash)`.
     pub fn artifact(
         &self,
@@ -539,6 +558,59 @@ mod tests {
             .artifact("schema.infer", "data.csv", &hash)
             .expect("artifact should be found");
         assert_eq!(found.payload().unwrap(), payload);
+    }
+
+    #[test]
+    fn test_upsert_artifact_variant_keeps_multiple_fingerprints() {
+        let mut inputs_a = BTreeMap::new();
+        inputs_a.insert("target".to_string(), "linux-x86_64-gnu".to_string());
+        let mut fp_a = BTreeMap::new();
+        fp_a.insert(
+            "native:linux-x86_64-gnu:duckdb@0.1.0:duckdb:system".to_string(),
+            "system-name:libduckdb.so:version:1.0.0".to_string(),
+        );
+        let artifact_a = LockedArtifact::new(
+            "external.native.library",
+            "duckdb@0.1.0::duckdb",
+            "shape-runtime/native_resolution@v1",
+            ArtifactDeterminism::External { fingerprints: fp_a },
+            inputs_a,
+            shape_wire::WireValue::String("linux".to_string()),
+        )
+        .expect("artifact should build");
+        let hash_a = artifact_a.inputs_hash.clone();
+
+        let mut inputs_b = BTreeMap::new();
+        inputs_b.insert("target".to_string(), "darwin-aarch64".to_string());
+        let mut fp_b = BTreeMap::new();
+        fp_b.insert(
+            "native:darwin-aarch64:duckdb@0.1.0:duckdb:system".to_string(),
+            "system-name:libduckdb.dylib:version:1.0.0".to_string(),
+        );
+        let artifact_b = LockedArtifact::new(
+            "external.native.library",
+            "duckdb@0.1.0::duckdb",
+            "shape-runtime/native_resolution@v1",
+            ArtifactDeterminism::External { fingerprints: fp_b },
+            inputs_b,
+            shape_wire::WireValue::String("darwin".to_string()),
+        )
+        .expect("artifact should build");
+        let hash_b = artifact_b.inputs_hash.clone();
+
+        let mut lock = PackageLock::new();
+        lock.upsert_artifact_variant(artifact_a).unwrap();
+        lock.upsert_artifact_variant(artifact_b).unwrap();
+
+        assert!(
+            lock.artifact("external.native.library", "duckdb@0.1.0::duckdb", &hash_a)
+                .is_some()
+        );
+        assert!(
+            lock.artifact("external.native.library", "duckdb@0.1.0::duckdb", &hash_b)
+                .is_some()
+        );
+        assert_eq!(lock.artifacts.len(), 2);
     }
 
     #[test]
