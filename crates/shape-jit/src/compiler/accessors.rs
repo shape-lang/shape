@@ -796,6 +796,7 @@ mod tests {
             type_schemas: vec![],
             source_map: vec![],
             foreign_dependencies: vec![],
+            frame_descriptor: None,
         };
 
         let report = preflight_blob_jit_compatibility(&blob);

@@ -422,10 +422,20 @@ fn execute_code_in_process(
         output.push_str(&format!("{}\n", msg.text));
     }
 
-    // Render the result value
-    if let Some(rendered) = shape_wire::render_wire_terminal(&result.value) {
+    // Render the result value (matches script_cmd.rs logic):
+    // 1. content_terminal (pre-rendered Content nodes)
+    // 2. render_wire_terminal (adapter-rendered types like AnyError)
+    // 3. serde_json (plain values: numbers, strings, arrays, objects)
+    if let Some(ref terminal_str) = result.content_terminal {
+        output.push_str(terminal_str);
+    } else if let Some(rendered) = shape_wire::render_wire_terminal(&result.value) {
         if !rendered.is_empty() && rendered != "()" {
             output.push_str(&rendered);
+        }
+    } else if !matches!(&result.value, shape_wire::WireValue::Null) {
+        match serde_json::to_string(&result.value) {
+            Ok(json) => output.push_str(&json),
+            Err(_) => output.push_str(&format!("{:?}", result.value)),
         }
     }
 
@@ -466,5 +476,229 @@ fn extract_location(err: &shape_runtime::error::ShapeError) -> (Option<u32>, Opt
     match loc {
         Some(l) => (Some(l.line as u32), Some(l.column as u32)),
         None => (None, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shape_vm::remote::{
+        ExecuteRequest, ExecuteResponse, ServerInfo, WireMessage,
+        build_call_request,
+    };
+    use shape_runtime::snapshot::SerializableVMValue;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Start a real server on a random port, return the bound address.
+    async fn start_test_server() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let config = Arc::new(ServeConfig {
+            auth_token: None,
+            max_concurrent: 4,
+            sandbox: SandboxLevel::None,
+            _mode: ExecutionModeArg::Vm,
+            extensions: vec![],
+            provider_opts: ProviderOptions::default(),
+        });
+        let semaphore = Arc::new(Semaphore::new(4));
+
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let config = config.clone();
+                let semaphore = semaphore.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(socket, &config, &semaphore).await;
+                });
+            }
+        });
+
+        addr
+    }
+
+    /// Send a WireMessage and read the response back.
+    async fn roundtrip(stream: &mut TcpStream, msg: &WireMessage) -> WireMessage {
+        let mp = shape_wire::encode_message(msg).unwrap();
+        let framed = encode_framed(&mp);
+        let len = framed.len() as u32;
+        stream.write_all(&len.to_be_bytes()).await.unwrap();
+        stream.write_all(&framed).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.unwrap();
+        let resp_len = u32::from_be_bytes(len_buf) as usize;
+        let mut resp_buf = vec![0u8; resp_len];
+        stream.read_exact(&mut resp_buf).await.unwrap();
+        let decompressed = decode_framed(&resp_buf).unwrap();
+        shape_wire::decode_message(&decompressed).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_ping_over_tcp() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let resp = roundtrip(&mut stream, &WireMessage::Ping).await;
+        match resp {
+            WireMessage::Pong(info) => {
+                assert_eq!(info.wire_protocol, shape_wire::WIRE_PROTOCOL_V2);
+                assert!(info.capabilities.contains(&"execute".to_string()));
+            }
+            other => panic!("Expected Pong, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_shape_code_over_tcp() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Send real Shape code to execute
+        let msg = WireMessage::Execute(ExecuteRequest {
+            code: "fn add(a, b) { a + b }\nadd(10, 32)".to_string(),
+            request_id: 1,
+        });
+
+        let resp = roundtrip(&mut stream, &msg).await;
+        match resp {
+            WireMessage::ExecuteResponse(r) => {
+                assert_eq!(r.request_id, 1);
+                assert!(r.success, "execute failed: {:?}", r.error);
+                let output = r.output.unwrap_or_default();
+                assert!(output.contains("42"), "expected 42 in output, got: {}", output);
+            }
+            other => panic!("Expected ExecuteResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_error_over_tcp() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let msg = WireMessage::Execute(ExecuteRequest {
+            code: "this is not valid shape code !!!".to_string(),
+            request_id: 2,
+        });
+
+        let resp = roundtrip(&mut stream, &msg).await;
+        match resp {
+            WireMessage::ExecuteResponse(r) => {
+                assert_eq!(r.request_id, 2);
+                assert!(!r.success, "should have failed");
+                assert!(r.error.is_some(), "should have error message");
+            }
+            other => panic!("Expected ExecuteResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_function_call_over_tcp() {
+        let addr = start_test_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Compile a Shape program with a function, then call it remotely
+        let bytecode = {
+            let program = shape_ast::parser::parse_program(
+                "function multiply(a, b) { a * b }"
+            ).expect("parse");
+            let compiler = shape_vm::compiler::BytecodeCompiler::new();
+            compiler.compile(&program).expect("compile")
+        };
+
+        // Build a remote call request for multiply(6, 7)
+        let request = build_call_request(
+            &bytecode,
+            "multiply",
+            vec![
+                SerializableVMValue::Number(6.0),
+                SerializableVMValue::Number(7.0),
+            ],
+        );
+
+        let msg = WireMessage::Call(request);
+        let resp = roundtrip(&mut stream, &msg).await;
+
+        match resp {
+            WireMessage::CallResponse(r) => {
+                match r.result {
+                    Ok(SerializableVMValue::Number(n)) => {
+                        assert_eq!(n, 42.0, "6 * 7 should be 42");
+                    }
+                    Ok(other) => panic!("Expected Number(42.0), got {:?}", other),
+                    Err(e) => panic!("Remote call failed: {:?}", e),
+                }
+            }
+            other => panic!("Expected CallResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auth_required_rejects_unauthenticated() {
+        // Start server WITH auth token
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let config = Arc::new(ServeConfig {
+            auth_token: Some("secret".to_string()),
+            max_concurrent: 4,
+            sandbox: SandboxLevel::None,
+            _mode: ExecutionModeArg::Vm,
+            extensions: vec![],
+            provider_opts: ProviderOptions::default(),
+        });
+        let semaphore = Arc::new(Semaphore::new(4));
+
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let config = config.clone();
+                let semaphore = semaphore.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(socket, &config, &semaphore).await;
+                });
+            }
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Try to execute without auth → should fail
+        let msg = WireMessage::Execute(ExecuteRequest {
+            code: "42".to_string(),
+            request_id: 1,
+        });
+        let resp = roundtrip(&mut stream, &msg).await;
+        match resp {
+            WireMessage::ExecuteResponse(r) => {
+                assert!(!r.success);
+                assert!(r.error.unwrap().contains("Authentication required"));
+            }
+            other => panic!("Expected ExecuteResponse, got {:?}", other),
+        }
+
+        // Now authenticate
+        let auth_msg = WireMessage::Auth(AuthRequest { token: "secret".to_string() });
+        let resp = roundtrip(&mut stream, &auth_msg).await;
+        match resp {
+            WireMessage::AuthResponse(r) => assert!(r.authenticated),
+            other => panic!("Expected AuthResponse, got {:?}", other),
+        }
+
+        // Now execute should work
+        let msg = WireMessage::Execute(ExecuteRequest {
+            code: "42".to_string(),
+            request_id: 2,
+        });
+        let resp = roundtrip(&mut stream, &msg).await;
+        match resp {
+            WireMessage::ExecuteResponse(r) => {
+                assert!(r.success, "should succeed after auth: {:?}", r.error);
+            }
+            other => panic!("Expected ExecuteResponse, got {:?}", other),
+        }
     }
 }
