@@ -7,6 +7,13 @@ use super::types::*;
 use shape_ast::ast::{self, Expr, Span, Spanned, Statement};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy)]
+struct MirLoopContext {
+    break_block: BasicBlockId,
+    continue_block: BasicBlockId,
+    break_value_slot: Option<SlotId>,
+}
+
 /// Builder for constructing a MIR function from AST.
 pub struct MirBuilder {
     /// Name of the function being built.
@@ -41,6 +48,8 @@ pub struct MirBuilder {
     param_slots: Vec<SlotId>,
     /// Named-local shadowing stack for lexical scopes.
     scope_bindings: Vec<Vec<(String, Option<SlotId>)>>,
+    /// Active loop control-flow targets.
+    loop_contexts: Vec<MirLoopContext>,
     /// Exit block for the enclosing function.
     exit_block: Option<BasicBlockId>,
     /// Function span.
@@ -79,6 +88,7 @@ impl MirBuilder {
             next_field_idx: 0,
             param_slots: Vec::new(),
             scope_bindings: vec![Vec::new()],
+            loop_contexts: Vec::new(),
             exit_block: None,
             span,
             had_fallbacks: false,
@@ -170,6 +180,27 @@ impl MirBuilder {
 
     pub fn mark_fallback(&mut self) {
         self.had_fallbacks = true;
+    }
+
+    pub fn push_loop(
+        &mut self,
+        break_block: BasicBlockId,
+        continue_block: BasicBlockId,
+        break_value_slot: Option<SlotId>,
+    ) {
+        self.loop_contexts.push(MirLoopContext {
+            break_block,
+            continue_block,
+            break_value_slot,
+        });
+    }
+
+    pub fn pop_loop(&mut self) {
+        self.loop_contexts.pop();
+    }
+
+    fn current_loop(&self) -> Option<MirLoopContext> {
+        self.loop_contexts.last().copied()
     }
 
     /// Allocate a new program point.
@@ -308,22 +339,18 @@ fn lower_statement(builder: &mut MirBuilder, stmt: &Statement, exit_block: Basic
             lower_assignment(builder, assign, *span);
         }
         Statement::Return(value, span) => {
-            if let Some(expr) = value {
-                let result = lower_expr_to_operand(builder, expr, true);
-                builder.push_stmt(
-                    StatementKind::Assign(Place::Local(builder.return_slot()), Rvalue::Use(result)),
-                    *span,
-                );
-            }
-            builder.finish_block(TerminatorKind::Return, *span);
-            // Start a new unreachable block for subsequent dead code
-            let dead_block = builder.new_block();
-            builder.start_block(dead_block);
+            lower_return_control_flow(builder, value.as_ref(), *span);
         }
         Statement::Expression(expr, span) => {
             // Expression statement — evaluate for side effects
             let _slot = lower_expr_to_temp(builder, expr);
             let _ = span; // span captured in sub-lowering
+        }
+        Statement::Break(span) => {
+            lower_break_control_flow(builder, None, *span);
+        }
+        Statement::Continue(span) => {
+            lower_continue_control_flow(builder, *span);
         }
         Statement::If(if_stmt, span) => {
             lower_if(builder, if_stmt, *span, exit_block);
@@ -384,6 +411,64 @@ fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span
         };
         builder.push_stmt(StatementKind::Assign(Place::Local(slot), rvalue), span);
     }
+}
+
+fn start_dead_block(builder: &mut MirBuilder) {
+    let dead_block = builder.new_block();
+    builder.start_block(dead_block);
+}
+
+fn lower_return_control_flow(builder: &mut MirBuilder, value: Option<&Expr>, span: Span) {
+    if let Some(expr) = value {
+        let result = lower_expr_to_operand(builder, expr, true);
+        builder.push_stmt(
+            StatementKind::Assign(Place::Local(builder.return_slot()), Rvalue::Use(result)),
+            expr.span(),
+        );
+    } else {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(builder.return_slot()),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+    }
+    builder.finish_block(TerminatorKind::Return, span);
+    start_dead_block(builder);
+}
+
+fn lower_break_control_flow(builder: &mut MirBuilder, value: Option<&Expr>, span: Span) {
+    let Some(loop_ctx) = builder.current_loop() else {
+        builder.mark_fallback();
+        builder.push_stmt(StatementKind::Nop, span);
+        return;
+    };
+
+    if let Some(result_slot) = loop_ctx.break_value_slot {
+        let rvalue = if let Some(expr) = value {
+            Rvalue::Use(lower_expr_to_operand(builder, expr, true))
+        } else {
+            Rvalue::Use(Operand::Constant(MirConstant::None))
+        };
+        builder.push_stmt(StatementKind::Assign(Place::Local(result_slot), rvalue), span);
+    } else if let Some(expr) = value {
+        let _ = lower_expr_to_temp(builder, expr);
+    }
+
+    builder.finish_block(TerminatorKind::Goto(loop_ctx.break_block), span);
+    start_dead_block(builder);
+}
+
+fn lower_continue_control_flow(builder: &mut MirBuilder, span: Span) {
+    let Some(loop_ctx) = builder.current_loop() else {
+        builder.mark_fallback();
+        builder.push_stmt(StatementKind::Nop, span);
+        return;
+    };
+
+    builder.finish_block(TerminatorKind::Goto(loop_ctx.continue_block), span);
+    start_dead_block(builder);
 }
 
 fn lower_expr_to_explicit_move_operand(builder: &mut MirBuilder, expr: &Expr) -> Operand {
@@ -595,11 +680,53 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         Expr::Let(let_expr, _) => {
             lower_let_expr(builder, let_expr, temp, span);
         }
+        Expr::While(while_expr, _) => {
+            lower_while_expr(builder, while_expr, temp, span);
+        }
+        Expr::For(for_expr, _) => {
+            lower_for_expr(builder, for_expr, temp, span);
+        }
+        Expr::Loop(loop_expr, _) => {
+            lower_loop_expr(builder, loop_expr, temp, span);
+        }
+        Expr::Match(match_expr, _) => {
+            lower_match_expr(builder, match_expr, temp, span);
+        }
         Expr::BinaryOp { left, right, .. } => {
             let l = lower_expr_to_operand(builder, left, false);
             let r = lower_expr_to_operand(builder, right, false);
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::BinaryOp(BinOp::Add, l, r)),
+                span,
+            );
+        }
+        Expr::Break(value, _) => {
+            lower_break_control_flow(builder, value.as_deref(), span);
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(temp),
+                    Rvalue::Use(Operand::Constant(MirConstant::None)),
+                ),
+                span,
+            );
+        }
+        Expr::Continue(_) => {
+            lower_continue_control_flow(builder, span);
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(temp),
+                    Rvalue::Use(Operand::Constant(MirConstant::None)),
+                ),
+                span,
+            );
+        }
+        Expr::Return(value, _) => {
+            lower_return_control_flow(builder, value.as_deref(), span);
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(temp),
+                    Rvalue::Use(Operand::Constant(MirConstant::None)),
+                ),
                 span,
             );
         }
@@ -747,7 +874,6 @@ fn lower_block_expr(builder: &mut MirBuilder, block: &ast::BlockExpr, temp: Slot
                 }
             }
             ast::BlockItem::Statement(stmt) => {
-                builder.mark_fallback();
                 lower_statement(builder, stmt, builder.exit_block());
                 if is_last {
                     builder.push_stmt(
@@ -812,6 +938,306 @@ fn lower_let_expr(builder: &mut MirBuilder, let_expr: &ast::LetExpr, temp: SlotI
     );
 
     builder.pop_scope();
+}
+
+fn lower_while_expr(
+    builder: &mut MirBuilder,
+    while_expr: &ast::WhileExpr,
+    temp: SlotId,
+    span: Span,
+) {
+    let header = builder.new_block();
+    let body_block = builder.new_block();
+    let after = builder.new_block();
+
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Constant(MirConstant::None)),
+        ),
+        span,
+    );
+    builder.finish_block(TerminatorKind::Goto(header), span);
+
+    builder.start_block(header);
+    let cond_slot = lower_expr_to_temp(builder, &while_expr.condition);
+    builder.finish_block(
+        TerminatorKind::SwitchBool {
+            operand: Operand::Copy(Place::Local(cond_slot)),
+            true_bb: body_block,
+            false_bb: after,
+        },
+        span,
+    );
+
+    builder.start_block(body_block);
+    builder.push_loop(after, header, Some(temp));
+    let body_slot = lower_expr_to_temp(builder, &while_expr.body);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
+        ),
+        while_expr.body.span(),
+    );
+    builder.pop_loop();
+    builder.finish_block(TerminatorKind::Goto(header), span);
+
+    builder.start_block(after);
+}
+
+fn lower_for_expr(builder: &mut MirBuilder, for_expr: &ast::ForExpr, temp: SlotId, span: Span) {
+    builder.push_scope();
+
+    let iter_slot = lower_expr_to_temp(builder, &for_expr.iterable);
+    let elem_slot = match &for_expr.pattern {
+        ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+            Some(builder.alloc_local(name.clone(), LocalTypeInfo::Unknown))
+        }
+        ast::Pattern::Wildcard => Some(builder.alloc_temp(LocalTypeInfo::Unknown)),
+        _ => {
+            builder.mark_fallback();
+            None
+        }
+    };
+    let header = builder.new_block();
+    let body_block = builder.new_block();
+    let after = builder.new_block();
+
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Constant(MirConstant::None)),
+        ),
+        span,
+    );
+    builder.finish_block(TerminatorKind::Goto(header), span);
+
+    builder.start_block(header);
+    builder.finish_block(
+        TerminatorKind::SwitchBool {
+            operand: Operand::Copy(Place::Local(iter_slot)),
+            true_bb: body_block,
+            false_bb: after,
+        },
+        span,
+    );
+
+    builder.start_block(body_block);
+    if let Some(elem_slot) = elem_slot {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(elem_slot),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+    }
+    builder.push_loop(after, header, Some(temp));
+    let body_slot = lower_expr_to_temp(builder, &for_expr.body);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
+        ),
+        for_expr.body.span(),
+    );
+    builder.pop_loop();
+    builder.finish_block(TerminatorKind::Goto(header), span);
+
+    builder.start_block(after);
+    builder.pop_scope();
+}
+
+fn lower_loop_expr(builder: &mut MirBuilder, loop_expr: &ast::LoopExpr, temp: SlotId, span: Span) {
+    let body_block = builder.new_block();
+    let after = builder.new_block();
+
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Constant(MirConstant::None)),
+        ),
+        span,
+    );
+    builder.finish_block(TerminatorKind::Goto(body_block), span);
+
+    builder.start_block(body_block);
+    builder.push_loop(after, body_block, Some(temp));
+    let body_slot = lower_expr_to_temp(builder, &loop_expr.body);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
+        ),
+        loop_expr.body.span(),
+    );
+    builder.pop_loop();
+    builder.finish_block(TerminatorKind::Goto(body_block), span);
+
+    builder.start_block(after);
+}
+
+fn lower_match_expr(
+    builder: &mut MirBuilder,
+    match_expr: &ast::MatchExpr,
+    temp: SlotId,
+    span: Span,
+) {
+    if match_expr.arms.is_empty() {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+        return;
+    }
+
+    let scrutinee_slot = lower_expr_to_temp(builder, &match_expr.scrutinee);
+    let merge_block = builder.new_block();
+    let no_match_block = builder.new_block();
+    let mut next_test_block = builder.current_block;
+
+    for (idx, arm) in match_expr.arms.iter().enumerate() {
+        if idx > 0 {
+            builder.start_block(next_test_block);
+        }
+
+        let body_block = builder.new_block();
+        let next_block = if idx + 1 < match_expr.arms.len() {
+            builder.new_block()
+        } else {
+            no_match_block
+        };
+        let pattern_span = arm.pattern_span.unwrap_or(span);
+        let mut binding_scope_active = false;
+
+        match &arm.pattern {
+            ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+                builder.push_scope();
+                binding_scope_active = true;
+                let binding_slot = builder.alloc_local(name.clone(), LocalTypeInfo::Unknown);
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(binding_slot),
+                        Rvalue::Use(Operand::Copy(Place::Local(scrutinee_slot))),
+                    ),
+                    pattern_span,
+                );
+                if let Some(guard) = &arm.guard {
+                    let guard_slot = lower_expr_to_temp(builder, guard);
+                    builder.finish_block(
+                        TerminatorKind::SwitchBool {
+                            operand: Operand::Copy(Place::Local(guard_slot)),
+                            true_bb: body_block,
+                            false_bb: next_block,
+                        },
+                        guard.span(),
+                    );
+                } else {
+                    builder.finish_block(TerminatorKind::Goto(body_block), pattern_span);
+                }
+            }
+            ast::Pattern::Wildcard => {
+                if let Some(guard) = &arm.guard {
+                    let guard_slot = lower_expr_to_temp(builder, guard);
+                    builder.finish_block(
+                        TerminatorKind::SwitchBool {
+                            operand: Operand::Copy(Place::Local(guard_slot)),
+                            true_bb: body_block,
+                            false_bb: next_block,
+                        },
+                        guard.span(),
+                    );
+                } else {
+                    builder.finish_block(TerminatorKind::Goto(body_block), pattern_span);
+                }
+            }
+            ast::Pattern::Literal(literal) => {
+                let literal_expr = Expr::Literal(literal.clone(), pattern_span);
+                let literal_operand = lower_expr_to_operand(builder, &literal_expr, false);
+                let matches_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(matches_slot),
+                        Rvalue::BinaryOp(
+                            BinOp::Eq,
+                            Operand::Copy(Place::Local(scrutinee_slot)),
+                            literal_operand,
+                        ),
+                    ),
+                    pattern_span,
+                );
+                if let Some(guard) = &arm.guard {
+                    let guard_block = builder.new_block();
+                    builder.finish_block(
+                        TerminatorKind::SwitchBool {
+                            operand: Operand::Copy(Place::Local(matches_slot)),
+                            true_bb: guard_block,
+                            false_bb: next_block,
+                        },
+                        pattern_span,
+                    );
+                    builder.start_block(guard_block);
+                    let guard_slot = lower_expr_to_temp(builder, guard);
+                    builder.finish_block(
+                        TerminatorKind::SwitchBool {
+                            operand: Operand::Copy(Place::Local(guard_slot)),
+                            true_bb: body_block,
+                            false_bb: next_block,
+                        },
+                        guard.span(),
+                    );
+                } else {
+                    builder.finish_block(
+                        TerminatorKind::SwitchBool {
+                            operand: Operand::Copy(Place::Local(matches_slot)),
+                            true_bb: body_block,
+                            false_bb: next_block,
+                        },
+                        pattern_span,
+                    );
+                }
+            }
+            _ => {
+                builder.mark_fallback();
+                if let Some(guard) = &arm.guard {
+                    let _ = lower_expr_to_temp(builder, guard);
+                }
+                builder.finish_block(TerminatorKind::Goto(body_block), pattern_span);
+            }
+        }
+
+        builder.start_block(body_block);
+        let body_slot = lower_expr_to_temp(builder, &arm.body);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
+            ),
+            arm.body.span(),
+        );
+        builder.finish_block(TerminatorKind::Goto(merge_block), arm.body.span());
+
+        if binding_scope_active {
+            builder.pop_scope();
+        }
+        next_test_block = next_block;
+    }
+
+    builder.start_block(no_match_block);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Constant(MirConstant::None)),
+        ),
+        span,
+    );
+    builder.finish_block(TerminatorKind::Goto(merge_block), span);
+
+    builder.start_block(merge_block);
 }
 
 /// Lower an if statement.
@@ -888,9 +1314,11 @@ fn lower_while(
 
     // Loop body
     builder.start_block(body_block);
+    builder.push_loop(after, header, None);
     builder.push_scope();
     lower_statements(builder, body, exit_block);
     builder.pop_scope();
+    builder.pop_loop();
     builder.finish_block(TerminatorKind::Goto(header), span);
 
     // After loop
@@ -904,36 +1332,98 @@ fn lower_for_loop(
     span: Span,
     exit_block: BasicBlockId,
 ) {
-    // Extract the iterable expression
-    let iter_expr = match &for_loop.init {
-        ast::ForInit::ForIn { iter, .. } => iter,
-        ast::ForInit::ForC { condition, .. } => condition,
-    };
+    match &for_loop.init {
+        ast::ForInit::ForIn { pattern, iter } => {
+            builder.push_scope();
 
-    let _iter_slot = lower_expr_to_temp(builder, iter_expr);
-    let header = builder.new_block();
-    let body_block = builder.new_block();
-    let after = builder.new_block();
+            let iter_slot = lower_expr_to_temp(builder, iter);
+            let pattern_slot = match pattern {
+                ast::DestructurePattern::Identifier(name, _) => {
+                    Some(builder.alloc_local(name.clone(), LocalTypeInfo::Unknown))
+                }
+                _ => {
+                    builder.mark_fallback();
+                    None
+                }
+            };
+            let header = builder.new_block();
+            let body_block = builder.new_block();
+            let after = builder.new_block();
 
-    builder.finish_block(TerminatorKind::Goto(header), span);
+            builder.finish_block(TerminatorKind::Goto(header), span);
 
-    builder.start_block(header);
-    builder.finish_block(
-        TerminatorKind::SwitchBool {
-            operand: Operand::Constant(MirConstant::Bool(true)),
-            true_bb: body_block,
-            false_bb: after,
-        },
-        span,
-    );
+            builder.start_block(header);
+            builder.finish_block(
+                TerminatorKind::SwitchBool {
+                    operand: Operand::Copy(Place::Local(iter_slot)),
+                    true_bb: body_block,
+                    false_bb: after,
+                },
+                span,
+            );
 
-    builder.start_block(body_block);
-    builder.push_scope();
-    lower_statements(builder, &for_loop.body, exit_block);
-    builder.pop_scope();
-    builder.finish_block(TerminatorKind::Goto(header), span);
+            builder.start_block(body_block);
+            if let Some(pattern_slot) = pattern_slot {
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(pattern_slot),
+                        Rvalue::Use(Operand::Constant(MirConstant::None)),
+                    ),
+                    span,
+                );
+            }
+            builder.push_loop(after, header, None);
+            builder.push_scope();
+            lower_statements(builder, &for_loop.body, exit_block);
+            builder.pop_scope();
+            builder.pop_loop();
+            builder.finish_block(TerminatorKind::Goto(header), span);
 
-    builder.start_block(after);
+            builder.start_block(after);
+            builder.pop_scope();
+        }
+        ast::ForInit::ForC {
+            init,
+            condition,
+            update,
+        } => {
+            builder.push_scope();
+            lower_statement(builder, init, exit_block);
+
+            let header = builder.new_block();
+            let body_block = builder.new_block();
+            let update_block = builder.new_block();
+            let after = builder.new_block();
+
+            builder.finish_block(TerminatorKind::Goto(header), span);
+
+            builder.start_block(header);
+            let cond_slot = lower_expr_to_temp(builder, condition);
+            builder.finish_block(
+                TerminatorKind::SwitchBool {
+                    operand: Operand::Copy(Place::Local(cond_slot)),
+                    true_bb: body_block,
+                    false_bb: after,
+                },
+                span,
+            );
+
+            builder.start_block(body_block);
+            builder.push_loop(after, update_block, None);
+            builder.push_scope();
+            lower_statements(builder, &for_loop.body, exit_block);
+            builder.pop_scope();
+            builder.pop_loop();
+            builder.finish_block(TerminatorKind::Goto(update_block), span);
+
+            builder.start_block(update_block);
+            let _ = lower_expr_to_temp(builder, update);
+            builder.finish_block(TerminatorKind::Goto(header), span);
+
+            builder.start_block(after);
+            builder.pop_scope();
+        }
+    }
 }
 
 // Helper to get span from Statement
@@ -967,6 +1457,15 @@ mod tests {
 
     fn span() -> Span {
         Span { start: 0, end: 1 }
+    }
+
+    fn lower_parsed_function(code: &str) -> MirLoweringResult {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let func = match &program.items[0] {
+            ast::Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+        lower_function_detailed(&func.name, &func.params, &func.body, func.name_span)
     }
 
     #[test]
@@ -1403,6 +1902,175 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::UseAfterMove),
             "expected use-after-move error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_while_expr_write_while_borrowed_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let mut x = 1
+                    let y = while true {
+                        let shared = &x
+                        x = 2
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "while-expression lowering should stay in the supported subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected while-expression write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_for_expr_write_while_borrowed_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test(items) {
+                    let mut x = 1
+                    let y = for item in items {
+                        let shared = &x
+                        x = 2
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "for-expression lowering should stay in the supported subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected for-expression write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_loop_expr_break_value_write_while_borrowed_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let mut x = 1
+                    let y = loop {
+                        let shared = &x
+                        break (x = 2)
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "loop-expression break lowering should stay in the supported subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected loop-expression break write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_continue_expression_in_while_body_stays_supported() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test(flag) {
+                    let mut x = 1
+                    let y = while flag {
+                        if flag { continue } else { x }
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "continue inside a while-expression body should stay supported"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis.errors.is_empty(),
+            "continue-only control flow should not introduce borrow errors, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_match_expression_write_while_borrowed_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test(flag) {
+                    let mut x = 1
+                    let y = match flag {
+                        true => {
+                            let shared = &x
+                            x = 2
+                        }
+                        _ => 0
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "simple literal/wildcard match lowering should stay supported"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected match-expression write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_match_expression_identifier_guard_stays_supported() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test(v) {
+                    let y = match v {
+                        x where x > 0 => x
+                        _ => 0
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "identifier/guard match lowering should stay supported"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis.errors.is_empty(),
+            "simple guarded identifier matches should stay clean, got {:?}",
             analysis.errors
         );
     }
