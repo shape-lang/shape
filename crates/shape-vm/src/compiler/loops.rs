@@ -787,6 +787,7 @@ impl BytecodeCompiler {
         for (idx, elem) in elements.iter().enumerate() {
             match elem {
                 Expr::Spread(inner, _) => {
+                    self.plan_flexible_binding_escape_from_expr(inner);
                     self.compile_expr(inner)?;
                     let iter_local = self.declare_local(&format!("__spread_iter_{idx}"))?;
                     self.emit(Instruction::new(
@@ -865,6 +866,7 @@ impl BytecodeCompiler {
                         OpCode::LoadLocal,
                         Some(Operand::Local(result_local)),
                     ));
+                    self.plan_flexible_binding_escape_from_expr(elem);
                     self.compile_expr(elem)?;
                     self.emit(Instruction::simple(OpCode::ArrayPush));
                     self.emit(Instruction::new(

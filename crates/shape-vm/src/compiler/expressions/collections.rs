@@ -129,6 +129,7 @@ impl BytecodeCompiler {
             self.compile_array_with_spread(elements)?;
         } else {
             for elem in elements {
+                self.plan_flexible_binding_escape_from_expr(elem);
                 self.compile_expr_as_value_or_placeholder(elem)?;
             }
             // Emit NewTypedArray for homogeneous int/number/bool literals
@@ -249,6 +250,7 @@ impl BytecodeCompiler {
         // Compile each explicit field value (in order)
         for entry in entries {
             if let ObjectEntry::Field { value, .. } = entry {
+                self.plan_flexible_binding_escape_from_expr(value);
                 self.compile_expr_as_value_or_placeholder(value)?;
             }
         }
@@ -288,6 +290,7 @@ impl BytecodeCompiler {
             match entry {
                 ObjectEntry::Field { key, value, .. } => {
                     // Push ONLY the value (keys are embedded in the schema)
+                    self.plan_flexible_binding_escape_from_expr(value);
                     self.compile_expr_as_value_or_placeholder(value)?;
                     pending_field_names.push(key.clone());
                 }
@@ -320,6 +323,7 @@ impl BytecodeCompiler {
                     }
 
                     // Compile the spread expression (should evaluate to an object)
+                    self.plan_flexible_binding_escape_from_expr(spread_expr);
                     self.compile_expr(spread_expr)?;
                     let spread_schema = self.last_expr_schema.take();
                     let Some(base_schema) = current_schema else {
@@ -674,6 +678,7 @@ impl BytecodeCompiler {
                         .iter()
                         .find(|(name, _)| name == expected_name)
                         .expect("field existence validated above");
+                    self.plan_flexible_binding_escape_from_expr(value);
                     self.compile_expr_as_value_or_placeholder(value)?;
                 }
 
@@ -689,12 +694,10 @@ impl BytecodeCompiler {
 
                 self.last_expr_schema = Some(schema_id);
                 self.last_expr_numeric_type = None;
-                self.last_expr_type_info = Some(
-                    crate::type_tracking::VariableTypeInfo::known(
-                        schema_id,
-                        runtime_type_name.clone(),
-                    ),
-                );
+                self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
+                    schema_id,
+                    runtime_type_name.clone(),
+                ));
                 Ok(())
             }
             None => Err(ShapeError::SemanticError {
@@ -756,6 +759,7 @@ impl BytecodeCompiler {
             EnumConstructorPayload::Unit => 0u16,
             EnumConstructorPayload::Tuple(values) => {
                 for value in values {
+                    self.plan_flexible_binding_escape_from_expr(value);
                     self.compile_expr_as_value_or_placeholder(value)?;
                 }
                 values.len() as u16
@@ -764,6 +768,7 @@ impl BytecodeCompiler {
                 // For struct payloads, we only push the values (not keys)
                 // The schema knows the field order
                 for (_key, value) in fields {
+                    self.plan_flexible_binding_escape_from_expr(value);
                     self.compile_expr_as_value_or_placeholder(value)?;
                 }
                 fields.len() as u16
@@ -821,7 +826,9 @@ impl BytecodeCompiler {
             }
             _ => {
                 return Err(ShapeError::SemanticError {
-                    message: "table row literal `[...], [...]` requires a `Table<T>` type annotation".to_string(),
+                    message:
+                        "table row literal `[...], [...]` requires a `Table<T>` type annotation"
+                            .to_string(),
                     location: Some(self.span_to_source_location(span)),
                 });
             }
@@ -833,7 +840,10 @@ impl BytecodeCompiler {
             Some(info) => info,
             None => {
                 return Err(ShapeError::SemanticError {
-                    message: format!("unknown type '{}' in Table<{}>", inner_type_name, inner_type_name),
+                    message: format!(
+                        "unknown type '{}' in Table<{}>",
+                        inner_type_name, inner_type_name
+                    ),
                     location: Some(self.span_to_source_location(span)),
                 });
             }
@@ -891,6 +901,7 @@ impl BytecodeCompiler {
         // Emit all field values in row-major order
         for row in rows {
             for elem in row {
+                self.plan_flexible_binding_escape_from_expr(elem);
                 self.compile_expr_as_value_or_placeholder(elem)?;
             }
         }
@@ -898,7 +909,9 @@ impl BytecodeCompiler {
         // Call MakeTableFromRows builtin
         // Convention: push arg_count as constant, then BuiltinCall
         let total_args = 3 + row_count * field_count;
-        let ac_const = self.program.add_constant(Constant::Number(total_args as f64));
+        let ac_const = self
+            .program
+            .add_constant(Constant::Number(total_args as f64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(ac_const)),
@@ -909,9 +922,10 @@ impl BytecodeCompiler {
         ));
 
         self.last_expr_schema = None;
-        self.last_expr_type_info = Some(super::super::VariableTypeInfo::named(
-            format!("Table<{}>", inner_type_name),
-        ));
+        self.last_expr_type_info = Some(super::super::VariableTypeInfo::named(format!(
+            "Table<{}>",
+            inner_type_name
+        )));
         self.last_expr_numeric_type = None;
 
         Ok(())

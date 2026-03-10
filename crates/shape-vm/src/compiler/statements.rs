@@ -3123,6 +3123,7 @@ impl BytecodeCompiler {
                             location: Some(self.span_to_source_location(*ref_span)),
                         });
                     }
+                    self.plan_flexible_binding_escape_from_expr(expr);
                     // Note: returning a ref_local identifier is allowed — compile_expr
                     // emits DerefLoad which returns the dereferenced *value*, not the
                     // reference itself. Only returning `&x` (Expr::Reference) is blocked.
@@ -3646,39 +3647,39 @@ impl BytecodeCompiler {
 
                 // Store in variable
                 self.compile_destructure_assignment(&assign.pattern)?;
-                    if let Some(name) = assigned_ident.as_deref() {
-                        if let Some(local_idx) = self.resolve_local(name) {
-                            if !self.ref_locals.contains(&local_idx) {
-                                self.finish_reference_binding_from_expr(
-                                    local_idx,
-                                true,
-                                name,
-                                &assign.value,
-                                    ref_borrow,
-                                );
-                            }
-                            self.plan_flexible_binding_storage_from_expr(
+                if let Some(name) = assigned_ident.as_deref() {
+                    if let Some(local_idx) = self.resolve_local(name) {
+                        if !self.ref_locals.contains(&local_idx) {
+                            self.finish_reference_binding_from_expr(
                                 local_idx,
                                 true,
+                                name,
                                 &assign.value,
+                                ref_borrow,
                             );
-                        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name)
-                        {
-                            if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-                                self.finish_reference_binding_from_expr(
-                                    binding_idx,
+                        }
+                        self.plan_flexible_binding_storage_from_expr(
+                            local_idx,
+                            true,
+                            &assign.value,
+                        );
+                    } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name)
+                    {
+                        if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                            self.finish_reference_binding_from_expr(
+                                binding_idx,
                                 false,
                                 name,
-                                    &assign.value,
-                                    ref_borrow,
-                                );
-                                self.plan_flexible_binding_storage_from_expr(
-                                    binding_idx,
-                                    false,
-                                    &assign.value,
-                                );
-                            }
+                                &assign.value,
+                                ref_borrow,
+                            );
+                            self.plan_flexible_binding_storage_from_expr(
+                                binding_idx,
+                                false,
+                                &assign.value,
+                            );
                         }
+                    }
                     self.propagate_assignment_type_to_identifier(name);
                 }
             }
@@ -4733,8 +4734,10 @@ mod tests {
         compiler.push_scope();
         let source = compiler.declare_local("source").expect("declare source");
         let dest = compiler.declare_local("dest").expect("declare dest");
-        let var_semantics =
-            BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(shape_ast::ast::VarKind::Var, false));
+        let var_semantics = BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(
+            shape_ast::ast::VarKind::Var,
+            false,
+        ));
         compiler
             .type_tracker
             .set_local_binding_semantics(source, var_semantics);
@@ -4770,8 +4773,10 @@ mod tests {
         compiler.push_scope();
         let left = compiler.declare_local("left").expect("declare left");
         let right = compiler.declare_local("right").expect("declare right");
-        let var_semantics =
-            BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(shape_ast::ast::VarKind::Var, false));
+        let var_semantics = BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(
+            shape_ast::ast::VarKind::Var,
+            false,
+        ));
         compiler
             .type_tracker
             .set_local_binding_semantics(left, var_semantics);
@@ -4825,12 +4830,16 @@ mod tests {
         .expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         let first_decl = match &program.items[0] {
-            Item::VariableDecl(var_decl, _) => Statement::VariableDecl(var_decl.clone(), Span::DUMMY),
+            Item::VariableDecl(var_decl, _) => {
+                Statement::VariableDecl(var_decl.clone(), Span::DUMMY)
+            }
             Item::Statement(stmt, _) => stmt.clone(),
             _ => panic!("expected first variable declaration"),
         };
         let second_decl = match &program.items[1] {
-            Item::VariableDecl(var_decl, _) => Statement::VariableDecl(var_decl.clone(), Span::DUMMY),
+            Item::VariableDecl(var_decl, _) => {
+                Statement::VariableDecl(var_decl.clone(), Span::DUMMY)
+            }
             Item::Statement(stmt, _) => stmt.clone(),
             _ => panic!("expected second variable declaration"),
         };
@@ -4871,7 +4880,9 @@ mod tests {
         let program = parse_program("var values = [1, 2, 3]").expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         let decl = match &program.items[0] {
-            Item::VariableDecl(var_decl, _) => Statement::VariableDecl(var_decl.clone(), Span::DUMMY),
+            Item::VariableDecl(var_decl, _) => {
+                Statement::VariableDecl(var_decl.clone(), Span::DUMMY)
+            }
             Item::Statement(stmt, _) => stmt.clone(),
             _ => panic!("expected variable declaration"),
         };
@@ -4888,6 +4899,54 @@ mod tests {
             compiler
                 .type_tracker
                 .get_binding_semantics(values_idx)
+                .map(|semantics| semantics.storage_class),
+            Some(crate::type_tracking::BindingStorageClass::Direct)
+        );
+    }
+
+    #[test]
+    fn test_module_var_collection_escape_marks_source_unique_heap() {
+        let program = parse_program(
+            r#"
+                var source = [1]
+                var wrapped = [source]
+            "#,
+        )
+        .expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        for item in &program.items {
+            let stmt = match item {
+                Item::VariableDecl(var_decl, _) => {
+                    Statement::VariableDecl(var_decl.clone(), Span::DUMMY)
+                }
+                Item::Statement(stmt, _) => stmt.clone(),
+                _ => continue,
+            };
+            compiler
+                .compile_statement(&stmt)
+                .expect("item should compile");
+        }
+
+        let source_idx = *compiler
+            .module_bindings
+            .get("source")
+            .expect("source binding should exist");
+        let wrapped_idx = *compiler
+            .module_bindings
+            .get("wrapped")
+            .expect("wrapped binding should exist");
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_binding_semantics(source_idx)
+                .map(|semantics| semantics.storage_class),
+            Some(crate::type_tracking::BindingStorageClass::UniqueHeap)
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_binding_semantics(wrapped_idx)
                 .map(|semantics| semantics.storage_class),
             Some(crate::type_tracking::BindingStorageClass::Direct)
         );

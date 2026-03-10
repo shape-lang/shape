@@ -9,8 +9,7 @@ use crate::type_tracking::{
 };
 use shape_ast::ast::{
     BlockItem, DestructurePattern, Expr, FunctionParameter, Item, Pattern,
-    PatternConstructorFields, Spanned, Statement,
-    TypeAnnotation,
+    PatternConstructorFields, Spanned, Statement, TypeAnnotation,
 };
 use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
@@ -576,10 +575,7 @@ impl BytecodeCompiler {
         }
     }
 
-    fn for_each_value_pattern_binding_name(
-        pattern: &Pattern,
-        visitor: &mut impl FnMut(&str),
-    ) {
+    fn for_each_value_pattern_binding_name(pattern: &Pattern, visitor: &mut impl FnMut(&str)) {
         match pattern {
             Pattern::Identifier(name) | Pattern::Typed { name, .. } => visitor(name),
             Pattern::Array(patterns) => {
@@ -630,11 +626,7 @@ impl BytecodeCompiler {
         });
     }
 
-    fn binding_semantics_for_slot(
-        &self,
-        slot: u16,
-        is_local: bool,
-    ) -> Option<BindingSemantics> {
+    fn binding_semantics_for_slot(&self, slot: u16, is_local: bool) -> Option<BindingSemantics> {
         if is_local {
             self.type_tracker.get_local_binding_semantics(slot).copied()
         } else {
@@ -664,11 +656,118 @@ impl BytecodeCompiler {
             })
     }
 
-    pub(super) fn finalize_flexible_binding_storage_for_slot(
+    fn merged_flexible_storage_class(
+        current: BindingStorageClass,
+        target: BindingStorageClass,
+    ) -> BindingStorageClass {
+        use BindingStorageClass::*;
+
+        match target {
+            SharedCow => SharedCow,
+            UniqueHeap => match current {
+                SharedCow | Reference => current,
+                _ => UniqueHeap,
+            },
+            Direct => match current {
+                Deferred => Direct,
+                _ => current,
+            },
+            Deferred | Reference => current,
+        }
+    }
+
+    pub(super) fn promote_flexible_binding_storage_for_slot(
         &mut self,
         slot: u16,
         is_local: bool,
+        target: BindingStorageClass,
     ) {
+        let Some(semantics) = self.binding_semantics_for_slot(slot, is_local) else {
+            return;
+        };
+        if semantics.ownership_class != BindingOwnershipClass::Flexible
+            || semantics.storage_class == BindingStorageClass::Reference
+        {
+            return;
+        }
+
+        let merged = Self::merged_flexible_storage_class(semantics.storage_class, target);
+        if merged != semantics.storage_class {
+            self.set_binding_storage_class(slot, is_local, merged);
+        }
+    }
+
+    pub(super) fn promote_flexible_binding_storage_for_name(
+        &mut self,
+        name: &str,
+        target: BindingStorageClass,
+    ) {
+        if let Some((slot, is_local, _)) = self.binding_semantics_for_name(name) {
+            self.promote_flexible_binding_storage_for_slot(slot, is_local, target);
+        }
+    }
+
+    /// Conservative escape planning for values that are stored beyond the
+    /// immediate expression, such as closure captures, return values, or
+    /// collection/object elements. This intentionally tracks only direct value
+    /// flow and does not attempt full effect analysis of arbitrary calls.
+    pub(super) fn plan_flexible_binding_escape_from_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Identifier(name, _) => {
+                self.promote_flexible_binding_storage_for_name(
+                    name,
+                    BindingStorageClass::UniqueHeap,
+                );
+            }
+            Expr::Array(elements, _) => {
+                for element in elements {
+                    self.plan_flexible_binding_escape_from_expr(element);
+                }
+            }
+            Expr::Object(entries, _) => {
+                for entry in entries {
+                    match entry {
+                        shape_ast::ast::ObjectEntry::Field { value, .. } => {
+                            self.plan_flexible_binding_escape_from_expr(value);
+                        }
+                        shape_ast::ast::ObjectEntry::Spread(expr) => {
+                            self.plan_flexible_binding_escape_from_expr(expr);
+                        }
+                    }
+                }
+            }
+            Expr::Spread(inner, _)
+            | Expr::TypeAssertion { expr: inner, .. }
+            | Expr::UsingImpl { expr: inner, .. }
+            | Expr::TryOperator(inner, _) => self.plan_flexible_binding_escape_from_expr(inner),
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.plan_flexible_binding_escape_from_expr(then_expr);
+                if let Some(else_expr) = else_expr.as_deref() {
+                    self.plan_flexible_binding_escape_from_expr(else_expr);
+                }
+            }
+            Expr::EnumConstructor { payload, .. } => match payload {
+                shape_ast::ast::EnumConstructorPayload::Unit => {}
+                shape_ast::ast::EnumConstructorPayload::Tuple(values) => {
+                    for value in values {
+                        self.plan_flexible_binding_escape_from_expr(value);
+                    }
+                }
+                shape_ast::ast::EnumConstructorPayload::Struct(fields) => {
+                    for (_, value) in fields {
+                        self.plan_flexible_binding_escape_from_expr(value);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    pub(super) fn finalize_flexible_binding_storage_for_slot(&mut self, slot: u16, is_local: bool) {
         let Some(semantics) = self.binding_semantics_for_slot(slot, is_local) else {
             return;
         };
@@ -677,7 +776,7 @@ impl BytecodeCompiler {
         {
             return;
         }
-        self.set_binding_storage_class(slot, is_local, BindingStorageClass::Direct);
+        self.promote_flexible_binding_storage_for_slot(slot, is_local, BindingStorageClass::Direct);
     }
 
     pub(super) fn plan_flexible_binding_storage_from_expr(
@@ -700,8 +799,16 @@ impl BytecodeCompiler {
                 self.binding_semantics_for_name(name)
             && source_semantics.ownership_class == BindingOwnershipClass::Flexible
         {
-            self.set_binding_storage_class(source_slot, source_is_local, BindingStorageClass::SharedCow);
-            self.set_binding_storage_class(slot, is_local, BindingStorageClass::SharedCow);
+            self.promote_flexible_binding_storage_for_slot(
+                source_slot,
+                source_is_local,
+                BindingStorageClass::SharedCow,
+            );
+            self.promote_flexible_binding_storage_for_slot(
+                slot,
+                is_local,
+                BindingStorageClass::SharedCow,
+            );
             return;
         }
 
@@ -3396,7 +3503,8 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use super::super::BytecodeCompiler;
-    use shape_ast::ast::TypeAnnotation;
+    use crate::type_tracking::BindingStorageClass;
+    use shape_ast::ast::{Expr, Span, TypeAnnotation};
     use shape_runtime::type_schema::FieldType;
 
     #[test]
@@ -3437,5 +3545,80 @@ mod tests {
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
         assert_eq!(ft, FieldType::Object("MyContainer".to_string()));
+    }
+
+    #[test]
+    fn test_flexible_storage_promotion_is_monotonic() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        compiler.promote_flexible_binding_storage_for_slot(
+            slot,
+            true,
+            BindingStorageClass::UniqueHeap,
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+
+        compiler.promote_flexible_binding_storage_for_slot(slot, true, BindingStorageClass::Direct);
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+
+        compiler.promote_flexible_binding_storage_for_slot(
+            slot,
+            true,
+            BindingStorageClass::SharedCow,
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::SharedCow)
+        );
+    }
+
+    #[test]
+    fn test_escape_planner_marks_array_element_identifier_as_unique_heap() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        let expr = Expr::Array(
+            vec![Expr::Identifier("value".to_string(), Span::DUMMY)],
+            Span::DUMMY,
+        );
+        compiler.plan_flexible_binding_escape_from_expr(&expr);
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
     }
 }

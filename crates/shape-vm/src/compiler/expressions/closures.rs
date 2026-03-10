@@ -144,7 +144,12 @@ impl BytecodeCompiler {
                 Some((_, _, semantics))
                     if semantics.ownership_class == BindingOwnershipClass::Flexible
             ) {
-                self.set_binding_storage_class_for_name(captured, BindingStorageClass::SharedCow);
+                let storage = if mutable_flags.get(i).copied().unwrap_or(false) {
+                    BindingStorageClass::SharedCow
+                } else {
+                    BindingStorageClass::UniqueHeap
+                };
+                self.promote_flexible_binding_storage_for_name(captured, storage);
             }
             if mutable_flags.get(i).copied().unwrap_or(false) {
                 // Mutable capture: emit BoxLocal/BoxModuleBinding to convert the
@@ -247,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flexible_closure_capture_marks_binding_as_shared_storage() {
+    fn test_flexible_closure_capture_marks_binding_as_unique_heap_storage() {
         let program = parse_program("let read = || counter").expect("parse failed");
         let var_decl = match &program.items[0] {
             Item::VariableDecl(var_decl, _) => var_decl,
@@ -286,7 +291,7 @@ mod tests {
                 .type_tracker
                 .get_binding_semantics(counter_idx)
                 .map(|semantics| semantics.storage_class),
-            Some(BindingStorageClass::SharedCow)
+            Some(BindingStorageClass::UniqueHeap)
         );
     }
 }

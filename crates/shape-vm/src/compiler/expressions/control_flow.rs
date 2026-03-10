@@ -94,6 +94,13 @@ impl BytecodeCompiler {
     /// Compile a return expression
     pub(super) fn compile_expr_return(&mut self, value_expr: &Option<Box<Expr>>) -> Result<()> {
         if let Some(expr) = value_expr {
+            if let Expr::Reference { span, .. } = expr.as_ref() {
+                return Err(ShapeError::SemanticError {
+                    message: "cannot return a reference — references are scoped borrows that cannot escape the function. Return an owned value instead".to_string(),
+                    location: Some(self.span_to_source_location(*span)),
+                });
+            }
+            self.plan_flexible_binding_escape_from_expr(expr);
             self.compile_expr(expr)?;
         } else {
             self.emit_unit();
