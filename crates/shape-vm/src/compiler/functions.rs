@@ -4760,4 +4760,40 @@ mod tests {
             analysis.errors
         );
     }
+
+    #[test]
+    fn test_compile_function_records_mir_if_expression_analysis() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function branch_write(flag) {
+                    let mut x = 1
+                    let shared = if flag { &x } else { &x }
+                    x = 2
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        compiler
+            .compile_function(func)
+            .expect("if-expression MIR lowering should stay in the supported subset");
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("branch_write")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis.errors.is_empty(),
+            "simple if-expression borrow analysis should stay clean, got {:?}",
+            analysis.errors
+        );
+    }
 }

@@ -17,6 +17,8 @@ pub struct MirBuilder {
     current_stmts: Vec<MirStatement>,
     /// ID of the current basic block.
     current_block: BasicBlockId,
+    /// Whether the current block has already been terminated and stored.
+    current_block_finished: bool,
     /// Next block ID to allocate.
     next_block_id: u32,
     /// Next local slot to allocate.
@@ -37,6 +39,10 @@ pub struct MirBuilder {
     next_field_idx: u16,
     /// Parameter slots.
     param_slots: Vec<SlotId>,
+    /// Named-local shadowing stack for lexical scopes.
+    scope_bindings: Vec<Vec<(String, Option<SlotId>)>>,
+    /// Exit block for the enclosing function.
+    exit_block: Option<BasicBlockId>,
     /// Function span.
     span: Span,
     /// Whether lowering had to fall back to placeholder/Nop handling.
@@ -57,6 +63,7 @@ impl MirBuilder {
             blocks: Vec::new(),
             current_stmts: Vec::new(),
             current_block: BasicBlockId(0),
+            current_block_finished: false,
             next_block_id: 1,
             next_local: 1,
             return_slot,
@@ -71,6 +78,8 @@ impl MirBuilder {
             field_indices: HashMap::new(),
             next_field_idx: 0,
             param_slots: Vec::new(),
+            scope_bindings: vec![Vec::new()],
+            exit_block: None,
             span,
             had_fallbacks: false,
         }
@@ -84,7 +93,7 @@ impl MirBuilder {
         if let Some((name, _, _)) = self.locals.last()
             && !name.starts_with("__mir_")
         {
-            self.local_slots.insert(name.clone(), slot);
+            self.bind_named_local(name.clone(), slot);
         }
         slot
     }
@@ -120,6 +129,43 @@ impl MirBuilder {
 
     pub fn return_slot(&self) -> SlotId {
         self.return_slot
+    }
+
+    pub fn set_exit_block(&mut self, block: BasicBlockId) {
+        self.exit_block = Some(block);
+    }
+
+    pub fn exit_block(&self) -> BasicBlockId {
+        self.exit_block
+            .expect("MIR builder exit block should be initialized before lowering")
+    }
+
+    pub fn push_scope(&mut self) {
+        self.scope_bindings.push(Vec::new());
+    }
+
+    pub fn pop_scope(&mut self) {
+        if self.scope_bindings.len() <= 1 {
+            return;
+        }
+        if let Some(bindings) = self.scope_bindings.pop() {
+            for (name, previous_slot) in bindings.into_iter().rev() {
+                if let Some(slot) = previous_slot {
+                    self.local_slots.insert(name, slot);
+                } else {
+                    self.local_slots.remove(&name);
+                }
+            }
+        }
+    }
+
+    fn bind_named_local(&mut self, name: String, slot: SlotId) {
+        if let Some(scope) = self.scope_bindings.last_mut()
+            && !scope.iter().any(|(existing, _)| existing == &name)
+        {
+            scope.push((name.clone(), self.local_slots.get(&name).copied()));
+        }
+        self.local_slots.insert(name, slot);
     }
 
     pub fn mark_fallback(&mut self) {
@@ -164,12 +210,14 @@ impl MirBuilder {
             },
         };
         self.blocks.push(block);
+        self.current_block_finished = true;
     }
 
     /// Start building a new block (after finishing the previous one).
     pub fn start_block(&mut self, id: BasicBlockId) {
         self.current_block = id;
         self.current_stmts.clear();
+        self.current_block_finished = false;
     }
 
     /// Finalize and produce the MIR function.
@@ -216,12 +264,13 @@ pub fn lower_function_detailed(
 
     // Create the exit block
     let exit_block = builder.new_block();
+    builder.set_exit_block(exit_block);
 
     // Lower body statements
     lower_statements(&mut builder, body, exit_block);
 
     // If current block hasn't been finished (no explicit return), emit goto exit
-    if builder.current_stmts.len() > 0 || builder.blocks.len() == 0 {
+    if !builder.current_block_finished {
         builder.finish_block(TerminatorKind::Goto(exit_block), span);
     }
 
@@ -515,6 +564,37 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 span,
             );
         }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            lower_conditional_expr(
+                builder,
+                condition,
+                then_expr,
+                else_expr.as_deref(),
+                temp,
+                span,
+            );
+        }
+        Expr::If(if_expr, _) => {
+            lower_conditional_expr(
+                builder,
+                &if_expr.condition,
+                &if_expr.then_branch,
+                if_expr.else_branch.as_deref(),
+                temp,
+                span,
+            );
+        }
+        Expr::Block(block, _) => {
+            lower_block_expr(builder, block, temp, span);
+        }
+        Expr::Let(let_expr, _) => {
+            lower_let_expr(builder, let_expr, temp, span);
+        }
         Expr::BinaryOp { left, right, .. } => {
             let l = lower_expr_to_operand(builder, left, false);
             let r = lower_expr_to_operand(builder, right, false);
@@ -553,6 +633,187 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
     temp
 }
 
+fn lower_conditional_expr(
+    builder: &mut MirBuilder,
+    condition: &Expr,
+    then_expr: &Expr,
+    else_expr: Option<&Expr>,
+    temp: SlotId,
+    span: Span,
+) {
+    let cond_slot = lower_expr_to_temp(builder, condition);
+    let then_block = builder.new_block();
+    let else_block = builder.new_block();
+    let merge_block = builder.new_block();
+
+    builder.finish_block(
+        TerminatorKind::SwitchBool {
+            operand: Operand::Copy(Place::Local(cond_slot)),
+            true_bb: then_block,
+            false_bb: else_block,
+        },
+        span,
+    );
+
+    builder.start_block(then_block);
+    let then_slot = lower_expr_to_temp(builder, then_expr);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Copy(Place::Local(then_slot))),
+        ),
+        then_expr.span(),
+    );
+    builder.finish_block(TerminatorKind::Goto(merge_block), then_expr.span());
+
+    builder.start_block(else_block);
+    if let Some(else_expr) = else_expr {
+        let else_slot = lower_expr_to_temp(builder, else_expr);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Copy(Place::Local(else_slot))),
+            ),
+            else_expr.span(),
+        );
+        builder.finish_block(TerminatorKind::Goto(merge_block), else_expr.span());
+    } else {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+        builder.finish_block(TerminatorKind::Goto(merge_block), span);
+    }
+
+    builder.start_block(merge_block);
+}
+
+fn lower_block_expr(builder: &mut MirBuilder, block: &ast::BlockExpr, temp: SlotId, span: Span) {
+    builder.push_scope();
+
+    if block.items.is_empty() {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+        builder.pop_scope();
+        return;
+    }
+
+    let last_idx = block.items.len() - 1;
+    for (idx, item) in block.items.iter().enumerate() {
+        let is_last = idx == last_idx;
+        match item {
+            ast::BlockItem::VariableDecl(decl) => {
+                lower_var_decl(builder, decl, span);
+                if is_last {
+                    builder.push_stmt(
+                        StatementKind::Assign(
+                            Place::Local(temp),
+                            Rvalue::Use(Operand::Constant(MirConstant::None)),
+                        ),
+                        span,
+                    );
+                }
+            }
+            ast::BlockItem::Assignment(assign) => {
+                lower_assignment(builder, assign, span);
+                if is_last {
+                    builder.push_stmt(
+                        StatementKind::Assign(
+                            Place::Local(temp),
+                            Rvalue::Use(Operand::Constant(MirConstant::None)),
+                        ),
+                        span,
+                    );
+                }
+            }
+            ast::BlockItem::Expression(expr) => {
+                let expr_slot = lower_expr_to_temp(builder, expr);
+                if is_last {
+                    builder.push_stmt(
+                        StatementKind::Assign(
+                            Place::Local(temp),
+                            Rvalue::Use(Operand::Copy(Place::Local(expr_slot))),
+                        ),
+                        expr.span(),
+                    );
+                }
+            }
+            ast::BlockItem::Statement(stmt) => {
+                builder.mark_fallback();
+                lower_statement(builder, stmt, builder.exit_block());
+                if is_last {
+                    builder.push_stmt(
+                        StatementKind::Assign(
+                            Place::Local(temp),
+                            Rvalue::Use(Operand::Constant(MirConstant::None)),
+                        ),
+                        stmt.span().unwrap_or(span),
+                    );
+                }
+            }
+        }
+    }
+
+    builder.pop_scope();
+}
+
+fn lower_let_expr(builder: &mut MirBuilder, let_expr: &ast::LetExpr, temp: SlotId, span: Span) {
+    builder.push_scope();
+
+    let Some(name) = let_expr.pattern.as_simple_name() else {
+        builder.mark_fallback();
+        if let Some(value) = &let_expr.value {
+            let _ = lower_expr_to_temp(builder, value);
+        }
+        let body_slot = lower_expr_to_temp(builder, &let_expr.body);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
+            ),
+            let_expr.body.span(),
+        );
+        builder.pop_scope();
+        return;
+    };
+
+    let slot = builder.alloc_local(name.to_string(), LocalTypeInfo::Unknown);
+    if let Some(value) = &let_expr.value {
+        let operand = lower_expr_to_operand(builder, value, true);
+        builder.push_stmt(
+            StatementKind::Assign(Place::Local(slot), Rvalue::Use(operand)),
+            value.span(),
+        );
+    } else {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(slot),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+    }
+
+    let body_slot = lower_expr_to_temp(builder, &let_expr.body);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
+        ),
+        let_expr.body.span(),
+    );
+
+    builder.pop_scope();
+}
+
 /// Lower an if statement.
 fn lower_if(
     builder: &mut MirBuilder,
@@ -581,13 +842,17 @@ fn lower_if(
 
     // Then branch
     builder.start_block(then_block);
+    builder.push_scope();
     lower_statements(builder, &if_stmt.then_body, exit_block);
+    builder.pop_scope();
     builder.finish_block(TerminatorKind::Goto(merge_block), span);
 
     // Else branch
     if let Some(else_body) = &if_stmt.else_body {
         builder.start_block(else_block);
+        builder.push_scope();
         lower_statements(builder, else_body, exit_block);
+        builder.pop_scope();
         builder.finish_block(TerminatorKind::Goto(merge_block), span);
     }
 
@@ -623,7 +888,9 @@ fn lower_while(
 
     // Loop body
     builder.start_block(body_block);
+    builder.push_scope();
     lower_statements(builder, body, exit_block);
+    builder.pop_scope();
     builder.finish_block(TerminatorKind::Goto(header), span);
 
     // After loop
@@ -661,7 +928,9 @@ fn lower_for_loop(
     );
 
     builder.start_block(body_block);
+    builder.push_scope();
     lower_statements(builder, &for_loop.body, exit_block);
+    builder.pop_scope();
     builder.finish_block(TerminatorKind::Goto(header), span);
 
     builder.start_block(after);
@@ -1292,6 +1561,215 @@ mod tests {
         assert!(
             analysis.errors.is_empty(),
             "disjoint property assignment should stay borrow-clean, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_block_expr_write_while_borrowed_is_visible_to_solver() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Block(
+                        ast::BlockExpr {
+                            items: vec![
+                                ast::BlockItem::VariableDecl(ast::VariableDecl {
+                                    kind: VarKind::Let,
+                                    is_mut: false,
+                                    pattern: DestructurePattern::Identifier(
+                                        "inner".to_string(),
+                                        span(),
+                                    ),
+                                    type_annotation: None,
+                                    value: Some(Expr::Reference {
+                                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                                        is_mutable: false,
+                                        span: span(),
+                                    }),
+                                    ownership: OwnershipModifier::Inferred,
+                                }),
+                                ast::BlockItem::Expression(Expr::Identifier(
+                                    "inner".to_string(),
+                                    span(),
+                                )),
+                            ],
+                        },
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
+        ];
+        let lowering = lower_function_detailed("test", &[], &body, span());
+        assert!(
+            !lowering.had_fallbacks,
+            "block expressions with simple local bindings should stay in the supported MIR subset"
+        );
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_let_expr_write_while_borrowed_is_visible_to_solver() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Let(
+                        Box::new(ast::LetExpr {
+                            pattern: ast::Pattern::Identifier("inner".to_string()),
+                            type_annotation: None,
+                            value: Some(Box::new(Expr::Reference {
+                                expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                                is_mutable: false,
+                                span: span(),
+                            })),
+                            body: Box::new(Expr::Identifier("inner".to_string(), span())),
+                        }),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
+        ];
+        let lowering = lower_function_detailed("test", &[], &body, span());
+        assert!(
+            !lowering.had_fallbacks,
+            "let expressions with simple bindings should stay in the supported MIR subset"
+        );
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_if_expression_with_block_branches_stays_supported() {
+        let block_branch = |borrow_name: &str| {
+            Expr::Block(
+                ast::BlockExpr {
+                    items: vec![ast::BlockItem::Expression(Expr::Reference {
+                        expr: Box::new(Expr::Identifier(borrow_name.to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    })],
+                },
+                span(),
+            )
+        };
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("flag".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Bool(true), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Conditional {
+                        condition: Box::new(Expr::Identifier("flag".to_string(), span())),
+                        then_expr: Box::new(block_branch("x")),
+                        else_expr: Some(Box::new(block_branch("x"))),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
+        ];
+        let lowering = lower_function_detailed("test", &[], &body, span());
+        assert!(
+            !lowering.had_fallbacks,
+            "if expressions with simple block branches should stay in the supported MIR subset"
+        );
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis.errors.is_empty(),
+            "simple branch-local borrows should stay borrow-clean here, got {:?}",
             analysis.errors
         );
     }

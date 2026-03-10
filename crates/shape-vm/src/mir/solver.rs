@@ -544,12 +544,17 @@ fn compute_use_after_move_errors(
     while changed {
         changed = false;
         for &block_id in &cfg.reverse_postorder() {
-            let mut block_in = HashMap::new();
+            let mut block_in: Option<HashMap<Place, shape_ast::ast::Span>> = None;
             for &pred in cfg.predecessors(block_id) {
                 if let Some(pred_out) = out_states.get(&pred) {
-                    merge_moved_places(&mut block_in, pred_out);
+                    if let Some(current) = block_in.as_mut() {
+                        intersect_moved_places(current, pred_out);
+                    } else {
+                        block_in = Some(pred_out.clone());
+                    }
                 }
             }
+            let block_in = block_in.unwrap_or_default();
 
             let mut block_out = block_in.clone();
             let block = mir.block(block_id);
@@ -638,13 +643,20 @@ fn compute_use_after_move_errors(
     errors
 }
 
-fn merge_moved_places(
+fn intersect_moved_places(
     dest: &mut HashMap<Place, shape_ast::ast::Span>,
     incoming: &HashMap<Place, shape_ast::ast::Span>,
 ) {
-    for (place, span) in incoming {
-        dest.entry(place.clone()).or_insert(*span);
-    }
+    dest.retain(|place, span| {
+        if let Some(incoming_span) = incoming.get(place) {
+            if incoming_span.start < span.start {
+                *span = *incoming_span;
+            }
+            true
+        } else {
+            false
+        }
+    });
 }
 
 fn apply_move_transfer(
