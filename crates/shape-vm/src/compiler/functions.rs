@@ -68,6 +68,22 @@ impl BytecodeCompiler {
         self.function_defs
             .insert(effective_def.name.clone(), effective_def.clone());
 
+        // Lower every compiled function to MIR and run the shared borrow analysis.
+        // Diagnostics still come from the bytecode compiler paths for now, but
+        // this gives real compilations a single analysis artifact we can
+        // progressively hook into later.
+        let mir = crate::mir::lowering::lower_function(
+            &effective_def.name,
+            &effective_def.params,
+            &effective_def.body,
+            effective_def.name_span,
+        );
+        let mut mir_analysis = crate::mir::solver::analyze(&mir);
+        crate::mir::repair::attach_repairs(&mut mir_analysis, &mir);
+        self.mir_functions.insert(effective_def.name.clone(), mir);
+        self.mir_borrow_analyses
+            .insert(effective_def.name.clone(), mir_analysis);
+
         // Track whether __original__ alias is active so we can clean it up.
         let has_original_alias = self.function_aliases.contains_key("__original__");
 
@@ -3174,7 +3190,7 @@ mod tests {
     use crate::compiler::{BytecodeCompiler, ParamPassMode};
     use crate::executor::{VMConfig, VirtualMachine};
     use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
-    use shape_ast::ast::{DestructurePattern, FunctionParameter, Span};
+    use shape_ast::ast::{DestructurePattern, FunctionParameter, Item, Span};
     use shape_value::ValueWord;
 
     fn eval(code: &str) -> ValueWord {
@@ -4355,5 +4371,43 @@ mod tests {
             "Expected undefined internal builtin error, got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_analysis() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function choose(flag, left, right) {
+                    if flag { left } else { right }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        compiler
+            .compile_function(func)
+            .expect("function should compile");
+
+        let mir = compiler
+            .mir_functions
+            .get("choose")
+            .expect("mir should be recorded");
+        assert_eq!(mir.name, "choose");
+        assert!(mir.num_locals >= 3, "params should appear in MIR locals");
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("choose")
+            .expect("borrow analysis should be recorded");
+        assert_eq!(analysis.loans.len(), 0);
+        assert!(analysis.errors.is_empty(), "analysis should be clean");
     }
 }

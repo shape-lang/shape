@@ -110,6 +110,8 @@ impl BytecodeCompiler {
             stdlib_function_names: HashSet::new(),
             allow_internal_builtins: false,
             native_resolution_context: None,
+            mir_functions: HashMap::new(),
+            mir_borrow_analyses: HashMap::new(),
         }
     }
 

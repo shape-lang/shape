@@ -660,6 +660,12 @@ pub struct BytecodeCompiler {
     /// Package-scoped native library resolutions for the current host.
     pub(crate) native_resolution_context:
         Option<shape_runtime::native_resolution::NativeResolutionSet>,
+
+    /// MIR lowered for functions compiled by this compiler instance.
+    pub(crate) mir_functions: HashMap<String, crate::mir::types::MirFunction>,
+
+    /// Borrow analyses produced from lowered MIR for compiled functions.
+    pub(crate) mir_borrow_analyses: HashMap<String, crate::mir::BorrowAnalysis>,
 }
 
 impl Default for BytecodeCompiler {
