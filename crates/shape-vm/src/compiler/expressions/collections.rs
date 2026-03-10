@@ -111,7 +111,11 @@ fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
-    fn reject_direct_reference_storage(&self, expr: &Expr, message: &'static str) -> Result<()> {
+    pub(super) fn reject_direct_reference_storage(
+        &self,
+        expr: &Expr,
+        message: &'static str,
+    ) -> Result<()> {
         if let Expr::Reference { span, .. } = expr {
             return Err(ShapeError::SemanticError {
                 message: message.to_string(),

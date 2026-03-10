@@ -57,6 +57,10 @@ pub struct BorrowFacts {
     pub object_store_loans: Vec<(u32, shape_ast::ast::Span)>,
     /// Loans stored into enum payloads.
     pub enum_store_loans: Vec<(u32, shape_ast::ast::Span)>,
+    /// Loans written through field assignments into aggregate places.
+    pub object_assignment_loans: Vec<(u32, shape_ast::ast::Span)>,
+    /// Loans written through index assignments into aggregate places.
+    pub array_assignment_loans: Vec<(u32, shape_ast::ast::Span)>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
@@ -117,6 +121,19 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                                 facts.escaped_loans.push((loan_id, stmt.span));
                             }
                         }
+                    }
+                    match place {
+                        Place::Field(..) => {
+                            for loan_id in local_loans_from_rvalue(&slot_loans, rvalue) {
+                                facts.object_assignment_loans.push((loan_id, stmt.span));
+                            }
+                        }
+                        Place::Index(..) => {
+                            for loan_id in local_loans_from_rvalue(&slot_loans, rvalue) {
+                                facts.array_assignment_loans.push((loan_id, stmt.span));
+                            }
+                        }
+                        Place::Local(..) | Place::Deref(..) => {}
                     }
                     facts.writes.push((stmt.point.0, place.clone(), stmt.span));
                     // Assignment to a place invalidates all loans on that place
@@ -534,8 +551,38 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         });
     }
 
+    for (loan_id, span) in &facts.array_assignment_loans {
+        if !seen_array_store.insert((*loan_id, span.start, span.end)) {
+            continue;
+        }
+        let info = &facts.loan_info[loan_id];
+        errors.push(BorrowError {
+            kind: BorrowErrorKind::ReferenceStoredInArray,
+            span: *span,
+            conflicting_loan: LoanId(*loan_id),
+            loan_span: info.span,
+            last_use_span: last_use_span_for_loan(facts, *loan_id),
+            repairs: Vec::new(),
+        });
+    }
+
     let mut seen_object_store = std::collections::HashSet::new();
     for (loan_id, span) in &facts.object_store_loans {
+        if !seen_object_store.insert((*loan_id, span.start, span.end)) {
+            continue;
+        }
+        let info = &facts.loan_info[loan_id];
+        errors.push(BorrowError {
+            kind: BorrowErrorKind::ReferenceStoredInObject,
+            span: *span,
+            conflicting_loan: LoanId(*loan_id),
+            loan_span: info.span,
+            last_use_span: last_use_span_for_loan(facts, *loan_id),
+            repairs: Vec::new(),
+        });
+    }
+
+    for (loan_id, span) in &facts.object_assignment_loans {
         if !seen_object_store.insert((*loan_id, span.start, span.end)) {
             continue;
         }

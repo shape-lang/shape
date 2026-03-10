@@ -249,6 +249,7 @@ impl BytecodeCompiler {
             Expr::PropertyAccess {
                 object, property, ..
             } => {
+                const OBJECT_REF_STORAGE_ERROR: &str = "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
                 if let Some(place) = self.try_resolve_typed_field_place(object, property) {
                     let label = format!("{}.{}", place.root_name, property);
                     let source_loc = self.span_to_source_location(assign_expr.target.span());
@@ -271,6 +272,10 @@ impl BytecodeCompiler {
                         Some(Operand::Local(field_ref)),
                     ));
 
+                    self.reject_direct_reference_storage(
+                        &assign_expr.value,
+                        OBJECT_REF_STORAGE_ERROR,
+                    )?;
                     self.compile_expr(&assign_expr.value)?;
                     let value_local = self.declare_temp_local("__assign_value_")?;
                     self.emit(Instruction::simple(OpCode::Dup));
@@ -354,6 +359,7 @@ impl BytecodeCompiler {
                         location: None,
                     })?;
 
+                self.reject_direct_reference_storage(&assign_expr.value, OBJECT_REF_STORAGE_ERROR)?;
                 self.compile_expr(&assign_expr.value)?;
                 let value_local = self.declare_temp_local("__assign_value_")?;
                 self.emit(Instruction::simple(OpCode::Dup));
@@ -377,8 +383,13 @@ impl BytecodeCompiler {
                 end_index: None,
                 ..
             } => {
+                const ARRAY_REF_STORAGE_ERROR: &str = "cannot store a reference in an array — references are scoped borrows that cannot escape into collections. Use owned values instead";
                 if let Expr::Identifier(name, _) = object.as_ref() {
                     self.compile_expr(index)?;
+                    self.reject_direct_reference_storage(
+                        &assign_expr.value,
+                        ARRAY_REF_STORAGE_ERROR,
+                    )?;
                     self.compile_expr(&assign_expr.value)?;
                     let value_local = self.declare_temp_local("__assign_value_")?;
                     self.emit(Instruction::simple(OpCode::Dup));
@@ -453,6 +464,10 @@ impl BytecodeCompiler {
                 } else {
                     self.compile_expr(object)?;
                     self.compile_expr(index)?;
+                    self.reject_direct_reference_storage(
+                        &assign_expr.value,
+                        ARRAY_REF_STORAGE_ERROR,
+                    )?;
                     self.compile_expr(&assign_expr.value)?;
                     let value_local = self.declare_temp_local("__assign_value_")?;
                     self.emit(Instruction::simple(OpCode::Dup));

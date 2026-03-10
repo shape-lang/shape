@@ -3905,6 +3905,116 @@ mod tests {
     }
 
     #[test]
+    fn test_lowered_property_assignment_direct_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    var obj = { value: 0 }
+                    let x = 1
+                    obj.value = &x
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "property assignment with a reference RHS should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected object-field reference escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_property_assignment_indirect_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    var obj = { value: 0 }
+                    let x = 1
+                    let r = &x
+                    obj.value = r
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "property assignment with an indirect reference RHS should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected indirect object-field reference escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_index_assignment_direct_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    var arr = [0]
+                    let x = 1
+                    arr[0] = &x
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "index assignment with a reference RHS should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected array-element reference escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_index_assignment_indirect_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    var arr = [0]
+                    let x = 1
+                    let r = &x
+                    arr[0] = r
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "index assignment with an indirect reference RHS should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected indirect array-element reference escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
     fn test_lowered_block_expr_write_while_borrowed_is_visible_to_solver() {
         let body = vec![
             Statement::VariableDecl(

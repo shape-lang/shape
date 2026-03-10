@@ -5353,6 +5353,226 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_function_records_mir_property_assignment_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function property_assignment_escape() {
+                    var obj = { value: 0 }
+                    let x = 1
+                    obj.value = &x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("property assignment reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
+            "expected object-field storage error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("property_assignment_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected MIR object-field reference escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_indirect_property_assignment_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function indirect_property_assignment_escape() {
+                    var obj = { value: 0 }
+                    let x = 1
+                    let r = &x
+                    obj.value = r
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler.compile_function(func).expect_err(
+            "indirect property assignment reference storage should surface as a compile error",
+        );
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
+            "expected indirect object-field storage error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("indirect_property_assignment_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected MIR indirect object-field reference escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_index_assignment_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function index_assignment_escape() {
+                    var arr = [0]
+                    let x = 1
+                    arr[0] = &x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("index assignment reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an array"),
+            "expected array-element storage error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("index_assignment_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected MIR array-element reference escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_indirect_index_assignment_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function indirect_index_assignment_escape() {
+                    var arr = [0]
+                    let x = 1
+                    let r = &x
+                    arr[0] = r
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler.compile_function(func).expect_err(
+            "indirect index assignment reference storage should surface as a compile error",
+        );
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an array"),
+            "expected indirect array-element storage error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("indirect_index_assignment_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected MIR indirect array-element reference escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_top_level_property_assignment_direct_reference_storage_rejected() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                let x = 1
+                var obj = { value: 0 }
+                obj.value = &x
+            "#,
+        )
+        .expect("parse failed");
+
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("top-level property assignment reference storage should error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
+            "expected top-level object-field storage error, got {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_compile_top_level_index_assignment_direct_reference_storage_rejected() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                let x = 1
+                var arr = [0]
+                arr[0] = &x
+            "#,
+        )
+        .expect("parse failed");
+
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("top-level index assignment reference storage should error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an array"),
+            "expected top-level array-element storage error, got {}",
+            err
+        );
+    }
+
+    #[test]
     fn test_compile_function_records_mir_owned_closure_capture() {
         let program = shape_ast::parser::parse_program(
             r#"
