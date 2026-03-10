@@ -2511,6 +2511,34 @@ fn test_first_class_ref_module_binding_autoderef() {
 }
 
 #[test]
+fn test_first_class_ref_last_use_releases_local_borrow() {
+    let code = r#"
+        function test() {
+            let mut data = [1, 2, 3]
+            let r = &data
+            print(r)
+            data.push(4)
+            return data.len()
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(4));
+}
+
+#[test]
+fn test_module_binding_last_use_releases_borrow() {
+    let code = r#"
+        let mut data = [1, 2, 3]
+        let r = &data
+        print(r)
+        data.push(4)
+        data.len()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result, ValueWord::from_i64(4));
+}
+
+#[test]
 fn test_module_binding_write_while_borrowed_rejected() {
     assert_compile_error(
         r#"
@@ -2673,6 +2701,26 @@ fn test_projected_field_whole_owner_write_rejected() {
         "#,
         "[B0002]",
     );
+}
+
+#[test]
+fn test_projected_field_last_use_releases_borrow() {
+    let code = r#"
+        type Pair {
+            a: int,
+            b: int
+        }
+
+        function test() {
+            let mut obj = Pair { a: 1, b: 2 }
+            let r = &obj.a
+            print(r)
+            obj.a = 10
+            return obj.a + obj.b
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(12));
 }
 
 // ── Concurrency boundary tests (Phase 6: Three Rules) ──────────────

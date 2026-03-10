@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::blob_cache_v2::BlobCache;
-use crate::borrow_checker::BorrowMode;
+use crate::borrow_checker::{BorrowId, BorrowMode};
 use crate::bytecode::{
     BytecodeProgram, Constant, FunctionBlob, FunctionHash, Instruction, OpCode,
     Program as ContentAddressedProgram,
@@ -60,6 +60,12 @@ pub(crate) struct ImportedSymbol {
 pub(crate) struct StructGenericInfo {
     pub type_params: Vec<shape_ast::ast::TypeParam>,
     pub runtime_field_types: HashMap<String, shape_ast::ast::TypeAnnotation>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TrackedReferenceBorrow {
+    pub borrow_id: BorrowId,
+    pub name: String,
 }
 
 /// Whether a type's Drop impl is sync-only, async-only, or both.
@@ -553,6 +559,14 @@ pub struct BytecodeCompiler {
     pub(crate) reference_value_module_bindings: HashSet<u16>,
     /// Subset of reference_value_module_bindings that hold exclusive (`&mut`) references.
     pub(crate) exclusive_reference_value_module_bindings: HashSet<u16>,
+    /// Local first-class reference bindings with active borrow ownership.
+    pub(crate) tracked_reference_borrow_locals: HashMap<u16, TrackedReferenceBorrow>,
+    /// Module first-class reference bindings with active borrow ownership.
+    pub(crate) tracked_reference_borrow_module_bindings: HashMap<u16, TrackedReferenceBorrow>,
+    /// Local ref-holder slots declared in the current lexical scopes.
+    pub(crate) scoped_reference_value_locals: Vec<HashSet<u16>>,
+    /// Module ref-holder slots declared in the current module scopes.
+    pub(crate) scoped_reference_value_module_bindings: Vec<HashSet<u16>>,
     /// True while compiling function call arguments (allows `&` references).
     pub(crate) in_call_args: bool,
     /// Borrow mode for the argument currently being compiled.

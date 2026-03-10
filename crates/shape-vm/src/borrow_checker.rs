@@ -8,6 +8,7 @@
 
 use shape_ast::ast::Span;
 use shape_ast::error::{ErrorNote, ShapeError, SourceLocation};
+pub type BorrowId = u32;
 pub type BorrowPlace = u32;
 
 /// Unique identifier for a lexical scope region.
@@ -17,6 +18,8 @@ pub struct RegionId(pub u32);
 /// Record of an active borrow.
 #[derive(Debug, Clone)]
 pub struct BorrowRecord {
+    /// Stable identifier for this borrow.
+    pub borrow_id: BorrowId,
     /// The place being borrowed (root binding or projected field).
     pub borrowed_place: BorrowPlace,
     /// True if the callee mutates through this ref (exclusive borrow).
@@ -58,6 +61,8 @@ pub struct BorrowChecker {
     region_stack: Vec<RegionId>,
     /// Next region ID to allocate.
     next_region_id: u32,
+    /// Next borrow ID to allocate.
+    next_borrow_id: BorrowId,
     /// Active borrows. We keep a flat list so overlap checks can reason about
     /// whole-owner places vs projected field places.
     active_borrows: Vec<BorrowRecord>,
@@ -70,6 +75,7 @@ impl BorrowChecker {
             current_region: RegionId(0),
             region_stack: vec![RegionId(0)],
             next_region_id: 1,
+            next_borrow_id: 0,
             active_borrows: Vec::new(),
         }
     }
@@ -136,7 +142,7 @@ impl BorrowChecker {
         mode: BorrowMode,
         span: Span,
         source_location: Option<SourceLocation>,
-    ) -> Result<(), ShapeError> {
+    ) -> Result<BorrowId, ShapeError> {
         for borrow in &self.active_borrows {
             if !Self::places_overlap(place, borrow.borrowed_place) {
                 continue;
@@ -171,7 +177,11 @@ impl BorrowChecker {
             }
         }
 
+        let borrow_id = self.next_borrow_id;
+        self.next_borrow_id += 1;
+
         let record = BorrowRecord {
+            borrow_id,
             borrowed_place: place,
             is_exclusive: mode.is_exclusive(),
             origin_region: self.current_region,
@@ -183,7 +193,7 @@ impl BorrowChecker {
 
         self.active_borrows.push(record);
 
-        Ok(())
+        Ok(borrow_id)
     }
 
     /// Check whether a write to `slot` is allowed (fails if any borrow exists).
@@ -262,11 +272,31 @@ impl BorrowChecker {
         self.active_borrows.retain(|b| b.borrow_region != region);
     }
 
+    /// Rebind an existing borrow to the local slot that now owns the reference value.
+    pub fn rebind_borrow_ref_slot(&mut self, borrow_id: BorrowId, ref_slot: u16) {
+        if let Some(borrow) = self
+            .active_borrows
+            .iter_mut()
+            .find(|borrow| borrow.borrow_id == borrow_id)
+        {
+            borrow.ref_slot = ref_slot;
+        }
+    }
+
+    /// Release a borrow by its stable ID.
+    pub fn release_borrow_by_id(&mut self, borrow_id: BorrowId) -> bool {
+        let before = self.active_borrows.len();
+        self.active_borrows
+            .retain(|borrow| borrow.borrow_id != borrow_id);
+        before != self.active_borrows.len()
+    }
+
     /// Reset the borrow checker state (e.g., when entering a new function body).
     pub fn reset(&mut self) {
         self.current_region = RegionId(0);
         self.region_stack = vec![RegionId(0)];
         self.next_region_id = 1;
+        self.next_borrow_id = 0;
         self.active_borrows.clear();
     }
 
@@ -475,6 +505,28 @@ mod tests {
         assert!(bc.check_no_escape(5, None).is_err());
         // ref_slot 99 is not in any borrow
         assert!(bc.check_no_escape(99, None).is_ok());
+    }
+
+    #[test]
+    fn test_rebind_borrow_ref_slot_updates_escape_tracking() {
+        let mut bc = BorrowChecker::new();
+        let borrow_id = bc
+            .create_borrow(0, 0, BorrowMode::Exclusive, span(), None)
+            .unwrap();
+        bc.rebind_borrow_ref_slot(borrow_id, 7);
+        assert!(bc.check_no_escape(0, None).is_ok());
+        assert!(bc.check_no_escape(7, None).is_err());
+    }
+
+    #[test]
+    fn test_release_borrow_by_id_allows_write() {
+        let mut bc = BorrowChecker::new();
+        let borrow_id = bc
+            .create_borrow(0, 0, BorrowMode::Exclusive, span(), None)
+            .unwrap();
+        assert!(bc.check_write_allowed(0, None).is_err());
+        assert!(bc.release_borrow_by_id(borrow_id));
+        assert!(bc.check_write_allowed(0, None).is_ok());
     }
 
     #[test]

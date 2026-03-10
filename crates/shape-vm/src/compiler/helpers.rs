@@ -1,15 +1,15 @@
 //! Helper methods for bytecode compilation
 
-use crate::borrow_checker::{BorrowMode, BorrowPlace};
+use crate::borrow_checker::{BorrowId, BorrowMode, BorrowPlace};
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{NumericType, StorageHint, TypeTracker, VariableKind, VariableTypeInfo};
-use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
+use shape_ast::ast::{BlockItem, Expr, Item, Spanned, Statement, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
 use std::collections::{BTreeSet, HashMap};
 
-use super::{BytecodeCompiler, DropKind, ParamPassMode};
+use super::{BytecodeCompiler, DropKind, ParamPassMode, TrackedReferenceBorrow};
 
 pub(super) struct TypedFieldPlace {
     pub root_name: String,
@@ -67,6 +67,400 @@ pub(crate) fn strip_error_prefix(e: &ShapeError) -> String {
     s.to_string()
 }
 
+fn assignment_target_uses_identifier(target: &Expr, name: &str) -> bool {
+    match target {
+        Expr::Identifier(_, _) => false,
+        Expr::PropertyAccess { object, .. } => expr_uses_identifier(object, name),
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            ..
+        } => {
+            expr_uses_identifier(object, name)
+                || expr_uses_identifier(index, name)
+                || end_index
+                    .as_deref()
+                    .is_some_and(|end| expr_uses_identifier(end, name))
+        }
+        other => expr_uses_identifier(other, name),
+    }
+}
+
+fn block_item_uses_identifier(item: &BlockItem, name: &str) -> bool {
+    match item {
+        BlockItem::VariableDecl(decl) => decl
+            .value
+            .as_ref()
+            .is_some_and(|value| expr_uses_identifier(value, name)),
+        BlockItem::Assignment(assign) => expr_uses_identifier(&assign.value, name),
+        BlockItem::Statement(stmt) => statement_uses_identifier(stmt, name),
+        BlockItem::Expression(expr) => expr_uses_identifier(expr, name),
+    }
+}
+
+fn statement_uses_identifier(stmt: &Statement, name: &str) -> bool {
+    use shape_ast::ast::ForInit;
+
+    match stmt {
+        Statement::VariableDecl(decl, _) => decl
+            .value
+            .as_ref()
+            .is_some_and(|value| expr_uses_identifier(value, name)),
+        Statement::Assignment(assign, _) => expr_uses_identifier(&assign.value, name),
+        Statement::Expression(expr, _) => expr_uses_identifier(expr, name),
+        Statement::Return(Some(expr), _) => expr_uses_identifier(expr, name),
+        Statement::If(if_stmt, _) => {
+            expr_uses_identifier(&if_stmt.condition, name)
+                || if_stmt
+                    .then_body
+                    .iter()
+                    .any(|stmt| statement_uses_identifier(stmt, name))
+                || if_stmt.else_body.as_ref().is_some_and(|else_body| {
+                    else_body
+                        .iter()
+                        .any(|stmt| statement_uses_identifier(stmt, name))
+                })
+        }
+        Statement::While(while_loop, _) => {
+            expr_uses_identifier(&while_loop.condition, name)
+                || while_loop
+                    .body
+                    .iter()
+                    .any(|stmt| statement_uses_identifier(stmt, name))
+        }
+        Statement::For(for_loop, _) => {
+            let init_uses = match &for_loop.init {
+                ForInit::ForIn { iter, .. } => expr_uses_identifier(iter, name),
+                ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => {
+                    statement_uses_identifier(init, name)
+                        || expr_uses_identifier(condition, name)
+                        || expr_uses_identifier(update, name)
+                }
+            };
+            init_uses
+                || for_loop
+                    .body
+                    .iter()
+                    .any(|stmt| statement_uses_identifier(stmt, name))
+        }
+        Statement::Extend(ext, _) => ext.methods.iter().any(|method| {
+            method
+                .body
+                .iter()
+                .any(|stmt| statement_uses_identifier(stmt, name))
+        }),
+        Statement::SetParamValue { expression, .. }
+        | Statement::SetReturnExpr { expression, .. }
+        | Statement::ReplaceBodyExpr { expression, .. }
+        | Statement::ReplaceModuleExpr { expression, .. } => expr_uses_identifier(expression, name),
+        Statement::ReplaceBody { body, .. } => body
+            .iter()
+            .any(|stmt| statement_uses_identifier(stmt, name)),
+        Statement::Break(_)
+        | Statement::Continue(_)
+        | Statement::Return(None, _)
+        | Statement::RemoveTarget(_)
+        | Statement::SetParamType { .. }
+        | Statement::SetReturnType { .. } => false,
+    }
+}
+
+fn item_uses_identifier(item: &Item, name: &str) -> bool {
+    match item {
+        Item::VariableDecl(decl, _) => decl
+            .value
+            .as_ref()
+            .is_some_and(|value| expr_uses_identifier(value, name)),
+        Item::Assignment(assign, _) => expr_uses_identifier(&assign.value, name),
+        Item::Expression(expr, _) => expr_uses_identifier(expr, name),
+        Item::Statement(stmt, _) => statement_uses_identifier(stmt, name),
+        Item::Function(func, _) => func
+            .body
+            .iter()
+            .any(|stmt| statement_uses_identifier(stmt, name)),
+        Item::Module(module, _) => module
+            .items
+            .iter()
+            .any(|item| item_uses_identifier(item, name)),
+        Item::Export(export, _) => {
+            export
+                .source_decl
+                .as_ref()
+                .and_then(|decl| decl.value.as_ref())
+                .is_some_and(|value| expr_uses_identifier(value, name))
+                || match &export.item {
+                    shape_ast::ast::ExportItem::Function(func_def) => func_def
+                        .body
+                        .iter()
+                        .any(|stmt| statement_uses_identifier(stmt, name)),
+                    shape_ast::ast::ExportItem::Named(_) => false,
+                    shape_ast::ast::ExportItem::TypeAlias(_) => false,
+                    shape_ast::ast::ExportItem::ForeignFunction(_)
+                    | shape_ast::ast::ExportItem::Struct(_)
+                    | shape_ast::ast::ExportItem::Enum(_)
+                    | shape_ast::ast::ExportItem::Trait(_)
+                    | shape_ast::ast::ExportItem::Interface(_) => false,
+                }
+        }
+        Item::Extend(ext, _) => ext.methods.iter().any(|method| {
+            method
+                .body
+                .iter()
+                .any(|stmt| statement_uses_identifier(stmt, name))
+        }),
+        Item::Impl(impl_block, _) => impl_block.methods.iter().any(|method| {
+            method
+                .body
+                .iter()
+                .any(|stmt| statement_uses_identifier(stmt, name))
+        }),
+        Item::Import(_, _)
+        | Item::Interface(_, _)
+        | Item::Query(_, _)
+        | Item::Stream(_, _)
+        | Item::Test(_, _)
+        | Item::Optimize(_, _)
+        | Item::TypeAlias(_, _)
+        | Item::StructType(_, _)
+        | Item::Enum(_, _)
+        | Item::Trait(_, _)
+        | Item::DataSource(_, _)
+        | Item::QueryDecl(_, _)
+        | Item::BuiltinTypeDecl(_, _)
+        | Item::BuiltinFunctionDecl(_, _)
+        | Item::ForeignFunction(_, _)
+        | Item::AnnotationDef(_, _) => false,
+        Item::Comptime(stmts, _) => stmts
+            .iter()
+            .any(|stmt| statement_uses_identifier(stmt, name)),
+    }
+}
+
+fn expr_uses_identifier(expr: &Expr, name: &str) -> bool {
+    macro_rules! visit_expr {
+        ($expr:expr) => {
+            expr_uses_identifier($expr, name)
+        };
+    }
+    macro_rules! visit_stmt {
+        ($stmt:expr) => {
+            statement_uses_identifier($stmt, name)
+        };
+    }
+
+    match expr {
+        Expr::Identifier(ident, _) => ident == name,
+        Expr::Assign(assign, _) => {
+            assignment_target_uses_identifier(assign.target.as_ref(), name)
+                || visit_expr!(&assign.value)
+        }
+        Expr::FunctionCall {
+            args, named_args, ..
+        } => {
+            args.iter().any(|arg| visit_expr!(arg))
+                || named_args.iter().any(|(_, arg)| visit_expr!(arg))
+        }
+        Expr::MethodCall {
+            receiver,
+            args,
+            named_args,
+            ..
+        } => {
+            visit_expr!(receiver)
+                || args.iter().any(|arg| visit_expr!(arg))
+                || named_args.iter().any(|(_, arg)| visit_expr!(arg))
+        }
+        Expr::UnaryOp { operand, .. }
+        | Expr::Spread(operand, _)
+        | Expr::TryOperator(operand, _)
+        | Expr::Await(operand, _)
+        | Expr::TimeframeContext { expr: operand, .. }
+        | Expr::UsingImpl { expr: operand, .. }
+        | Expr::Reference { expr: operand, .. }
+        | Expr::InstanceOf { expr: operand, .. } => visit_expr!(operand),
+        Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+            visit_expr!(left) || visit_expr!(right)
+        }
+        Expr::PropertyAccess { object, .. } => visit_expr!(object),
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            ..
+        } => {
+            visit_expr!(object)
+                || visit_expr!(index)
+                || end_index.as_deref().is_some_and(|end| visit_expr!(end))
+        }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            visit_expr!(condition)
+                || visit_expr!(then_expr)
+                || else_expr
+                    .as_deref()
+                    .is_some_and(|else_expr| visit_expr!(else_expr))
+        }
+        Expr::Array(items, _) => items.iter().any(|item| visit_expr!(item)),
+        Expr::TableRows(rows, _) => rows.iter().flatten().any(|value| visit_expr!(value)),
+        Expr::Object(entries, _) => entries.iter().any(|entry| match entry {
+            shape_ast::ast::ObjectEntry::Field { value, .. } => visit_expr!(value),
+            shape_ast::ast::ObjectEntry::Spread(spread) => visit_expr!(spread),
+        }),
+        Expr::ListComprehension(comp, _) => {
+            visit_expr!(&comp.element)
+                || comp.clauses.iter().any(|clause| {
+                    visit_expr!(&clause.iterable)
+                        || clause
+                            .filter
+                            .as_ref()
+                            .is_some_and(|filter| visit_expr!(filter))
+                })
+        }
+        Expr::Block(block, _) => block
+            .items
+            .iter()
+            .any(|item| block_item_uses_identifier(item, name)),
+        Expr::FunctionExpr { body, .. } => body.iter().any(|stmt| visit_stmt!(stmt)),
+        Expr::If(if_expr, _) => {
+            visit_expr!(&if_expr.condition)
+                || visit_expr!(&if_expr.then_branch)
+                || if_expr
+                    .else_branch
+                    .as_deref()
+                    .is_some_and(|else_branch| visit_expr!(else_branch))
+        }
+        Expr::While(while_expr, _) => {
+            visit_expr!(&while_expr.condition) || visit_expr!(&while_expr.body)
+        }
+        Expr::For(for_expr, _) => visit_expr!(&for_expr.iterable) || visit_expr!(&for_expr.body),
+        Expr::Loop(loop_expr, _) => visit_expr!(&loop_expr.body),
+        Expr::Let(let_expr, _) => {
+            let_expr
+                .value
+                .as_ref()
+                .is_some_and(|value| visit_expr!(value))
+                || visit_expr!(&let_expr.body)
+        }
+        Expr::Match(match_expr, _) => {
+            visit_expr!(&match_expr.scrutinee)
+                || match_expr.arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(|guard| visit_expr!(guard))
+                        || visit_expr!(&arm.body)
+                })
+        }
+        Expr::Join(join_expr, _) => join_expr
+            .branches
+            .iter()
+            .any(|branch| visit_expr!(&branch.expr)),
+        Expr::Annotated { target, .. } => visit_expr!(target),
+        Expr::AsyncLet(async_let, _) => visit_expr!(&async_let.expr),
+        Expr::AsyncScope(inner, _) => visit_expr!(inner),
+        Expr::Comptime(stmts, _) => stmts.iter().any(|stmt| visit_stmt!(stmt)),
+        Expr::ComptimeFor(cf, _) => {
+            visit_expr!(&cf.iterable) || cf.body.iter().any(|stmt| visit_stmt!(stmt))
+        }
+        Expr::SimulationCall { params, .. } => params.iter().any(|(_, value)| visit_expr!(value)),
+        Expr::WindowExpr(window_expr, _) => {
+            let fn_uses = match &window_expr.function {
+                shape_ast::ast::WindowFunction::Lag { expr, default, .. }
+                | shape_ast::ast::WindowFunction::Lead { expr, default, .. } => {
+                    visit_expr!(expr)
+                        || default.as_ref().is_some_and(|default| visit_expr!(default))
+                }
+                shape_ast::ast::WindowFunction::FirstValue(expr)
+                | shape_ast::ast::WindowFunction::LastValue(expr)
+                | shape_ast::ast::WindowFunction::NthValue(expr, _)
+                | shape_ast::ast::WindowFunction::Sum(expr)
+                | shape_ast::ast::WindowFunction::Avg(expr)
+                | shape_ast::ast::WindowFunction::Min(expr)
+                | shape_ast::ast::WindowFunction::Max(expr) => visit_expr!(expr),
+                shape_ast::ast::WindowFunction::Count(expr) => {
+                    expr.as_ref().is_some_and(|expr| visit_expr!(expr))
+                }
+                shape_ast::ast::WindowFunction::RowNumber
+                | shape_ast::ast::WindowFunction::Rank
+                | shape_ast::ast::WindowFunction::DenseRank
+                | shape_ast::ast::WindowFunction::Ntile(_) => false,
+            };
+            fn_uses
+                || window_expr
+                    .over
+                    .partition_by
+                    .iter()
+                    .any(|expr| visit_expr!(expr))
+                || window_expr.over.order_by.as_ref().is_some_and(|order_by| {
+                    order_by.columns.iter().any(|(expr, _)| visit_expr!(expr))
+                })
+        }
+        Expr::FromQuery(fq, _) => {
+            visit_expr!(&fq.source)
+                || fq.clauses.iter().any(|clause| match clause {
+                    shape_ast::ast::QueryClause::Where(expr) => visit_expr!(expr),
+                    shape_ast::ast::QueryClause::OrderBy(items) => {
+                        items.iter().any(|item| visit_expr!(&item.key))
+                    }
+                    shape_ast::ast::QueryClause::GroupBy { element, key, .. } => {
+                        visit_expr!(element) || visit_expr!(key)
+                    }
+                    shape_ast::ast::QueryClause::Let { value, .. } => visit_expr!(value),
+                    shape_ast::ast::QueryClause::Join {
+                        source,
+                        left_key,
+                        right_key,
+                        ..
+                    } => visit_expr!(source) || visit_expr!(left_key) || visit_expr!(right_key),
+                })
+                || visit_expr!(&fq.select)
+        }
+        Expr::StructLiteral { fields, .. } => fields.iter().any(|(_, value)| visit_expr!(value)),
+        Expr::EnumConstructor { payload, .. } => match payload {
+            shape_ast::ast::EnumConstructorPayload::Unit => false,
+            shape_ast::ast::EnumConstructorPayload::Tuple(values) => {
+                values.iter().any(|value| visit_expr!(value))
+            }
+            shape_ast::ast::EnumConstructorPayload::Struct(fields) => {
+                fields.iter().any(|(_, value)| visit_expr!(value))
+            }
+        },
+        Expr::TypeAssertion {
+            expr,
+            meta_param_overrides,
+            ..
+        } => {
+            visit_expr!(expr)
+                || meta_param_overrides
+                    .as_ref()
+                    .is_some_and(|overrides| overrides.values().any(|value| visit_expr!(value)))
+        }
+        Expr::Range { start, end, .. } => {
+            start.as_deref().is_some_and(|start| visit_expr!(start))
+                || end.as_deref().is_some_and(|end| visit_expr!(end))
+        }
+        Expr::DataRelativeAccess { reference, .. } => visit_expr!(reference),
+        Expr::Break(Some(expr), _) | Expr::Return(Some(expr), _) => visit_expr!(expr),
+        Expr::Literal(..)
+        | Expr::DataRef(..)
+        | Expr::DataDateTimeRef(..)
+        | Expr::TimeRef(..)
+        | Expr::DateTime(..)
+        | Expr::PatternRef(..)
+        | Expr::Unit(..)
+        | Expr::Duration(..)
+        | Expr::Continue(..)
+        | Expr::Break(None, _)
+        | Expr::Return(None, _) => false,
+    }
+}
+
 impl BytecodeCompiler {
     const MODULE_BINDING_BORROW_FLAG: BorrowPlace = 0x8000_0000;
     const FIELD_BORROW_SHIFT: u32 = 16;
@@ -101,7 +495,8 @@ impl BytecodeCompiler {
     ) -> ShapeError {
         match err {
             ShapeError::SemanticError { message, location } => ShapeError::SemanticError {
-                message: message.replace(&format!("(slot {})", borrow_key), &format!("'{}'", label)),
+                message: message
+                    .replace(&format!("(slot {})", borrow_key), &format!("'{}'", label)),
                 location,
             },
             other => other,
@@ -181,8 +576,8 @@ impl BytecodeCompiler {
         expr: &Expr,
         span: shape_ast::ast::Span,
         mode: BorrowMode,
-    ) -> Result<()> {
-        match expr {
+    ) -> Result<BorrowId> {
+        let borrow_id = match expr {
             Expr::Identifier(name, id_span) => self.compile_reference_identifier(name, *id_span, mode),
             Expr::PropertyAccess {
                 object,
@@ -195,7 +590,11 @@ impl BytecodeCompiler {
                     "`&` can only be applied to a simple variable name or compile-time-resolved field access (e.g., `&x`, `&obj.a`)".to_string(),
                 location: Some(self.span_to_source_location(span)),
             }),
-        }
+        }?;
+        self.last_expr_schema = None;
+        self.last_expr_type_info = None;
+        self.last_expr_numeric_type = None;
+        Ok(borrow_id)
     }
 
     fn compile_reference_property_access(
@@ -204,7 +603,7 @@ impl BytecodeCompiler {
         property: &str,
         span: shape_ast::ast::Span,
         mode: BorrowMode,
-    ) -> Result<()> {
+    ) -> Result<BorrowId> {
         let Some(place) = self.try_resolve_typed_field_place(object, property) else {
             return Err(ShapeError::SemanticError {
                 message:
@@ -237,7 +636,8 @@ impl BytecodeCompiler {
 
         let label = format!("{}.{}", place.root_name, property);
         let source_loc = self.span_to_source_location(span);
-        self.borrow_checker
+        let borrow_id = self
+            .borrow_checker
             .create_borrow(place.borrow_key, place.slot, mode, span, Some(source_loc))
             .map_err(|err| Self::relabel_borrow_error(err, place.borrow_key, &label))?;
 
@@ -251,15 +651,10 @@ impl BytecodeCompiler {
             OpCode::MakeFieldRef,
             Some(place.typed_operand),
         ));
-        Ok(())
+        Ok(borrow_id)
     }
 
-    pub(super) fn mark_reference_binding(
-        &mut self,
-        slot: u16,
-        is_local: bool,
-        is_exclusive: bool,
-    ) {
+    pub(super) fn mark_reference_binding(&mut self, slot: u16, is_local: bool, is_exclusive: bool) {
         if is_local {
             self.reference_value_locals.insert(slot);
             if is_exclusive {
@@ -277,7 +672,86 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn compile_expr_for_reference_binding(
+        &mut self,
+        expr: &shape_ast::ast::Expr,
+    ) -> Result<Option<(BorrowId, bool)>> {
+        if let shape_ast::ast::Expr::Reference {
+            expr: inner,
+            is_mutable,
+            span,
+        } = expr
+        {
+            let mode = if *is_mutable {
+                BorrowMode::Exclusive
+            } else {
+                BorrowMode::Shared
+            };
+            let borrow_id = self.compile_reference_expr(inner, *span, mode)?;
+            if borrow_id == BorrowId::MAX {
+                Ok(None)
+            } else {
+                Ok(Some((borrow_id, *is_mutable)))
+            }
+        } else {
+            self.compile_expr(expr)?;
+            Ok(None)
+        }
+    }
+
+    fn track_reference_binding_slot(&mut self, slot: u16, is_local: bool) {
+        if is_local {
+            if let Some(scope) = self.scoped_reference_value_locals.last_mut() {
+                scope.insert(slot);
+            }
+        } else if let Some(scope) = self.scoped_reference_value_module_bindings.last_mut() {
+            scope.insert(slot);
+        }
+    }
+
+    pub(super) fn bind_reference_value_slot(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        name: &str,
+        is_exclusive: bool,
+        borrow_id: BorrowId,
+    ) {
+        self.borrow_checker.rebind_borrow_ref_slot(borrow_id, slot);
+        self.mark_reference_binding(slot, is_local, is_exclusive);
+        self.track_reference_binding_slot(slot, is_local);
+        if is_local {
+            self.type_tracker
+                .set_local_type(slot, VariableTypeInfo::unknown());
+        } else {
+            self.type_tracker
+                .set_binding_type(slot, VariableTypeInfo::unknown());
+        }
+        let tracked = TrackedReferenceBorrow {
+            borrow_id,
+            name: name.to_string(),
+        };
+        if is_local {
+            self.tracked_reference_borrow_locals.insert(slot, tracked);
+        } else {
+            self.tracked_reference_borrow_module_bindings
+                .insert(slot, tracked);
+        }
+    }
+
+    pub(super) fn release_tracked_reference_borrow(&mut self, slot: u16, is_local: bool) {
+        let tracked = if is_local {
+            self.tracked_reference_borrow_locals.remove(&slot)
+        } else {
+            self.tracked_reference_borrow_module_bindings.remove(&slot)
+        };
+        if let Some(tracked) = tracked {
+            self.borrow_checker.release_borrow_by_id(tracked.borrow_id);
+        }
+    }
+
     pub(super) fn clear_reference_binding(&mut self, slot: u16, is_local: bool) {
+        self.release_tracked_reference_borrow(slot, is_local);
         if is_local {
             self.reference_value_locals.remove(&slot);
             self.exclusive_reference_value_locals.remove(&slot);
@@ -297,6 +771,105 @@ impl BytecodeCompiler {
             self.mark_reference_binding(slot, is_local, *is_mutable);
         } else {
             self.clear_reference_binding(slot, is_local);
+        }
+    }
+
+    pub(super) fn finish_reference_binding_from_expr(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        name: &str,
+        expr: &shape_ast::ast::Expr,
+        ref_borrow: Option<(BorrowId, bool)>,
+    ) {
+        if let Some((borrow_id, is_exclusive)) = ref_borrow {
+            self.bind_reference_value_slot(slot, is_local, name, is_exclusive, borrow_id);
+        } else {
+            self.update_reference_binding_from_expr(slot, is_local, expr);
+        }
+    }
+
+    pub(super) fn push_module_reference_scope(&mut self) {
+        self.scoped_reference_value_module_bindings
+            .push(Default::default());
+    }
+
+    pub(super) fn pop_module_reference_scope(&mut self) {
+        self.scoped_reference_value_module_bindings.pop();
+    }
+
+    pub(super) fn release_unused_local_reference_borrows_for_remaining_statements(
+        &mut self,
+        remaining: &[Statement],
+    ) {
+        let Some(scope_slots) = self.scoped_reference_value_locals.last() else {
+            return;
+        };
+        let dead_slots: Vec<u16> = scope_slots
+            .iter()
+            .copied()
+            .filter(|slot| {
+                self.tracked_reference_borrow_locals
+                    .get(slot)
+                    .is_some_and(|tracked| {
+                        !remaining
+                            .iter()
+                            .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
+                    })
+            })
+            .collect();
+        for slot in dead_slots {
+            self.release_tracked_reference_borrow(slot, true);
+        }
+    }
+
+    pub(super) fn release_unused_local_reference_borrows_for_remaining_block_items(
+        &mut self,
+        remaining: &[BlockItem],
+    ) {
+        let Some(scope_slots) = self.scoped_reference_value_locals.last() else {
+            return;
+        };
+        let dead_slots: Vec<u16> = scope_slots
+            .iter()
+            .copied()
+            .filter(|slot| {
+                self.tracked_reference_borrow_locals
+                    .get(slot)
+                    .is_some_and(|tracked| {
+                        !remaining
+                            .iter()
+                            .any(|item| block_item_uses_identifier(item, &tracked.name))
+                    })
+            })
+            .collect();
+        for slot in dead_slots {
+            self.release_tracked_reference_borrow(slot, true);
+        }
+    }
+
+    pub(super) fn release_unused_module_reference_borrows_for_remaining_items(
+        &mut self,
+        remaining: &[Item],
+    ) {
+        let Some(scope_slots) = self.scoped_reference_value_module_bindings.last() else {
+            return;
+        };
+        let dead_slots: Vec<u16> = scope_slots
+            .iter()
+            .copied()
+            .filter(|slot| {
+                self.tracked_reference_borrow_module_bindings
+                    .get(slot)
+                    .is_some_and(|tracked| {
+                        !remaining
+                            .iter()
+                            .any(|item| item_uses_identifier(item, &tracked.name))
+                    })
+            })
+            .collect();
+        for slot in dead_slots {
+            self.release_tracked_reference_borrow(slot, false);
         }
     }
 
@@ -642,13 +1215,17 @@ impl BytecodeCompiler {
     ) -> Result<()> {
         use shape_ast::ast::Expr;
         match arg {
-            Expr::Identifier(name, span) => self.compile_reference_identifier(name, *span, mode),
+            Expr::Identifier(name, span) => self
+                .compile_reference_identifier(name, *span, mode)
+                .map(|_| ()),
             Expr::PropertyAccess {
                 object,
                 property,
                 optional: false,
                 span,
-            } => self.compile_reference_property_access(object, property, *span, mode),
+            } => self
+                .compile_reference_property_access(object, property, *span, mode)
+                .map(|_| ()),
             _ if mode == BorrowMode::Exclusive => Err(ShapeError::SemanticError {
                 message: "[B0004] mutable reference arguments must be simple variables".to_string(),
                 location: Some(self.span_to_source_location(arg.span())),
@@ -682,7 +1259,7 @@ impl BytecodeCompiler {
         name: &str,
         span: shape_ast::ast::Span,
         mode: BorrowMode,
-    ) -> Result<()> {
+    ) -> Result<BorrowId> {
         if let Some(local_idx) = self.resolve_local(name) {
             // Reject exclusive borrows of const variables
             if mode == BorrowMode::Exclusive && self.const_locals.contains(&local_idx) {
@@ -700,7 +1277,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(local_idx)),
                 ));
-                return Ok(());
+                return Ok(u32::MAX);
             }
             if self.reference_value_locals.contains(&local_idx) {
                 if mode == BorrowMode::Exclusive
@@ -718,10 +1295,11 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(local_idx)),
                 ));
-                return Ok(());
+                return Ok(u32::MAX);
             }
             let source_loc = self.span_to_source_location(span);
-            self.borrow_checker
+            let borrow_id = self
+                .borrow_checker
                 .create_borrow(
                     Self::borrow_key_for_local(local_idx),
                     local_idx,
@@ -744,7 +1322,7 @@ impl BytecodeCompiler {
                 OpCode::MakeRef,
                 Some(Operand::Local(local_idx)),
             ));
-            Ok(())
+            Ok(borrow_id)
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let Some(&binding_idx) = self.module_bindings.get(&scoped_name) else {
                 return Err(ShapeError::SemanticError {
@@ -783,10 +1361,11 @@ impl BytecodeCompiler {
                     OpCode::LoadModuleBinding,
                     Some(Operand::ModuleBinding(binding_idx)),
                 ));
-                return Ok(());
+                return Ok(u32::MAX);
             }
             let source_loc = self.span_to_source_location(span);
-            self.borrow_checker
+            let borrow_id = self
+                .borrow_checker
                 .create_borrow(
                     Self::borrow_key_for_module_binding(binding_idx),
                     binding_idx,
@@ -797,7 +1376,10 @@ impl BytecodeCompiler {
                 .map_err(|e| match e {
                     ShapeError::SemanticError { message, location } => {
                         let user_msg = message.replace(
-                            &format!("(slot {})", Self::borrow_key_for_module_binding(binding_idx)),
+                            &format!(
+                                "(slot {})",
+                                Self::borrow_key_for_module_binding(binding_idx)
+                            ),
                             &format!("'{}'", name),
                         );
                         ShapeError::SemanticError {
@@ -811,7 +1393,7 @@ impl BytecodeCompiler {
                 OpCode::MakeRef,
                 Some(Operand::ModuleBinding(binding_idx)),
             ));
-            Ok(())
+            Ok(borrow_id)
         } else if let Some(func_idx) = self.find_function(name) {
             // Function name passed as reference argument: create a temporary local
             // with the function constant and make a reference to it.
@@ -828,19 +1410,18 @@ impl BytecodeCompiler {
                 Some(Operand::Local(temp)),
             ));
             let source_loc = self.span_to_source_location(span);
-            self.borrow_checker
-                .create_borrow(
-                    Self::borrow_key_for_local(temp),
-                    temp,
-                    mode,
-                    span,
-                    Some(source_loc),
-                )?;
+            let borrow_id = self.borrow_checker.create_borrow(
+                Self::borrow_key_for_local(temp),
+                temp,
+                mode,
+                span,
+                Some(source_loc),
+            )?;
             self.emit(Instruction::new(
                 OpCode::MakeRef,
                 Some(Operand::Local(temp)),
             ));
-            Ok(())
+            Ok(borrow_id)
         } else {
             Err(ShapeError::SemanticError {
                 message: format!(
@@ -855,12 +1436,17 @@ impl BytecodeCompiler {
     /// Push a new scope
     pub(super) fn push_scope(&mut self) {
         self.locals.push(HashMap::new());
+        self.scoped_reference_value_locals.push(Default::default());
         self.type_tracker.push_scope();
         self.borrow_checker.enter_region();
     }
 
     /// Pop a scope
     pub(super) fn pop_scope(&mut self) {
+        let scope_slots = self.scoped_reference_value_locals.pop().unwrap_or_default();
+        for slot in scope_slots {
+            self.clear_reference_binding(slot, true);
+        }
         self.borrow_checker.exit_region();
         self.locals.pop();
         self.type_tracker.pop_scope();
@@ -965,7 +1551,9 @@ impl BytecodeCompiler {
 
         // Build top-level FrameDescriptor so JIT can use per-slot type info
         let has_any_known = top_hints.iter().any(|h| *h != StorageHint::Unknown);
-        let has_trusted = self.program.instructions
+        let has_trusted = self
+            .program
+            .instructions
             .iter()
             .any(|i| i.opcode.is_trusted());
         if has_any_known || has_trusted {

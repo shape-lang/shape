@@ -731,14 +731,13 @@ impl BytecodeCompiler {
                         OpCode::StoreLocal,
                         Some(Operand::Local(before_result_local)),
                     ));
-                    short_circuit_jump =
-                        self.apply_before_result_contract_with_short_circuit(
-                            before_result_local,
-                            args_local,
-                            ctx_local,
-                            ctx_schema_id,
-                            result_local,
-                        )?;
+                    short_circuit_jump = self.apply_before_result_contract_with_short_circuit(
+                        before_result_local,
+                        args_local,
+                        ctx_local,
+                        ctx_schema_id,
+                        result_local,
+                    )?;
                 }
 
                 // --- Normal path: evaluate inner expression + await ---
@@ -1136,7 +1135,7 @@ impl BytecodeCompiler {
                 } else {
                     BorrowMode::Shared
                 };
-                self.compile_reference_expr(inner, *span, mode)
+                self.compile_reference_expr(inner, *span, mode).map(|_| ())
             }
 
             // Table row literals — compiled via compile_table_rows() in the VariableDecl handler.

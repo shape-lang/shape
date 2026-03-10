@@ -12,13 +12,23 @@ impl BytecodeCompiler {
     pub(super) fn compile_expr_let(&mut self, let_expr: &shape_ast::ast::LetExpr) -> Result<()> {
         self.push_scope();
 
+        let mut ref_borrow = None;
         if let Some(value) = &let_expr.value {
-            self.compile_expr(value)?;
+            ref_borrow = self.compile_expr_for_reference_binding(value)?;
         } else {
             self.emit(Instruction::simple(OpCode::PushNull));
         }
 
         self.compile_pattern_binding(&let_expr.pattern)?;
+        if let Some(name) = let_expr.pattern.as_simple_name()
+            && let Some(local_idx) = self.resolve_local(name)
+        {
+            if let Some(value) = &let_expr.value {
+                self.finish_reference_binding_from_expr(local_idx, true, name, value, ref_borrow);
+            } else {
+                self.clear_reference_binding(local_idx, true);
+            }
+        }
         self.compile_expr(&let_expr.body)?;
 
         self.pop_scope();
@@ -114,7 +124,7 @@ impl BytecodeCompiler {
                     }
                 }
 
-                self.compile_expr(&assign_expr.value)?;
+                let ref_borrow = self.compile_expr_for_reference_binding(&assign_expr.value)?;
                 self.emit(Instruction::simple(OpCode::Dup));
                 // Mutable closure captures: emit StoreClosure
                 if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name.as_str()) {
@@ -177,7 +187,13 @@ impl BytecodeCompiler {
                         }
                     }
                     if !self.ref_locals.contains(&local_idx) {
-                        self.update_reference_binding_from_expr(local_idx, true, &assign_expr.value);
+                        self.finish_reference_binding_from_expr(
+                            local_idx,
+                            true,
+                            name,
+                            &assign_expr.value,
+                            ref_borrow,
+                        );
                     }
                 } else {
                     let binding_idx = self.get_or_create_module_binding(name);
@@ -225,7 +241,13 @@ impl BytecodeCompiler {
                             }
                         }
                     }
-                    self.update_reference_binding_from_expr(binding_idx, false, &assign_expr.value);
+                    self.finish_reference_binding_from_expr(
+                        binding_idx,
+                        false,
+                        name,
+                        &assign_expr.value,
+                        ref_borrow,
+                    );
                 }
                 self.propagate_assignment_type_to_identifier(name);
                 Ok(())

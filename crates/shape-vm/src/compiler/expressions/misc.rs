@@ -90,7 +90,7 @@ impl BytecodeCompiler {
             match item {
                 shape_ast::ast::BlockItem::VariableDecl(var_decl) => {
                     if let Some(init_expr) = &var_decl.value {
-                        self.compile_expr(init_expr)?;
+                        let ref_borrow = self.compile_expr_for_reference_binding(init_expr)?;
                         // Use full destructure pattern support (array, object, identifier)
                         self.compile_destructure_pattern(&var_decl.pattern)?;
 
@@ -112,7 +112,9 @@ impl BytecodeCompiler {
                                     // Propagate initializer type (e.g., var x = 0 → Int64 hint)
                                     // so typed opcodes can be emitted for operations on this variable.
                                     let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
-                                    self.propagate_initializer_type_to_slot(local_idx, true, is_mutable);
+                                    self.propagate_initializer_type_to_slot(
+                                        local_idx, true, is_mutable,
+                                    );
                                 }
                                 // Track for auto-drop at scope exit
                                 let drop_kind = self.local_drop_kind(local_idx).or_else(|| {
@@ -131,6 +133,9 @@ impl BytecodeCompiler {
                                     Some(super::super::DropKind::SyncOnly) | None => false,
                                 };
                                 self.track_drop_local(local_idx, is_async);
+                                self.finish_reference_binding_from_expr(
+                                    local_idx, true, name, init_expr, ref_borrow,
+                                );
                             }
                         }
                     }
@@ -173,9 +178,33 @@ impl BytecodeCompiler {
                         }
                     }
 
-                    self.compile_expr(&assignment.value)?;
+                    let ref_borrow = self.compile_expr_for_reference_binding(&assignment.value)?;
                     // Store in local/module_binding/closure variable
                     self.compile_destructure_assignment(&assignment.pattern)?;
+                    if let Some(name) = assignment.pattern.as_identifier() {
+                        if let Some(local_idx) = self.resolve_local(name) {
+                            if !self.ref_locals.contains(&local_idx) {
+                                self.finish_reference_binding_from_expr(
+                                    local_idx,
+                                    true,
+                                    name,
+                                    &assignment.value,
+                                    ref_borrow,
+                                );
+                            }
+                        } else if let Some(scoped_name) =
+                            self.resolve_scoped_module_binding_name(name)
+                            && let Some(&binding_idx) = self.module_bindings.get(&scoped_name)
+                        {
+                            self.finish_reference_binding_from_expr(
+                                binding_idx,
+                                false,
+                                name,
+                                &assignment.value,
+                                ref_borrow,
+                            );
+                        }
+                    }
                 }
                 shape_ast::ast::BlockItem::Statement(stmt) => {
                     self.compile_statement(stmt)?;
@@ -191,6 +220,10 @@ impl BytecodeCompiler {
                     }
                 }
             }
+
+            self.release_unused_local_reference_borrows_for_remaining_block_items(
+                &block.items[i + 1..],
+            );
         }
 
         // If no value, push null

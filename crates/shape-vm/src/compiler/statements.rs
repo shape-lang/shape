@@ -246,20 +246,19 @@ impl BytecodeCompiler {
                     self.function_const_params
                         .insert(def.name.clone(), Vec::new());
                     let (ref_params, ref_mutates) = Self::native_param_reference_contract(def);
-                    let (vis_ref_params, vis_ref_mutates) =
-                        if def.params.iter().any(|p| p.is_out) {
-                            let mut vrp = Vec::new();
-                            let mut vrm = Vec::new();
-                            for (i, p) in def.params.iter().enumerate() {
-                                if !p.is_out {
-                                    vrp.push(ref_params.get(i).copied().unwrap_or(false));
-                                    vrm.push(ref_mutates.get(i).copied().unwrap_or(false));
-                                }
+                    let (vis_ref_params, vis_ref_mutates) = if def.params.iter().any(|p| p.is_out) {
+                        let mut vrp = Vec::new();
+                        let mut vrm = Vec::new();
+                        for (i, p) in def.params.iter().enumerate() {
+                            if !p.is_out {
+                                vrp.push(ref_params.get(i).copied().unwrap_or(false));
+                                vrm.push(ref_mutates.get(i).copied().unwrap_or(false));
                             }
-                            (vrp, vrm)
-                        } else {
-                            (ref_params, ref_mutates)
-                        };
+                        }
+                        (vrp, vrm)
+                    } else {
+                        (ref_params, ref_mutates)
+                    };
 
                     let func = crate::bytecode::Function {
                         name: def.name.clone(),
@@ -417,10 +416,13 @@ impl BytecodeCompiler {
         // Detect duplicate function definitions (Shape does not support overloading).
         // Skip names containing "::" (trait impl methods) or "." (extend methods)
         // — those are type-qualified and live in separate namespaces.
-        if !func_def.name.contains("::")
-            && !func_def.name.contains('.')
-        {
-            if let Some(existing) = self.program.functions.iter().find(|f| f.name == func_def.name) {
+        if !func_def.name.contains("::") && !func_def.name.contains('.') {
+            if let Some(existing) = self
+                .program
+                .functions
+                .iter()
+                .find(|f| f.name == func_def.name)
+            {
                 // Allow idempotent re-registration from module inlining: when the
                 // prelude and an explicitly imported module both define the same helper
                 // function (e.g., `percentile`), silently keep the first definition
@@ -534,9 +536,13 @@ impl BytecodeCompiler {
             Item::VariableDecl(var_decl, _) => {
                 // ModuleBinding variable — register the variable even if the initializer fails,
                 // to prevent cascading "Undefined variable" errors on later references.
+                let mut ref_borrow = None;
                 let init_err = if let Some(init_expr) = &var_decl.value {
-                    match self.compile_expr(init_expr) {
-                        Ok(()) => None,
+                    match self.compile_expr_for_reference_binding(init_expr) {
+                        Ok(tracked_borrow) => {
+                            ref_borrow = tracked_borrow;
+                            None
+                        }
                         Err(e) => {
                             // Push null as placeholder so the variable still gets registered
                             self.emit(Instruction::simple(OpCode::PushNull));
@@ -554,12 +560,21 @@ impl BytecodeCompiler {
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
+                    if let Some(value) = &var_decl.value {
+                        self.finish_reference_binding_from_expr(
+                            binding_idx,
+                            false,
+                            name,
+                            value,
+                            ref_borrow,
+                        );
+                    } else {
+                        self.clear_reference_binding(binding_idx, false);
+                    }
 
                     // Propagate type info from annotation or initializer expression
                     if let Some(ref type_ann) = var_decl.type_annotation {
-                        if let Some(type_name) =
-                            Self::tracked_type_name_from_annotation(type_ann)
-                        {
+                        if let Some(type_name) = Self::tracked_type_name_from_annotation(type_ann) {
                             self.set_module_binding_type_info(binding_idx, &type_name);
                         }
                     } else {
@@ -622,8 +637,9 @@ impl BytecodeCompiler {
                 // If the export has a source variable declaration (pub let/const/var),
                 // compile it so the initialization is actually executed.
                 if let Some(ref var_decl) = export.source_decl {
+                    let mut ref_borrow = None;
                     if let Some(init_expr) = &var_decl.value {
-                        self.compile_expr(init_expr)?;
+                        ref_borrow = self.compile_expr_for_reference_binding(init_expr)?;
                     } else {
                         self.emit(Instruction::simple(OpCode::PushNull));
                     }
@@ -633,6 +649,17 @@ impl BytecodeCompiler {
                             OpCode::StoreModuleBinding,
                             Some(Operand::ModuleBinding(binding_idx)),
                         ));
+                        if let Some(value) = &var_decl.value {
+                            self.finish_reference_binding_from_expr(
+                                binding_idx,
+                                false,
+                                name,
+                                value,
+                                ref_borrow,
+                            );
+                        } else {
+                            self.clear_reference_binding(binding_idx, false);
+                        }
                     }
                 }
                 match &export.item {
@@ -1635,7 +1662,9 @@ impl BytecodeCompiler {
                         shape_ast::ast::ObjectTypeField {
                             name: "event_log".to_string(),
                             optional: false,
-                            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
+                            type_annotation: TypeAnnotation::Array(Box::new(
+                                TypeAnnotation::Basic("unknown".to_string()),
+                            )),
                             annotations: vec![],
                         },
                     ]))
@@ -2099,9 +2128,7 @@ impl BytecodeCompiler {
                     align: spec.2,
                 })
             }
-            TypeAnnotation::Generic { name, args }
-                if name == "Option" && args.len() == 1 =>
-            {
+            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
                 let inner = self.native_field_layout_spec(&args[0], span, struct_name)?;
                 if inner.c_type == "cstring" {
                     Ok(NativeFieldLayoutSpec {
@@ -2479,8 +2506,13 @@ impl BytecodeCompiler {
                     let target_value = target.to_nanboxed();
                     let target_name = struct_def.name.clone();
                     let handler_span = handler.span;
-                    let execution =
-                        self.execute_comptime_annotation_handler(ann, &handler, target_value, &compiled.param_names, &[])?;
+                    let execution = self.execute_comptime_annotation_handler(
+                        ann,
+                        &handler,
+                        target_value,
+                        &compiled.param_names,
+                        &[],
+                    )?;
 
                     if self
                         .process_comptime_directives(execution.directives, &target_name)
@@ -2787,8 +2819,13 @@ impl BytecodeCompiler {
                     );
                     let target_value = target.to_nanboxed();
                     let handler_span = handler.span;
-                    let execution =
-                        self.execute_comptime_annotation_handler(ann, &handler, target_value, &compiled.param_names, &[])?;
+                    let execution = self.execute_comptime_annotation_handler(
+                        ann,
+                        &handler,
+                        target_value,
+                        &compiled.param_names,
+                        &[],
+                    )?;
                     if self
                         .process_comptime_directives_for_module(
                             execution.directives,
@@ -2951,13 +2988,16 @@ impl BytecodeCompiler {
 
         let module_path = self.current_module_path_for(&module_def.name);
         self.module_scope_stack.push(module_path.clone());
+        self.push_module_reference_scope();
 
         let mut module_items = module_def.items.clone();
         if self.execute_module_comptime_handlers(module_def, &module_path, &mut module_items)? {
+            self.pop_module_reference_scope();
             self.module_scope_stack.pop();
             return Ok(());
         }
         if self.execute_module_inline_comptime_blocks(&module_path, &mut module_items)? {
+            self.pop_module_reference_scope();
             self.module_scope_stack.pop();
             return Ok(());
         }
@@ -2971,8 +3011,11 @@ impl BytecodeCompiler {
             self.register_missing_module_functions(qualified)?;
         }
 
-        for qualified in &qualified_items {
+        for (idx, qualified) in qualified_items.iter().enumerate() {
             self.compile_item_with_context(qualified, false)?;
+            self.release_unused_module_reference_borrows_for_remaining_items(
+                &qualified_items[idx + 1..],
+            );
         }
 
         let exports = self.collect_module_runtime_exports(&module_items, &module_path);
@@ -3005,6 +3048,7 @@ impl BytecodeCompiler {
             Some(binding_idx),
         )?;
 
+        self.pop_module_reference_scope();
         self.module_scope_stack.pop();
         Ok(())
     }
@@ -3052,7 +3096,12 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    pub(super) fn propagate_initializer_type_to_slot(&mut self, slot: u16, is_local: bool, _is_mutable: bool) {
+    pub(super) fn propagate_initializer_type_to_slot(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        _is_mutable: bool,
+    ) {
         self.propagate_assignment_type_to_slot(slot, is_local, true);
     }
 
@@ -3177,6 +3226,7 @@ impl BytecodeCompiler {
 
                 // Compile initializer — register the variable even if the initializer fails,
                 // to prevent cascading "Undefined variable" errors on later references.
+                let mut ref_borrow = None;
                 let init_err = if let Some(init_expr) = &var_decl.value {
                     // Special handling: Table row literal syntax
                     // `let t: Table<T> = [a, b], [c, d]` → compile as table construction
@@ -3189,8 +3239,11 @@ impl BytecodeCompiler {
                             }
                         }
                     } else {
-                        match self.compile_expr(init_expr) {
-                            Ok(()) => None,
+                        match self.compile_expr_for_reference_binding(init_expr) {
+                            Ok(tracked_borrow) => {
+                                ref_borrow = tracked_borrow;
+                                None
+                            }
                             Err(e) => {
                                 self.emit(Instruction::simple(OpCode::PushNull));
                                 Some(e)
@@ -3295,7 +3348,13 @@ impl BytecodeCompiler {
                             self.track_drop_module_binding(binding_idx, is_async);
                         }
                         if let Some(value) = &var_decl.value {
-                            self.update_reference_binding_from_expr(binding_idx, false, value);
+                            self.finish_reference_binding_from_expr(
+                                binding_idx,
+                                false,
+                                name,
+                                value,
+                                ref_borrow,
+                            );
                         } else {
                             self.clear_reference_binding(binding_idx, false);
                         }
@@ -3405,7 +3464,9 @@ impl BytecodeCompiler {
                             };
                             self.track_drop_local(local_idx, is_async);
                             if let Some(value) = &var_decl.value {
-                                self.update_reference_binding_from_expr(local_idx, true, value);
+                                self.finish_reference_binding_from_expr(
+                                    local_idx, true, name, value, ref_borrow,
+                                );
                             } else {
                                 self.clear_reference_binding(local_idx, true);
                             }
@@ -3439,10 +3500,7 @@ impl BytecodeCompiler {
                             });
                         }
                         self.borrow_checker
-                            .check_write_allowed(
-                                Self::borrow_key_for_local(local_idx),
-                                None,
-                            )
+                            .check_write_allowed(Self::borrow_key_for_local(local_idx), None)
                             .map_err(|e| match e {
                                 ShapeError::SemanticError { message, location } => {
                                     let user_msg = message.replace(
@@ -3553,7 +3611,7 @@ impl BytecodeCompiler {
                 }
 
                 // Compile value
-                self.compile_expr(&assign.value)?;
+                let ref_borrow = self.compile_expr_for_reference_binding(&assign.value)?;
                 let assigned_ident = assign.pattern.as_identifier().map(str::to_string);
 
                 // Store in variable
@@ -3561,16 +3619,23 @@ impl BytecodeCompiler {
                 if let Some(name) = assigned_ident.as_deref() {
                     if let Some(local_idx) = self.resolve_local(name) {
                         if !self.ref_locals.contains(&local_idx) {
-                            self.update_reference_binding_from_expr(local_idx, true, &assign.value);
+                            self.finish_reference_binding_from_expr(
+                                local_idx,
+                                true,
+                                name,
+                                &assign.value,
+                                ref_borrow,
+                            );
                         }
-                    } else if let Some(scoped_name) =
-                        self.resolve_scoped_module_binding_name(name)
+                    } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name)
                     {
                         if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-                            self.update_reference_binding_from_expr(
+                            self.finish_reference_binding_from_expr(
                                 binding_idx,
                                 false,
+                                name,
                                 &assign.value,
+                                ref_borrow,
                             );
                         }
                     }
@@ -3598,11 +3663,7 @@ impl BytecodeCompiler {
                                     Some(Operand::Local(local_idx)),
                                 ));
                                 if let Some(numeric_type) = pushed_numeric {
-                                    self.mark_slot_as_numeric_array(
-                                        local_idx,
-                                        true,
-                                        numeric_type,
-                                    );
+                                    self.mark_slot_as_numeric_array(local_idx, true, numeric_type);
                                 }
                                 return Ok(());
                             } else if !self

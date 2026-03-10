@@ -279,11 +279,8 @@ impl BytecodeCompiler {
 
         let (inferred_ref_params, inferred_ref_mutates, inferred_param_type_hints) =
             Self::infer_reference_model(&program);
-        self.inferred_param_pass_modes = Self::build_param_pass_mode_map(
-            &program,
-            &inferred_ref_params,
-            &inferred_ref_mutates,
-        );
+        self.inferred_param_pass_modes =
+            Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
         self.inferred_ref_params = inferred_ref_params;
         self.inferred_ref_mutates = inferred_ref_mutates;
         self.inferred_param_type_hints = inferred_param_type_hints;
@@ -326,6 +323,9 @@ impl BytecodeCompiler {
             if let Err(e) = self.compile_item_with_context(item, is_last) {
                 self.errors.push(e);
             }
+            self.release_unused_module_reference_borrows_for_remaining_items(
+                &program.items[idx + 1..],
+            );
         }
 
         // Return collected errors before emitting Halt
@@ -341,8 +341,7 @@ impl BytecodeCompiler {
 
         // Emit drops for top-level module bindings that have Drop impls
         {
-            let bindings: Vec<(u16, bool)> =
-                std::mem::take(&mut self.drop_module_bindings);
+            let bindings: Vec<(u16, bool)> = std::mem::take(&mut self.drop_module_bindings);
             for (binding_idx, is_async) in bindings.into_iter().rev() {
                 self.emit_drop_call_for_module_binding(binding_idx, is_async);
             }

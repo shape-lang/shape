@@ -2769,6 +2769,20 @@ impl BytecodeCompiler {
         let saved_ref_locals = std::mem::take(&mut self.ref_locals);
         let saved_exclusive_ref_locals = std::mem::take(&mut self.exclusive_ref_locals);
         let saved_inferred_ref_locals = std::mem::take(&mut self.inferred_ref_locals);
+        let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
+        let saved_exclusive_reference_value_locals =
+            std::mem::take(&mut self.exclusive_reference_value_locals);
+        let saved_tracked_reference_borrow_locals =
+            std::mem::take(&mut self.tracked_reference_borrow_locals);
+        let saved_scoped_reference_value_locals =
+            std::mem::take(&mut self.scoped_reference_value_locals);
+        let saved_reference_value_module_bindings = self.reference_value_module_bindings.clone();
+        let saved_exclusive_reference_value_module_bindings =
+            self.exclusive_reference_value_module_bindings.clone();
+        let saved_tracked_reference_borrow_module_bindings =
+            self.tracked_reference_borrow_module_bindings.clone();
+        let saved_scoped_reference_value_module_bindings =
+            self.scoped_reference_value_module_bindings.clone();
         let saved_comptime_mode = self.comptime_mode;
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
         let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
@@ -2793,9 +2807,11 @@ impl BytecodeCompiler {
         self.inferred_ref_locals.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
+        self.tracked_reference_borrow_locals.clear();
+        self.scoped_reference_value_locals = vec![HashSet::new()];
         self.immutable_locals.clear();
-        self.reference_value_module_bindings.clear();
-        self.exclusive_reference_value_module_bindings.clear();
+        self.tracked_reference_borrow_module_bindings.clear();
+        self.scoped_reference_value_module_bindings = vec![HashSet::new()];
         self.param_locals.clear();
         self.push_scope();
         self.push_drop_scope();
@@ -2982,6 +2998,20 @@ impl BytecodeCompiler {
                         self.ref_locals = saved_ref_locals;
                         self.exclusive_ref_locals = saved_exclusive_ref_locals.clone();
                         self.inferred_ref_locals = saved_inferred_ref_locals.clone();
+                        self.reference_value_locals = saved_reference_value_locals;
+                        self.exclusive_reference_value_locals =
+                            saved_exclusive_reference_value_locals;
+                        self.tracked_reference_borrow_locals =
+                            saved_tracked_reference_borrow_locals;
+                        self.scoped_reference_value_locals = saved_scoped_reference_value_locals;
+                        self.reference_value_module_bindings =
+                            saved_reference_value_module_bindings;
+                        self.exclusive_reference_value_module_bindings =
+                            saved_exclusive_reference_value_module_bindings;
+                        self.tracked_reference_borrow_module_bindings =
+                            saved_tracked_reference_borrow_module_bindings;
+                        self.scoped_reference_value_module_bindings =
+                            saved_scoped_reference_value_module_bindings;
                         self.comptime_mode = saved_comptime_mode;
                         // Patch the jump-over instruction if we emitted one
                         if let Some(jump_addr) = jump_over {
@@ -2998,10 +3028,16 @@ impl BytecodeCompiler {
                     _ => {
                         // Other statement types - compile normally
                         self.compile_statement(stmt)?;
+                        self.release_unused_local_reference_borrows_for_remaining_statements(
+                            &func_def.body[idx + 1..],
+                        );
                     }
                 }
             } else {
                 self.compile_statement(stmt)?;
+                self.release_unused_local_reference_borrows_for_remaining_statements(
+                    &func_def.body[idx + 1..],
+                );
             }
         }
 
@@ -3035,6 +3071,16 @@ impl BytecodeCompiler {
         self.ref_locals = saved_ref_locals;
         self.exclusive_ref_locals = saved_exclusive_ref_locals;
         self.inferred_ref_locals = saved_inferred_ref_locals;
+        self.reference_value_locals = saved_reference_value_locals;
+        self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
+        self.tracked_reference_borrow_locals = saved_tracked_reference_borrow_locals;
+        self.scoped_reference_value_locals = saved_scoped_reference_value_locals;
+        self.reference_value_module_bindings = saved_reference_value_module_bindings;
+        self.exclusive_reference_value_module_bindings =
+            saved_exclusive_reference_value_module_bindings;
+        self.tracked_reference_borrow_module_bindings =
+            saved_tracked_reference_borrow_module_bindings;
+        self.scoped_reference_value_module_bindings = saved_scoped_reference_value_module_bindings;
         self.comptime_mode = saved_comptime_mode;
 
         // Patch the jump-over instruction if we emitted one
@@ -4115,11 +4161,7 @@ mod tests {
     fn test_intrinsic_builtin_blocked_from_user_code() {
         // Verify that __intrinsic_* and __json_* builtins are gated from user code.
         // Note: __into_*/__try_into_* are NOT gated (compiler-generated for type assertions).
-        for intrinsic in &[
-            "__intrinsic_sum",
-            "__intrinsic_mean",
-            "__json_object_get",
-        ] {
+        for intrinsic in &["__intrinsic_sum", "__intrinsic_mean", "__json_object_get"] {
             let code = format!(
                 r#"
                 fn test() {{
@@ -4131,10 +4173,9 @@ mod tests {
             );
             let mut compiler = BytecodeCompiler::new();
             let program = shape_ast::parser::parse_program(&code).unwrap();
-            let err = compiler.compile(&program).expect_err(&format!(
-                "{} should be blocked from user code",
-                intrinsic
-            ));
+            let err = compiler
+                .compile(&program)
+                .expect_err(&format!("{} should be blocked from user code", intrinsic));
             let msg = format!("{}", err);
             assert!(
                 msg.contains(&format!("Undefined function: {}", intrinsic)),
@@ -4157,7 +4198,9 @@ mod tests {
             }
         "#;
         let mut compiler = BytecodeCompiler::new();
-        compiler.stdlib_function_names.insert("Json.get".to_string());
+        compiler
+            .stdlib_function_names
+            .insert("Json.get".to_string());
         let program = shape_ast::parser::parse_program(code).unwrap();
         let err = compiler
             .compile(&program)
