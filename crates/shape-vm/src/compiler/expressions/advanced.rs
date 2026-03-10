@@ -193,6 +193,11 @@ impl BytecodeCompiler {
             OpCode::StoreLocal,
             Some(Operand::Local(local_idx)),
         ));
+        self.immutable_locals.insert(local_idx);
+        self.type_tracker.set_local_binding_semantics(
+            local_idx,
+            Self::owned_immutable_binding_semantics(),
+        );
 
         // `async let` is an expression — push the future back onto the stack
         self.emit(Instruction::new(
@@ -529,6 +534,31 @@ mod tests {
     }
 
     #[test]
+    fn test_match_binding_is_immutable() {
+        let code = r#"
+            function test() {
+                let source = Some(1)
+                return match source {
+                    Some(x) => {
+                        x = 2
+                        x
+                    }
+                    None => 0
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(result.is_err(), "match binding reassignment should fail");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("immutable variable 'x'"),
+            "unexpected error: {}",
+            err_msg
+        );
+    }
+
+    #[test]
     fn test_exhaustiveness_checker_integrated() {
         // Verify that check_match_exhaustiveness method exists and is called
         // This is a smoke test to ensure the integration is in place
@@ -820,6 +850,26 @@ mod tests {
         assert!(
             err_msg.contains("async"),
             "Error should mention async, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_async_let_binding_is_immutable() {
+        let code = r#"
+            async function fetch_data() {
+                async let x = 1 + 2
+                x = 3
+                await x
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(result.is_err(), "async let reassignment should fail");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("immutable variable 'x'"),
+            "unexpected error: {}",
             err_msg
         );
     }

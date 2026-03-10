@@ -20,6 +20,11 @@ impl BytecodeCompiler {
         }
 
         self.compile_pattern_binding(&let_expr.pattern)?;
+        self.mark_value_pattern_bindings_immutable(&let_expr.pattern);
+        self.apply_binding_semantics_to_value_pattern_bindings(
+            &let_expr.pattern,
+            Self::owned_immutable_binding_semantics(),
+        );
         if let Some(name) = let_expr.pattern.as_simple_name()
             && let Some(local_idx) = self.resolve_local(name)
         {
@@ -562,5 +567,35 @@ impl BytecodeCompiler {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn test_let_expression_binding_is_immutable() {
+        let code = r#"
+            function test() {
+                return let x = 5 in {
+                    x = 6
+                    x
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("parse failed");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "reassigning let-expression binding should fail"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("immutable variable 'x'"),
+            "unexpected error: {}",
+            err
+        );
     }
 }

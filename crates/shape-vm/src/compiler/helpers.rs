@@ -8,7 +8,8 @@ use crate::type_tracking::{
     TypeTracker, VariableKind, VariableTypeInfo,
 };
 use shape_ast::ast::{
-    BlockItem, DestructurePattern, Expr, FunctionParameter, Item, Spanned, Statement,
+    BlockItem, DestructurePattern, Expr, FunctionParameter, Item, Pattern,
+    PatternConstructorFields, Spanned, Statement,
     TypeAnnotation,
 };
 use shape_ast::error::{Result, ShapeError, SourceLocation};
@@ -543,6 +544,14 @@ impl BytecodeCompiler {
         semantics
     }
 
+    pub(super) const fn owned_immutable_binding_semantics() -> BindingSemantics {
+        Self::binding_semantics_for_ownership_class(BindingOwnershipClass::OwnedImmutable)
+    }
+
+    pub(super) const fn owned_mutable_binding_semantics() -> BindingSemantics {
+        Self::binding_semantics_for_ownership_class(BindingOwnershipClass::OwnedMutable)
+    }
+
     pub(super) fn apply_binding_semantics_to_pattern_bindings(
         &mut self,
         pattern: &DestructurePattern,
@@ -565,6 +574,60 @@ impl BytecodeCompiler {
                 }
             }
         }
+    }
+
+    fn for_each_value_pattern_binding_name(
+        pattern: &Pattern,
+        visitor: &mut impl FnMut(&str),
+    ) {
+        match pattern {
+            Pattern::Identifier(name) | Pattern::Typed { name, .. } => visitor(name),
+            Pattern::Array(patterns) => {
+                for pattern in patterns {
+                    Self::for_each_value_pattern_binding_name(pattern, visitor);
+                }
+            }
+            Pattern::Object(fields) => {
+                for (_, pattern) in fields {
+                    Self::for_each_value_pattern_binding_name(pattern, visitor);
+                }
+            }
+            Pattern::Constructor { fields, .. } => match fields {
+                PatternConstructorFields::Unit => {}
+                PatternConstructorFields::Tuple(patterns) => {
+                    for pattern in patterns {
+                        Self::for_each_value_pattern_binding_name(pattern, visitor);
+                    }
+                }
+                PatternConstructorFields::Struct(fields) => {
+                    for (_, pattern) in fields {
+                        Self::for_each_value_pattern_binding_name(pattern, visitor);
+                    }
+                }
+            },
+            Pattern::Wildcard | Pattern::Literal(_) => {}
+        }
+    }
+
+    pub(super) fn apply_binding_semantics_to_value_pattern_bindings(
+        &mut self,
+        pattern: &Pattern,
+        semantics: BindingSemantics,
+    ) {
+        Self::for_each_value_pattern_binding_name(pattern, &mut |name| {
+            if let Some(local_idx) = self.resolve_local(name) {
+                self.type_tracker
+                    .set_local_binding_semantics(local_idx, semantics);
+            }
+        });
+    }
+
+    pub(super) fn mark_value_pattern_bindings_immutable(&mut self, pattern: &Pattern) {
+        Self::for_each_value_pattern_binding_name(pattern, &mut |name| {
+            if let Some(local_idx) = self.resolve_local(name) {
+                self.immutable_locals.insert(local_idx);
+            }
+        });
     }
 
     pub(super) fn set_binding_storage_class(

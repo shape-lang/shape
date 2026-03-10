@@ -778,6 +778,10 @@ impl BytecodeCompiler {
                 OpCode::StoreLocal,
                 Some(Operand::Local(local_idx)),
             ));
+            self.type_tracker.set_local_binding_semantics(
+                local_idx,
+                Self::owned_mutable_binding_semantics(),
+            );
 
             // Compile body statements.
             // The last statement's value stays on the stack as the iteration result.

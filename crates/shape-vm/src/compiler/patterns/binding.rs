@@ -236,7 +236,13 @@ impl BytecodeCompiler {
             OpCode::StoreLocal,
             Some(Operand::Local(value_local)),
         ));
-        self.compile_match_binding_local(pattern, value_local)
+        self.compile_match_binding_local(pattern, value_local)?;
+        self.mark_value_pattern_bindings_immutable(pattern);
+        self.apply_binding_semantics_to_value_pattern_bindings(
+            pattern,
+            Self::owned_immutable_binding_semantics(),
+        );
+        Ok(())
     }
 
     pub(in crate::compiler) fn compile_match_binding_local(
@@ -468,5 +474,54 @@ impl BytecodeCompiler {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::compiler::BytecodeCompiler;
+    use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
+    use shape_ast::ast::Pattern;
+
+    #[test]
+    fn test_value_pattern_bindings_get_owned_semantics_recursively() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let left = compiler.declare_local("left").expect("declare left");
+        let right = compiler.declare_local("right").expect("declare right");
+        let pattern = Pattern::Object(vec![
+            ("lhs".to_string(), Pattern::Identifier("left".to_string())),
+            (
+                "rhs".to_string(),
+                Pattern::Array(vec![Pattern::Identifier("right".to_string())]),
+            ),
+        ]);
+
+        compiler.apply_binding_semantics_to_value_pattern_bindings(
+            &pattern,
+            BytecodeCompiler::owned_mutable_binding_semantics(),
+        );
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(left)
+                .map(|semantics| semantics.ownership_class),
+            Some(BindingOwnershipClass::OwnedMutable)
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(left)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::Direct)
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(right)
+                .map(|semantics| semantics.ownership_class),
+            Some(BindingOwnershipClass::OwnedMutable)
+        );
     }
 }

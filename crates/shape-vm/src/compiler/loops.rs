@@ -176,6 +176,11 @@ impl BytecodeCompiler {
                 for name in pattern.get_identifiers() {
                     self.declare_local(&name)?;
                 }
+                self.apply_binding_semantics_to_pattern_bindings(
+                    pattern,
+                    true,
+                    Self::owned_mutable_binding_semantics(),
+                );
 
                 let loop_start = self.program.current_offset();
                 self.emit(Instruction::simple(OpCode::LoopStart));
@@ -459,6 +464,10 @@ impl BytecodeCompiler {
                 });
             }
         }
+        self.apply_binding_semantics_to_value_pattern_bindings(
+            &for_expr.pattern,
+            Self::owned_mutable_binding_semantics(),
+        );
 
         let loop_start = self.program.current_offset();
         self.emit(Instruction::simple(OpCode::LoopStart));
@@ -724,6 +733,11 @@ impl BytecodeCompiler {
         ));
         self.emit(Instruction::simple(OpCode::IterNext));
         self.compile_destructure_pattern(&clause.pattern)?;
+        self.apply_binding_semantics_to_pattern_bindings(
+            &clause.pattern,
+            true,
+            Self::owned_mutable_binding_semantics(),
+        );
 
         if let Some(filter) = &clause.filter {
             self.compile_expr(filter)?;
