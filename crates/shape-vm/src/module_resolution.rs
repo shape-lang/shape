@@ -439,7 +439,22 @@ impl BytecodeExecutor {
                     if let Some(module) = loader.get_module(module_path) {
                         Some(module.ast.items.clone())
                     } else {
-                        Some(loader.load_module(module_path)?.ast.items.clone())
+                        match loader.load_module(module_path) {
+                            Ok(module) => Some(module.ast.items.clone()),
+                            Err(_) => {
+                                // Module not found on disk — check if it's a native
+                                // extension module (json, file, io, state, etc.) which
+                                // has no Shape source and is handled at runtime.
+                                let is_extension = self.extensions.iter().any(|ext| ext.name == *module_path);
+                                if is_extension {
+                                    None
+                                } else {
+                                    // Re-attempt to produce the original error
+                                    let loader = self.module_loader.as_mut().unwrap();
+                                    Some(loader.load_module(module_path)?.ast.items.clone())
+                                }
+                            }
+                        }
                     }
                 } else {
                     None
@@ -477,6 +492,10 @@ impl BytecodeExecutor {
                         // Record as fully inlined
                         inlined_names.insert(module_path.clone(), None);
                     }
+                } else {
+                    // No AST items (native extension module) — mark as fully
+                    // inlined so the fixed-point loop doesn't revisit it.
+                    inlined_names.insert(module_path.clone(), None);
                 }
             }
 

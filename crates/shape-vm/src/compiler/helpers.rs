@@ -627,14 +627,19 @@ impl BytecodeCompiler {
 
         // Populate FrameDescriptor on the function for trusted opcode verification.
         let has_any_known = hints.iter().any(|h| *h != StorageHint::Unknown);
+        let instr_len = self.program.instructions.len();
         let code_end = if func.body_length > 0 {
-            func.entry_point + func.body_length
+            (func.entry_point + func.body_length).min(instr_len)
         } else {
-            self.program.instructions.len()
+            instr_len
         };
-        let has_trusted = self.program.instructions[func.entry_point..code_end]
-            .iter()
-            .any(|i| i.opcode.is_trusted());
+        let has_trusted = if func.entry_point <= code_end && code_end <= instr_len {
+            self.program.instructions[func.entry_point..code_end]
+                .iter()
+                .any(|i| i.opcode.is_trusted())
+        } else {
+            false
+        };
         if has_any_known || has_trusted {
             self.program.functions[func_idx].frame_descriptor = Some(
                 crate::type_tracking::FrameDescriptor::from_slots(hints.clone()),
@@ -1436,6 +1441,8 @@ impl BytecodeCompiler {
         )
         // Object methods handled by handle_object_method
         || matches!(method, "keys" | "values" | "has" | "get" | "set" | "len")
+        // DateTime methods (from DATETIME_METHODS PHF map)
+        || matches!(method, "format")
         // Universal intrinsic methods
         || matches!(method, "type")
     }

@@ -254,8 +254,16 @@ fn parse_return_stmt(pair: Pair<Rule>) -> Result<Statement> {
     let first = inner.next();
     if let Some(ref p) = first {
         if p.as_rule() == Rule::return_keyword {
+            let keyword_end_line = p.as_span().end_pos().line_col().0;
             // Keyword consumed, check for expression
             if let Some(expr_pair) = inner.next() {
+                // Only treat as `return <expr>` if the expression starts on the
+                // same line as `return`. Otherwise it's a bare `return` followed
+                // by dead code on the next line (the grammar greedily consumes it).
+                let expr_start_line = expr_pair.as_span().start_pos().line_col().0;
+                if expr_start_line > keyword_end_line {
+                    return Ok(Statement::Return(None, span));
+                }
                 let expr = expressions::parse_expression(expr_pair)?;
                 return Ok(Statement::Return(Some(expr), span));
             } else {

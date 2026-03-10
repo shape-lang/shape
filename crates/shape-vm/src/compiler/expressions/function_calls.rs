@@ -773,6 +773,36 @@ impl BytecodeCompiler {
             });
         }
 
+        // Named import from a native extension module (e.g. `from file use { read_text }`).
+        // Native modules have no AST to inline, so the function won't be in program.functions.
+        // Rewrite the call as a module namespace call (e.g. file.read_text(...)).
+        if let Some(imported) = self.imported_names.get(name).cloned() {
+            if self.is_native_module_export(&imported.module_path, &imported.original_name) {
+                // Ensure the module has a namespace binding (auto-create if needed)
+                if !self.module_namespace_bindings.contains(&imported.module_path) {
+                    let binding_idx = self.get_or_create_module_binding(&imported.module_path);
+                    self.module_namespace_bindings
+                        .insert(imported.module_path.clone());
+                    self.register_extension_module_schema(&imported.module_path);
+                    let module_schema_name = format!("__mod_{}", imported.module_path);
+                    if self
+                        .type_tracker
+                        .schema_registry()
+                        .get(&module_schema_name)
+                        .is_some()
+                    {
+                        self.set_module_binding_type_info(binding_idx, &module_schema_name);
+                    }
+                }
+                let receiver = Expr::Identifier(imported.module_path.clone(), span);
+                return self.compile_module_namespace_call(
+                    &receiver,
+                    &imported.original_name,
+                    args,
+                );
+            }
+        }
+
         // Build error message with suggestions
         let mut message = format!("Undefined function: {}", name);
 

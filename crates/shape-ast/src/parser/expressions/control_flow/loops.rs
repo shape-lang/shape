@@ -165,9 +165,20 @@ pub fn parse_break_expr(pair: Pair<Rule>) -> Result<Expr> {
 /// Parse return expression
 pub fn parse_return_expr(pair: Pair<Rule>) -> Result<Expr> {
     let span = pair_span(&pair);
+    // The "return" keyword starts at the beginning of this pair.
+    let keyword_line = pair.as_span().start_pos().line_col().0;
     let mut inner = pair.into_inner();
     let value = if let Some(expr) = inner.next() {
-        Some(Box::new(super::super::parse_expression(expr)?))
+        // Only treat as `return <expr>` if the expression starts on the same
+        // line as `return`. The grammar greedily consumes the next expression
+        // even across newlines; bare `return` on its own line should be a
+        // void return, not `return <next-line-expr>`.
+        let expr_line = expr.as_span().start_pos().line_col().0;
+        if expr_line > keyword_line {
+            None
+        } else {
+            Some(Box::new(super::super::parse_expression(expr)?))
+        }
     } else {
         None
     };

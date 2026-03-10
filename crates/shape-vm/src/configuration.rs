@@ -97,6 +97,12 @@ impl BytecodeExecutor {
         self.extensions
             .push(shape_runtime::stdlib::set_module::create_set_module());
         self.extensions
+            .push(shape_runtime::stdlib::file::create_file_module());
+        self.extensions
+            .push(shape_runtime::stdlib_io::create_io_module());
+        self.extensions
+            .push(crate::executor::state_builtins::create_state_module());
+        self.extensions
             .push(crate::executor::create_transport_module_exports());
         self.extensions
             .push(crate::executor::create_remote_module_exports());

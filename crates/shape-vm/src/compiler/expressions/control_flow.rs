@@ -95,11 +95,15 @@ impl BytecodeCompiler {
     pub(super) fn compile_expr_return(&mut self, value_expr: &Option<Box<Expr>>) -> Result<()> {
         if let Some(expr) = value_expr {
             self.compile_expr(expr)?;
-            self.emit(Instruction::simple(OpCode::ReturnValue));
         } else {
             self.emit_unit();
-            self.emit(Instruction::simple(OpCode::ReturnValue));
         }
+        // Emit drops for all active drop scopes before returning
+        let total_scopes = self.drop_locals.len();
+        if total_scopes > 0 {
+            self.emit_drops_for_early_exit(total_scopes)?;
+        }
+        self.emit(Instruction::simple(OpCode::ReturnValue));
         Ok(())
     }
 }
