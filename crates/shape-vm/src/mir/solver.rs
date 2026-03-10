@@ -45,13 +45,15 @@ pub struct BorrowFacts {
     pub writes: Vec<(u32, Place, shape_ast::ast::Span)>,
     /// Reads from owner places that may conflict with active exclusive loans.
     pub reads: Vec<(u32, Place, shape_ast::ast::Span)>,
+    /// Loans that flow into the dedicated return slot and would escape.
+    pub escaped_loans: Vec<(u32, shape_ast::ast::Span)>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
 pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
     let mut facts = BorrowFacts::default();
     let mut next_loan = 0u32;
-    let mut loan_ref_slots: HashMap<u32, SlotId> = HashMap::new();
+    let mut slot_loans: HashMap<SlotId, Vec<u32>> = HashMap::new();
 
     // Extract CFG edges from the block structure
     for block in &mir.blocks {
@@ -84,7 +86,7 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
 
                     facts.loan_issued_at.push((loan_id, stmt.point.0));
                     if let Place::Local(slot) = dest {
-                        loan_ref_slots.insert(loan_id, *slot);
+                        slot_loans.insert(*slot, vec![loan_id]);
                     }
                     facts.loan_info.insert(
                         loan_id,
@@ -97,7 +99,15 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                         },
                     );
                 }
-                StatementKind::Assign(place, _) => {
+                StatementKind::Assign(place, rvalue) => {
+                    if let Place::Local(dest_slot) = place {
+                        update_slot_loan_aliases(&mut slot_loans, *dest_slot, rvalue);
+                        if *dest_slot == SlotId(0) {
+                            for loan_id in local_loans_from_rvalue(&slot_loans, rvalue) {
+                                facts.escaped_loans.push((loan_id, stmt.span));
+                            }
+                        }
+                    }
                     facts.writes.push((stmt.point.0, place.clone(), stmt.span));
                     // Assignment to a place invalidates all loans on that place
                     for (lid, info) in &facts.loan_info {
@@ -122,8 +132,8 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                     .reads
                     .push((stmt.point.0, read_place.clone(), stmt.span));
                 if let Place::Local(slot) = read_place {
-                    for (loan_id, ref_slot) in &loan_ref_slots {
-                        if *ref_slot == slot {
+                    if let Some(loans) = slot_loans.get(&slot) {
+                        for loan_id in loans {
                             facts.use_of_loan.push((*loan_id, stmt.point.0));
                         }
                     }
@@ -199,6 +209,41 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
         StatementKind::Nop => {}
     }
     reads
+}
+
+fn update_slot_loan_aliases(
+    slot_loans: &mut HashMap<SlotId, Vec<u32>>,
+    dest_slot: SlotId,
+    rvalue: &Rvalue,
+) {
+    match rvalue {
+        Rvalue::Borrow(_, _) => {}
+        Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
+            if let Some(loans) = slot_loans.get(src_slot).cloned() {
+                slot_loans.insert(dest_slot, loans);
+            } else {
+                slot_loans.remove(&dest_slot);
+            }
+        }
+        _ => {
+            slot_loans.remove(&dest_slot);
+        }
+    }
+}
+
+fn local_loans_from_rvalue(slot_loans: &HashMap<SlotId, Vec<u32>>, rvalue: &Rvalue) -> Vec<u32> {
+    match rvalue {
+        Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
+            slot_loans.get(src_slot).cloned().unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Run the Datafrog solver to compute loan liveness and detect errors.
@@ -361,6 +406,22 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
             });
             break;
         }
+    }
+
+    let mut seen_escapes = std::collections::HashSet::new();
+    for (loan_id, span) in &facts.escaped_loans {
+        if !seen_escapes.insert((*loan_id, span.start, span.end)) {
+            continue;
+        }
+        let info = &facts.loan_info[loan_id];
+        errors.push(BorrowError {
+            kind: BorrowErrorKind::ReferenceEscape,
+            span: *span,
+            conflicting_loan: LoanId(*loan_id),
+            loan_span: info.span,
+            last_use_span: last_use_span_for_loan(facts, *loan_id),
+            repairs: Vec::new(),
+        });
     }
 
     SolverResult {
@@ -686,6 +747,66 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReadWhileExclusivelyBorrowed),
             "expected read-while-exclusive error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_reference_escape_error_for_returned_ref_alias() {
+        let mir = MirFunction {
+            name: "test".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(42))),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Borrow(BorrowKind::Shared, Place::Local(SlotId(1))),
+                        ),
+                        1,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(3)),
+                            Rvalue::Use(Operand::Move(Place::Local(SlotId(2)))),
+                        ),
+                        2,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Move(Place::Local(SlotId(3)))),
+                        ),
+                        3,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals: 4,
+            param_slots: vec![],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+        };
+
+        let analysis = analyze(&mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
+            "expected reference-escape error, got {:?}",
             analysis.errors
         );
     }

@@ -4611,4 +4611,49 @@ mod tests {
             analysis.errors
         );
     }
+
+    #[test]
+    fn test_compile_function_records_mir_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function escape_ref() {
+                    let x = 1
+                    let r = &x
+                    let alias = r
+                    return alias
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR reference escape should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("outlives its owner"),
+            "expected reference-escape error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("escape_ref")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
+            "expected MIR reference-escape error, got {:?}",
+            analysis.errors
+        );
+    }
 }
