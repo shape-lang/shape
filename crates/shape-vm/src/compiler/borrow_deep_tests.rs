@@ -701,6 +701,40 @@ fn test_returned_reference_binding_can_alias_existing_reference_value() {
 }
 
 #[test]
+fn test_returned_reference_binding_can_alias_explicit_tracked_reference_value() {
+    let code = r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function test() {
+            var x = 41
+            let r1 = borrow_id(x)
+            let r2 = borrow_id(&r1)
+            return r2 + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_returned_reference_binding_can_alias_explicit_tracked_module_binding_value() {
+    let code = r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        let value = 41
+        let r1 = borrow_id(value)
+        let r2 = borrow_id(&r1)
+        r2 + 1
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
 fn test_returned_reference_binding_alias_keeps_owner_borrowed_after_source_last_use() {
     assert_compile_error(
         r#"
@@ -712,6 +746,27 @@ fn test_returned_reference_binding_alias_keeps_owner_borrowed_after_source_last_
             var x = 1
             let r1 = borrow_id(x)
             let r2 = borrow_id(r1)
+            print(r1) // last use of r1; r2 must keep x frozen
+            x = 2
+            return r2
+        }
+        "#,
+        "B0002",
+    );
+}
+
+#[test]
+fn test_returned_reference_binding_explicit_alias_keeps_owner_borrowed_after_source_last_use() {
+    assert_compile_error(
+        r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function test() {
+            var x = 1
+            let r1 = borrow_id(x)
+            let r2 = borrow_id(&r1)
             print(r1) // last use of r1; r2 must keep x frozen
             x = 2
             return r2
@@ -761,6 +816,27 @@ fn test_returned_reference_binding_can_alias_reference_param() {
 }
 
 #[test]
+fn test_returned_reference_binding_can_alias_explicit_reference_param() {
+    let code = r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function alias_param(&x) {
+            let r = borrow_id(&x)
+            return r + 1
+        }
+
+        function test() {
+            var x = 41
+            return alias_param(x)
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
 fn test_returned_reference_binding_keeps_owner_borrowed_with_additional_reference_params() {
     assert_compile_error(
         r#"
@@ -775,6 +851,23 @@ fn test_returned_reference_binding_keeps_owner_borrowed_with_additional_referenc
             let r = pick_first(x, y)
             x = 2
             return r + y
+        }
+        "#,
+        "B0002",
+    );
+}
+
+#[test]
+fn test_first_class_ref_alias_of_tracked_reference_value_keeps_owner_borrowed() {
+    assert_compile_error(
+        r#"
+        function test() {
+            let mut data = [1, 2, 3]
+            let r1 = &data
+            let r2 = &r1
+            print(r1) // last use of r1; r2 must keep data frozen
+            data.push(4)
+            return r2.len()
         }
         "#,
         "B0002",
@@ -2789,6 +2882,21 @@ fn test_first_class_ref_module_binding_autoderef() {
     "#;
     let result = compile_and_run(code);
     assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_first_class_ref_alias_of_tracked_module_binding_keeps_owner_borrowed() {
+    assert_compile_error(
+        r#"
+        let mut data = [1, 2, 3]
+        let r1 = &data
+        let r2 = &r1
+        print(r1) // last use of r1; r2 must keep data frozen
+        data.push(4)
+        r2.len()
+        "#,
+        "B0002",
+    );
 }
 
 #[test]

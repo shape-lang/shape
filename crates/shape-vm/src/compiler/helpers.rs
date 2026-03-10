@@ -1242,12 +1242,6 @@ impl BytecodeCompiler {
                     BorrowMode::Shared
                 };
                 let borrow_id = self.compile_reference_expr(inner, *span, explicit_mode)?;
-                if borrow_id == BorrowId::MAX {
-                    return Err(ShapeError::SemanticError {
-                        message: "binding a returned reference from an existing reference value is not supported yet".to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
                 return Ok((borrow_id, *is_mutable));
             }
             Expr::Identifier(name, span) => {
@@ -1292,13 +1286,6 @@ impl BytecodeCompiler {
                 borrow_id
             }
         };
-
-        if borrow_id == BorrowId::MAX {
-            return Err(ShapeError::SemanticError {
-                message: "binding a returned reference from an existing reference value is not supported yet".to_string(),
-                location: Some(self.span_to_source_location(arg.span())),
-            });
-        }
 
         Ok((borrow_id, mode == BorrowMode::Exclusive))
     }
@@ -2768,6 +2755,28 @@ impl BytecodeCompiler {
                     location: Some(self.span_to_source_location(span)),
                 });
             }
+            if let Some(borrow_id) = self
+                .tracked_reference_borrow_locals
+                .get(&local_idx)
+                .map(|tracked| tracked.borrow_id)
+            {
+                if mode == BorrowMode::Exclusive
+                    && !self.exclusive_reference_value_locals.contains(&local_idx)
+                {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot pass shared reference variable '{}' as an exclusive reference",
+                            name
+                        ),
+                        location: Some(self.span_to_source_location(span)),
+                    });
+                }
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(local_idx)),
+                ));
+                return Ok(borrow_id);
+            }
             if self.ref_locals.contains(&local_idx) {
                 // Forward an existing reference parameter by value (TAG_REF).
                 self.emit(Instruction::new(
@@ -2839,6 +2848,30 @@ impl BytecodeCompiler {
                     ),
                     location: Some(self.span_to_source_location(span)),
                 });
+            }
+            if let Some(borrow_id) = self
+                .tracked_reference_borrow_module_bindings
+                .get(&binding_idx)
+                .map(|tracked| tracked.borrow_id)
+            {
+                if mode == BorrowMode::Exclusive
+                    && !self
+                        .exclusive_reference_value_module_bindings
+                        .contains(&binding_idx)
+                {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot pass shared reference variable '{}' as an exclusive reference",
+                            name
+                        ),
+                        location: Some(self.span_to_source_location(span)),
+                    });
+                }
+                self.emit(Instruction::new(
+                    OpCode::LoadModuleBinding,
+                    Some(Operand::ModuleBinding(binding_idx)),
+                ));
+                return Ok(borrow_id);
             }
             if self.reference_value_module_bindings.contains(&binding_idx) {
                 if mode == BorrowMode::Exclusive
