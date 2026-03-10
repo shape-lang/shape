@@ -1957,6 +1957,7 @@ impl BytecodeCompiler {
                             location: Some(self.span_to_source_location(*span)),
                         })
                     } else {
+                        self.plan_flexible_binding_escape_from_expr(arg);
                         self.compile_expr(arg)
                     }
                 }
@@ -3562,6 +3563,7 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use super::super::BytecodeCompiler;
+    use crate::compiler::ParamPassMode;
     use crate::type_tracking::BindingStorageClass;
     use shape_ast::ast::{Expr, Span, TypeAnnotation};
     use shape_runtime::type_schema::FieldType;
@@ -3743,6 +3745,59 @@ mod tests {
                 .get_local_binding_semantics(slot)
                 .map(|semantics| semantics.storage_class),
             Some(BindingStorageClass::UniqueHeap)
+        );
+    }
+
+    #[test]
+    fn test_call_args_mark_by_value_identifier_as_unique_heap() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        compiler
+            .compile_call_args(&[Expr::Identifier("value".to_string(), Span::DUMMY)], None)
+            .expect("call args should compile");
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+    }
+
+    #[test]
+    fn test_call_args_leave_by_ref_identifier_storage_unchanged() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        compiler
+            .compile_call_args(
+                &[Expr::Identifier("value".to_string(), Span::DUMMY)],
+                Some(&[ParamPassMode::ByRefShared]),
+            )
+            .expect("reference call args should compile");
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::Deferred)
         );
     }
 }
