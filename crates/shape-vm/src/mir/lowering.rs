@@ -200,13 +200,18 @@ pub fn lower_function_detailed(
 
     // Register parameters
     for param in params {
-        let param_name = param.simple_name().unwrap_or("_").to_string();
+        let Some(param_name) = param.simple_name() else {
+            builder.mark_fallback();
+            let fallback_name = format!("__mir_unsupported_param{}", builder.param_slots.len());
+            builder.add_param(fallback_name, LocalTypeInfo::Unknown);
+            continue;
+        };
         let type_info = if param.is_reference {
             LocalTypeInfo::NonCopy // references are always tracked
         } else {
             LocalTypeInfo::Unknown // will be resolved during analysis
         };
-        builder.add_param(param_name, type_info);
+        builder.add_param(param_name.to_string(), type_info);
     }
 
     // Create the exit block
@@ -298,13 +303,20 @@ fn lower_statement(builder: &mut MirBuilder, stmt: &Statement, exit_block: Basic
 
 /// Lower a variable declaration.
 fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span) {
-    let name = decl.pattern.as_identifier().unwrap_or("_").to_string();
+    let Some(name) = decl.pattern.as_identifier() else {
+        builder.mark_fallback();
+        if let Some(init_expr) = &decl.value {
+            let _ = lower_expr_to_temp(builder, init_expr);
+        }
+        builder.push_stmt(StatementKind::Nop, span);
+        return;
+    };
     let type_info = decl
         .value
         .as_ref()
         .map(infer_local_type_from_expr)
         .unwrap_or(LocalTypeInfo::Unknown);
-    let slot = builder.alloc_local(name, type_info);
+    let slot = builder.alloc_local(name.to_string(), type_info);
 
     if let Some(init_expr) = &decl.value {
         // Determine operand based on ownership modifier
@@ -1088,6 +1100,32 @@ mod tests {
                 .any(|error| error.kind == BorrowErrorKind::UseAfterMove),
             "expected use-after-move error, got {:?}",
             analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lower_destructure_var_decl_marks_fallback() {
+        let body = vec![Statement::VariableDecl(
+            ast::VariableDecl {
+                kind: VarKind::Let,
+                is_mut: false,
+                pattern: DestructurePattern::Array(vec![
+                    DestructurePattern::Identifier("left".to_string(), span()),
+                    DestructurePattern::Identifier("right".to_string(), span()),
+                ]),
+                type_annotation: None,
+                value: Some(Expr::Literal(
+                    ast::Literal::String("hi".to_string()),
+                    span(),
+                )),
+                ownership: OwnershipModifier::Inferred,
+            },
+            span(),
+        )];
+        let lowering = lower_function_detailed("test", &[], &body, span());
+        assert!(
+            lowering.had_fallbacks,
+            "destructuring declarations should keep MIR in fallback mode"
         );
     }
 }
