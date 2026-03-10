@@ -34,9 +34,27 @@ impl BytecodeCompiler {
         self.loop_stack.push(loop_ctx);
 
         // Compile body
-        for stmt in &while_loop.body {
-            self.compile_statement(stmt)?;
-        }
+        self.push_repeating_reference_release_barrier();
+        let body_result = (|| -> Result<()> {
+            for (idx, stmt) in while_loop.body.iter().enumerate() {
+                let future_names = self.future_reference_use_names_for_remaining_statements(
+                    &while_loop.body[idx + 1..],
+                );
+                self.push_future_reference_use_names(future_names);
+                let compile_result = self.compile_statement(stmt);
+                self.pop_future_reference_use_names();
+                compile_result?;
+                self.release_unused_local_reference_borrows_for_remaining_statements(
+                    &while_loop.body[idx + 1..],
+                );
+                self.release_unused_module_reference_borrows_for_remaining_statements(
+                    &while_loop.body[idx + 1..],
+                );
+            }
+            Ok(())
+        })();
+        self.pop_repeating_reference_release_barrier();
+        body_result?;
 
         // Jump back to LoopStart
         let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
@@ -88,7 +106,10 @@ impl BytecodeCompiler {
             drop_scope_depth: self.drop_locals.len(),
         });
 
-        self.compile_expr(&while_expr.body)?;
+        self.push_repeating_reference_release_barrier();
+        let body_result = self.compile_expr(&while_expr.body);
+        self.pop_repeating_reference_release_barrier();
+        body_result?;
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(result_local)),
@@ -211,9 +232,28 @@ impl BytecodeCompiler {
                 self.loop_stack.push(loop_ctx);
 
                 // Compile body
-                for stmt in &for_loop.body {
-                    self.compile_statement(stmt)?;
-                }
+                self.push_repeating_reference_release_barrier();
+                let body_result = (|| -> Result<()> {
+                    for (idx, stmt) in for_loop.body.iter().enumerate() {
+                        let future_names = self
+                            .future_reference_use_names_for_remaining_statements(
+                                &for_loop.body[idx + 1..],
+                            );
+                        self.push_future_reference_use_names(future_names);
+                        let compile_result = self.compile_statement(stmt);
+                        self.pop_future_reference_use_names();
+                        compile_result?;
+                        self.release_unused_local_reference_borrows_for_remaining_statements(
+                            &for_loop.body[idx + 1..],
+                        );
+                        self.release_unused_module_reference_borrows_for_remaining_statements(
+                            &for_loop.body[idx + 1..],
+                        );
+                    }
+                    Ok(())
+                })();
+                self.pop_repeating_reference_release_barrier();
+                body_result?;
 
                 // Jump back to LoopStart
                 let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
@@ -271,9 +311,28 @@ impl BytecodeCompiler {
                 self.loop_stack.push(loop_ctx);
 
                 // Compile body
-                for stmt in &for_loop.body {
-                    self.compile_statement(stmt)?;
-                }
+                self.push_repeating_reference_release_barrier();
+                let body_result = (|| -> Result<()> {
+                    for (idx, stmt) in for_loop.body.iter().enumerate() {
+                        let future_names = self
+                            .future_reference_use_names_for_remaining_statements(
+                                &for_loop.body[idx + 1..],
+                            );
+                        self.push_future_reference_use_names(future_names);
+                        let compile_result = self.compile_statement(stmt);
+                        self.pop_future_reference_use_names();
+                        compile_result?;
+                        self.release_unused_local_reference_borrows_for_remaining_statements(
+                            &for_loop.body[idx + 1..],
+                        );
+                        self.release_unused_module_reference_borrows_for_remaining_statements(
+                            &for_loop.body[idx + 1..],
+                        );
+                    }
+                    Ok(())
+                })();
+                self.pop_repeating_reference_release_barrier();
+                body_result?;
 
                 // Update
                 loop_ctx = self
@@ -493,7 +552,10 @@ impl BytecodeCompiler {
             drop_scope_depth: self.drop_locals.len(),
         });
 
-        self.compile_expr(&for_expr.body)?;
+        self.push_repeating_reference_release_barrier();
+        let body_result = self.compile_expr(&for_expr.body);
+        self.pop_repeating_reference_release_barrier();
+        body_result?;
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(result_local)),
@@ -542,7 +604,10 @@ impl BytecodeCompiler {
             drop_scope_depth: self.drop_locals.len(),
         });
 
-        self.compile_expr(&loop_expr.body)?;
+        self.push_repeating_reference_release_barrier();
+        let body_result = self.compile_expr(&loop_expr.body);
+        self.pop_repeating_reference_release_barrier();
+        body_result?;
         // Discard the body value; break expressions store their values
         // to result_local themselves. We must Pop here so the stack
         // doesn't grow on each iteration.

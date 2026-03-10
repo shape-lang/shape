@@ -567,6 +567,14 @@ pub struct BytecodeCompiler {
     pub(crate) scoped_reference_value_locals: Vec<HashSet<u16>>,
     /// Module ref-holder slots declared in the current module scopes.
     pub(crate) scoped_reference_value_module_bindings: Vec<HashSet<u16>>,
+    /// Reference-holder names used later in the enclosing statement/item sequence.
+    pub(crate) future_reference_use_names: Vec<HashSet<String>>,
+    /// Active repeated-body barriers for local ref holders.
+    pub(crate) repeating_body_reference_local_barriers: Vec<HashSet<u16>>,
+    /// Active repeated-body barriers for module ref holders.
+    pub(crate) repeating_body_reference_module_binding_barriers: Vec<HashSet<u16>>,
+    /// Borrow places that must stay frozen for the duration of the active repeated bodies.
+    pub(crate) repeating_body_protected_places: Vec<Vec<crate::borrow_checker::BorrowPlace>>,
     /// True while compiling function call arguments (allows `&` references).
     pub(crate) in_call_args: bool,
     /// Borrow mode for the argument currently being compiled.

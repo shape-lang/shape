@@ -5,9 +5,9 @@ use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{NumericType, StorageHint, TypeTracker, VariableKind, VariableTypeInfo};
 use shape_ast::ast::{BlockItem, Expr, Item, Spanned, Statement, TypeAnnotation};
-use shape_ast::error::{Result, ShapeError};
+use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::{BytecodeCompiler, DropKind, ParamPassMode, TrackedReferenceBorrow};
 
@@ -798,24 +798,262 @@ impl BytecodeCompiler {
         self.scoped_reference_value_module_bindings.pop();
     }
 
+    pub(super) fn push_future_reference_use_names(&mut self, names: HashSet<String>) {
+        self.future_reference_use_names.push(names);
+    }
+
+    pub(super) fn pop_future_reference_use_names(&mut self) {
+        self.future_reference_use_names.pop();
+        if self.future_reference_use_names.is_empty() {
+            self.future_reference_use_names.push(HashSet::new());
+        }
+    }
+
+    pub(super) fn future_reference_use_names_for_remaining_statements(
+        &self,
+        remaining: &[Statement],
+    ) -> HashSet<String> {
+        let mut names = self
+            .future_reference_use_names
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        for tracked in self.tracked_reference_borrow_locals.values() {
+            if remaining
+                .iter()
+                .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
+            {
+                names.insert(tracked.name.clone());
+            }
+        }
+        for tracked in self.tracked_reference_borrow_module_bindings.values() {
+            if remaining
+                .iter()
+                .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
+            {
+                names.insert(tracked.name.clone());
+            }
+        }
+        names
+    }
+
+    pub(super) fn future_reference_use_names_for_remaining_block_items(
+        &self,
+        remaining: &[BlockItem],
+    ) -> HashSet<String> {
+        let mut names = self
+            .future_reference_use_names
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        for tracked in self.tracked_reference_borrow_locals.values() {
+            if remaining
+                .iter()
+                .any(|item| block_item_uses_identifier(item, &tracked.name))
+            {
+                names.insert(tracked.name.clone());
+            }
+        }
+        for tracked in self.tracked_reference_borrow_module_bindings.values() {
+            if remaining
+                .iter()
+                .any(|item| block_item_uses_identifier(item, &tracked.name))
+            {
+                names.insert(tracked.name.clone());
+            }
+        }
+        names
+    }
+
+    pub(super) fn future_reference_use_names_for_remaining_items(
+        &self,
+        remaining: &[Item],
+    ) -> HashSet<String> {
+        let mut names = self
+            .future_reference_use_names
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        for tracked in self.tracked_reference_borrow_locals.values() {
+            if remaining
+                .iter()
+                .any(|item| item_uses_identifier(item, &tracked.name))
+            {
+                names.insert(tracked.name.clone());
+            }
+        }
+        for tracked in self.tracked_reference_borrow_module_bindings.values() {
+            if remaining
+                .iter()
+                .any(|item| item_uses_identifier(item, &tracked.name))
+            {
+                names.insert(tracked.name.clone());
+            }
+        }
+        names
+    }
+
+    pub(super) fn push_repeating_reference_release_barrier(&mut self) {
+        self.repeating_body_reference_local_barriers.push(
+            self.tracked_reference_borrow_locals
+                .keys()
+                .copied()
+                .collect(),
+        );
+        self.repeating_body_reference_module_binding_barriers.push(
+            self.tracked_reference_borrow_module_bindings
+                .keys()
+                .copied()
+                .collect(),
+        );
+        let protected_places = self
+            .tracked_reference_borrow_locals
+            .keys()
+            .copied()
+            .chain(
+                self.tracked_reference_borrow_module_bindings
+                    .keys()
+                    .copied(),
+            )
+            .filter_map(|slot| self.borrow_checker.borrow_place_for_ref_slot(slot))
+            .collect();
+        self.repeating_body_protected_places.push(protected_places);
+    }
+
+    pub(super) fn pop_repeating_reference_release_barrier(&mut self) {
+        self.repeating_body_reference_local_barriers.pop();
+        self.repeating_body_reference_module_binding_barriers.pop();
+        self.repeating_body_protected_places.pop();
+    }
+
+    fn local_reference_release_is_barrier_protected(&self, slot: u16) -> bool {
+        self.repeating_body_reference_local_barriers
+            .iter()
+            .any(|slots| slots.contains(&slot))
+    }
+
+    fn module_reference_release_is_barrier_protected(&self, slot: u16) -> bool {
+        self.repeating_body_reference_module_binding_barriers
+            .iter()
+            .any(|slots| slots.contains(&slot))
+    }
+
+    pub(super) fn check_write_allowed_in_current_context(
+        &self,
+        place: BorrowPlace,
+        source_location: Option<SourceLocation>,
+    ) -> Result<()> {
+        self.borrow_checker
+            .check_write_allowed(place, source_location.clone())?;
+        if self
+            .repeating_body_protected_places
+            .iter()
+            .flatten()
+            .any(|protected| {
+                crate::borrow_checker::BorrowChecker::places_conflict(place, *protected)
+            })
+        {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "[B0002] cannot write to this value while it is borrowed in an active loop iteration (slot {})",
+                    place
+                ),
+                location: source_location,
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_named_binding_write_allowed(
+        &self,
+        name: &str,
+        source_location: Option<SourceLocation>,
+    ) -> Result<()> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            if self.const_locals.contains(&local_idx) {
+                return Err(ShapeError::SemanticError {
+                    message: format!("Cannot reassign const variable '{}'", name),
+                    location: source_location,
+                });
+            }
+            if self.immutable_locals.contains(&local_idx) {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Cannot reassign immutable variable '{}'. Use `let mut` or `var` for mutable bindings",
+                        name
+                    ),
+                    location: source_location,
+                });
+            }
+            return self
+                .check_write_allowed_in_current_context(
+                    Self::borrow_key_for_local(local_idx),
+                    source_location,
+                )
+                .map_err(|e| {
+                    Self::relabel_borrow_error(e, Self::borrow_key_for_local(local_idx), name)
+                });
+        }
+
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+            if self.const_module_bindings.contains(&binding_idx) {
+                return Err(ShapeError::SemanticError {
+                    message: format!("Cannot reassign const variable '{}'", name),
+                    location: source_location,
+                });
+            }
+            if self.immutable_module_bindings.contains(&binding_idx) {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Cannot reassign immutable variable '{}'. Use `let mut` or `var` for mutable bindings",
+                        name
+                    ),
+                    location: source_location,
+                });
+            }
+            return self
+                .check_write_allowed_in_current_context(
+                    Self::borrow_key_for_module_binding(binding_idx),
+                    source_location,
+                )
+                .map_err(|e| {
+                    Self::relabel_borrow_error(
+                        e,
+                        Self::borrow_key_for_module_binding(binding_idx),
+                        name,
+                    )
+                });
+        }
+
+        Ok(())
+    }
+
     pub(super) fn release_unused_local_reference_borrows_for_remaining_statements(
         &mut self,
         remaining: &[Statement],
     ) {
-        let Some(scope_slots) = self.scoped_reference_value_locals.last() else {
-            return;
-        };
-        let dead_slots: Vec<u16> = scope_slots
+        let future_names = self
+            .future_reference_use_names
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        let dead_slots: Vec<u16> = self
+            .tracked_reference_borrow_locals
             .iter()
-            .copied()
-            .filter(|slot| {
-                self.tracked_reference_borrow_locals
-                    .get(slot)
-                    .is_some_and(|tracked| {
-                        !remaining
-                            .iter()
-                            .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
-                    })
+            .filter_map(|(slot, tracked)| {
+                if self.local_reference_release_is_barrier_protected(*slot)
+                    || future_names.contains(&tracked.name)
+                    || remaining
+                        .iter()
+                        .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
+                {
+                    None
+                } else {
+                    Some(*slot)
+                }
             })
             .collect();
         for slot in dead_slots {
@@ -827,20 +1065,25 @@ impl BytecodeCompiler {
         &mut self,
         remaining: &[BlockItem],
     ) {
-        let Some(scope_slots) = self.scoped_reference_value_locals.last() else {
-            return;
-        };
-        let dead_slots: Vec<u16> = scope_slots
+        let future_names = self
+            .future_reference_use_names
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        let dead_slots: Vec<u16> = self
+            .tracked_reference_borrow_locals
             .iter()
-            .copied()
-            .filter(|slot| {
-                self.tracked_reference_borrow_locals
-                    .get(slot)
-                    .is_some_and(|tracked| {
-                        !remaining
-                            .iter()
-                            .any(|item| block_item_uses_identifier(item, &tracked.name))
-                    })
+            .filter_map(|(slot, tracked)| {
+                if self.local_reference_release_is_barrier_protected(*slot)
+                    || future_names.contains(&tracked.name)
+                    || remaining
+                        .iter()
+                        .any(|item| block_item_uses_identifier(item, &tracked.name))
+                {
+                    None
+                } else {
+                    Some(*slot)
+                }
             })
             .collect();
         for slot in dead_slots {
@@ -848,24 +1091,89 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn release_unused_module_reference_borrows_for_remaining_statements(
+        &mut self,
+        remaining: &[Statement],
+    ) {
+        let future_names = self
+            .future_reference_use_names
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        let dead_slots: Vec<u16> = self
+            .tracked_reference_borrow_module_bindings
+            .iter()
+            .filter_map(|(slot, tracked)| {
+                if self.module_reference_release_is_barrier_protected(*slot)
+                    || future_names.contains(&tracked.name)
+                    || remaining
+                        .iter()
+                        .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
+                {
+                    None
+                } else {
+                    Some(*slot)
+                }
+            })
+            .collect();
+        for slot in dead_slots {
+            self.release_tracked_reference_borrow(slot, false);
+        }
+    }
+
+    pub(super) fn release_unused_module_reference_borrows_for_remaining_block_items(
+        &mut self,
+        remaining: &[BlockItem],
+    ) {
+        let future_names = self
+            .future_reference_use_names
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        let dead_slots: Vec<u16> = self
+            .tracked_reference_borrow_module_bindings
+            .iter()
+            .filter_map(|(slot, tracked)| {
+                if self.module_reference_release_is_barrier_protected(*slot)
+                    || future_names.contains(&tracked.name)
+                    || remaining
+                        .iter()
+                        .any(|item| block_item_uses_identifier(item, &tracked.name))
+                {
+                    None
+                } else {
+                    Some(*slot)
+                }
+            })
+            .collect();
+        for slot in dead_slots {
+            self.release_tracked_reference_borrow(slot, false);
+        }
+    }
+
     pub(super) fn release_unused_module_reference_borrows_for_remaining_items(
         &mut self,
         remaining: &[Item],
     ) {
-        let Some(scope_slots) = self.scoped_reference_value_module_bindings.last() else {
-            return;
-        };
-        let dead_slots: Vec<u16> = scope_slots
+        let future_names = self
+            .future_reference_use_names
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        let dead_slots: Vec<u16> = self
+            .tracked_reference_borrow_module_bindings
             .iter()
-            .copied()
-            .filter(|slot| {
-                self.tracked_reference_borrow_module_bindings
-                    .get(slot)
-                    .is_some_and(|tracked| {
-                        !remaining
-                            .iter()
-                            .any(|item| item_uses_identifier(item, &tracked.name))
-                    })
+            .filter_map(|(slot, tracked)| {
+                if self.module_reference_release_is_barrier_protected(*slot)
+                    || future_names.contains(&tracked.name)
+                    || remaining
+                        .iter()
+                        .any(|item| item_uses_identifier(item, &tracked.name))
+                {
+                    None
+                } else {
+                    Some(*slot)
+                }
             })
             .collect();
         for slot in dead_slots {

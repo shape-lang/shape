@@ -17,8 +17,19 @@ impl BytecodeCompiler {
         let else_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
 
         // Compile then body
-        for stmt in &if_stmt.then_body {
-            self.compile_statement(stmt)?;
+        for (idx, stmt) in if_stmt.then_body.iter().enumerate() {
+            let future_names = self
+                .future_reference_use_names_for_remaining_statements(&if_stmt.then_body[idx + 1..]);
+            self.push_future_reference_use_names(future_names);
+            let compile_result = self.compile_statement(stmt);
+            self.pop_future_reference_use_names();
+            compile_result?;
+            self.release_unused_local_reference_borrows_for_remaining_statements(
+                &if_stmt.then_body[idx + 1..],
+            );
+            self.release_unused_module_reference_borrows_for_remaining_statements(
+                &if_stmt.then_body[idx + 1..],
+            );
         }
 
         if let Some(else_body) = &if_stmt.else_body {
@@ -29,8 +40,19 @@ impl BytecodeCompiler {
             self.patch_jump(else_jump);
 
             // Compile else body
-            for stmt in else_body {
-                self.compile_statement(stmt)?;
+            for (idx, stmt) in else_body.iter().enumerate() {
+                let future_names =
+                    self.future_reference_use_names_for_remaining_statements(&else_body[idx + 1..]);
+                self.push_future_reference_use_names(future_names);
+                let compile_result = self.compile_statement(stmt);
+                self.pop_future_reference_use_names();
+                compile_result?;
+                self.release_unused_local_reference_borrows_for_remaining_statements(
+                    &else_body[idx + 1..],
+                );
+                self.release_unused_module_reference_borrows_for_remaining_statements(
+                    &else_body[idx + 1..],
+                );
             }
 
             // Patch end jump

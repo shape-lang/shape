@@ -320,7 +320,12 @@ impl BytecodeCompiler {
         let item_count = program.items.len();
         for (idx, item) in program.items.iter().enumerate() {
             let is_last = idx == item_count - 1;
-            if let Err(e) = self.compile_item_with_context(item, is_last) {
+            let future_names =
+                self.future_reference_use_names_for_remaining_items(&program.items[idx + 1..]);
+            self.push_future_reference_use_names(future_names);
+            let compile_result = self.compile_item_with_context(item, is_last);
+            self.pop_future_reference_use_names();
+            if let Err(e) = compile_result {
                 self.errors.push(e);
             }
             self.release_unused_module_reference_borrows_for_remaining_items(

@@ -74,8 +74,13 @@ impl BytecodeCompiler {
                     if method == "push" && args.len() == 1 {
                         if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                             if recv_name == name {
+                                let source_loc = self.span_to_source_location(*id_span);
                                 if let Some(local_idx) = self.resolve_local(name) {
                                     if !self.ref_locals.contains(&local_idx) {
+                                        self.check_named_binding_write_allowed(
+                                            name,
+                                            Some(source_loc),
+                                        )?;
                                         self.compile_expr(&args[0])?;
                                         let pushed_numeric = self.last_expr_numeric_type;
                                         self.emit(Instruction::new(
@@ -97,6 +102,7 @@ impl BytecodeCompiler {
                                         return Ok(());
                                     }
                                 } else {
+                                    self.check_named_binding_write_allowed(name, Some(source_loc))?;
                                     // ModuleBinding variable: same optimization with ModuleBinding operand
                                     let binding_idx = self.get_or_create_module_binding(name);
                                     self.compile_expr(&args[0])?;
@@ -144,24 +150,7 @@ impl BytecodeCompiler {
                     } else {
                         // Borrow check: reject writes to borrowed variables
                         let source_loc = self.span_to_source_location(*id_span);
-                        self.borrow_checker
-                            .check_write_allowed(
-                                Self::borrow_key_for_local(local_idx),
-                                Some(source_loc),
-                            )
-                            .map_err(|e| match e {
-                                ShapeError::SemanticError { message, location } => {
-                                    let user_msg = message.replace(
-                                        &format!("(slot {})", local_idx),
-                                        &format!("'{}'", name),
-                                    );
-                                    ShapeError::SemanticError {
-                                        message: user_msg,
-                                        location,
-                                    }
-                                }
-                                other => other,
-                            })?;
+                        self.check_named_binding_write_allowed(name, Some(source_loc))?;
                         self.emit(Instruction::new(
                             OpCode::StoreLocal,
                             Some(Operand::Local(local_idx)),
@@ -196,29 +185,9 @@ impl BytecodeCompiler {
                         );
                     }
                 } else {
-                    let binding_idx = self.get_or_create_module_binding(name);
                     let source_loc = self.span_to_source_location(*id_span);
-                    self.borrow_checker
-                        .check_write_allowed(
-                            Self::borrow_key_for_module_binding(binding_idx),
-                            Some(source_loc),
-                        )
-                        .map_err(|e| match e {
-                            ShapeError::SemanticError { message, location } => {
-                                let user_msg = message.replace(
-                                    &format!(
-                                        "(slot {})",
-                                        Self::borrow_key_for_module_binding(binding_idx)
-                                    ),
-                                    &format!("'{}'", name),
-                                );
-                                ShapeError::SemanticError {
-                                    message: user_msg,
-                                    location,
-                                }
-                            }
-                            other => other,
-                        })?;
+                    self.check_named_binding_write_allowed(name, Some(source_loc))?;
+                    let binding_idx = self.get_or_create_module_binding(name);
                     self.emit(Instruction::new(
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
@@ -258,8 +227,7 @@ impl BytecodeCompiler {
                 if let Some(place) = self.try_resolve_typed_field_place(object, property) {
                     let label = format!("{}.{}", place.root_name, property);
                     let source_loc = self.span_to_source_location(assign_expr.target.span());
-                    self.borrow_checker
-                        .check_write_allowed(place.borrow_key, Some(source_loc))
+                    self.check_write_allowed_in_current_context(place.borrow_key, Some(source_loc))
                         .map_err(|err| Self::relabel_borrow_error(err, place.borrow_key, &label))?;
 
                     let field_ref = self.declare_temp_local("__field_assign_ref_")?;
@@ -301,24 +269,21 @@ impl BytecodeCompiler {
                     && !self.ref_locals.contains(&local_idx)
                 {
                     let source_loc = self.span_to_source_location(*id_span);
-                    self.borrow_checker
-                        .check_write_allowed(
-                            Self::borrow_key_for_local(local_idx),
-                            Some(source_loc),
-                        )
-                        .map_err(|e| match e {
-                            ShapeError::SemanticError { message, location } => {
-                                let user_msg = message.replace(
-                                    &format!("(slot {})", local_idx),
-                                    &format!("'{}'", name),
-                                );
-                                ShapeError::SemanticError {
-                                    message: user_msg,
-                                    location,
-                                }
+                    self.check_write_allowed_in_current_context(
+                        Self::borrow_key_for_local(local_idx),
+                        Some(source_loc),
+                    )
+                    .map_err(|e| match e {
+                        ShapeError::SemanticError { message, location } => {
+                            let user_msg = message
+                                .replace(&format!("(slot {})", local_idx), &format!("'{}'", name));
+                            ShapeError::SemanticError {
+                                message: user_msg,
+                                location,
                             }
-                            other => other,
-                        })?;
+                        }
+                        other => other,
+                    })?;
                 }
                 self.compile_expr(object)?;
                 let Some(schema_id) = self.last_expr_schema else {
@@ -405,44 +370,14 @@ impl BytecodeCompiler {
                             ));
                         } else {
                             let source_loc = self.span_to_source_location(index.span());
-                            self.borrow_checker
-                                .check_write_allowed(
-                                    Self::borrow_key_for_local(local_idx),
-                                    Some(source_loc),
-                                )
-                                .map_err(|e| match e {
-                                    ShapeError::SemanticError { message, location } => {
-                                        let user_msg = message.replace(
-                                            &format!("(slot {})", local_idx),
-                                            &format!("'{}'", name),
-                                        );
-                                        ShapeError::SemanticError {
-                                            message: user_msg,
-                                            location,
-                                        }
-                                    }
-                                    other => other,
-                                })?;
-                            self.emit(Instruction::new(
-                                OpCode::SetLocalIndex,
-                                Some(Operand::Local(local_idx)),
-                            ));
-                        }
-                    } else {
-                        let binding_idx = self.get_or_create_module_binding(name);
-                        let source_loc = self.span_to_source_location(index.span());
-                        self.borrow_checker
-                            .check_write_allowed(
-                                Self::borrow_key_for_module_binding(binding_idx),
+                            self.check_write_allowed_in_current_context(
+                                Self::borrow_key_for_local(local_idx),
                                 Some(source_loc),
                             )
                             .map_err(|e| match e {
                                 ShapeError::SemanticError { message, location } => {
                                     let user_msg = message.replace(
-                                        &format!(
-                                            "(slot {})",
-                                            Self::borrow_key_for_module_binding(binding_idx)
-                                        ),
+                                        &format!("(slot {})", local_idx),
                                         &format!("'{}'", name),
                                     );
                                     ShapeError::SemanticError {
@@ -452,6 +387,34 @@ impl BytecodeCompiler {
                                 }
                                 other => other,
                             })?;
+                            self.emit(Instruction::new(
+                                OpCode::SetLocalIndex,
+                                Some(Operand::Local(local_idx)),
+                            ));
+                        }
+                    } else {
+                        let binding_idx = self.get_or_create_module_binding(name);
+                        let source_loc = self.span_to_source_location(index.span());
+                        self.check_write_allowed_in_current_context(
+                            Self::borrow_key_for_module_binding(binding_idx),
+                            Some(source_loc),
+                        )
+                        .map_err(|e| match e {
+                            ShapeError::SemanticError { message, location } => {
+                                let user_msg = message.replace(
+                                    &format!(
+                                        "(slot {})",
+                                        Self::borrow_key_for_module_binding(binding_idx)
+                                    ),
+                                    &format!("'{}'", name),
+                                );
+                                ShapeError::SemanticError {
+                                    message: user_msg,
+                                    location,
+                                }
+                            }
+                            other => other,
+                        })?;
                         self.emit(Instruction::new(
                             OpCode::SetModuleBindingIndex,
                             Some(Operand::ModuleBinding(binding_idx)),

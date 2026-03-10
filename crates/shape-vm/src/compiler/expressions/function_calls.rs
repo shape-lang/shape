@@ -637,17 +637,14 @@ impl BytecodeCompiler {
                     if let Some(ref fdef) = func_def {
                         if let Some(param) = fdef.params.get(param_idx) {
                             if let Some(ref default_expr) = param.default_value {
-                                let is_ref_param = ref_params
-                                    .get(param_idx)
-                                    .copied()
-                                    .unwrap_or(false);
+                                let is_ref_param =
+                                    ref_params.get(param_idx).copied().unwrap_or(false);
                                 let default_clone = default_expr.clone();
                                 self.compile_expr(&default_clone)?;
                                 // If the callee expects a reference, wrap the
                                 // default value: store in a temp and MakeRef.
                                 if is_ref_param {
-                                    let temp =
-                                        self.declare_temp_local("__default_ref_")?;
+                                    let temp = self.declare_temp_local("__default_ref_")?;
                                     self.emit(Instruction::new(
                                         OpCode::StoreLocal,
                                         Some(Operand::Local(temp)),
@@ -780,7 +777,10 @@ impl BytecodeCompiler {
         if let Some(imported) = self.imported_names.get(name).cloned() {
             if self.is_native_module_export(&imported.module_path, &imported.original_name) {
                 // Ensure the module has a namespace binding (auto-create if needed)
-                if !self.module_namespace_bindings.contains(&imported.module_path) {
+                if !self
+                    .module_namespace_bindings
+                    .contains(&imported.module_path)
+                {
                     let binding_idx = self.get_or_create_module_binding(&imported.module_path);
                     self.module_namespace_bindings
                         .insert(imported.module_path.clone());
@@ -964,7 +964,14 @@ impl BytecodeCompiler {
         // loops, and blocks (which are compiled as expressions, not statements).
         if method == "push" && args.len() == 1 {
             if let Expr::Identifier(recv_name, _) = receiver {
+                let source_loc = self.span_to_source_location(receiver.span());
                 if let Some(local_idx) = self.resolve_local(recv_name) {
+                    if !self.ref_locals.contains(&local_idx) {
+                        self.check_named_binding_write_allowed(
+                            recv_name,
+                            Some(source_loc.clone()),
+                        )?;
+                    }
                     self.compile_expr(&args[0])?;
                     let pushed_numeric = self.last_expr_numeric_type;
                     self.emit(Instruction::new(
@@ -993,6 +1000,7 @@ impl BytecodeCompiler {
                     .mutable_closure_captures
                     .contains_key(recv_name.as_str())
                 {
+                    self.check_named_binding_write_allowed(recv_name, Some(source_loc))?;
                     let binding_idx = self.get_or_create_module_binding(recv_name);
                     self.compile_expr(&args[0])?;
                     self.emit(Instruction::new(
@@ -1197,11 +1205,8 @@ impl BytecodeCompiler {
         // Capture receiver's numeric type for extend method return type propagation.
         let receiver_numeric_type = self.last_expr_numeric_type;
         // Capture receiver's extend type before args compilation overwrites compiler state.
-        let receiver_extend_type = self.resolve_receiver_extend_type(
-            receiver,
-            &receiver_type_info,
-            receiver_schema,
-        );
+        let receiver_extend_type =
+            self.resolve_receiver_extend_type(receiver, &receiver_type_info, receiver_schema);
 
         // Resolve closure-row schema from the receiver contract.
         // `receiver` was compiled immediately above and may carry Table<T> metadata.
@@ -1345,8 +1350,8 @@ impl BytecodeCompiler {
             // For extend methods (resolved via qualified Type.method name),
             // propagate the receiver's numeric type for chaining support.
             // For bare-name user functions, use the static method table.
-            let resolved_via_extend = extend_func_idx.is_some()
-                && self.find_function(method).is_none();
+            let resolved_via_extend =
+                extend_func_idx.is_some() && self.find_function(method).is_none();
             self.last_expr_numeric_type = if resolved_via_extend {
                 receiver_numeric_type
             } else {
@@ -1382,14 +1387,17 @@ impl BytecodeCompiler {
                     .or_else(|| self.find_function(&extend_name))
             });
             // Also check trait_method_symbols for named impls
-            let trait_func_idx = scoped_func_idx.is_none().then(|| {
-                extend_type_names.iter().find_map(|type_name| {
-                    self.program
-                        .find_default_trait_impl_for_type_method(type_name, method)
-                        .map(|s| s.to_string())
-                        .and_then(|impl_func_name| self.find_function(&impl_func_name))
+            let trait_func_idx = scoped_func_idx
+                .is_none()
+                .then(|| {
+                    extend_type_names.iter().find_map(|type_name| {
+                        self.program
+                            .find_default_trait_impl_for_type_method(type_name, method)
+                            .map(|s| s.to_string())
+                            .and_then(|impl_func_name| self.find_function(&impl_func_name))
+                    })
                 })
-            }).flatten();
+                .flatten();
 
             if let Some(func_idx) = scoped_func_idx.or(trait_func_idx) {
                 let func_name = self.program.functions[func_idx].name.clone();

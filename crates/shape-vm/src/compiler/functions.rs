@@ -2776,6 +2776,13 @@ impl BytecodeCompiler {
             std::mem::take(&mut self.tracked_reference_borrow_locals);
         let saved_scoped_reference_value_locals =
             std::mem::take(&mut self.scoped_reference_value_locals);
+        let saved_future_reference_use_names = std::mem::take(&mut self.future_reference_use_names);
+        let saved_repeating_body_reference_local_barriers =
+            std::mem::take(&mut self.repeating_body_reference_local_barriers);
+        let saved_repeating_body_reference_module_binding_barriers =
+            std::mem::take(&mut self.repeating_body_reference_module_binding_barriers);
+        let saved_repeating_body_protected_places =
+            std::mem::take(&mut self.repeating_body_protected_places);
         let saved_reference_value_module_bindings = self.reference_value_module_bindings.clone();
         let saved_exclusive_reference_value_module_bindings =
             self.exclusive_reference_value_module_bindings.clone();
@@ -2809,6 +2816,11 @@ impl BytecodeCompiler {
         self.exclusive_reference_value_locals.clear();
         self.tracked_reference_borrow_locals.clear();
         self.scoped_reference_value_locals = vec![HashSet::new()];
+        self.future_reference_use_names = vec![HashSet::new()];
+        self.repeating_body_reference_local_barriers.clear();
+        self.repeating_body_reference_module_binding_barriers
+            .clear();
+        self.repeating_body_protected_places.clear();
         self.immutable_locals.clear();
         self.tracked_reference_borrow_module_bindings.clear();
         self.scoped_reference_value_module_bindings = vec![HashSet::new()];
@@ -3004,6 +3016,13 @@ impl BytecodeCompiler {
                         self.tracked_reference_borrow_locals =
                             saved_tracked_reference_borrow_locals;
                         self.scoped_reference_value_locals = saved_scoped_reference_value_locals;
+                        self.future_reference_use_names = saved_future_reference_use_names;
+                        self.repeating_body_reference_local_barriers =
+                            saved_repeating_body_reference_local_barriers;
+                        self.repeating_body_reference_module_binding_barriers =
+                            saved_repeating_body_reference_module_binding_barriers;
+                        self.repeating_body_protected_places =
+                            saved_repeating_body_protected_places;
                         self.reference_value_module_bindings =
                             saved_reference_value_module_bindings;
                         self.exclusive_reference_value_module_bindings =
@@ -3021,20 +3040,39 @@ impl BytecodeCompiler {
                     }
                     Statement::Return(_, _) => {
                         // Explicit return - compile normally, it will handle its own return
-                        self.compile_statement(stmt)?;
+                        let future_names = self
+                            .future_reference_use_names_for_remaining_statements(
+                                &func_def.body[idx + 1..],
+                            );
+                        self.push_future_reference_use_names(future_names);
+                        let compile_result = self.compile_statement(stmt);
+                        self.pop_future_reference_use_names();
+                        compile_result?;
                         // After an explicit return, we still need the fallback below for
                         // control flow that might skip the return (though rare)
                     }
                     _ => {
                         // Other statement types - compile normally
-                        self.compile_statement(stmt)?;
+                        let future_names = self
+                            .future_reference_use_names_for_remaining_statements(
+                                &func_def.body[idx + 1..],
+                            );
+                        self.push_future_reference_use_names(future_names);
+                        let compile_result = self.compile_statement(stmt);
+                        self.pop_future_reference_use_names();
+                        compile_result?;
                         self.release_unused_local_reference_borrows_for_remaining_statements(
                             &func_def.body[idx + 1..],
                         );
                     }
                 }
             } else {
-                self.compile_statement(stmt)?;
+                let future_names = self
+                    .future_reference_use_names_for_remaining_statements(&func_def.body[idx + 1..]);
+                self.push_future_reference_use_names(future_names);
+                let compile_result = self.compile_statement(stmt);
+                self.pop_future_reference_use_names();
+                compile_result?;
                 self.release_unused_local_reference_borrows_for_remaining_statements(
                     &func_def.body[idx + 1..],
                 );
@@ -3075,6 +3113,12 @@ impl BytecodeCompiler {
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
         self.tracked_reference_borrow_locals = saved_tracked_reference_borrow_locals;
         self.scoped_reference_value_locals = saved_scoped_reference_value_locals;
+        self.future_reference_use_names = saved_future_reference_use_names;
+        self.repeating_body_reference_local_barriers =
+            saved_repeating_body_reference_local_barriers;
+        self.repeating_body_reference_module_binding_barriers =
+            saved_repeating_body_reference_module_binding_barriers;
+        self.repeating_body_protected_places = saved_repeating_body_protected_places;
         self.reference_value_module_bindings = saved_reference_value_module_bindings;
         self.exclusive_reference_value_module_bindings =
             saved_exclusive_reference_value_module_bindings;

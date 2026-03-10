@@ -86,8 +86,11 @@ impl BytecodeCompiler {
         let mut has_value = false;
         for (i, item) in block.items.iter().enumerate() {
             let is_last = i == block.items.len() - 1;
+            let future_names =
+                self.future_reference_use_names_for_remaining_block_items(&block.items[i + 1..]);
+            self.push_future_reference_use_names(future_names);
 
-            match item {
+            let compile_result: Result<()> = match item {
                 shape_ast::ast::BlockItem::VariableDecl(var_decl) => {
                     if let Some(init_expr) = &var_decl.value {
                         let ref_borrow = self.compile_expr_for_reference_binding(init_expr)?;
@@ -139,8 +142,12 @@ impl BytecodeCompiler {
                             }
                         }
                     }
+                    Ok::<(), ShapeError>(())
                 }
                 shape_ast::ast::BlockItem::Assignment(assignment) => 'block_assign: {
+                    if let Some(name) = assignment.pattern.as_identifier() {
+                        self.check_named_binding_write_allowed(name, None)?;
+                    }
                     // Optimization: x = x.push(val) → ArrayPushLocal (O(1) in-place)
                     if let Some(name) = assignment.pattern.as_identifier() {
                         if let Expr::MethodCall {
@@ -160,7 +167,7 @@ impl BytecodeCompiler {
                                                     OpCode::ArrayPushLocal,
                                                     Some(Operand::Local(local_idx)),
                                                 ));
-                                                break 'block_assign;
+                                                break 'block_assign Ok::<(), ShapeError>(());
                                             }
                                         } else if let Some(&binding_idx) =
                                             self.module_bindings.get(name)
@@ -170,7 +177,7 @@ impl BytecodeCompiler {
                                                 OpCode::ArrayPushLocal,
                                                 Some(Operand::ModuleBinding(binding_idx)),
                                             ));
-                                            break 'block_assign;
+                                            break 'block_assign Ok::<(), ShapeError>(());
                                         }
                                     }
                                 }
@@ -205,10 +212,12 @@ impl BytecodeCompiler {
                             );
                         }
                     }
+                    Ok::<(), ShapeError>(())
                 }
                 shape_ast::ast::BlockItem::Statement(stmt) => {
                     self.compile_statement(stmt)?;
                     // Statements don't push anything to the stack
+                    Ok::<(), ShapeError>(())
                 }
                 shape_ast::ast::BlockItem::Expression(expr) => {
                     self.compile_expr(expr)?;
@@ -218,10 +227,16 @@ impl BytecodeCompiler {
                     } else {
                         has_value = true;
                     }
+                    Ok::<(), ShapeError>(())
                 }
-            }
+            };
+            self.pop_future_reference_use_names();
+            compile_result?;
 
             self.release_unused_local_reference_borrows_for_remaining_block_items(
+                &block.items[i + 1..],
+            );
+            self.release_unused_module_reference_borrows_for_remaining_block_items(
                 &block.items[i + 1..],
             );
         }
