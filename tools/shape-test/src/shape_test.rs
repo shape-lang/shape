@@ -12,11 +12,11 @@ use shape_lsp::context::CompletionContext;
 use shape_lsp::diagnostics::error_to_diagnostic;
 use shape_lsp::inlay_hints::InlayHintConfig;
 
+use shape_runtime::engine::ShapeEngine;
 use shape_runtime::initialize_shared_runtime;
 use shape_runtime::output_adapter::OutputAdapter;
-use shape_runtime::engine::ShapeEngine;
-use shape_vm::BytecodeExecutor;
 use shape_value::PrintResult;
+use shape_vm::BytecodeExecutor;
 
 // ---------------------------------------------------------------------------
 // Capture adapter — shared output buffer readable after execution

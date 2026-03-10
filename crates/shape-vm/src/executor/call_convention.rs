@@ -189,11 +189,10 @@ impl VirtualMachine {
         // using tokio's block_in_place to avoid deadlocking the runtime.
         if self.task_scheduler.has_external(task_id) {
             if let Some(rx) = self.task_scheduler.take_external_receiver(task_id) {
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(rx)
-                })
-                .map_err(|_| VMError::RuntimeError("Remote task dropped".to_string()))?
-                .map_err(VMError::RuntimeError)?;
+                let result =
+                    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(rx))
+                        .map_err(|_| VMError::RuntimeError("Remote task dropped".to_string()))?
+                        .map_err(VMError::RuntimeError)?;
                 self.task_scheduler.complete(task_id, result.clone());
                 return Ok(result);
             }

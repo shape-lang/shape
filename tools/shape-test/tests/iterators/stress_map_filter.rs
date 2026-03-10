@@ -10,37 +10,46 @@ use shape_test::shape_test::ShapeTest;
 /// Array map basic — check length and first element.
 #[test]
 fn test_array_map_basic() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         fn test() -> int {
             let arr = [1, 2, 3].map(|x| x * 2)
             arr[0] + arr[1] + arr[2]
         }
         test()
-    "#).expect_number(12.0);
+    "#,
+    )
+    .expect_number(12.0);
 }
 
 /// Array map identity.
 #[test]
 fn test_array_map_identity() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         fn test() -> int {
             let arr = [10, 20, 30].map(|x| x)
             arr[0]
         }
         test()
-    "#).expect_number(10.0);
+    "#,
+    )
+    .expect_number(10.0);
 }
 
 /// Array map to bool.
 #[test]
 fn test_array_map_to_bool() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         fn test() -> bool {
             let arr = [1, 2, 3].map(|x| x > 1)
             arr[0]
         }
         test()
-    "#).expect_bool(false);
+    "#,
+    )
+    .expect_bool(false);
 }
 
 /// Array map empty.
@@ -52,8 +61,7 @@ fn test_array_map_empty() {
 /// Array filter basic.
 #[test]
 fn test_array_filter_basic() {
-    ShapeTest::new(r#"{ let a = [1, 2, 3, 4, 5]; a.filter(|x| x > 3).length }"#)
-        .expect_number(2.0);
+    ShapeTest::new(r#"{ let a = [1, 2, 3, 4, 5]; a.filter(|x| x > 3).length }"#).expect_number(2.0);
 }
 
 /// Array filter keep all.
@@ -131,15 +139,16 @@ fn test_array_every_false() {
 /// Array filter then map — check sum.
 #[test]
 fn test_array_filter_then_map() {
-    ShapeTest::new(r#"[1, 2, 3, 4, 5, 6].filter(|x| x % 2 == 0).map(|x| x * 10).reduce(|acc, x| acc + x, 0)"#)
-        .expect_number(120.0);
+    ShapeTest::new(
+        r#"[1, 2, 3, 4, 5, 6].filter(|x| x % 2 == 0).map(|x| x * 10).reduce(|acc, x| acc + x, 0)"#,
+    )
+    .expect_number(120.0);
 }
 
 /// Array map then filter — check length.
 #[test]
 fn test_array_map_then_filter() {
-    ShapeTest::new(r#"[1, 2, 3, 4, 5].map(|x| x * 2).filter(|x| x > 6).length"#)
-        .expect_number(2.0);
+    ShapeTest::new(r#"[1, 2, 3, 4, 5].map(|x| x * 2).filter(|x| x > 6).length"#).expect_number(2.0);
 }
 
 /// Array filter map reduce.
@@ -191,12 +200,15 @@ fn test_array_count_aggregation() {
 /// Array iter collect identity.
 #[test]
 fn test_array_iter_collect_identity() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         {
             let arr = [1, 2, 3].iter().collect()
             arr[0] + arr[1] + arr[2]
         }
-    "#).expect_number(6.0);
+    "#,
+    )
+    .expect_number(6.0);
 }
 
 /// Array iter toArray.
@@ -236,12 +248,15 @@ fn test_empty_iter_count() {
 /// Iter take basic.
 #[test]
 fn test_iter_take_basic() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         {
             let arr = [1, 2, 3, 4, 5].iter().take(3).collect()
             arr.length
         }
-    "#).expect_number(3.0);
+    "#,
+    )
+    .expect_number(3.0);
 }
 
 /// Iter take zero.
@@ -265,12 +280,15 @@ fn test_iter_take_all() {
 /// Iter skip basic.
 #[test]
 fn test_iter_skip_basic() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         {
             let arr = [1, 2, 3, 4, 5].iter().skip(2).collect()
             arr[0]
         }
-    "#).expect_number(3.0);
+    "#,
+    )
+    .expect_number(3.0);
 }
 
 /// Iter skip zero.
@@ -294,23 +312,29 @@ fn test_iter_skip_more_than_available() {
 /// Iter skip then take.
 #[test]
 fn test_iter_skip_then_take() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         {
             let arr = [1, 2, 3, 4, 5].iter().skip(1).take(3).collect()
             arr[0] + arr[1] + arr[2]
         }
-    "#).expect_number(9.0);
+    "#,
+    )
+    .expect_number(9.0);
 }
 
 /// Iter take then skip.
 #[test]
 fn test_iter_take_then_skip() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         {
             let arr = [1, 2, 3, 4, 5].iter().take(4).skip(2).collect()
             arr[0] + arr[1]
         }
-    "#).expect_number(7.0);
+    "#,
+    )
+    .expect_number(7.0);
 }
 
 /// Iter skip then take then count.
@@ -327,12 +351,15 @@ fn test_iter_skip_then_take_then_count() {
 /// Iter map collect.
 #[test]
 fn test_iter_map_collect() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         {
             let arr = [1, 2, 3].iter().map(|x| x * 10).collect()
             arr[0] + arr[1] + arr[2]
         }
-    "#).expect_number(60.0);
+    "#,
+    )
+    .expect_number(60.0);
 }
 
 /// Iter map identity.
@@ -350,26 +377,27 @@ fn test_iter_map_empty() {
 /// Iter filter collect.
 #[test]
 fn test_iter_filter_collect() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         {
             let arr = [1, 2, 3, 4, 5].iter().filter(|x| x > 3).collect()
             arr[0] + arr[1]
         }
-    "#).expect_number(9.0);
+    "#,
+    )
+    .expect_number(9.0);
 }
 
 /// Iter filter keep all.
 #[test]
 fn test_iter_filter_keep_all() {
-    ShapeTest::new(r#"[1, 2, 3].iter().filter(|x| x > 0).collect().length"#)
-        .expect_number(3.0);
+    ShapeTest::new(r#"[1, 2, 3].iter().filter(|x| x > 0).collect().length"#).expect_number(3.0);
 }
 
 /// Iter filter keep none.
 #[test]
 fn test_iter_filter_keep_none() {
-    ShapeTest::new(r#"[1, 2, 3].iter().filter(|x| x > 100).collect().length"#)
-        .expect_number(0.0);
+    ShapeTest::new(r#"[1, 2, 3].iter().filter(|x| x > 100).collect().length"#).expect_number(0.0);
 }
 
 /// Iter filter empty source.
@@ -381,10 +409,13 @@ fn test_iter_filter_empty_source() {
 /// Iter filter even numbers.
 #[test]
 fn test_iter_filter_even_numbers() {
-    ShapeTest::new(r#"
+    ShapeTest::new(
+        r#"
         {
             let arr = [1, 2, 3, 4, 5, 6].iter().filter(|x| x % 2 == 0).collect()
             arr[0] + arr[1] + arr[2]
         }
-    "#).expect_number(12.0);
+    "#,
+    )
+    .expect_number(12.0);
 }

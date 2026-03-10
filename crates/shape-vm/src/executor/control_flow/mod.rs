@@ -235,12 +235,7 @@ impl VirtualMachine {
                                     // Multi-frame deopt: reconstruct full call stack.
                                     // First push the outermost physical function's frame,
                                     // then intermediate frames, then innermost callee.
-                                    self.deopt_with_inline_frames(
-                                        info,
-                                        &ctx_buf,
-                                        func_id_u16,
-                                        bp,
-                                    )?;
+                                    self.deopt_with_inline_frames(info, &ctx_buf, func_id_u16, bp)?;
                                     // Interpreter now has full call stack reconstructed.
                                     return Ok(());
                                 }

@@ -126,8 +126,7 @@ fn array_foreach() {
     // Just verify it runs without error.
     let code = r#"let nums = [1, 2, 3]
 nums.forEach(|x| print(x))"#;
-    ShapeTest::new(code)
-        .expect_run_ok();
+    ShapeTest::new(code).expect_run_ok();
 }
 
 #[test]

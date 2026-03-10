@@ -15,7 +15,9 @@ pub use registry::{RecordField, RecordSchema, TraitImplEntry, TypeAliasEntry};
 use super::*;
 use evolution::EvolutionRegistry;
 use registry::TypeRegistry;
-use shape_ast::ast::{EnumDef, Expr, InterfaceDef, ObjectTypeField, Span, TraitDef, TypeAnnotation};
+use shape_ast::ast::{
+    EnumDef, Expr, InterfaceDef, ObjectTypeField, Span, TraitDef, TypeAnnotation,
+};
 use std::collections::{HashMap, HashSet};
 
 /// A field that was hoisted from a property assignment (e.g., `a.b = 2` hoists field `b` to variable `a`)
@@ -1370,7 +1372,6 @@ mod tests {
         assert!(!canonical.is_field_optional("a"));
         assert!(canonical.is_field_optional("b"));
     }
-
 
     #[test]
     fn test_environment_starts_without_hardcoded_trait_contracts() {

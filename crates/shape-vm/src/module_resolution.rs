@@ -445,7 +445,8 @@ impl BytecodeExecutor {
                                 // Module not found on disk — check if it's a native
                                 // extension module (json, file, io, state, etc.) which
                                 // has no Shape source and is handled at runtime.
-                                let is_extension = self.extensions.iter().any(|ext| ext.name == *module_path);
+                                let is_extension =
+                                    self.extensions.iter().any(|ext| ext.name == *module_path);
                                 if is_extension {
                                     None
                                 } else {

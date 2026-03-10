@@ -174,8 +174,7 @@ test()"#,
 /// Division by zero int fails.
 #[test]
 fn division_by_zero_int_fails() {
-    ShapeTest::new("fn test() -> int { 1 / 0 }\ntest()")
-        .expect_run_err();
+    ShapeTest::new("fn test() -> int { 1 / 0 }\ntest()").expect_run_err();
 }
 
 /// Float division by zero produces a runtime error in Shape.
@@ -187,15 +186,13 @@ fn division_by_zero_float_is_inf_or_error() {
 /// Index out of bounds fails.
 #[test]
 fn index_out_of_bounds_fails() {
-    ShapeTest::new("let arr = [1, 2, 3]\narr[10]")
-        .expect_run_err();
+    ShapeTest::new("let arr = [1, 2, 3]\narr[10]").expect_run_err();
 }
 
 /// Negative index out of bounds fails.
 #[test]
 fn negative_index_out_of_bounds_fails() {
-    ShapeTest::new("let arr = [1, 2, 3]\narr[-10]")
-        .expect_run_err();
+    ShapeTest::new("let arr = [1, 2, 3]\narr[-10]").expect_run_err();
 }
 
 // =============================================================================
@@ -205,15 +202,13 @@ fn negative_index_out_of_bounds_fails() {
 /// Undefined variable fails.
 #[test]
 fn undefined_variable_fails() {
-    ShapeTest::new("undefined_var")
-        .expect_run_err();
+    ShapeTest::new("undefined_var").expect_run_err();
 }
 
 /// Undefined function call fails.
 #[test]
 fn undefined_function_call_fails() {
-    ShapeTest::new("not_a_function()")
-        .expect_run_err();
+    ShapeTest::new("not_a_function()").expect_run_err();
 }
 
 // =============================================================================

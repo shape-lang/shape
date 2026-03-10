@@ -1,8 +1,8 @@
 use crate::commands::ProviderOptions;
 use crate::config;
+use shape_runtime::LoadedExtension;
 use shape_runtime::engine::ShapeEngine;
 use shape_runtime::project::{ProjectRoot, ShapeProject, find_project_root};
-use shape_runtime::LoadedExtension;
 use shape_vm::BytecodeExecutor;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

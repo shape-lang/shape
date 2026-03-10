@@ -384,7 +384,6 @@ print(Currency::decimals)
     ShapeTest::new(code).expect_run_ok().expect_output("$\n2");
 }
 
-
 /// BUG: Type::field static access treats the type as an enum.
 /// Accessing `Config::version` on a type with a single comptime field
 /// causes a semantic error: "Type 'Config' is not an enum".

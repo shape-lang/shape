@@ -48,8 +48,7 @@ impl ProgramExecutor for JITExecutor {
         // Merge with main program
         let mut merged_program = imported_program;
         merged_program.items.extend(program.items.clone());
-        let stdlib_names =
-            shape_vm::module_resolution::prepend_prelude_items(&mut merged_program);
+        let stdlib_names = shape_vm::module_resolution::prepend_prelude_items(&mut merged_program);
 
         // Compile to bytecode (with source text if available for better error messages)
         let bytecode_compile_start = Instant::now();
@@ -95,10 +94,16 @@ impl JITExecutor {
         // Use selective compilation: JIT-compatible functions get native code,
         // incompatible ones get Interpreted entries for VM fallback.
         if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!("[jit-debug] starting compile_program_selective with {} instructions, {} functions",
-                bytecode.instructions.len(), bytecode.functions.len());
+            eprintln!(
+                "[jit-debug] starting compile_program_selective with {} instructions, {} functions",
+                bytecode.instructions.len(),
+                bytecode.functions.len()
+            );
             for (i, instr) in bytecode.instructions.iter().enumerate() {
-                eprintln!("[jit-debug] instr[{}]: {:?} {:?}", i, instr.opcode, instr.operand);
+                eprintln!(
+                    "[jit-debug] instr[{}]: {:?} {:?}",
+                    i, instr.opcode, instr.operand
+                );
             }
         }
         let jit_compile_start = Instant::now();
@@ -248,7 +253,7 @@ impl JITExecutor {
             HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number, jit_unbox,
             unbox_number,
         };
-        use shape_value::tags::{get_tag, is_tagged, sign_extend_i48, get_payload, TAG_INT};
+        use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
         if is_number(bits) {
             WireValue::Number(unbox_number(bits))

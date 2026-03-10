@@ -82,8 +82,7 @@ fn test_let_typed_number() {
 /// Verifies type-annotated bool binding.
 #[test]
 fn test_let_typed_bool() {
-    ShapeTest::new("fn test() -> bool { let x: bool = true\nreturn x }\ntest()")
-        .expect_bool(true);
+    ShapeTest::new("fn test() -> bool { let x: bool = true\nreturn x }\ntest()").expect_bool(true);
 }
 
 /// Verifies type-annotated string binding.
@@ -147,8 +146,7 @@ fn test_width_u64() {
 /// Verifies i8 negative value.
 #[test]
 fn test_width_i8_negative() {
-    ShapeTest::new("fn test() -> int { let a: i8 = -128\nreturn a }\ntest()")
-        .expect_number(-128.0);
+    ShapeTest::new("fn test() -> int { let a: i8 = -128\nreturn a }\ntest()").expect_number(-128.0);
 }
 
 /// Verifies i16 negative value.
@@ -567,15 +565,13 @@ fn test_let_bind_large_int() {
 /// Verifies negative number binding.
 #[test]
 fn test_let_bind_negative_number() {
-    ShapeTest::new("fn test() -> number { let x = -2.5\nreturn x }\ntest()")
-        .expect_number(-2.5);
+    ShapeTest::new("fn test() -> number { let x = -2.5\nreturn x }\ntest()").expect_number(-2.5);
 }
 
 /// Verifies let bind expression result.
 #[test]
 fn test_let_bind_expression_result() {
-    ShapeTest::new("fn test() -> int { let x = 3 + 4 * 2\nreturn x }\ntest()")
-        .expect_number(11.0);
+    ShapeTest::new("fn test() -> int { let x = 3 + 4 * 2\nreturn x }\ntest()").expect_number(11.0);
 }
 
 /// Verifies let bind comparison result.

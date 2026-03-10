@@ -69,8 +69,7 @@ pub async fn run_expand_comptime(
             script.display()
         )
     })?;
-    let generated_extends =
-        shape_ast::transform::collect_generated_annotation_extends(&program);
+    let generated_extends = shape_ast::transform::collect_generated_annotation_extends(&program);
     let user_function_names = collect_program_function_names(&program);
     let generated_method_names = collect_generated_method_names(&generated_extends);
 
@@ -221,9 +220,7 @@ fn collect_generated_method_names(generated_extends: &[ExtendStatement]) -> Hash
     names
 }
 
-fn collect_program_function_defs(
-    program: &shape_ast::Program,
-) -> HashMap<String, FunctionDef> {
+fn collect_program_function_defs(program: &shape_ast::Program) -> HashMap<String, FunctionDef> {
     let mut defs = HashMap::new();
     for item in &program.items {
         if let Item::Function(func, _) = item {

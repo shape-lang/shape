@@ -199,7 +199,7 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
 
 /// Format a NaN-boxed value as a string for display
 fn format_nan_boxed(value_bits: u64) -> String {
-    use shape_value::tags::{get_tag, is_tagged, sign_extend_i48, get_payload, TAG_INT};
+    use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
     if is_number(value_bits) {
         let n = unbox_number(value_bits);
@@ -225,10 +225,7 @@ fn format_nan_boxed(value_bits: u64) -> String {
             }
             Some(HK_ARRAY) => {
                 let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
-                let elems: Vec<String> = arr
-                    .iter()
-                    .map(|&bits| format_nan_boxed(bits))
-                    .collect();
+                let elems: Vec<String> = arr.iter().map(|&bits| format_nan_boxed(bits)).collect();
                 format!("[{}]", elems.join(", "))
             }
             Some(HK_OK) => {

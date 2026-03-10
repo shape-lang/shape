@@ -34,8 +34,7 @@ fn test_string_literal_with_digits() {
 /// Verifies a string literal containing special characters.
 #[test]
 fn test_string_literal_special_chars() {
-    ShapeTest::new(r#"fn test() -> string { "!@#$%^&*()" } test()"#)
-        .expect_string("!@#$%^&*()");
+    ShapeTest::new(r#"fn test() -> string { "!@#$%^&*()" } test()"#).expect_string("!@#$%^&*()");
 }
 
 /// Verifies a string literal containing only spaces.
@@ -60,49 +59,61 @@ fn test_string_literal_long() {
 /// Verifies concatenation of two strings.
 #[test]
 fn test_concat_two_strings() {
-    ShapeTest::new(r#"fn test() -> string { "hello" + " world" }
-test()"#)
-        .expect_string("hello world");
+    ShapeTest::new(
+        r#"fn test() -> string { "hello" + " world" }
+test()"#,
+    )
+    .expect_string("hello world");
 }
 
 /// Verifies concatenation with empty string on the left.
 #[test]
 fn test_concat_empty_left() {
-    ShapeTest::new(r#"fn test() -> string { "" + "hello" }
-test()"#)
-        .expect_string("hello");
+    ShapeTest::new(
+        r#"fn test() -> string { "" + "hello" }
+test()"#,
+    )
+    .expect_string("hello");
 }
 
 /// Verifies concatenation with empty string on the right.
 #[test]
 fn test_concat_empty_right() {
-    ShapeTest::new(r#"fn test() -> string { "hello" + "" }
-test()"#)
-        .expect_string("hello");
+    ShapeTest::new(
+        r#"fn test() -> string { "hello" + "" }
+test()"#,
+    )
+    .expect_string("hello");
 }
 
 /// Verifies concatenation of two empty strings.
 #[test]
 fn test_concat_both_empty() {
-    ShapeTest::new(r#"fn test() -> string { "" + "" }
-test()"#)
-        .expect_string("");
+    ShapeTest::new(
+        r#"fn test() -> string { "" + "" }
+test()"#,
+    )
+    .expect_string("");
 }
 
 /// Verifies chaining multiple concatenations.
 #[test]
 fn test_concat_multiple() {
-    ShapeTest::new(r#"fn test() -> string { "a" + "b" + "c" + "d" }
-test()"#)
-        .expect_string("abcd");
+    ShapeTest::new(
+        r#"fn test() -> string { "a" + "b" + "c" + "d" }
+test()"#,
+    )
+    .expect_string("abcd");
 }
 
 /// Verifies concatenation with spaces.
 #[test]
 fn test_concat_with_spaces() {
-    ShapeTest::new(r#"fn test() -> string { "hello" + " " + "world" }
-test()"#)
-        .expect_string("hello world");
+    ShapeTest::new(
+        r#"fn test() -> string { "hello" + " " + "world" }
+test()"#,
+    )
+    .expect_string("hello world");
 }
 
 /// Verifies concatenation of variable-held strings.
@@ -139,33 +150,41 @@ test()"#,
 /// Verifies newline escape in string length.
 #[test]
 fn test_escape_newline() {
-    ShapeTest::new(r#"fn test() -> int { "a\nb".length }
-test()"#)
-        .expect_number(3.0);
+    ShapeTest::new(
+        r#"fn test() -> int { "a\nb".length }
+test()"#,
+    )
+    .expect_number(3.0);
 }
 
 /// Verifies tab escape in string length.
 #[test]
 fn test_escape_tab() {
-    ShapeTest::new(r#"fn test() -> int { "a\tb".length }
-test()"#)
-        .expect_number(3.0);
+    ShapeTest::new(
+        r#"fn test() -> int { "a\tb".length }
+test()"#,
+    )
+    .expect_number(3.0);
 }
 
 /// Verifies backslash escape in string length.
 #[test]
 fn test_escape_backslash() {
-    ShapeTest::new(r#"fn test() -> int { "a\\b".length }
-test()"#)
-        .expect_number(3.0);
+    ShapeTest::new(
+        r#"fn test() -> int { "a\\b".length }
+test()"#,
+    )
+    .expect_number(3.0);
 }
 
 /// Verifies double-quote escape is contained in string.
 #[test]
 fn test_escape_double_quote() {
-    ShapeTest::new(r#"fn test() -> bool { "he\"llo".contains("\"") }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "he\"llo".contains("\"") }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies newline escape in contains check.
@@ -185,57 +204,71 @@ test()"#,
 /// Verifies equality of identical strings.
 #[test]
 fn test_string_equal_same() {
-    ShapeTest::new(r#"fn test() -> bool { "hello" == "hello" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "hello" == "hello" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies inequality of different strings.
 #[test]
 fn test_string_equal_different() {
-    ShapeTest::new(r#"fn test() -> bool { "hello" == "world" }
-test()"#)
-        .expect_bool(false);
+    ShapeTest::new(
+        r#"fn test() -> bool { "hello" == "world" }
+test()"#,
+    )
+    .expect_bool(false);
 }
 
 /// Verifies != operator with different strings.
 #[test]
 fn test_string_not_equal() {
-    ShapeTest::new(r#"fn test() -> bool { "hello" != "world" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "hello" != "world" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies != operator with same strings.
 #[test]
 fn test_string_not_equal_same() {
-    ShapeTest::new(r#"fn test() -> bool { "hello" != "hello" }
-test()"#)
-        .expect_bool(false);
+    ShapeTest::new(
+        r#"fn test() -> bool { "hello" != "hello" }
+test()"#,
+    )
+    .expect_bool(false);
 }
 
 /// Verifies case-sensitive string equality.
 #[test]
 fn test_string_equal_case_sensitive() {
-    ShapeTest::new(r#"fn test() -> bool { "Hello" == "hello" }
-test()"#)
-        .expect_bool(false);
+    ShapeTest::new(
+        r#"fn test() -> bool { "Hello" == "hello" }
+test()"#,
+    )
+    .expect_bool(false);
 }
 
 /// Verifies equality of two empty strings.
 #[test]
 fn test_string_equal_empty() {
-    ShapeTest::new(r#"fn test() -> bool { "" == "" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "" == "" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies inequality of empty vs non-empty strings.
 #[test]
 fn test_string_not_equal_empty_vs_nonempty() {
-    ShapeTest::new(r#"fn test() -> bool { "" != "a" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "" != "a" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies string equality with concatenated result.
@@ -258,41 +291,51 @@ test()"#,
 /// Verifies lexicographic less-than comparison.
 #[test]
 fn test_string_less_than() {
-    ShapeTest::new(r#"fn test() -> bool { "abc" < "abd" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "abc" < "abd" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies lexicographic greater-than comparison.
 #[test]
 fn test_string_greater_than() {
-    ShapeTest::new(r#"fn test() -> bool { "b" > "a" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "b" > "a" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies less-than-or-equal comparison.
 #[test]
 fn test_string_less_than_equal() {
-    ShapeTest::new(r#"fn test() -> bool { "abc" <= "abc" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "abc" <= "abc" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies greater-than-or-equal comparison.
 #[test]
 fn test_string_greater_than_equal() {
-    ShapeTest::new(r#"fn test() -> bool { "abd" >= "abc" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "abd" >= "abc" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies prefix string is less than the full string.
 #[test]
 fn test_string_compare_prefix() {
-    ShapeTest::new(r#"fn test() -> bool { "ab" < "abc" }
-test()"#)
-        .expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "ab" < "abc" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies string comparison with variables.

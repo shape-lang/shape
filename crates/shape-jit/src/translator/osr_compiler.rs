@@ -51,9 +51,9 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::LoadLocalTrusted
         | OpCode::StoreLocal
         | OpCode::StoreLocalTyped => true,
-        OpCode::LoadModuleBinding | OpCode::StoreModuleBinding | OpCode::StoreModuleBindingTyped => {
-            true
-        }
+        OpCode::LoadModuleBinding
+        | OpCode::StoreModuleBinding
+        | OpCode::StoreModuleBindingTyped => true,
         // Arithmetic (Int)
         OpCode::AddInt
         | OpCode::SubInt
@@ -855,7 +855,9 @@ pub fn compile_osr_loop(
                 }
 
                 // Module bindings: not in JIT context buffer. Deopt if encountered.
-                OpCode::LoadModuleBinding | OpCode::StoreModuleBinding | OpCode::StoreModuleBindingTyped => {
+                OpCode::LoadModuleBinding
+                | OpCode::StoreModuleBinding
+                | OpCode::StoreModuleBindingTyped => {
                     builder.ins().jump(deopt_block, &[]);
                     block_terminated = true;
                 }

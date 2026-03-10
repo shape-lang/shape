@@ -354,7 +354,9 @@ impl VirtualMachine {
                 } else if let (Some(ai), Some(bi)) = (Self::int_operand(&a), Self::int_operand(&b))
                 {
                     match ai.checked_add(bi) {
-                        Some(result) if fits_i48(result) => self.push_vw(ValueWord::from_i64(result))?,
+                        Some(result) if fits_i48(result) => {
+                            self.push_vw(ValueWord::from_i64(result))?
+                        }
                         _ => self.push_vw(ValueWord::from_f64(ai as f64 + bi as f64))?,
                     }
                 } else {
@@ -397,7 +399,9 @@ impl VirtualMachine {
                 } else if let (Some(ai), Some(bi)) = (Self::int_operand(&a), Self::int_operand(&b))
                 {
                     match ai.checked_sub(bi) {
-                        Some(result) if fits_i48(result) => self.push_vw(ValueWord::from_i64(result))?,
+                        Some(result) if fits_i48(result) => {
+                            self.push_vw(ValueWord::from_i64(result))?
+                        }
                         _ => self.push_vw(ValueWord::from_f64(ai as f64 - bi as f64))?,
                     }
                 } else {
@@ -440,7 +444,9 @@ impl VirtualMachine {
                 } else if let (Some(ai), Some(bi)) = (Self::int_operand(&a), Self::int_operand(&b))
                 {
                     match ai.checked_mul(bi) {
-                        Some(result) if fits_i48(result) => self.push_vw(ValueWord::from_i64(result))?,
+                        Some(result) if fits_i48(result) => {
+                            self.push_vw(ValueWord::from_i64(result))?
+                        }
                         _ => self.push_vw(ValueWord::from_f64(ai as f64 * bi as f64))?,
                     }
                 } else {

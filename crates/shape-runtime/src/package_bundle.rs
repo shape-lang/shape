@@ -372,7 +372,10 @@ mod tests {
     #[test]
     fn test_verify_checksum_wrong() {
         let data = b"hello world";
-        assert!(!verify_bundle_checksum(data, "0000000000000000000000000000000000000000000000000000000000000000"));
+        assert!(!verify_bundle_checksum(
+            data,
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        ));
     }
 
     #[test]

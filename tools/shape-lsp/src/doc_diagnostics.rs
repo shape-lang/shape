@@ -344,7 +344,14 @@ fn validate_link_tag(
         return;
     }
 
-    if resolve_doc_link(program, &link.target, module_cache, current_file, workspace_root).is_none()
+    if resolve_doc_link(
+        program,
+        &link.target,
+        module_cache,
+        current_file,
+        workspace_root,
+    )
+    .is_none()
     {
         push_doc_error(
             diagnostics,

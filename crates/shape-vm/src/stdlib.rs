@@ -87,8 +87,7 @@ fn load_from_embedded(bytes: &[u8]) -> Result<BytecodeProgram> {
 pub fn core_binding_names() -> Vec<String> {
     match compile_core_modules() {
         Ok(program) => {
-            let mut names: Vec<String> =
-                program.functions.iter().map(|f| f.name.clone()).collect();
+            let mut names: Vec<String> = program.functions.iter().map(|f| f.name.clone()).collect();
             for name in &program.module_binding_names {
                 if !names.contains(name) {
                     names.push(name.clone());
@@ -364,7 +363,11 @@ mod tests {
                 ));
             }
         }
-        assert!(bad.is_empty(), "Functions with OOB body_length:\n{}", bad.join("\n"));
+        assert!(
+            bad.is_empty(),
+            "Functions with OOB body_length:\n{}",
+            bad.join("\n")
+        );
     }
 
     #[test]

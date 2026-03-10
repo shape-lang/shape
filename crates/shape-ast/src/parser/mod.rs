@@ -109,12 +109,13 @@ pub fn parse_item(pair: pest::iterators::Pair<Rule>) -> Result<Item> {
     let pair_loc = pair_location(&pair);
     let mut item_inner = pair.into_inner();
     let mut doc_comment = None;
-    let mut inner = item_inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected item content".to_string(),
-        location: Some(pair_loc.clone().with_hint(
-            "provide a pattern, query, function, variable declaration, or expression",
-        )),
-    })?;
+    let mut inner =
+        item_inner.next().ok_or_else(|| ShapeError::ParseError {
+            message: "expected item content".to_string(),
+            location: Some(pair_loc.clone().with_hint(
+                "provide a pattern, query, function, variable declaration, or expression",
+            )),
+        })?;
 
     if inner.as_rule() == Rule::doc_comment {
         doc_comment = Some(docs::parse_doc_comment(inner));
@@ -151,10 +152,7 @@ pub fn parse_item(pair: pest::iterators::Pair<Rule>) -> Result<Item> {
                 location: Some(inner_loc.with_hint("provide a value after '='")),
             })?;
             let value = expressions::parse_expression(value_pair)?;
-            Item::Assignment(
-                crate::ast::Assignment { pattern, value },
-                span,
-            )
+            Item::Assignment(crate::ast::Assignment { pattern, value }, span)
         }
         Rule::expression_stmt => {
             let inner_loc = pair_location(&inner);
@@ -172,31 +170,26 @@ pub fn parse_item(pair: pest::iterators::Pair<Rule>) -> Result<Item> {
         Rule::module_decl => Item::Module(modules::parse_module_decl(inner)?, span),
         Rule::pub_item => Item::Export(modules::parse_export_item(inner)?, span),
         Rule::struct_type_def => Item::StructType(types::parse_struct_type_def(inner)?, span),
-        Rule::native_struct_type_def => Item::StructType(
-            types::parse_native_struct_type_def(inner)?,
-            span,
-        ),
-        Rule::builtin_type_decl => Item::BuiltinTypeDecl(
-            types::parse_builtin_type_decl(inner)?,
-            span,
-        ),
+        Rule::native_struct_type_def => {
+            Item::StructType(types::parse_native_struct_type_def(inner)?, span)
+        }
+        Rule::builtin_type_decl => {
+            Item::BuiltinTypeDecl(types::parse_builtin_type_decl(inner)?, span)
+        }
         Rule::type_alias_def => Item::TypeAlias(types::parse_type_alias_def(inner)?, span),
         Rule::interface_def => Item::Interface(types::parse_interface_def(inner)?, span),
         Rule::trait_def => Item::Trait(types::parse_trait_def(inner)?, span),
         Rule::enum_def => Item::Enum(types::parse_enum_def(inner)?, span),
-        Rule::extern_native_function_def => Item::ForeignFunction(
-            functions::parse_extern_native_function_def(inner)?,
-            span,
-        ),
-        Rule::foreign_function_def => Item::ForeignFunction(
-            functions::parse_foreign_function_def(inner)?,
-            span,
-        ),
+        Rule::extern_native_function_def => {
+            Item::ForeignFunction(functions::parse_extern_native_function_def(inner)?, span)
+        }
+        Rule::foreign_function_def => {
+            Item::ForeignFunction(functions::parse_foreign_function_def(inner)?, span)
+        }
         Rule::function_def => Item::Function(functions::parse_function_def(inner)?, span),
-        Rule::builtin_function_decl => Item::BuiltinFunctionDecl(
-            functions::parse_builtin_function_decl(inner)?,
-            span,
-        ),
+        Rule::builtin_function_decl => {
+            Item::BuiltinFunctionDecl(functions::parse_builtin_function_decl(inner)?, span)
+        }
         Rule::stream_def => Item::Stream(stream::parse_stream_def(inner)?, span),
         Rule::test_def => {
             return Err(ShapeError::ParseError {
@@ -206,27 +199,14 @@ pub fn parse_item(pair: pest::iterators::Pair<Rule>) -> Result<Item> {
             });
         }
         Rule::statement => Item::Statement(statements::parse_statement(inner)?, span),
-        Rule::extend_statement => Item::Extend(
-            extensions::parse_extend_statement(inner)?,
-            span,
-        ),
+        Rule::extend_statement => Item::Extend(extensions::parse_extend_statement(inner)?, span),
         Rule::impl_block => Item::Impl(extensions::parse_impl_block(inner)?, span),
-        Rule::optimize_statement => Item::Optimize(
-            extensions::parse_optimize_statement(inner)?,
-            span,
-        ),
-        Rule::annotation_def => Item::AnnotationDef(
-            extensions::parse_annotation_def(inner)?,
-            span,
-        ),
-        Rule::datasource_def => Item::DataSource(
-            data_sources::parse_datasource_def(inner)?,
-            span,
-        ),
-        Rule::query_decl => Item::QueryDecl(
-            data_sources::parse_query_decl(inner)?,
-            span,
-        ),
+        Rule::optimize_statement => {
+            Item::Optimize(extensions::parse_optimize_statement(inner)?, span)
+        }
+        Rule::annotation_def => Item::AnnotationDef(extensions::parse_annotation_def(inner)?, span),
+        Rule::datasource_def => Item::DataSource(data_sources::parse_datasource_def(inner)?, span),
+        Rule::query_decl => Item::QueryDecl(data_sources::parse_query_decl(inner)?, span),
         Rule::comptime_block => {
             let block_pair = inner
                 .into_inner()

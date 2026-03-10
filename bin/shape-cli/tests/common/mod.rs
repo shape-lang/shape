@@ -3,8 +3,8 @@
 //! Extracted from shape-core/tests/feature_coverage.rs.
 #![allow(dead_code)]
 
-use shape_runtime::initialize_shared_runtime;
 use shape_runtime::engine::ShapeEngine;
+use shape_runtime::initialize_shared_runtime;
 use shape_vm::BytecodeExecutor;
 
 pub fn init_runtime() {
@@ -15,7 +15,9 @@ pub fn eval(code: &str) -> Result<serde_json::Value, String> {
     let mut engine = ShapeEngine::new().map_err(|e| e.to_string())?;
     engine.load_stdlib().map_err(|e| e.to_string())?;
     let mut executor = BytecodeExecutor::new();
-    let result = engine.execute(&mut executor, code).map_err(|e| e.to_string())?;
+    let result = engine
+        .execute(&mut executor, code)
+        .map_err(|e| e.to_string())?;
     serde_json::to_value(&result.value).map_err(|e| e.to_string())
 }
 

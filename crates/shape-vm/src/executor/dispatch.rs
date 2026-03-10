@@ -473,9 +473,22 @@ impl VirtualMachine {
             }
 
             // Variables (including reference operations)
-            LoadLocal | LoadLocalTrusted | StoreLocal | StoreLocalTyped | LoadModuleBinding
-            | StoreModuleBinding | StoreModuleBindingTyped | LoadClosure | StoreClosure
-            | CloseUpvalue | MakeRef | MakeFieldRef | DerefLoad | DerefStore | SetIndexRef | BoxLocal
+            LoadLocal
+            | LoadLocalTrusted
+            | StoreLocal
+            | StoreLocalTyped
+            | LoadModuleBinding
+            | StoreModuleBinding
+            | StoreModuleBindingTyped
+            | LoadClosure
+            | StoreClosure
+            | CloseUpvalue
+            | MakeRef
+            | MakeFieldRef
+            | DerefLoad
+            | DerefStore
+            | SetIndexRef
+            | BoxLocal
             | BoxModuleBinding => {
                 return self.exec_variables(instruction);
             }

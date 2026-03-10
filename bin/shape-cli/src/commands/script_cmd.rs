@@ -1,12 +1,12 @@
 use super::{ExecutionMode, ExecutionModeArg, ProviderOptions};
 use crate::extension_loading;
 use anyhow::{Context, Result, bail};
+use shape_runtime::engine::{ExecutionResult, ShapeEngine};
 use shape_runtime::hashing::HashDigest;
 use shape_runtime::project::ExternalLockMode;
 #[cfg(test)]
 use shape_runtime::project::{NativeDependencyProvider, NativeDependencySpec};
 use shape_runtime::snapshot::{SnapshotStore, VmSnapshot};
-use shape_runtime::engine::{ExecutionResult, ShapeEngine};
 use shape_vm::BytecodeExecutor;
 use shape_wire::{WireValue, render_wire_terminal};
 #[cfg(test)]
@@ -206,8 +206,7 @@ pub async fn run_script(
             let content = fs::read_to_string(file)
                 .await
                 .with_context(|| format!("failed to read {}", file.display()))?;
-            let (frontmatter, source) =
-                shape_runtime::frontmatter::parse_frontmatter(&content);
+            let (frontmatter, source) = shape_runtime::frontmatter::parse_frontmatter(&content);
             if let Some(ref fm) = frontmatter {
                 if !fm.modules.paths.is_empty() {
                     let base = file
@@ -358,8 +357,10 @@ fn resolve_frontmatter_dependencies(
 
     let lock_path = standalone_script_lock_path(script_path);
     resolve_dependencies_for_root(engine, &root_path, &frontmatter.dependencies, &lock_path);
-    let scopes =
-        shape_runtime::native_resolution::collect_native_dependency_scopes(&root_path, frontmatter)?;
+    let scopes = shape_runtime::native_resolution::collect_native_dependency_scopes(
+        &root_path,
+        frontmatter,
+    )?;
     let _ = shape_runtime::native_resolution::resolve_native_dependency_scopes(
         &scopes,
         Some(&lock_path),
@@ -388,9 +389,9 @@ fn resolve_dependencies_for_root(
     };
 
     if need_resolve {
-        let Some(resolver) = shape_runtime::dependency_resolver::DependencyResolver::new(
-            root_path.to_path_buf(),
-        ) else {
+        let Some(resolver) =
+            shape_runtime::dependency_resolver::DependencyResolver::new(root_path.to_path_buf())
+        else {
             return;
         };
 
@@ -471,8 +472,7 @@ fn resolve_dependencies_for_root(
             }
 
             if let shape_runtime::package_lock::LockedSource::Registry {
-                path: Some(path),
-                ..
+                path: Some(path), ..
             } = &pkg.source
             {
                 dep_paths.insert(pkg.name.clone(), std::path::PathBuf::from(path));
@@ -481,9 +481,7 @@ fn resolve_dependencies_for_root(
 
             // For git/legacy-registry deps, re-resolve to recover concrete cached path.
             if let Some(resolver) =
-                shape_runtime::dependency_resolver::DependencyResolver::new(
-                    root_path.to_path_buf(),
-                )
+                shape_runtime::dependency_resolver::DependencyResolver::new(root_path.to_path_buf())
                 && let Some(spec) = dependencies.get(&pkg.name)
             {
                 let mut m = std::collections::HashMap::new();
@@ -659,9 +657,9 @@ fn collect_native_dependency_scopes(
             continue;
         }
 
-        let Some(resolver) = shape_runtime::dependency_resolver::DependencyResolver::new(
-            canonical_root.clone(),
-        ) else {
+        let Some(resolver) =
+            shape_runtime::dependency_resolver::DependencyResolver::new(canonical_root.clone())
+        else {
             continue;
         };
         let resolved = resolver.resolve(&package.dependencies).map_err(|e| {
@@ -729,17 +727,16 @@ fn collect_native_dependency_scopes(
                 Ok(content) => content,
                 Err(_) => continue,
             };
-            let dep_project =
-                match shape_runtime::project::parse_shape_project_toml(&dep_source) {
-                    Ok(config) => config,
-                    Err(err) => {
-                        return Err(anyhow::anyhow!(
-                            "failed to parse dependency project '{}': {}",
-                            dep_toml.display(),
-                            err
-                        ));
-                    }
-                };
+            let dep_project = match shape_runtime::project::parse_shape_project_toml(&dep_source) {
+                Ok(config) => config,
+                Err(err) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to parse dependency project '{}': {}",
+                        dep_toml.display(),
+                        err
+                    ));
+                }
+            };
             let (dep_name, dep_version, dep_key) =
                 normalize_package_identity(&dep_project, &resolved_dep.name, &resolved_dep.version);
             queue.push_back((dep_root, dep_project, dep_name, dep_version, dep_key));
@@ -988,8 +985,7 @@ fn native_artifact_inputs(
         ),
         probe.fingerprint.clone(),
     )]);
-    let determinism =
-        shape_runtime::package_lock::ArtifactDeterminism::External { fingerprints };
+    let determinism = shape_runtime::package_lock::ArtifactDeterminism::External { fingerprints };
     (inputs, determinism)
 }
 
@@ -1802,8 +1798,8 @@ duckdb = {{ provider = "system", version = "1.0.0", linux = "{alias}", macos = "
         std::fs::write(leaf_dir.join("main.shape"), "pub fn leaf_marker() { 1 }")
             .expect("write leaf source");
 
-        let leaf_project = shape_runtime::project::find_project_root(&leaf_dir)
-            .expect("resolve leaf project");
+        let leaf_project =
+            shape_runtime::project::find_project_root(&leaf_dir).expect("resolve leaf project");
         let leaf_bundle = BundleCompiler::compile(&leaf_project).expect("compile leaf bundle");
         let leaf_bundle_path = tmp.path().join("leaf.shapec");
         leaf_bundle

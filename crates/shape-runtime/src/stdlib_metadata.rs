@@ -129,8 +129,10 @@ impl StdlibMetadata {
                     }
                 }
                 Item::BuiltinTypeDecl(type_decl, span) => {
-                    intrinsic_types
-                        .push(Self::builtin_type_to_info(type_decl, program.docs.comment_for_span(*span)));
+                    intrinsic_types.push(Self::builtin_type_to_info(
+                        type_decl,
+                        program.docs.comment_for_span(*span),
+                    ));
                 }
                 Item::BuiltinFunctionDecl(func_decl, span) => {
                     intrinsic_functions.push(Self::builtin_function_to_info(
@@ -227,7 +229,9 @@ impl StdlibMetadata {
             category,
             parameters: params,
             return_type,
-            example: doc.and_then(|comment| comment.example_doc()).map(str::to_string),
+            example: doc
+                .and_then(|comment| comment.example_doc())
+                .map(str::to_string),
             implemented: true,
             comptime_only: false,
         }
@@ -297,7 +301,9 @@ impl StdlibMetadata {
             category: Self::infer_category_from_path(module_path),
             parameters: params,
             return_type,
-            example: doc.and_then(|comment| comment.example_doc()).map(str::to_string),
+            example: doc
+                .and_then(|comment| comment.example_doc())
+                .map(str::to_string),
             implemented: true,
             comptime_only: crate::builtin_metadata::is_comptime_builtin_function(&func.name),
         }

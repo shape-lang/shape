@@ -92,10 +92,7 @@ fn test_enum_construct_last_of_many() {
 /// Verifies enum with explicit int values parses correctly.
 #[test]
 fn test_enum_explicit_int_values_parses() {
-    ShapeTest::new(
-        "enum Status { Pending = 0, Active = 1, Done = 2 }\n1",
-    )
-    .expect_number(1.0);
+    ShapeTest::new("enum Status { Pending = 0, Active = 1, Done = 2 }\n1").expect_number(1.0);
 }
 
 /// Verifies enum with explicit string values parses correctly.
@@ -132,8 +129,7 @@ fn test_enum_eq_same_variant() {
 /// Verifies two different enum variants are not equal.
 #[test]
 fn test_enum_eq_different_variant() {
-    ShapeTest::new("enum Color { Red, Green, Blue }\nColor::Red == Color::Blue")
-        .expect_bool(false);
+    ShapeTest::new("enum Color { Red, Green, Blue }\nColor::Red == Color::Blue").expect_bool(false);
 }
 
 /// Verifies != returns false for same variants.
@@ -354,10 +350,8 @@ match Visibility::Public { Visibility::Public => "pub", Visibility::Private => "
 /// Verifies enum with semicolon separator between variants.
 #[test]
 fn test_enum_semicolon_separator() {
-    ShapeTest::new(
-        "enum Sep { A; B; C }\nmatch Sep::B { Sep::A => 1, Sep::B => 2, Sep::C => 3, }",
-    )
-    .expect_number(2.0);
+    ShapeTest::new("enum Sep { A; B; C }\nmatch Sep::B { Sep::A => 1, Sep::B => 2, Sep::C => 3, }")
+        .expect_number(2.0);
 }
 
 // =============================================================================

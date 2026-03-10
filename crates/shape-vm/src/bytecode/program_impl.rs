@@ -275,7 +275,11 @@ impl BytecodeProgram {
 
         // Merge native struct layouts (dedup by name, self wins)
         for layout in other.native_struct_layouts {
-            if !self.native_struct_layouts.iter().any(|l| l.name == layout.name) {
+            if !self
+                .native_struct_layouts
+                .iter()
+                .any(|l| l.name == layout.name)
+            {
                 self.native_struct_layouts.push(layout);
             }
         }

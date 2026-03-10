@@ -136,10 +136,7 @@ pub async fn run_publish(
     if !response.is_empty() {
         eprintln!("{}", response);
     }
-    eprintln!(
-        "  https://pkg.shape-lang.dev/packages/{}",
-        pkg_name
-    );
+    eprintln!("  https://pkg.shape-lang.dev/packages/{}", pkg_name);
 
     Ok(())
 }

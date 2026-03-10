@@ -196,9 +196,10 @@ fn collect_all(
     ctx: &mut Option<&mut ExecutionContext>,
 ) -> Result<Vec<ValueWord>, VMError> {
     // Check if there are any skip/take transforms. If not, fast path.
-    let has_skip_take = state.transforms.iter().any(|t| {
-        matches!(t, IteratorTransform::Skip(_) | IteratorTransform::Take(_))
-    });
+    let has_skip_take = state
+        .transforms
+        .iter()
+        .any(|t| matches!(t, IteratorTransform::Skip(_) | IteratorTransform::Take(_)));
 
     if !has_skip_take {
         // No skip/take — just collect all elements with map/filter applied
@@ -253,9 +254,10 @@ fn collect_all(
     // raw source before map/filter.
 
     // Find the position of the first skip/take and the first map/filter/flatmap
-    let first_skip_take_pos = state.transforms.iter().position(|t| {
-        matches!(t, IteratorTransform::Skip(_) | IteratorTransform::Take(_))
-    });
+    let first_skip_take_pos = state
+        .transforms
+        .iter()
+        .position(|t| matches!(t, IteratorTransform::Skip(_) | IteratorTransform::Take(_)));
     let first_map_filter_pos = state.transforms.iter().position(|t| {
         matches!(
             t,
@@ -309,11 +311,8 @@ fn collect_all(
                     IteratorTransform::Map(func) => {
                         let mut mapped = Vec::with_capacity(raw.len());
                         for elem in raw {
-                            let result = vm.call_value_immediate_nb(
-                                func,
-                                &[elem],
-                                ctx.as_deref_mut(),
-                            )?;
+                            let result =
+                                vm.call_value_immediate_nb(func, &[elem], ctx.as_deref_mut())?;
                             mapped.push(result);
                         }
                         raw = mapped;
@@ -321,11 +320,8 @@ fn collect_all(
                     IteratorTransform::FlatMap(func) => {
                         let mut flat = Vec::new();
                         for elem in raw {
-                            let result = vm.call_value_immediate_nb(
-                                func,
-                                &[elem],
-                                ctx.as_deref_mut(),
-                            )?;
+                            let result =
+                                vm.call_value_immediate_nb(func, &[elem], ctx.as_deref_mut())?;
                             if let Some(inner_view) = result.as_any_array() {
                                 let inner = inner_view.to_generic();
                                 flat.extend_from_slice(&inner);

@@ -422,9 +422,7 @@ impl BytecodeCompiler {
 
         // y column names
         for y_col in &spec.y_columns {
-            let yc = self
-                .program
-                .add_constant(Constant::String(y_col.clone()));
+            let yc = self.program.add_constant(Constant::String(y_col.clone()));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(yc)),

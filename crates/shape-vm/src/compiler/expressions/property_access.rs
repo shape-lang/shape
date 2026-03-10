@@ -189,9 +189,7 @@ impl BytecodeCompiler {
             }
         }
 
-        if !optional
-            && let Some(place) = self.try_resolve_typed_field_place(object, property)
-        {
+        if !optional && let Some(place) = self.try_resolve_typed_field_place(object, property) {
             let label = format!("{}.{}", place.root_name, property);
             let source_loc = self.span_to_source_location(object.span());
             self.borrow_checker

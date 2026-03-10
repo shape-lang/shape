@@ -40,99 +40,141 @@ fn test_bool_false_is_not_truthy() {
 /// Verifies empty string literal.
 #[test]
 fn test_string_literal_empty() {
-    ShapeTest::new(r#"fn test() -> string { "" }
-test()"#).expect_string("");
+    ShapeTest::new(
+        r#"fn test() -> string { "" }
+test()"#,
+    )
+    .expect_string("");
 }
 
 /// Verifies hello string literal.
 #[test]
 fn test_string_literal_hello() {
-    ShapeTest::new(r#"fn test() -> string { "hello" }
-test()"#).expect_string("hello");
+    ShapeTest::new(
+        r#"fn test() -> string { "hello" }
+test()"#,
+    )
+    .expect_string("hello");
 }
 
 /// Verifies single character string literal.
 #[test]
 fn test_string_literal_single_char() {
-    ShapeTest::new(r#"fn test() -> string { "a" }
-test()"#).expect_string("a");
+    ShapeTest::new(
+        r#"fn test() -> string { "a" }
+test()"#,
+    )
+    .expect_string("a");
 }
 
 /// Verifies multi-word string literal.
 #[test]
 fn test_string_literal_multi_word() {
-    ShapeTest::new(r#"fn test() -> string { "hello world" }
-test()"#).expect_string("hello world");
+    ShapeTest::new(
+        r#"fn test() -> string { "hello world" }
+test()"#,
+    )
+    .expect_string("hello world");
 }
 
 /// Verifies string literal with numbers.
 #[test]
 fn test_string_literal_with_numbers() {
-    ShapeTest::new(r#"fn test() -> string { "abc123" }
-test()"#).expect_string("abc123");
+    ShapeTest::new(
+        r#"fn test() -> string { "abc123" }
+test()"#,
+    )
+    .expect_string("abc123");
 }
 
 /// Verifies string literal with leading/trailing spaces.
 #[test]
 fn test_string_literal_with_spaces() {
-    ShapeTest::new(r#"fn test() -> string { "  spaces  " }
-test()"#).expect_string("  spaces  ");
+    ShapeTest::new(
+        r#"fn test() -> string { "  spaces  " }
+test()"#,
+    )
+    .expect_string("  spaces  ");
 }
 
 /// Verifies string escape: newline.
 #[test]
 fn test_string_escape_newline() {
-    ShapeTest::new(r#"fn test() -> string { "line1\nline2" }
-test()"#).expect_string("line1\nline2");
+    ShapeTest::new(
+        r#"fn test() -> string { "line1\nline2" }
+test()"#,
+    )
+    .expect_string("line1\nline2");
 }
 
 /// Verifies string escape: tab.
 #[test]
 fn test_string_escape_tab() {
-    ShapeTest::new(r#"fn test() -> string { "col1\tcol2" }
-test()"#).expect_string("col1\tcol2");
+    ShapeTest::new(
+        r#"fn test() -> string { "col1\tcol2" }
+test()"#,
+    )
+    .expect_string("col1\tcol2");
 }
 
 /// Verifies string escape: backslash.
 #[test]
 fn test_string_escape_backslash() {
-    ShapeTest::new(r#"fn test() -> string { "back\\slash" }
-test()"#).expect_string("back\\slash");
+    ShapeTest::new(
+        r#"fn test() -> string { "back\\slash" }
+test()"#,
+    )
+    .expect_string("back\\slash");
 }
 
 /// Verifies string escape: double quote.
 #[test]
 fn test_string_escape_quote() {
-    ShapeTest::new(r#"fn test() -> string { "say \"hi\"" }
-test()"#).expect_string("say \"hi\"");
+    ShapeTest::new(
+        r#"fn test() -> string { "say \"hi\"" }
+test()"#,
+    )
+    .expect_string("say \"hi\"");
 }
 
 /// Verifies long string literal.
 #[test]
 fn test_string_literal_long() {
-    ShapeTest::new(r#"fn test() -> string { "the quick brown fox jumps over the lazy dog" }
-test()"#).expect_string("the quick brown fox jumps over the lazy dog");
+    ShapeTest::new(
+        r#"fn test() -> string { "the quick brown fox jumps over the lazy dog" }
+test()"#,
+    )
+    .expect_string("the quick brown fox jumps over the lazy dog");
 }
 
 /// Verifies string literal with special characters.
 #[test]
 fn test_string_literal_special_chars() {
-    ShapeTest::new(r#"fn test() -> string { "!@#%^&*()" }
-test()"#).expect_string("!@#%^&*()");
+    ShapeTest::new(
+        r#"fn test() -> string { "!@#%^&*()" }
+test()"#,
+    )
+    .expect_string("!@#%^&*()");
 }
 
 /// Verifies string literal with basic unicode.
 #[test]
 fn test_string_literal_unicode_basic() {
-    ShapeTest::new(r#"fn test() -> string { "café" }
-test()"#).expect_string("café");
+    ShapeTest::new(
+        r#"fn test() -> string { "café" }
+test()"#,
+    )
+    .expect_string("café");
 }
 
 /// Verifies string escape: carriage return.
 #[test]
 fn test_string_escape_carriage_return() {
-    ShapeTest::new(r#"fn test() -> string { "a\rb" }
-test()"#).expect_string("a\rb");
+    ShapeTest::new(
+        r#"fn test() -> string { "a\rb" }
+test()"#,
+    )
+    .expect_string("a\rb");
 }
 
 // =============================================================================
@@ -177,9 +219,12 @@ fn test_let_inferred_bool() {
 /// Verifies let binding with inferred string type.
 #[test]
 fn test_let_inferred_string() {
-    ShapeTest::new(r#"fn test() { let x = "abc"
+    ShapeTest::new(
+        r#"fn test() { let x = "abc"
  x }
-test()"#).expect_string("abc");
+test()"#,
+    )
+    .expect_string("abc");
 }
 
 // =============================================================================
@@ -289,15 +334,21 @@ fn test_bool_inequality() {
 /// Verifies string equality with same values.
 #[test]
 fn test_string_equality_same() {
-    ShapeTest::new(r#"fn test() -> bool { "abc" == "abc" }
-test()"#).expect_bool(true);
+    ShapeTest::new(
+        r#"fn test() -> bool { "abc" == "abc" }
+test()"#,
+    )
+    .expect_bool(true);
 }
 
 /// Verifies string equality with different values.
 #[test]
 fn test_string_equality_different() {
-    ShapeTest::new(r#"fn test() -> bool { "abc" == "def" }
-test()"#).expect_bool(false);
+    ShapeTest::new(
+        r#"fn test() -> bool { "abc" == "def" }
+test()"#,
+    )
+    .expect_bool(false);
 }
 
 /// Verifies null equality None == None.
@@ -431,15 +482,21 @@ fn test_top_level_string_expr() {
 /// Verifies string length method.
 #[test]
 fn test_string_length_method() {
-    ShapeTest::new(r#"fn test() -> int { "hello".length() }
-test()"#).expect_number(5.0);
+    ShapeTest::new(
+        r#"fn test() -> int { "hello".length() }
+test()"#,
+    )
+    .expect_number(5.0);
 }
 
 /// Verifies empty string length.
 #[test]
 fn test_empty_string_length() {
-    ShapeTest::new(r#"fn test() -> int { "".length() }
-test()"#).expect_number(0.0);
+    ShapeTest::new(
+        r#"fn test() -> int { "".length() }
+test()"#,
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies string interpolation.
@@ -458,29 +515,41 @@ test()"#,
 /// Verifies string concatenation.
 #[test]
 fn test_string_concatenation() {
-    ShapeTest::new(r#"fn test() -> string { "hello" + " " + "world" }
-test()"#).expect_string("hello world");
+    ShapeTest::new(
+        r#"fn test() -> string { "hello" + " " + "world" }
+test()"#,
+    )
+    .expect_string("hello world");
 }
 
 /// Verifies chained string concatenation.
 #[test]
 fn test_chained_string_concat() {
-    ShapeTest::new(r#"fn test() -> string { "a" + "b" + "c" + "d" }
-test()"#).expect_string("abcd");
+    ShapeTest::new(
+        r#"fn test() -> string { "a" + "b" + "c" + "d" }
+test()"#,
+    )
+    .expect_string("abcd");
 }
 
 /// Verifies int to string interpolation.
 #[test]
 fn test_int_to_string_interpolation() {
-    ShapeTest::new(r#"fn test() -> string { f"{1 + 2}" }
-test()"#).expect_string("3");
+    ShapeTest::new(
+        r#"fn test() -> string { f"{1 + 2}" }
+test()"#,
+    )
+    .expect_string("3");
 }
 
 /// Verifies bool to string interpolation.
 #[test]
 fn test_bool_to_string_interpolation() {
-    ShapeTest::new(r#"fn test() -> string { f"{true}" }
-test()"#).expect_string("true");
+    ShapeTest::new(
+        r#"fn test() -> string { f"{true}" }
+test()"#,
+    )
+    .expect_string("true");
 }
 
 /// Verifies negative int to string interpolation.

@@ -67,11 +67,8 @@ pub fn resolve_trait_definition(
                     return Some(ResolvedTraitDef {
                         trait_def: trait_def.clone(),
                         span: *span,
-                        documentation: module_info
-                            .program
-                            .docs
-                            .comment_for_span(*span)
-                            .map(|comment| {
+                        documentation: module_info.program.docs.comment_for_span(*span).map(
+                            |comment| {
                                 render_doc_comment(
                                     &module_info.program,
                                     comment,
@@ -79,7 +76,8 @@ pub fn resolve_trait_definition(
                                     Some(&module_info.path),
                                     workspace_root,
                                 )
-                            }),
+                            },
+                        ),
                         source_text: std::fs::read_to_string(&module_info.path).ok(),
                         source_path: Some(module_info.path.clone()),
                         import_path: Some(import_path),

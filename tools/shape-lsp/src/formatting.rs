@@ -980,7 +980,11 @@ fn align_table_row_columns(text: &str) -> Vec<TextEdit> {
             }
 
             // Compute max column count and max width per column
-            let max_cols = group.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
+            let max_cols = group
+                .iter()
+                .map(|(_, cells)| cells.len())
+                .max()
+                .unwrap_or(0);
             let mut col_widths = vec![0usize; max_cols];
             for (_, cells) in &group {
                 for (j, cell) in cells.iter().enumerate() {
@@ -1618,6 +1622,9 @@ fn shape_fn() {
     fn test_align_table_row_columns_no_change_when_single_row() {
         let source = "    [1, 100, 60],\n";
         let edits = align_table_row_columns(source);
-        assert!(edits.is_empty(), "Single row should not produce alignment edits");
+        assert!(
+            edits.is_empty(),
+            "Single row should not produce alignment edits"
+        );
     }
 }

@@ -97,14 +97,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
         // On negative signal: set the deopt_signal_var to the callee's signal
         // (preserving its deopt_id in ctx_buf[0]) and jump to exit.
-        if let (Some(deopt_signal_var), Some(exit_block)) =
-            (self.deopt_signal_var, self.exit_block)
+        if let (Some(deopt_signal_var), Some(exit_block)) = (self.deopt_signal_var, self.exit_block)
         {
             let fail_block = self.builder.create_block();
             let cont = self.builder.create_block();
-            self.builder
-                .ins()
-                .brif(ok, cont, &[], fail_block, &[]);
+            self.builder.ins().brif(ok, cont, &[], fail_block, &[]);
             self.builder.switch_to_block(fail_block);
             self.builder.seal_block(fail_block);
             // Propagate the callee's negative signal directly.
@@ -313,11 +310,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     ///
     /// When `is_add` is true, the fallback calls `generic_add` (handles string concat,
     /// Time+Duration, etc.). Otherwise returns TAG_NULL for non-numeric operands.
-    pub(in crate::translator) fn generic_binary_op_with_fallback<F>(
-        &mut self,
-        op: F,
-        is_add: bool,
-    ) where
+    pub(in crate::translator) fn generic_binary_op_with_fallback<F>(&mut self, op: F, is_add: bool)
+    where
         F: FnOnce(&mut FunctionBuilder, Value, Value) -> Value,
     {
         if self.stack_len() >= 2 {

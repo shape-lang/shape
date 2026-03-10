@@ -9,7 +9,13 @@ fn make_func(name: &str, arity: u16, locals_count: u16, entry_point: usize) -> F
     make_func_with_body(name, arity, locals_count, entry_point, 0)
 }
 
-fn make_func_with_body(name: &str, arity: u16, locals_count: u16, entry_point: usize, body_length: usize) -> Function {
+fn make_func_with_body(
+    name: &str,
+    arity: u16,
+    locals_count: u16,
+    entry_point: usize,
+    body_length: usize,
+) -> Function {
     Function {
         name: name.to_string(),
         arity,
@@ -200,7 +206,7 @@ fn test_deopt_info_construction_and_local_mapping() {
         local_kinds: vec![SlotKind::Int64, SlotKind::Float64, SlotKind::Bool],
         stack_depth: 1,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     };
 
     // Verify mapping: JIT local 0 -> bytecode local 2, etc.
@@ -221,7 +227,7 @@ fn test_deopt_info_serialization_roundtrip() {
         local_kinds: vec![SlotKind::Float64, SlotKind::Int64],
         stack_depth: 0,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     };
 
     let json = serde_json::to_string(&deopt).expect("serialize DeoptInfo");
@@ -615,7 +621,7 @@ fn test_compilation_result_deopt_points() {
                 local_kinds: vec![SlotKind::Int64, SlotKind::Float64],
                 stack_depth: 0,
                 innermost_function_id: None,
-            inline_frames: Vec::new(),
+                inline_frames: Vec::new(),
             },
             DeoptInfo {
                 resume_ip: 25,
@@ -623,7 +629,7 @@ fn test_compilation_result_deopt_points() {
                 local_kinds: vec![SlotKind::Int64],
                 stack_depth: 1,
                 innermost_function_id: None,
-            inline_frames: Vec::new(),
+                inline_frames: Vec::new(),
             },
         ],
         loop_header_ip: None,
@@ -681,7 +687,7 @@ fn test_deopt_info_slot_kind_int64_for_unboxed_locals() {
         local_kinds: vec![SlotKind::Int64, SlotKind::NanBoxed, SlotKind::NanBoxed],
         stack_depth: 1,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     };
 
     // Verify Int64 local is properly tagged
@@ -702,7 +708,7 @@ fn test_deopt_info_slot_kind_float64_for_unboxed_locals() {
         local_kinds: vec![SlotKind::Float64, SlotKind::NanBoxed],
         stack_depth: 0,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     };
 
     assert_eq!(deopt.local_kinds[0], SlotKind::Float64);
@@ -720,7 +726,7 @@ fn test_verify_deopt_points_passes_for_correct_metadata() {
         local_kinds: vec![SlotKind::Int64, SlotKind::Float64],
         stack_depth: 0,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     }];
 
     let mut unboxed_ints = HashSet::new();
@@ -743,7 +749,7 @@ fn test_verify_deopt_points_fails_for_unboxed_int_tagged_unknown() {
         local_kinds: vec![SlotKind::Unknown], // Wrong! Should be Int64
         stack_depth: 0,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     }];
 
     let mut unboxed_ints = HashSet::new();
@@ -766,7 +772,7 @@ fn test_verify_deopt_points_fails_for_unboxed_f64_tagged_unknown() {
         local_kinds: vec![SlotKind::Unknown], // Wrong! Should be Float64
         stack_depth: 0,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     }];
 
     let unboxed_ints = HashSet::new();
@@ -789,7 +795,7 @@ fn test_verify_deopt_points_allows_empty_deopt() {
         local_kinds: vec![],
         stack_depth: 0,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     }];
 
     let mut unboxed_ints = HashSet::new();
@@ -811,12 +817,16 @@ fn test_verify_deopt_points_rejects_length_mismatch() {
         local_kinds: vec![SlotKind::Unknown], // Length mismatch!
         stack_depth: 0,
         innermost_function_id: None,
-            inline_frames: Vec::new(),
+        inline_frames: Vec::new(),
     }];
 
     let result = BytecodeToIR::verify_deopt_points(&points, &HashSet::new(), &HashSet::new());
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("local_mapping len 2 != local_kinds len 1"));
+    assert!(
+        result
+            .unwrap_err()
+            .contains("local_mapping len 2 != local_kinds len 1")
+    );
 }
 
 // =========================================================================
@@ -867,13 +877,17 @@ fn test_deopt_info_with_inline_frames_roundtrip() {
     assert_eq!(roundtripped.inline_frames.len(), 1);
     assert_eq!(roundtripped.inline_frames[0].function_id, 3);
     assert_eq!(roundtripped.inline_frames[0].resume_ip, 50);
-    assert_eq!(roundtripped.inline_frames[0].local_kinds[1], SlotKind::Float64);
+    assert_eq!(
+        roundtripped.inline_frames[0].local_kinds[1],
+        SlotKind::Float64
+    );
 }
 
 #[test]
 fn test_deopt_info_backward_compat_deserialize_no_inline_frames() {
     // Simulate old serialized DeoptInfo without inline_frames field
-    let json = r#"{"resume_ip":10,"local_mapping":[[0,0]],"local_kinds":["Unknown"],"stack_depth":0}"#;
+    let json =
+        r#"{"resume_ip":10,"local_mapping":[[0,0]],"local_kinds":["Unknown"],"stack_depth":0}"#;
     let deopt: DeoptInfo = serde_json::from_str(json).expect("deserialize old format");
 
     assert_eq!(deopt.resume_ip, 10);
@@ -897,13 +911,12 @@ fn test_speculative_call_target_returns_cross_function_target() {
     // via integration tests.)
     assert!(fv.is_monomorphic(10));
     assert_eq!(
-        fv.get_slot(10)
-            .and_then(|s| match s {
-                shape_vm::feedback::FeedbackSlot::Call(fb)
-                    if fb.state == shape_vm::feedback::ICState::Monomorphic =>
-                    Some(fb.targets[0].function_id),
-                _ => None,
-            }),
+        fv.get_slot(10).and_then(|s| match s {
+            shape_vm::feedback::FeedbackSlot::Call(fb)
+                if fb.state == shape_vm::feedback::ICState::Monomorphic =>
+                Some(fb.targets[0].function_id),
+            _ => None,
+        }),
         Some(5)
     );
 }
@@ -926,7 +939,9 @@ fn test_cross_function_speculation_without_func_ref() {
         .and_then(|s| match s {
             shape_vm::feedback::FeedbackSlot::Call(fb)
                 if fb.state == shape_vm::feedback::ICState::Monomorphic =>
-                Some(fb.targets[0].function_id),
+            {
+                Some(fb.targets[0].function_id)
+            }
             _ => None,
         })
         .unwrap();
@@ -1057,7 +1072,9 @@ fn test_polymorphic_feedback_rejects_speculation() {
     let target = fv.get_slot(10).and_then(|s| match s {
         shape_vm::feedback::FeedbackSlot::Call(fb)
             if fb.state == shape_vm::feedback::ICState::Monomorphic =>
-            Some(fb.targets[0].function_id),
+        {
+            Some(fb.targets[0].function_id)
+        }
         _ => None,
     });
     assert!(target.is_none());
@@ -1082,7 +1099,8 @@ fn test_deopt_info_innermost_function_id_serialization() {
 #[test]
 fn test_deopt_info_innermost_function_id_defaults_none() {
     // Old format without innermost_function_id should default to None
-    let json = r#"{"resume_ip":10,"local_mapping":[[0,0]],"local_kinds":["Unknown"],"stack_depth":0}"#;
+    let json =
+        r#"{"resume_ip":10,"local_mapping":[[0,0]],"local_kinds":["Unknown"],"stack_depth":0}"#;
     let deopt: DeoptInfo = serde_json::from_str(json).expect("deserialize old format");
     assert_eq!(deopt.innermost_function_id, None);
 }
@@ -1268,7 +1286,10 @@ fn test_tier2_inline_deopt_produces_inline_frames() {
         !inline_deopts.is_empty(),
         "Expected at least one deopt point with inline_frames, got {} total deopt points: {:?}",
         deopt_points.len(),
-        deopt_points.iter().map(|dp| (dp.resume_ip, dp.inline_frames.len())).collect::<Vec<_>>()
+        deopt_points
+            .iter()
+            .map(|dp| (dp.resume_ip, dp.inline_frames.len()))
+            .collect::<Vec<_>>()
     );
 
     // Verify the inline frame structure: the innermost function should be inner (fn_id=1).
@@ -1298,5 +1319,8 @@ fn test_tier2_inline_deopt_produces_inline_frames() {
         .iter()
         .find(|dp| dp.resume_ip == 8)
         .expect("should have deopt at inner's Add (global IP=8)");
-    assert_eq!(add_deopt.inline_frames[0].resume_ip, 2, "caller resume_ip should be call site IP=2");
+    assert_eq!(
+        add_deopt.inline_frames[0].resume_ip, 2,
+        "caller resume_ip should be call site IP=2"
+    );
 }

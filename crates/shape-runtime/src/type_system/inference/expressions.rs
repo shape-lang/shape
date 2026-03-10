@@ -170,7 +170,9 @@ impl TypeInferenceEngine {
                                 self.constraints.push((value_type.clone(), annotated_type));
                                 ta.clone()
                             } else {
-                                value_type.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()))
+                                value_type
+                                    .to_annotation()
+                                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()))
                             };
                             field_types.push(shape_ast::ast::ObjectTypeField {
                                 name: key.clone(),
@@ -192,16 +194,12 @@ impl TypeInferenceEngine {
                                         self.struct_type_defs.get(name.as_str()).cloned()
                                     {
                                         for field in &struct_def.fields {
-                                            field_types.push(
-                                                shape_ast::ast::ObjectTypeField {
-                                                    name: field.name.clone(),
-                                                    optional: false,
-                                                    type_annotation: field
-                                                        .type_annotation
-                                                        .clone(),
-                                                    annotations: vec![],
-                                                },
-                                            );
+                                            field_types.push(shape_ast::ast::ObjectTypeField {
+                                                name: field.name.clone(),
+                                                optional: false,
+                                                type_annotation: field.type_annotation.clone(),
+                                                annotations: vec![],
+                                            });
                                         }
                                     }
                                 }
@@ -291,27 +289,26 @@ impl TypeInferenceEngine {
                 // so closures get their param types from the method signature.
                 let (type_name, receiver_params) =
                     MethodTable::extract_receiver_info(&receiver_type);
-                let expected_arg_types: Option<Vec<Type>> =
-                    type_name.as_ref().and_then(|tn| {
-                        self.method_table
-                            .lookup_generic_signature(tn, method)
-                            .map(|gsig| {
-                                let method_vars: Vec<Type> = (0..gsig.method_type_params)
-                                    .map(|_| Type::Variable(TypeVar::fresh()))
-                                    .collect();
-                                gsig.param_types
-                                    .iter()
-                                    .map(|pt| {
-                                        MethodTable::resolve_type_param_expr(
-                                            pt,
-                                            &receiver_type,
-                                            &receiver_params,
-                                            &method_vars,
-                                        )
-                                    })
-                                    .collect()
-                            })
-                    });
+                let expected_arg_types: Option<Vec<Type>> = type_name.as_ref().and_then(|tn| {
+                    self.method_table
+                        .lookup_generic_signature(tn, method)
+                        .map(|gsig| {
+                            let method_vars: Vec<Type> = (0..gsig.method_type_params)
+                                .map(|_| Type::Variable(TypeVar::fresh()))
+                                .collect();
+                            gsig.param_types
+                                .iter()
+                                .map(|pt| {
+                                    MethodTable::resolve_type_param_expr(
+                                        pt,
+                                        &receiver_type,
+                                        &receiver_params,
+                                        &method_vars,
+                                    )
+                                })
+                                .collect()
+                        })
+                });
 
                 // Infer arguments WITH expected types (bidirectional)
                 let arg_types: Vec<Type> = if let Some(ref expected) = expected_arg_types {
@@ -319,10 +316,7 @@ impl TypeInferenceEngine {
                         .enumerate()
                         .map(|(i, arg)| {
                             if let Some(expected_ty) = expected.get(i) {
-                                self.check_expr(
-                                    arg,
-                                    CheckMode::Synth(expected_ty.clone()),
-                                )
+                                self.check_expr(arg, CheckMode::Synth(expected_ty.clone()))
                             } else {
                                 self.infer_expr(arg)
                             }
@@ -348,11 +342,8 @@ impl TypeInferenceEngine {
                 // For unresolved generic/constrained receivers (e.g. T: Displayable),
                 // forcing a HasField constraint here over-constrains the receiver to a
                 // structural object shape and breaks trait-bound method dispatch.
-                let can_try_callable_field = !matches!(
-                    &receiver_type,
-                    Type::Variable(_)
-                        | Type::Constrained { .. }
-                );
+                let can_try_callable_field =
+                    !matches!(&receiver_type, Type::Variable(_) | Type::Constrained { .. });
                 if can_try_callable_field {
                     if let Ok(field_type) = self.infer_property_access(&receiver_type, method) {
                         match field_type {
@@ -747,7 +738,11 @@ impl TypeInferenceEngine {
                 };
                 Ok(Type::Concrete(TypeAnnotation::Generic {
                     name: "Range".to_string(),
-                    args: vec![element_type.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()))],
+                    args: vec![
+                        element_type
+                            .to_annotation()
+                            .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
+                    ],
                 }))
             }
 

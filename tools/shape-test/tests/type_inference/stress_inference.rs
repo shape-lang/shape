@@ -675,4 +675,3 @@ fn struct_type_in_function() {
     )
     .expect_number(42.0);
 }
-

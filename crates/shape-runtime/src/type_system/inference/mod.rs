@@ -1134,7 +1134,6 @@ impl TypeInferenceEngine {
         (types, errors)
     }
 
-
     fn apply_callsite_unions(&mut self, types: &mut HashMap<String, Type>) {
         let callsites = self.callsite_param_types.clone();
         for (function_name, observed_by_param) in callsites {
@@ -1256,10 +1255,8 @@ impl TypeInferenceEngine {
             0 => substituted_return,
             1 => members.into_iter().next().unwrap_or(substituted_return),
             _ => self.create_nominal_union(&members).unwrap_or_else(|_| {
-                let variants: Vec<TypeAnnotation> = members
-                    .iter()
-                    .filter_map(|t| t.to_annotation())
-                    .collect();
+                let variants: Vec<TypeAnnotation> =
+                    members.iter().filter_map(|t| t.to_annotation()).collect();
                 Type::Concrete(TypeAnnotation::Union(variants))
             }),
         }
@@ -1284,10 +1281,8 @@ impl TypeInferenceEngine {
             0 => None,
             1 => unique.into_iter().next(),
             _ => self.create_nominal_union(&unique).ok().or_else(|| {
-                let variants: Vec<TypeAnnotation> = unique
-                    .iter()
-                    .filter_map(|t| t.to_annotation())
-                    .collect();
+                let variants: Vec<TypeAnnotation> =
+                    unique.iter().filter_map(|t| t.to_annotation()).collect();
                 Some(Type::Concrete(TypeAnnotation::Union(variants)))
             }),
         }

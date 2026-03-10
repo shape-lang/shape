@@ -86,8 +86,7 @@ for i in 0..10 step 2 {
 }
 // Expected: syntax error — step not supported
 "#;
-    ShapeTest::new(code)
-        .expect_run_err();
+    ShapeTest::new(code).expect_run_err();
 }
 
 /// Fixed: Range iteration now produces i64 values, so accumulation

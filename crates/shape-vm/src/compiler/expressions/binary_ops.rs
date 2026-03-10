@@ -132,9 +132,11 @@ impl BytecodeCompiler {
             | Expr::Literal(Literal::TypedInt(..), _)
             | Expr::Literal(Literal::UInt(_), _)
             | Expr::Literal(Literal::Decimal(_), _) => true,
-            Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => {
-                Self::is_expr_confirmed_numeric(operand)
-            }
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                operand,
+                ..
+            } => Self::is_expr_confirmed_numeric(operand),
             _ => false,
         }
     }
@@ -456,11 +458,13 @@ impl BytecodeCompiler {
                     //    like a[0], foo.bar, x*y — the type tracker is reliable
                     //    because the B19 mistyping only affects bare param identifiers
                     let lhs_confirmed = Self::is_expr_confirmed_numeric(left)
-                        || self.storage_hint_for_expr(left)
+                        || self
+                            .storage_hint_for_expr(left)
                             .is_some_and(|h| h.is_default_int_family() || h.is_float_family())
                         || (!matches!(left, Expr::Identifier(..)) && left_numeric.is_some());
                     let rhs_confirmed = Self::is_expr_confirmed_numeric(right)
-                        || self.storage_hint_for_expr(right)
+                        || self
+                            .storage_hint_for_expr(right)
                             .is_some_and(|h| h.is_default_int_family() || h.is_float_family())
                         || (!matches!(right, Expr::Identifier(..)) && right_numeric.is_some());
 
@@ -570,7 +574,6 @@ impl BytecodeCompiler {
                 self.compile_expr(right)?;
                 let mut right_numeric = self.last_expr_numeric_type;
                 let right_schema = self.last_expr_schema;
-
 
                 // Don't trust inferred numeric types for untyped function parameters.
                 // Their inferred_param_type_hints can be wrong (same rationale as the

@@ -240,10 +240,14 @@ impl Type {
                     .map(|p| shape_ast::ast::FunctionParam {
                         name: None,
                         optional: false,
-                        type_annotation: p.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
+                        type_annotation: p
+                            .to_annotation()
+                            .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
                     })
                     .collect();
-                let ret_ann = returns.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()));
+                let ret_ann = returns
+                    .to_annotation()
+                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()));
                 Some(TypeAnnotation::Function {
                     params: param_anns,
                     returns: Box::new(ret_ann),

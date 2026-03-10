@@ -8,10 +8,10 @@
 //! - `builtins` — `op_builtin_call` dispatch table
 //! - `stack`    — stack push/pop, enum creation, hash helpers
 
+mod builtins;
 mod init;
 mod modules;
-mod schemas;
-mod program;
 mod output;
-mod builtins;
+mod program;
+mod schemas;
 mod stack;

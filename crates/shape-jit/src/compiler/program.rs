@@ -900,24 +900,30 @@ impl JITCompiler {
                         if let Some(shape_vm::bytecode::Operand::Function(fn_id)) = &instr.operand {
                             let callee_id = fn_id.0;
                             // Skip self-recursive and already-processed callees
-                            if callee_id == func_index as u16 || callee_inline_map.contains_key(&callee_id) {
+                            if callee_id == func_index as u16
+                                || callee_inline_map.contains_key(&callee_id)
+                            {
                                 continue;
                             }
                             if let Some(candidate) = full_candidates.get(&callee_id) {
                                 let callee_start = candidate.entry_point;
                                 let callee_end = callee_start + candidate.instruction_count;
                                 if callee_end <= program.instructions.len() {
-                                    let callee_instrs = &program.instructions[callee_start..callee_end];
+                                    let callee_instrs =
+                                        &program.instructions[callee_start..callee_end];
                                     let rebased_entry = sub_instructions_vec.len();
                                     sub_instructions_vec.extend_from_slice(callee_instrs);
                                     let rebased_end = sub_instructions_vec.len();
 
-                                    callee_inline_map.insert(callee_id, InlineCandidate {
-                                        entry_point: rebased_entry,
-                                        instruction_count: candidate.instruction_count,
-                                        arity: candidate.arity,
-                                        locals_count: candidate.locals_count,
-                                    });
+                                    callee_inline_map.insert(
+                                        callee_id,
+                                        InlineCandidate {
+                                            entry_point: rebased_entry,
+                                            instruction_count: candidate.instruction_count,
+                                            arity: candidate.arity,
+                                            locals_count: candidate.locals_count,
+                                        },
+                                    );
                                     callee_skip_ranges.push((rebased_entry, rebased_end));
                                     callee_feedback_offsets.push((callee_id, rebased_entry));
                                 }
@@ -977,7 +983,9 @@ impl JITCompiler {
                 // Inject inline candidates with rebased entry_points.
                 // These are keyed by original fn_id so compile_call can find them.
                 for (callee_id, candidate) in &callee_inline_map {
-                    compiler.inline_candidates.insert(*callee_id, candidate.clone());
+                    compiler
+                        .inline_candidates
+                        .insert(*callee_id, candidate.clone());
                 }
                 // Set skip_ranges so the main compilation loop doesn't process
                 // appended callee instructions (they're only used by compile_inline_call).

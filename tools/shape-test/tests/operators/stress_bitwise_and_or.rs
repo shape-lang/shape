@@ -324,15 +324,19 @@ fn test_de_morgan_or() {
 /// Verifies AND is commutative.
 #[test]
 fn test_and_commutative() {
-    ShapeTest::new("fn test() {\n    if (0xAB & 0xCD) == (0xCD & 0xAB) { 1 } else { 0 }\n}\ntest()")
-        .expect_number(1.0);
+    ShapeTest::new(
+        "fn test() {\n    if (0xAB & 0xCD) == (0xCD & 0xAB) { 1 } else { 0 }\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 /// Verifies OR is commutative.
 #[test]
 fn test_or_commutative() {
-    ShapeTest::new("fn test() {\n    if (0xAB | 0xCD) == (0xCD | 0xAB) { 1 } else { 0 }\n}\ntest()")
-        .expect_number(1.0);
+    ShapeTest::new(
+        "fn test() {\n    if (0xAB | 0xCD) == (0xCD | 0xAB) { 1 } else { 0 }\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 /// Verifies AND is associative.

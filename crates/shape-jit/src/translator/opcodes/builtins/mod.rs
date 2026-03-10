@@ -88,10 +88,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
         // Call jit_generic_builtin(ctx, builtin_id, arg_count)
         let builtin_id = *builtin as u16;
-        let builtin_id_val = self
-            .builder
-            .ins()
-            .iconst(cl_types::I16, builtin_id as i64);
+        let builtin_id_val = self.builder.ins().iconst(cl_types::I16, builtin_id as i64);
         let arg_count_i16 = self
             .builder
             .ins()

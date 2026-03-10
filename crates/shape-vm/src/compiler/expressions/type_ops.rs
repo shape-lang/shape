@@ -229,13 +229,15 @@ impl BytecodeCompiler {
                     ),
                     location: Some(self.span_to_source_location(expr.span())),
                 })?;
-            let target_selector = Self::try_into_name_from_annotation(inner_type)
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "`as Type?` target must be a named type selector, found '{}'",
-                        annotation_to_string(inner_type)
-                    ),
-                    location: Some(self.span_to_source_location(expr.span())),
+            let target_selector =
+                Self::try_into_name_from_annotation(inner_type).ok_or_else(|| {
+                    ShapeError::SemanticError {
+                        message: format!(
+                            "`as Type?` target must be a named type selector, found '{}'",
+                            annotation_to_string(inner_type)
+                        ),
+                        location: Some(self.span_to_source_location(expr.span())),
+                    }
                 })?;
 
             // `as Type?` compiles to trait-dispatch metadata consumed by Convert.

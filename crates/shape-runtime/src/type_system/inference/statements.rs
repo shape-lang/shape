@@ -142,7 +142,8 @@ impl TypeInferenceEngine {
                 self.env.push_scope();
                 // Push narrowed types for then-branch (e.g. x != null → x: T)
                 for (var_name, narrowed_type) in &narrowings {
-                    self.env.define(var_name, TypeScheme::mono(narrowed_type.clone()));
+                    self.env
+                        .define(var_name, TypeScheme::mono(narrowed_type.clone()));
                 }
                 let then_type = self.infer_statements(&if_stmt.then_body)?;
                 self.env.pop_scope();
@@ -150,8 +151,7 @@ impl TypeInferenceEngine {
 
                 if let Some(else_body) = &if_stmt.else_body {
                     // Compute inverse narrowings for else-branch
-                    let inverse_narrowings =
-                        self.extract_inverse_narrowings(&if_stmt.condition);
+                    let inverse_narrowings = self.extract_inverse_narrowings(&if_stmt.condition);
                     self.env.enter_conditional();
                     self.env.push_scope();
                     for (var_name, narrowed_type) in &inverse_narrowings {
@@ -267,9 +267,7 @@ impl TypeInferenceEngine {
     fn is_null_literal(expr: &Expr) -> bool {
         match expr {
             Expr::Literal(Literal::None, _) => true,
-            Expr::Identifier(name, _) => {
-                name == "null" || name == "undefined" || name == "none"
-            }
+            Expr::Identifier(name, _) => name == "null" || name == "undefined" || name == "none",
             _ => false,
         }
     }

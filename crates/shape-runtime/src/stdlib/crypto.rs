@@ -316,9 +316,7 @@ pub fn create_crypto_module() -> ModuleExports {
                 .ok_or_else(|| "crypto.random_bytes() requires an int argument".to_string())?;
 
             if n < 0 || n > 65536 {
-                return Err(
-                    "crypto.random_bytes() n must be between 0 and 65536".to_string()
-                );
+                return Err("crypto.random_bytes() n must be between 0 and 65536".to_string());
             }
 
             let mut buf = vec![0u8; n as usize];
@@ -377,12 +375,9 @@ pub fn create_crypto_module() -> ModuleExports {
                 "crypto.ed25519_sign() requires a message string argument".to_string()
             })?;
 
-            let secret_hex = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| {
-                    "crypto.ed25519_sign() requires a secret_key hex string argument".to_string()
-                })?;
+            let secret_hex = args.get(1).and_then(|a| a.as_str()).ok_or_else(|| {
+                "crypto.ed25519_sign() requires a secret_key hex string argument".to_string()
+            })?;
 
             let secret_bytes = hex::decode(secret_hex)
                 .map_err(|e| format!("crypto.ed25519_sign() invalid secret_key hex: {}", e))?;
@@ -401,8 +396,9 @@ pub fn create_crypto_module() -> ModuleExports {
             ))))
         },
         ModuleFunction {
-            description: "Sign a message with an Ed25519 secret key, returning a hex-encoded signature"
-                .to_string(),
+            description:
+                "Sign a message with an Ed25519 secret key, returning a hex-encoded signature"
+                    .to_string(),
             params: vec![
                 ModuleParam {
                     name: "message".to_string(),
@@ -704,7 +700,9 @@ mod tests {
         // Known SHA-512 digest for "hello"
         assert_eq!(
             result.as_str(),
-            Some("9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043")
+            Some(
+                "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043"
+            )
         );
     }
 
@@ -717,7 +715,9 @@ mod tests {
         // SHA-512 of empty string
         assert_eq!(
             result.as_str(),
-            Some("cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e")
+            Some(
+                "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+            )
         );
     }
 
@@ -777,10 +777,7 @@ mod tests {
         )
         .unwrap();
         // Known MD5 digest for "hello"
-        assert_eq!(
-            result.as_str(),
-            Some("5d41402abc4b2a76b9719d911017c592")
-        );
+        assert_eq!(result.as_str(), Some("5d41402abc4b2a76b9719d911017c592"));
     }
 
     #[test]
@@ -789,10 +786,7 @@ mod tests {
         let ctx = test_ctx();
         let md5_fn = module.get_export("md5").unwrap();
         let result = md5_fn(&[ValueWord::from_string(Arc::new(String::new()))], &ctx).unwrap();
-        assert_eq!(
-            result.as_str(),
-            Some("d41d8cd98f00b204e9800998ecf8427e")
-        );
+        assert_eq!(result.as_str(), Some("d41d8cd98f00b204e9800998ecf8427e"));
     }
 
     #[test]
@@ -844,13 +838,7 @@ mod tests {
         let module = create_crypto_module();
         let ctx = test_ctx();
         let rb_fn = module.get_export("random_bytes").unwrap();
-        assert!(
-            rb_fn(
-                &[ValueWord::from_string(Arc::new("10".to_string()))],
-                &ctx
-            )
-            .is_err()
-        );
+        assert!(rb_fn(&[ValueWord::from_string(Arc::new("10".to_string()))], &ctx).is_err());
     }
 
     #[test]
@@ -954,13 +942,7 @@ mod tests {
         let verify_fn = module.get_export("ed25519_verify").unwrap();
 
         // Missing arguments
-        assert!(
-            verify_fn(
-                &[ValueWord::from_string(Arc::new("msg".to_string()))],
-                &ctx
-            )
-            .is_err()
-        );
+        assert!(verify_fn(&[ValueWord::from_string(Arc::new("msg".to_string()))], &ctx).is_err());
 
         // Invalid hex in signature
         assert!(

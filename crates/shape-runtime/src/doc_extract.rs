@@ -52,7 +52,12 @@ pub fn extract_docs_from_ast(_source: &str, ast: &Program) -> Vec<DocItem> {
     docs
 }
 
-fn collect_items(items: &[Item], program: &Program, module_path: &[String], docs: &mut Vec<DocItem>) {
+fn collect_items(
+    items: &[Item],
+    program: &Program,
+    module_path: &[String],
+    docs: &mut Vec<DocItem>,
+) {
     for item in items {
         match item {
             Item::Module(module, span) => {
@@ -210,7 +215,10 @@ fn collect_items(items: &[Item], program: &Program, module_path: &[String], docs
                             .iter()
                             .map(|param| DocParam {
                                 name: param.simple_name().unwrap_or("_").to_string(),
-                                type_name: param.type_annotation.as_ref().map(format_type_annotation),
+                                type_name: param
+                                    .type_annotation
+                                    .as_ref()
+                                    .map(format_type_annotation),
                                 description: program
                                     .docs
                                     .comment_for_span(*span)
@@ -280,7 +288,12 @@ fn collect_items(items: &[Item], program: &Program, module_path: &[String], docs
     }
 }
 
-fn extract_function_doc(program: &Program, path: String, func: &FunctionDef, span: Span) -> DocItem {
+fn extract_function_doc(
+    program: &Program,
+    path: String,
+    func: &FunctionDef,
+    span: Span,
+) -> DocItem {
     let doc = program.docs.comment_for_span(span);
     let params = func
         .params
@@ -375,7 +388,11 @@ fn extract_enum_doc(
                     fields
                         .iter()
                         .map(|field| {
-                            format!("{}: {}", field.name, format_type_annotation(&field.type_annotation))
+                            format!(
+                                "{}: {}",
+                                field.name,
+                                format_type_annotation(&field.type_annotation)
+                            )
                         })
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -410,7 +427,12 @@ fn extract_trait_doc(
     for member in &tr.members {
         match member {
             TraitMember::Required(member) => {
-                children.push(extract_interface_member_doc(program, &path, member, DocItemKind::Method));
+                children.push(extract_interface_member_doc(
+                    program,
+                    &path,
+                    member,
+                    DocItemKind::Method,
+                ));
             }
             TraitMember::Default(method) => {
                 children.push(DocItem {
@@ -504,7 +526,11 @@ fn extract_interface_member_doc(
             kind: DocItemKind::Field,
             name: join_child_path(parent_path, name),
             doc: doc_text_from_span(program, *span),
-            signature: Some(format!("{}: {}", name, format_type_annotation(type_annotation))),
+            signature: Some(format!(
+                "{}: {}",
+                name,
+                format_type_annotation(type_annotation)
+            )),
             type_params: Vec::new(),
             params: Vec::new(),
             return_type: Some(format_type_annotation(type_annotation)),
@@ -545,9 +571,7 @@ fn extract_interface_member_doc(
                     description: program
                         .docs
                         .comment_for_span(*span)
-                        .and_then(|doc| {
-                            doc.param_doc(param.name.as_deref().unwrap_or("_"))
-                        })
+                        .and_then(|doc| doc.param_doc(param.name.as_deref().unwrap_or("_")))
                         .map(str::to_string),
                     default_value: None,
                 })
@@ -626,7 +650,10 @@ fn format_function_signature(func: &FunctionDef) -> String {
         .as_ref()
         .map(|ty| format!(" -> {}", format_type_annotation(ty)))
         .unwrap_or_default();
-    format!("fn {}{}({}){}", func.name, type_param_suffix, params, return_suffix)
+    format!(
+        "fn {}{}({}){}",
+        func.name, type_param_suffix, params, return_suffix
+    )
 }
 
 fn format_method_signature(method: &shape_ast::ast::MethodDef) -> String {
@@ -732,7 +759,11 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
             let params = params
                 .iter()
                 .map(|param| match &param.name {
-                    Some(name) => format!("{}: {}", name, format_type_annotation(&param.type_annotation)),
+                    Some(name) => format!(
+                        "{}: {}",
+                        name,
+                        format_type_annotation(&param.type_annotation)
+                    ),
                     None => format_type_annotation(&param.type_annotation),
                 })
                 .collect::<Vec<_>>()
@@ -753,7 +784,11 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
             "{{ {} }}",
             fields
                 .iter()
-                .map(|field| format!("{}: {}", field.name, format_type_annotation(&field.type_annotation)))
+                .map(|field| format!(
+                    "{}: {}",
+                    field.name,
+                    format_type_annotation(&field.type_annotation)
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),

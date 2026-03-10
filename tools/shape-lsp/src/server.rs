@@ -1860,7 +1860,10 @@ print("hello")
             }
         });
 
-        let specs = dedup_extension_specs(collect_configured_extensions_from_options(Some(&value), None));
+        let specs = dedup_extension_specs(collect_configured_extensions_from_options(
+            Some(&value),
+            None,
+        ));
         assert_eq!(specs.len(), 1);
         assert_eq!(
             specs[0].path,

@@ -200,7 +200,14 @@ async fn main() -> Result<()> {
             }
         }
 
-        (Some(Commands::Publish { registry, key, no_sign }), _) => {
+        (
+            Some(Commands::Publish {
+                registry,
+                key,
+                no_sign,
+            }),
+            _,
+        ) => {
             run_publish(registry, key, no_sign).await?;
         }
         (Some(Commands::Add { name, version }), _) => {

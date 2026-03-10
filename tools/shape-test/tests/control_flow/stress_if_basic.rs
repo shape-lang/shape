@@ -10,61 +10,71 @@ use shape_test::shape_test::ShapeTest;
 /// Verifies if true takes true branch.
 #[test]
 fn test_if_true_branch() {
-    ShapeTest::new("function test() {\n  if true { return 1; }\n  return 0;\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if true { return 1; }\n  return 0;\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies if false skips body.
 #[test]
 fn test_if_false_branch() {
-    ShapeTest::new("function test() {\n  if false { return 1; }\n  return 0;\n}\ntest()").expect_number(0.0);
+    ShapeTest::new("function test() {\n  if false { return 1; }\n  return 0;\n}\ntest()")
+        .expect_number(0.0);
 }
 
 /// Verifies if-else true branch.
 #[test]
 fn test_if_else_true_branch() {
-    ShapeTest::new("function test() {\n  if true { return 10; } else { return 20; }\n}\ntest()").expect_number(10.0);
+    ShapeTest::new("function test() {\n  if true { return 10; } else { return 20; }\n}\ntest()")
+        .expect_number(10.0);
 }
 
 /// Verifies if-else false branch.
 #[test]
 fn test_if_else_false_branch() {
-    ShapeTest::new("function test() {\n  if false { return 10; } else { return 20; }\n}\ntest()").expect_number(20.0);
+    ShapeTest::new("function test() {\n  if false { return 10; } else { return 20; }\n}\ntest()")
+        .expect_number(20.0);
 }
 
 /// Verifies if with greater-than comparison.
 #[test]
 fn test_if_comparison_greater() {
-    ShapeTest::new("function test() {\n  if 5 > 3 { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if 5 > 3 { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies if with less-than comparison.
 #[test]
 fn test_if_comparison_less() {
-    ShapeTest::new("function test() {\n  if 3 < 5 { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if 3 < 5 { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies if with equality comparison.
 #[test]
 fn test_if_comparison_equal() {
-    ShapeTest::new("function test() {\n  if 7 == 7 { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if 7 == 7 { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies if with not-equal comparison.
 #[test]
 fn test_if_comparison_not_equal() {
-    ShapeTest::new("function test() {\n  if 7 != 8 { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if 7 != 8 { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies if with greater-than-or-equal.
 #[test]
 fn test_if_comparison_gte() {
-    ShapeTest::new("function test() {\n  if 5 >= 5 { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if 5 >= 5 { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies if with less-than-or-equal.
 #[test]
 fn test_if_comparison_lte() {
-    ShapeTest::new("function test() {\n  if 3 <= 5 { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if 3 <= 5 { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(1.0);
 }
 
 // ===========================================================================
@@ -74,13 +84,17 @@ fn test_if_comparison_lte() {
 /// Verifies if without else, condition true.
 #[test]
 fn test_if_without_else_true() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if true { x = 1; }\n  return x;\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  let x = 0;\n  if true { x = 1; }\n  return x;\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies if without else, condition false.
 #[test]
 fn test_if_without_else_false() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if false { x = 1; }\n  return x;\n}\ntest()").expect_number(0.0);
+    ShapeTest::new(
+        "function test() {\n  let x = 0;\n  if false { x = 1; }\n  return x;\n}\ntest()",
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies if without else side effects.
@@ -136,37 +150,51 @@ fn test_else_if_chain_last_resort() {
 /// Verifies truthiness of true.
 #[test]
 fn test_truthiness_true() {
-    ShapeTest::new("function test() {\n  if true { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if true { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies truthiness of false.
 #[test]
 fn test_truthiness_false() {
-    ShapeTest::new("function test() {\n  if false { return 1; } else { return 0; }\n}\ntest()").expect_number(0.0);
+    ShapeTest::new("function test() {\n  if false { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(0.0);
 }
 
 /// Verifies truthiness of zero int (falsy).
 #[test]
 fn test_truthiness_zero_int() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if x { return 1; } else { return 0; }\n}\ntest()").expect_number(0.0);
+    ShapeTest::new(
+        "function test() {\n  let x = 0;\n  if x { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies truthiness of nonzero int (truthy).
 #[test]
 fn test_truthiness_nonzero_int() {
-    ShapeTest::new("function test() {\n  let x = 42;\n  if x { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new(
+        "function test() {\n  let x = 42;\n  if x { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 /// Verifies truthiness of negative int (truthy).
 #[test]
 fn test_truthiness_negative_int() {
-    ShapeTest::new("function test() {\n  let x = -1;\n  if x { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new(
+        "function test() {\n  let x = -1;\n  if x { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 /// Verifies truthiness of None (falsy).
 #[test]
 fn test_truthiness_none_is_falsy() {
-    ShapeTest::new("function test() {\n  let x = None;\n  if x { return 1; } else { return 0; }\n}\ntest()").expect_number(0.0);
+    ShapeTest::new(
+        "function test() {\n  let x = None;\n  if x { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies truthiness of nonempty string (truthy).
@@ -178,13 +206,19 @@ fn test_truthiness_nonempty_string() {
 /// Verifies truthiness of float zero (falsy).
 #[test]
 fn test_truthiness_float_zero() {
-    ShapeTest::new("function test() {\n  let x = 0.0;\n  if x { return 1; } else { return 0; }\n}\ntest()").expect_number(0.0);
+    ShapeTest::new(
+        "function test() {\n  let x = 0.0;\n  if x { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies truthiness of float nonzero (truthy).
 #[test]
 fn test_truthiness_float_nonzero() {
-    ShapeTest::new("function test() {\n  let x = 0.1;\n  if x { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new(
+        "function test() {\n  let x = 0.1;\n  if x { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 // ===========================================================================
@@ -194,37 +228,51 @@ fn test_truthiness_float_nonzero() {
 /// Verifies AND with both true.
 #[test]
 fn test_and_both_true() {
-    ShapeTest::new("function test() {\n  if true && true { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new(
+        "function test() {\n  if true && true { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 /// Verifies AND with one false.
 #[test]
 fn test_and_one_false() {
-    ShapeTest::new("function test() {\n  if true && false { return 1; } else { return 0; }\n}\ntest()").expect_number(0.0);
+    ShapeTest::new(
+        "function test() {\n  if true && false { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies OR with both false.
 #[test]
 fn test_or_both_false() {
-    ShapeTest::new("function test() {\n  if false || false { return 1; } else { return 0; }\n}\ntest()").expect_number(0.0);
+    ShapeTest::new(
+        "function test() {\n  if false || false { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies OR with one true.
 #[test]
 fn test_or_one_true() {
-    ShapeTest::new("function test() {\n  if false || true { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new(
+        "function test() {\n  if false || true { return 1; } else { return 0; }\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 /// Verifies NOT true.
 #[test]
 fn test_not_true() {
-    ShapeTest::new("function test() {\n  if !true { return 1; } else { return 0; }\n}\ntest()").expect_number(0.0);
+    ShapeTest::new("function test() {\n  if !true { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(0.0);
 }
 
 /// Verifies NOT false.
 #[test]
 fn test_not_false() {
-    ShapeTest::new("function test() {\n  if !false { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  if !false { return 1; } else { return 0; }\n}\ntest()")
+        .expect_number(1.0);
 }
 
 /// Verifies compound AND with comparisons.
@@ -286,13 +334,19 @@ fn test_function_result_in_else_if() {
 /// Verifies conditional assignment true.
 #[test]
 fn test_conditional_assignment_true() {
-    ShapeTest::new("function test() {\n  let x = if 5 > 3 { 100 } else { 200 }\n  return x\n}\ntest()").expect_number(100.0);
+    ShapeTest::new(
+        "function test() {\n  let x = if 5 > 3 { 100 } else { 200 }\n  return x\n}\ntest()",
+    )
+    .expect_number(100.0);
 }
 
 /// Verifies conditional assignment false.
 #[test]
 fn test_conditional_assignment_false() {
-    ShapeTest::new("function test() {\n  let x = if 1 > 3 { 100 } else { 200 }\n  return x\n}\ntest()").expect_number(200.0);
+    ShapeTest::new(
+        "function test() {\n  let x = if 1 > 3 { 100 } else { 200 }\n  return x\n}\ntest()",
+    )
+    .expect_number(200.0);
 }
 
 /// Verifies conditional reassignment.
@@ -308,13 +362,15 @@ fn test_conditional_reassignment() {
 /// Verifies early return in if.
 #[test]
 fn test_early_return_in_if() {
-    ShapeTest::new("function test() {\n  if true { return 42; }\n  return 0;\n}\ntest()").expect_number(42.0);
+    ShapeTest::new("function test() {\n  if true { return 42; }\n  return 0;\n}\ntest()")
+        .expect_number(42.0);
 }
 
 /// Verifies early return skipped.
 #[test]
 fn test_early_return_skipped() {
-    ShapeTest::new("function test() {\n  if false { return 42; }\n  return 0;\n}\ntest()").expect_number(0.0);
+    ShapeTest::new("function test() {\n  if false { return 42; }\n  return 0;\n}\ntest()")
+        .expect_number(0.0);
 }
 
 /// Verifies early return in loop.

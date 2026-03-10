@@ -37,7 +37,10 @@ where
 }
 
 /// Execute code with an executor
-fn execute_with_executor<E: ProgramExecutor>(executor: &mut E, test: &FeatureTest) -> ExecutionResult {
+fn execute_with_executor<E: ProgramExecutor>(
+    executor: &mut E,
+    test: &FeatureTest,
+) -> ExecutionResult {
     let mut engine = match ShapeEngine::new() {
         Ok(e) => e,
         Err(e) => return ExecutionResult::Error(format!("Engine init failed: {}", e)),

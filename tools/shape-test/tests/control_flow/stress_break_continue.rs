@@ -17,7 +17,10 @@ fn test_loop_break_basic() {
 /// Verifies loop immediate break.
 #[test]
 fn test_loop_immediate_break() {
-    ShapeTest::new("fn run() {\n    let mut x = 0\n    loop {\n        break\n    }\n    x\n}\nrun()").expect_number(0.0);
+    ShapeTest::new(
+        "fn run() {\n    let mut x = 0\n    loop {\n        break\n    }\n    x\n}\nrun()",
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies loop break after 10.
@@ -165,7 +168,10 @@ fn test_multiple_break_conditions() {
 /// Verifies break with value.
 #[test]
 fn test_break_with_value() {
-    ShapeTest::new("fn run() {\n    let result = loop {\n        break 42\n    }\n    result\n}\nrun()").expect_number(42.0);
+    ShapeTest::new(
+        "fn run() {\n    let result = loop {\n        break 42\n    }\n    result\n}\nrun()",
+    )
+    .expect_number(42.0);
 }
 
 /// Verifies break with computed value.

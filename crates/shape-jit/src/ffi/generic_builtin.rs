@@ -26,9 +26,7 @@ pub static GENERIC_BUILTIN_FN: std::sync::atomic::AtomicPtr<()> =
 /// # Safety
 /// The function pointer must be valid for the duration of JIT execution and
 /// must have the signature: `extern "C" fn(*mut JITContext, u16, u16) -> u64`
-pub unsafe fn register_generic_builtin_fn(
-    f: extern "C" fn(*mut JITContext, u16, u16) -> u64,
-) {
+pub unsafe fn register_generic_builtin_fn(f: extern "C" fn(*mut JITContext, u16, u16) -> u64) {
     GENERIC_BUILTIN_FN.store(f as *mut (), std::sync::atomic::Ordering::Release);
 }
 

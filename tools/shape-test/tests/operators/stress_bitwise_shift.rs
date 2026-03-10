@@ -297,8 +297,7 @@ fn test_bitwise_shift_with_variables() {
 /// Verifies <<= compound assignment.
 #[test]
 fn test_shl_assign() {
-    ShapeTest::new("fn test() {\n    var x = 1\n    x <<= 4\n    x\n}\ntest()")
-        .expect_number(16.0);
+    ShapeTest::new("fn test() {\n    var x = 1\n    x <<= 4\n    x\n}\ntest()").expect_number(16.0);
 }
 
 /// Verifies >>= compound assignment.
@@ -352,8 +351,10 @@ fn test_return_bitwise_shift() {
 /// Verifies packing two bytes: (high << 8) | low = 0xABCD.
 #[test]
 fn test_pack_two_bytes() {
-    ShapeTest::new("fn test() {\n    let high = 0xAB\n    let low = 0xCD\n    (high << 8) | low\n}\ntest()")
-        .expect_number(0xABCD as f64);
+    ShapeTest::new(
+        "fn test() {\n    let high = 0xAB\n    let low = 0xCD\n    (high << 8) | low\n}\ntest()",
+    )
+    .expect_number(0xABCD as f64);
 }
 
 /// Verifies unpacking two bytes.
@@ -417,8 +418,10 @@ fn test_bitwise_mask_and_shift_pipeline() {
 fn test_rotate_left_pattern() {
     let x: i64 = 0b10110001;
     let expected = ((x << 3) | (x >> 5)) & 0xFF;
-    ShapeTest::new("fn test() {\n    let x = 0b10110001\n    ((x << 3) | (x >> 5)) & 0xFF\n}\ntest()")
-        .expect_number(expected as f64);
+    ShapeTest::new(
+        "fn test() {\n    let x = 0b10110001\n    ((x << 3) | (x >> 5)) & 0xFF\n}\ntest()",
+    )
+    .expect_number(expected as f64);
 }
 
 /// Verifies extract byte: (0xABCD >> 8) & 0xFF = 0xAB.

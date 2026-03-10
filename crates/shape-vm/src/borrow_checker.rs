@@ -358,9 +358,10 @@ mod tests {
     #[test]
     fn test_single_exclusive_borrow_ok() {
         let mut bc = BorrowChecker::new();
-        assert!(bc
-            .create_borrow(0, 0, BorrowMode::Exclusive, span(), None)
-            .is_ok());
+        assert!(
+            bc.create_borrow(0, 0, BorrowMode::Exclusive, span(), None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -377,15 +378,18 @@ mod tests {
     #[test]
     fn test_multiple_shared_borrows_ok() {
         let mut bc = BorrowChecker::new();
-        assert!(bc
-            .create_borrow(0, 0, BorrowMode::Shared, span(), None)
-            .is_ok());
-        assert!(bc
-            .create_borrow(0, 1, BorrowMode::Shared, span(), None)
-            .is_ok());
-        assert!(bc
-            .create_borrow(0, 2, BorrowMode::Shared, span(), None)
-            .is_ok());
+        assert!(
+            bc.create_borrow(0, 0, BorrowMode::Shared, span(), None)
+                .is_ok()
+        );
+        assert!(
+            bc.create_borrow(0, 1, BorrowMode::Shared, span(), None)
+                .is_ok()
+        );
+        assert!(
+            bc.create_borrow(0, 2, BorrowMode::Shared, span(), None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -433,12 +437,14 @@ mod tests {
     #[test]
     fn test_disjoint_field_exclusive_borrows_ok() {
         let mut bc = BorrowChecker::new();
-        assert!(bc
-            .create_borrow(field_place(0, 0), 0, BorrowMode::Exclusive, span(), None)
-            .is_ok());
-        assert!(bc
-            .create_borrow(field_place(0, 1), 1, BorrowMode::Exclusive, span(), None)
-            .is_ok());
+        assert!(
+            bc.create_borrow(field_place(0, 0), 0, BorrowMode::Exclusive, span(), None)
+                .is_ok()
+        );
+        assert!(
+            bc.create_borrow(field_place(0, 1), 1, BorrowMode::Exclusive, span(), None)
+                .is_ok()
+        );
         assert!(bc.check_write_allowed(field_place(0, 0), None).is_err());
         assert!(bc.check_write_allowed(field_place(0, 1), None).is_err());
     }
@@ -463,9 +469,10 @@ mod tests {
         bc.exit_region();
         assert!(bc.check_write_allowed(0, None).is_ok());
         // Can borrow again after release
-        assert!(bc
-            .create_borrow(0, 1, BorrowMode::Exclusive, span(), None)
-            .is_ok());
+        assert!(
+            bc.create_borrow(0, 1, BorrowMode::Exclusive, span(), None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -493,9 +500,10 @@ mod tests {
         bc.create_borrow(0, 0, BorrowMode::Exclusive, span(), None)
             .unwrap();
         // Different slot is fine
-        assert!(bc
-            .create_borrow(1, 1, BorrowMode::Exclusive, span(), None)
-            .is_ok());
+        assert!(
+            bc.create_borrow(1, 1, BorrowMode::Exclusive, span(), None)
+                .is_ok()
+        );
         assert!(bc.check_write_allowed(1, None).is_err());
         assert!(bc.check_write_allowed(2, None).is_ok());
     }
@@ -542,9 +550,10 @@ mod tests {
         bc.reset();
         // All borrows cleared
         assert!(bc.check_write_allowed(0, None).is_ok());
-        assert!(bc
-            .create_borrow(0, 0, BorrowMode::Exclusive, span(), None)
-            .is_ok());
+        assert!(
+            bc.create_borrow(0, 0, BorrowMode::Exclusive, span(), None)
+                .is_ok()
+        );
     }
 
     #[test]

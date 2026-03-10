@@ -12,8 +12,8 @@
 use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use shape_runtime::wire_conversion::wire_to_nb;
 use shape_value::ValueWord;
-use shape_wire::transport::factory::TransportKind;
 use shape_wire::transport::Transport;
+use shape_wire::transport::factory::TransportKind;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -155,8 +155,7 @@ fn wire_roundtrip(
         .map_err(|e| format!("remote: failed to create transport: {}", e))?;
 
     // Encode WireMessage to MessagePack
-    let mp =
-        shape_wire::encode_message(msg).map_err(|e| format!("remote: encode error: {}", e))?;
+    let mp = shape_wire::encode_message(msg).map_err(|e| format!("remote: encode error: {}", e))?;
 
     // Send via transport (handles framing + length prefix internally)
     let response_bytes = transport
@@ -164,8 +163,7 @@ fn wire_roundtrip(
         .map_err(|e| format!("remote: transport error: {}", e))?;
 
     // Response is already deframed by transport.send()
-    shape_wire::decode_message(&response_bytes)
-        .map_err(|e| format!("remote: decode error: {}", e))
+    shape_wire::decode_message(&response_bytes).map_err(|e| format!("remote: decode error: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -268,9 +266,7 @@ fn remote_ping(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, Str
 ///
 /// Handles all common types without requiring a filesystem-backed SnapshotStore.
 /// Falls back to `None` only for truly unsupported types (BlobRef-backed, IoHandle, etc.).
-fn nb_to_serializable(
-    nb: &ValueWord,
-) -> shape_runtime::snapshot::SerializableVMValue {
+fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVMValue {
     use shape_runtime::snapshot::SerializableVMValue;
     use shape_value::NanTag;
 
@@ -291,9 +287,18 @@ fn nb_to_serializable(
                     let items: Vec<_> = arr.iter().map(|v| nb_to_serializable(v)).collect();
                     SerializableVMValue::Array(items)
                 }
-                Some(HeapValue::Closure { function_id, upvalues }) => {
-                    let ups: Vec<_> = upvalues.iter().map(|u| nb_to_serializable(&u.get())).collect();
-                    SerializableVMValue::Closure { function_id: *function_id, upvalues: ups }
+                Some(HeapValue::Closure {
+                    function_id,
+                    upvalues,
+                }) => {
+                    let ups: Vec<_> = upvalues
+                        .iter()
+                        .map(|u| nb_to_serializable(&u.get()))
+                        .collect();
+                    SerializableVMValue::Closure {
+                        function_id: *function_id,
+                        upvalues: ups,
+                    }
                 }
                 Some(HeapValue::Some(inner)) => {
                     SerializableVMValue::Some(Box::new(nb_to_serializable(inner)))
@@ -309,34 +314,51 @@ fn nb_to_serializable(
                     let values: Vec<_> = map.values.iter().map(|v| nb_to_serializable(v)).collect();
                     SerializableVMValue::HashMap { keys, values }
                 }
-                Some(HeapValue::Range { start, end, inclusive }) => {
-                    SerializableVMValue::Range {
-                        start: start.as_ref().map(|s| Box::new(nb_to_serializable(s))),
-                        end: end.as_ref().map(|e| Box::new(nb_to_serializable(e))),
-                        inclusive: *inclusive,
-                    }
-                }
+                Some(HeapValue::Range {
+                    start,
+                    end,
+                    inclusive,
+                }) => SerializableVMValue::Range {
+                    start: start.as_ref().map(|s| Box::new(nb_to_serializable(s))),
+                    end: end.as_ref().map(|e| Box::new(nb_to_serializable(e))),
+                    inclusive: *inclusive,
+                },
                 Some(HeapValue::IntArray(buf)) => {
                     let items: Vec<_> = buf.iter().map(|&v| SerializableVMValue::Int(v)).collect();
                     SerializableVMValue::Array(items)
                 }
                 Some(HeapValue::FloatArray(buf)) => {
-                    let items: Vec<_> = buf.as_slice().iter().map(|&v| SerializableVMValue::Number(v)).collect();
+                    let items: Vec<_> = buf
+                        .as_slice()
+                        .iter()
+                        .map(|&v| SerializableVMValue::Number(v))
+                        .collect();
                     SerializableVMValue::Array(items)
                 }
                 Some(HeapValue::BoolArray(buf)) => {
-                    let items: Vec<_> = buf.iter().map(|&v| SerializableVMValue::Bool(v != 0)).collect();
+                    let items: Vec<_> = buf
+                        .iter()
+                        .map(|&v| SerializableVMValue::Bool(v != 0))
+                        .collect();
                     SerializableVMValue::Array(items)
                 }
-                Some(HeapValue::TypedObject { schema_id, slots, heap_mask }) => {
-                    let slot_data: Vec<_> = slots.iter().enumerate().map(|(i, slot)| {
-                        if *heap_mask & (1u64 << i) != 0 {
-                            let vw = slot.as_value_word(true);
-                            nb_to_serializable(&vw)
-                        } else {
-                            SerializableVMValue::Number(slot.as_f64())
-                        }
-                    }).collect();
+                Some(HeapValue::TypedObject {
+                    schema_id,
+                    slots,
+                    heap_mask,
+                }) => {
+                    let slot_data: Vec<_> = slots
+                        .iter()
+                        .enumerate()
+                        .map(|(i, slot)| {
+                            if *heap_mask & (1u64 << i) != 0 {
+                                let vw = slot.as_value_word(true);
+                                nb_to_serializable(&vw)
+                            } else {
+                                SerializableVMValue::Number(slot.as_f64())
+                            }
+                        })
+                        .collect();
                     SerializableVMValue::TypedObject {
                         schema_id: *schema_id,
                         slot_data,
@@ -351,9 +373,7 @@ fn nb_to_serializable(
 }
 
 /// Lightweight SerializableVMValue → ValueWord conversion for remote call responses.
-fn serializable_to_nb(
-    sv: &shape_runtime::snapshot::SerializableVMValue,
-) -> ValueWord {
+fn serializable_to_nb(sv: &shape_runtime::snapshot::SerializableVMValue) -> ValueWord {
     use shape_runtime::snapshot::SerializableVMValue;
 
     match sv {
@@ -369,29 +389,29 @@ fn serializable_to_nb(
             ValueWord::from_array(Arc::new(vals))
         }
         SerializableVMValue::Decimal(d) => ValueWord::from_decimal(*d),
-        SerializableVMValue::Some(inner) => {
-            ValueWord::from_some(serializable_to_nb(inner))
-        }
-        SerializableVMValue::Ok(inner) => {
-            ValueWord::from_ok(serializable_to_nb(inner))
-        }
-        SerializableVMValue::Err(inner) => {
-            ValueWord::from_err(serializable_to_nb(inner))
-        }
+        SerializableVMValue::Some(inner) => ValueWord::from_some(serializable_to_nb(inner)),
+        SerializableVMValue::Ok(inner) => ValueWord::from_ok(serializable_to_nb(inner)),
+        SerializableVMValue::Err(inner) => ValueWord::from_err(serializable_to_nb(inner)),
         SerializableVMValue::HashMap { keys, values } => {
             let k: Vec<_> = keys.iter().map(serializable_to_nb).collect();
             let v: Vec<_> = values.iter().map(serializable_to_nb).collect();
             ValueWord::from_hashmap_pairs(k, v)
         }
-        SerializableVMValue::Range { start, end, inclusive } => {
-            ValueWord::from_range(
-                start.as_ref().map(|s| serializable_to_nb(s)),
-                end.as_ref().map(|e| serializable_to_nb(e)),
-                *inclusive,
-            )
-        }
-        SerializableVMValue::Closure { function_id, upvalues } => {
-            let ups: Vec<_> = upvalues.iter()
+        SerializableVMValue::Range {
+            start,
+            end,
+            inclusive,
+        } => ValueWord::from_range(
+            start.as_ref().map(|s| serializable_to_nb(s)),
+            end.as_ref().map(|e| serializable_to_nb(e)),
+            *inclusive,
+        ),
+        SerializableVMValue::Closure {
+            function_id,
+            upvalues,
+        } => {
+            let ups: Vec<_> = upvalues
+                .iter()
                 .map(|sv| shape_value::value::Upvalue::new(serializable_to_nb(sv)))
                 .collect();
             ValueWord::from_heap_value(shape_value::HeapValue::Closure {
@@ -399,19 +419,29 @@ fn serializable_to_nb(
                 upvalues: ups,
             })
         }
-        SerializableVMValue::TypedObject { schema_id, slot_data, heap_mask } => {
-            let slots: Vec<_> = slot_data.iter().enumerate().map(|(i, sv)| {
-                if *heap_mask & (1u64 << i) != 0 {
-                    let vw = serializable_to_nb(sv);
-                    let (slot, _) = shape_value::ValueSlot::from_value_word(&vw);
-                    slot
-                } else {
-                    match sv {
-                        SerializableVMValue::Number(n) => shape_value::ValueSlot::from_number(*n),
-                        _ => shape_value::ValueSlot::from_raw(0),
+        SerializableVMValue::TypedObject {
+            schema_id,
+            slot_data,
+            heap_mask,
+        } => {
+            let slots: Vec<_> = slot_data
+                .iter()
+                .enumerate()
+                .map(|(i, sv)| {
+                    if *heap_mask & (1u64 << i) != 0 {
+                        let vw = serializable_to_nb(sv);
+                        let (slot, _) = shape_value::ValueSlot::from_value_word(&vw);
+                        slot
+                    } else {
+                        match sv {
+                            SerializableVMValue::Number(n) => {
+                                shape_value::ValueSlot::from_number(*n)
+                            }
+                            _ => shape_value::ValueSlot::from_raw(0),
+                        }
                     }
-                }
-            }).collect();
+                })
+                .collect();
             ValueWord::from_heap_value(shape_value::HeapValue::TypedObject {
                 schema_id: *schema_id,
                 slots: slots.into_boxed_slice(),
@@ -440,10 +470,7 @@ fn remote_call(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, Str
     // fn_ref can be a Function (u16 ID) or a number (function index from annotation ctx)
     let func_id = args
         .get(1)
-        .and_then(|a| {
-            a.as_function()
-                .or_else(|| a.as_f64().map(|n| n as u16))
-        })
+        .and_then(|a| a.as_function().or_else(|| a.as_f64().map(|n| n as u16)))
         .ok_or_else(|| {
             "remote.__call(): second argument must be a function reference".to_string()
         })?;
@@ -455,9 +482,11 @@ fn remote_call(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, Str
         .unwrap_or_default();
 
     // Get the current program from thread-local
-    let program = CURRENT_PROGRAM.with(|p| p.borrow().clone()).ok_or_else(|| {
-        "remote.__call(): no program context available (internal error)".to_string()
-    })?;
+    let program = CURRENT_PROGRAM
+        .with(|p| p.borrow().clone())
+        .ok_or_else(|| {
+            "remote.__call(): no program context available (internal error)".to_string()
+        })?;
 
     // Look up function name for the request
     let function_name = program

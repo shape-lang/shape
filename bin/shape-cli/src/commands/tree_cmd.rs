@@ -92,9 +92,9 @@ fn print_project_tree(
             shape_runtime::dependency_resolver::ResolvedDependencySource::Path => "source",
             shape_runtime::dependency_resolver::ResolvedDependencySource::Bundle => "bundle",
             shape_runtime::dependency_resolver::ResolvedDependencySource::Git { .. } => "git",
-            shape_runtime::dependency_resolver::ResolvedDependencySource::Registry {
-                ..
-            } => "registry",
+            shape_runtime::dependency_resolver::ResolvedDependencySource::Registry { .. } => {
+                "registry"
+            }
         };
         let is_bundle_path = resolved_dep
             .path

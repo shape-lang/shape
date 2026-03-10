@@ -2,8 +2,8 @@
 //! Tests compile-time borrow checking: error detection, diagnostics, and edge cases.
 
 use super::*;
-use crate::executor::VirtualMachine;
 use crate::VMConfig;
+use crate::executor::VirtualMachine;
 use shape_ast::parser::parse_program;
 use shape_value::ValueWord;
 
@@ -980,7 +980,7 @@ fn test_borrow_scope_multiple_refs_in_same_scope_different_vars() {
     "#;
     let result = compile_and_run_fn(code, "test");
     assert_eq!(result, ValueWord::from_i64(231)); // x=2, y=3, z=1 => swap(y,z) => x=2,y=1,z=3 wait...
-                                                  // Actually: swap(x,y) => x=2,y=1; swap(y,z) => y=3,z=1 => x=2,y=3,z=1 => 231
+    // Actually: swap(x,y) => x=2,y=1; swap(y,z) => y=3,z=1 => x=2,y=3,z=1 => 231
 }
 
 // =============================================================================
@@ -1973,9 +1973,10 @@ fn test_borrow_unit_shared_after_region_exit_allows_exclusive() {
         .unwrap();
     bc.exit_region();
     // After shared borrow released, exclusive should be allowed
-    assert!(bc
-        .create_borrow(0, 1, BorrowMode::Exclusive, span, None)
-        .is_ok());
+    assert!(
+        bc.create_borrow(0, 1, BorrowMode::Exclusive, span, None)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -1990,9 +1991,10 @@ fn test_borrow_unit_exclusive_after_region_exit_allows_shared() {
         .unwrap();
     bc.exit_region();
     // After exclusive borrow released, shared should be allowed
-    assert!(bc
-        .create_borrow(0, 1, BorrowMode::Shared, span, None)
-        .is_ok());
+    assert!(
+        bc.create_borrow(0, 1, BorrowMode::Shared, span, None)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -2013,12 +2015,14 @@ fn test_borrow_unit_reset_clears_everything() {
     // After reset, everything is clean
     assert!(bc.check_write_allowed(0, None).is_ok());
     assert!(bc.check_write_allowed(1, None).is_ok());
-    assert!(bc
-        .create_borrow(0, 0, BorrowMode::Exclusive, span, None)
-        .is_ok());
-    assert!(bc
-        .create_borrow(1, 1, BorrowMode::Exclusive, span, None)
-        .is_ok());
+    assert!(
+        bc.create_borrow(0, 0, BorrowMode::Exclusive, span, None)
+            .is_ok()
+    );
+    assert!(
+        bc.create_borrow(1, 1, BorrowMode::Exclusive, span, None)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -2037,9 +2041,10 @@ fn test_borrow_unit_many_shared_borrows_same_slot() {
     // But read should be allowed
     assert!(bc.check_read_allowed(0, None).is_ok());
     // Adding an exclusive should fail
-    assert!(bc
-        .create_borrow(0, 99, BorrowMode::Exclusive, span, None)
-        .is_err());
+    assert!(
+        bc.create_borrow(0, 99, BorrowMode::Exclusive, span, None)
+            .is_err()
+    );
 }
 
 #[test]

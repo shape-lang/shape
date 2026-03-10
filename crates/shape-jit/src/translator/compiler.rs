@@ -570,10 +570,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // Jump to shared deopt block
             let deopt = self.get_or_create_deopt_block();
-            let deopt_id_val = self
-                .builder
-                .ins()
-                .iconst(types::I32, spill.deopt_id as i64);
+            let deopt_id_val = self.builder.ins().iconst(types::I32, spill.deopt_id as i64);
             self.builder.ins().jump(deopt, &[deopt_id_val]);
             self.builder.seal_block(spill.block);
         }
@@ -809,7 +806,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// - It does not use CallValue (closure calls need captured state)
     /// - It is straight-line (no jumps, loops, or exception handlers)
     /// Non-leaf functions (with Call/CallMethod/BuiltinCall) ARE allowed.
-    pub(crate) fn analyze_inline_candidates(program: &BytecodeProgram) -> HashMap<u16, InlineCandidate> {
+    pub(crate) fn analyze_inline_candidates(
+        program: &BytecodeProgram,
+    ) -> HashMap<u16, InlineCandidate> {
         let mut candidates = HashMap::new();
         let num_funcs = program.functions.len();
         if num_funcs == 0 {
@@ -1157,20 +1156,14 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 }
 
                 // Unboxed int locals must be tagged Int64
-                if unboxed_ints.contains(&bc_idx)
-                    && ctx_pos < 128
-                    && kind != SlotKind::Int64
-                {
+                if unboxed_ints.contains(&bc_idx) && ctx_pos < 128 && kind != SlotKind::Int64 {
                     return Err(format!(
                         "DeoptInfo[{}] mapping[{}]: unboxed int local {} tagged as {:?}, expected Int64",
                         i, j, bc_idx, kind
                     ));
                 }
                 // Unboxed f64 locals must be tagged Float64
-                if unboxed_f64s.contains(&bc_idx)
-                    && ctx_pos < 128
-                    && kind != SlotKind::Float64
-                {
+                if unboxed_f64s.contains(&bc_idx) && ctx_pos < 128 && kind != SlotKind::Float64 {
                     return Err(format!(
                         "DeoptInfo[{}] mapping[{}]: unboxed f64 local {} tagged as {:?}, expected Float64",
                         i, j, bc_idx, kind
@@ -1183,7 +1176,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 if iframe.local_mapping.len() != iframe.local_kinds.len() {
                     return Err(format!(
                         "DeoptInfo[{}].inline_frames[{}]: local_mapping len {} != local_kinds len {}",
-                        i, fi, iframe.local_mapping.len(), iframe.local_kinds.len()
+                        i,
+                        fi,
+                        iframe.local_mapping.len(),
+                        iframe.local_kinds.len()
                     ));
                 }
                 for (j, &(ctx_pos, bc_idx)) in iframe.local_mapping.iter().enumerate() {
@@ -1193,7 +1189,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                             i, fi, j, ctx_pos, CTX_BUF_LOCALS_MAX
                         ));
                     }
-                    let kind = iframe.local_kinds.get(j).copied().unwrap_or(SlotKind::Unknown);
+                    let kind = iframe
+                        .local_kinds
+                        .get(j)
+                        .copied()
+                        .unwrap_or(SlotKind::Unknown);
                     if kind == SlotKind::Unknown {
                         return Err(format!(
                             "DeoptInfo[{}].inline_frames[{}] mapping[{}]: slot (ctx_pos={}, bc_idx={}) \

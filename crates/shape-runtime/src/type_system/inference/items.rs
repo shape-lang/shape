@@ -489,20 +489,14 @@ impl TypeInferenceEngine {
             TypeAnnotation::Union(types) => {
                 let resolved: Vec<TypeAnnotation> = types
                     .iter()
-                    .filter_map(|t| {
-                        self.resolve_type_annotation(t)
-                            .to_annotation()
-                    })
+                    .filter_map(|t| self.resolve_type_annotation(t).to_annotation())
                     .collect();
                 Type::Concrete(TypeAnnotation::Union(resolved))
             }
             TypeAnnotation::Intersection(types) => {
                 let resolved: Vec<TypeAnnotation> = types
                     .iter()
-                    .filter_map(|t| {
-                        self.resolve_type_annotation(t)
-                            .to_annotation()
-                    })
+                    .filter_map(|t| self.resolve_type_annotation(t).to_annotation())
                     .collect();
                 Type::Concrete(TypeAnnotation::Intersection(resolved))
             }

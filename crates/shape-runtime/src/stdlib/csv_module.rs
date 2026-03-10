@@ -27,8 +27,7 @@ pub fn create_csv_module() -> ModuleExports {
 
             let mut rows: Vec<ValueWord> = Vec::new();
             for result in reader.records() {
-                let record =
-                    result.map_err(|e| format!("csv.parse() failed: {}", e))?;
+                let record = result.map_err(|e| format!("csv.parse() failed: {}", e))?;
                 let row: Vec<ValueWord> = record
                     .iter()
                     .map(|field| ValueWord::from_string(Arc::new(field.to_string())))
@@ -74,8 +73,7 @@ pub fn create_csv_module() -> ModuleExports {
 
             let mut records: Vec<ValueWord> = Vec::new();
             for result in reader.records() {
-                let record =
-                    result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
+                let record = result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
                 let mut keys = Vec::with_capacity(headers.len());
                 let mut values = Vec::with_capacity(headers.len());
                 for (i, field) in record.iter().enumerate() {
@@ -147,8 +145,8 @@ pub fn create_csv_module() -> ModuleExports {
             let bytes = writer
                 .into_inner()
                 .map_err(|e| format!("csv.stringify() failed to flush: {}", e))?;
-            let output =
-                String::from_utf8(bytes).map_err(|e| format!("csv.stringify() UTF-8 error: {}", e))?;
+            let output = String::from_utf8(bytes)
+                .map_err(|e| format!("csv.stringify() UTF-8 error: {}", e))?;
 
             Ok(ValueWord::from_string(Arc::new(output)))
         },
@@ -274,8 +272,8 @@ pub fn create_csv_module() -> ModuleExports {
                     name: "headers".to_string(),
                     type_name: "Array<string>".to_string(),
                     required: false,
-                    description:
-                        "Explicit header order (default: keys from first record)".to_string(),
+                    description: "Explicit header order (default: keys from first record)"
+                        .to_string(),
                     ..Default::default()
                 },
             ],
@@ -301,8 +299,7 @@ pub fn create_csv_module() -> ModuleExports {
 
             let mut rows: Vec<ValueWord> = Vec::new();
             for result in reader.records() {
-                let record =
-                    result.map_err(|e| format!("csv.read_file() parse error: {}", e))?;
+                let record = result.map_err(|e| format!("csv.read_file() parse error: {}", e))?;
                 let row: Vec<ValueWord> = record
                     .iter()
                     .map(|field| ValueWord::from_string(Arc::new(field.to_string())))
@@ -398,13 +395,19 @@ mod tests {
         let rows = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(rows.len(), 3);
         // First row
-        let row0 = rows[0].as_any_array().expect("row should be array").to_generic();
+        let row0 = rows[0]
+            .as_any_array()
+            .expect("row should be array")
+            .to_generic();
         assert_eq!(row0.len(), 3);
         assert_eq!(row0[0].as_str(), Some("a"));
         assert_eq!(row0[1].as_str(), Some("b"));
         assert_eq!(row0[2].as_str(), Some("c"));
         // Second row
-        let row1 = rows[1].as_any_array().expect("row should be array").to_generic();
+        let row1 = rows[1]
+            .as_any_array()
+            .expect("row should be array")
+            .to_generic();
         assert_eq!(row1[0].as_str(), Some("1"));
         assert_eq!(row1[1].as_str(), Some("2"));
         assert_eq!(row1[2].as_str(), Some("3"));
@@ -420,7 +423,10 @@ mod tests {
         let result = parse_fn(&[input], &ctx).unwrap();
         let rows = result.as_any_array().expect("should be array").to_generic();
         assert_eq!(rows.len(), 1);
-        let row0 = rows[0].as_any_array().expect("row should be array").to_generic();
+        let row0 = rows[0]
+            .as_any_array()
+            .expect("row should be array")
+            .to_generic();
         assert_eq!(row0[0].as_str(), Some("hello, world"));
         assert_eq!(row0[1].as_str(), Some("foo\"bar"));
     }
@@ -651,7 +657,10 @@ mod tests {
         let inner = result.as_ok_inner().expect("should be Ok");
         let rows = inner.as_any_array().expect("should be array").to_generic();
         assert_eq!(rows.len(), 3);
-        let row0 = rows[0].as_any_array().expect("row should be array").to_generic();
+        let row0 = rows[0]
+            .as_any_array()
+            .expect("row should be array")
+            .to_generic();
         assert_eq!(row0[0].as_str(), Some("a"));
         assert_eq!(row0[1].as_str(), Some("b"));
     }

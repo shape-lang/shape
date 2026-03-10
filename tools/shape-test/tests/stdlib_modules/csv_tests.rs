@@ -76,10 +76,7 @@ fn csv_parse_records_basic() {
     let ctx = test_ctx();
     let input = ValueWord::from_string(Arc::new("name,age\nAlice,30\nBob,25".to_string()));
     let result = parse_fn(&[input], &ctx).unwrap();
-    let records = result
-        .as_any_array()
-        .expect("should be array")
-        .to_generic();
+    let records = result.as_any_array().expect("should be array").to_generic();
     assert_eq!(records.len(), 2);
 }
 

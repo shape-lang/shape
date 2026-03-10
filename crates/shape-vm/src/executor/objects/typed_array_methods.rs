@@ -436,11 +436,7 @@ pub fn handle_float_map(
     for (i, &v) in arr.iter().enumerate() {
         let elem_nb = ValueWord::from_f64(v);
         let mapped = if cb_arity >= 2 {
-            vm.call_value_immediate_nb(
-                &callback,
-                &[elem_nb, ValueWord::from_i64(i as i64)],
-                None,
-            )?
+            vm.call_value_immediate_nb(&callback, &[elem_nb, ValueWord::from_i64(i as i64)], None)?
         } else {
             vm.call_value_immediate_nb(&callback, &[elem_nb], None)?
         };
@@ -474,11 +470,7 @@ pub fn handle_int_map(
     for (i, &v) in arr.iter().enumerate() {
         let elem_nb = ValueWord::from_i64(v);
         let mapped = if cb_arity >= 2 {
-            vm.call_value_immediate_nb(
-                &callback,
-                &[elem_nb, ValueWord::from_i64(i as i64)],
-                None,
-            )?
+            vm.call_value_immediate_nb(&callback, &[elem_nb, ValueWord::from_i64(i as i64)], None)?
         } else {
             vm.call_value_immediate_nb(&callback, &[elem_nb], None)?
         };
@@ -509,11 +501,7 @@ pub fn handle_float_filter(
     for (i, &v) in arr.iter().enumerate() {
         let elem_nb = ValueWord::from_f64(v);
         let keep = if cb_arity >= 2 {
-            vm.call_value_immediate_nb(
-                &callback,
-                &[elem_nb, ValueWord::from_i64(i as i64)],
-                None,
-            )?
+            vm.call_value_immediate_nb(&callback, &[elem_nb, ValueWord::from_i64(i as i64)], None)?
         } else {
             vm.call_value_immediate_nb(&callback, &[elem_nb], None)?
         };
@@ -539,11 +527,7 @@ pub fn handle_int_filter(
     for (i, &v) in arr.iter().enumerate() {
         let elem_nb = ValueWord::from_i64(v);
         let keep = if cb_arity >= 2 {
-            vm.call_value_immediate_nb(
-                &callback,
-                &[elem_nb, ValueWord::from_i64(i as i64)],
-                None,
-            )?
+            vm.call_value_immediate_nb(&callback, &[elem_nb, ValueWord::from_i64(i as i64)], None)?
         } else {
             vm.call_value_immediate_nb(&callback, &[elem_nb], None)?
         };

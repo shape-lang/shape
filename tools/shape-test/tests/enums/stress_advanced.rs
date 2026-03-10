@@ -155,10 +155,8 @@ fn test_enum_is_typed_object_internally() {
 /// Verifies different enum types comparison does not crash.
 #[test]
 fn test_enum_different_types_not_equal() {
-    ShapeTest::new(
-        "enum A { X }\nenum B { X }\nlet a = A::X\nlet b = B::X\na == b",
-    )
-    .expect_bool(false);
+    ShapeTest::new("enum A { X }\nenum B { X }\nlet a = A::X\nlet b = B::X\na == b")
+        .expect_bool(false);
 }
 
 // =============================================================================
@@ -186,10 +184,8 @@ fn test_builtin_result_ok() {
 /// Verifies builtin Result Err.
 #[test]
 fn test_builtin_result_err() {
-    ShapeTest::new(
-        "let x = Err(\"oops\")\nmatch x { Ok(n) => \"ok\", Err(e) => e, }",
-    )
-    .expect_string("oops");
+    ShapeTest::new("let x = Err(\"oops\")\nmatch x { Ok(n) => \"ok\", Err(e) => e, }")
+        .expect_string("oops");
 }
 
 // =============================================================================

@@ -474,10 +474,7 @@ impl TypeInferenceEngine {
             &func_type,
             Type::Function { .. } | Type::Concrete(TypeAnnotation::Function { .. })
         ) {
-            if matches!(
-                &func_type,
-                Type::Variable(_) | Type::Constrained { .. }
-            ) {
+            if matches!(&func_type, Type::Variable(_) | Type::Constrained { .. }) {
                 let result_type = Type::Variable(TypeVar::fresh());
                 let expected_func_type =
                     BuiltinTypes::function(arg_types.clone(), result_type.clone());

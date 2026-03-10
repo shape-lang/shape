@@ -724,9 +724,11 @@ mod tests {
     fn test_chart_spec_from_series() {
         let spec = ChartSpec::from_series(
             ChartType::Line,
-            vec![
-                ("Revenue".to_string(), vec![(1.0, 100.0), (2.0, 200.0)], None),
-            ],
+            vec![(
+                "Revenue".to_string(),
+                vec![(1.0, 100.0), (2.0, 200.0)],
+                None,
+            )],
         );
         assert_eq!(spec.channels.len(), 2); // x + y
         assert_eq!(spec.channel("x").unwrap().values, vec![1.0, 2.0]);

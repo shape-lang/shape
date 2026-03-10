@@ -6,19 +6,26 @@ use shape_test::shape_test::ShapeTest;
 /// Verifies if as expression true branch.
 #[test]
 fn test_if_as_expression_true() {
-    ShapeTest::new("function test() {\n  let x = if true { 10 } else { 20 }\n  return x\n}\ntest()").expect_number(10.0);
+    ShapeTest::new(
+        "function test() {\n  let x = if true { 10 } else { 20 }\n  return x\n}\ntest()",
+    )
+    .expect_number(10.0);
 }
 
 /// Verifies if as expression false branch.
 #[test]
 fn test_if_as_expression_false() {
-    ShapeTest::new("function test() {\n  let x = if false { 10 } else { 20 }\n  return x\n}\ntest()").expect_number(20.0);
+    ShapeTest::new(
+        "function test() {\n  let x = if false { 10 } else { 20 }\n  return x\n}\ntest()",
+    )
+    .expect_number(20.0);
 }
 
 /// Verifies if expression in return.
 #[test]
 fn test_if_expr_in_return() {
-    ShapeTest::new("function test() {\n  return if 3 > 2 { 42 } else { 0 }\n}\ntest()").expect_number(42.0);
+    ShapeTest::new("function test() {\n  return if 3 > 2 { 42 } else { 0 }\n}\ntest()")
+        .expect_number(42.0);
 }
 
 /// Verifies if expression with block body.
@@ -36,13 +43,19 @@ fn test_if_expr_chained_assignment() {
 /// Verifies if expression string result.
 #[test]
 fn test_if_expr_string_result() {
-    ShapeTest::new("function test() {\n  let x = if true { \"yes\" } else { \"no\" }\n  return x\n}\ntest()").expect_string("yes");
+    ShapeTest::new(
+        "function test() {\n  let x = if true { \"yes\" } else { \"no\" }\n  return x\n}\ntest()",
+    )
+    .expect_string("yes");
 }
 
 /// Verifies if expression string false branch.
 #[test]
 fn test_if_expr_string_false_branch() {
-    ShapeTest::new("function test() {\n  let x = if false { \"yes\" } else { \"no\" }\n  return x\n}\ntest()").expect_string("no");
+    ShapeTest::new(
+        "function test() {\n  let x = if false { \"yes\" } else { \"no\" }\n  return x\n}\ntest()",
+    )
+    .expect_string("no");
 }
 
 /// Verifies if as top-level expression.
@@ -54,7 +67,10 @@ fn test_if_as_top_level_expression() {
 /// Verifies if-else both branches string.
 #[test]
 fn test_if_expr_both_branches_string() {
-    ShapeTest::new("function test() {\n  let x = if 1 > 0 { \"yes\" } else { \"no\" }\n  return x\n}\ntest()").expect_string("yes");
+    ShapeTest::new(
+        "function test() {\n  let x = if 1 > 0 { \"yes\" } else { \"no\" }\n  return x\n}\ntest()",
+    )
+    .expect_string("yes");
 }
 
 /// Verifies if-else as function arg.

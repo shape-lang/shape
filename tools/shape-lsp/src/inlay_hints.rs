@@ -386,9 +386,10 @@ impl<'a> HintContext<'a> {
 
         // Extract inner type name from Table<T> annotation
         let inner_type = match &decl.type_annotation {
-            Some(TypeAnnotation::Generic { name, args }) if name == "Table" => {
-                args.first().and_then(|a| a.as_simple_name()).map(String::from)
-            }
+            Some(TypeAnnotation::Generic { name, args }) if name == "Table" => args
+                .first()
+                .and_then(|a| a.as_simple_name())
+                .map(String::from),
             _ => None,
         };
         let inner_type = match inner_type {

@@ -22,7 +22,8 @@ use crate::commands::ProviderOptions;
 use crate::extension_loading;
 
 /// Pre-loaded language runtimes for polyglot remote execution.
-type LanguageRuntimes = HashMap<String, Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>>;
+type LanguageRuntimes =
+    HashMap<String, Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>>;
 
 /// Server configuration derived from CLI flags.
 struct ServeConfig {
@@ -48,7 +49,10 @@ impl std::str::FromStr for SandboxLevel {
             "strict" => Ok(SandboxLevel::Strict),
             "permissive" => Ok(SandboxLevel::Permissive),
             "none" => Ok(SandboxLevel::None),
-            _ => Err(format!("unknown sandbox level: '{}' (expected strict|permissive|none)", s)),
+            _ => Err(format!(
+                "unknown sandbox level: '{}' (expected strict|permissive|none)",
+                s
+            )),
         }
     }
 }
@@ -97,7 +101,10 @@ pub async fn run_serve(
 
     // Warn if non-localhost without auth token
     if !addr.ip().is_loopback() && auth_token.is_none() {
-        eprintln!("Warning: serving on {} without --auth-token. Any client can execute code.", addr);
+        eprintln!(
+            "Warning: serving on {} without --auth-token. Any client can execute code.",
+            addr
+        );
     }
 
     let sandbox_level: SandboxLevel = sandbox.parse().map_err(|e: String| anyhow::anyhow!(e))?;
@@ -111,16 +118,24 @@ pub async fn run_serve(
         let mut engine = ShapeEngine::new()
             .map_err(|e| anyhow::anyhow!("failed to create engine for extension loading: {}", e))?;
         // Use the standard extension discovery path (auto-scans ~/.shape/extensions/)
-        let specs = extension_loading::collect_startup_specs(
-            provider_opts, None, None, None, &extensions,
-        );
+        let specs =
+            extension_loading::collect_startup_specs(provider_opts, None, None, None, &extensions);
         let loaded = extension_loading::load_specs(
-            &mut engine, &specs,
+            &mut engine,
+            &specs,
             |spec, info| {
-                eprintln!("  Loaded extension: {} ({})", info.name, spec.path.display());
+                eprintln!(
+                    "  Loaded extension: {} ({})",
+                    info.name,
+                    spec.path.display()
+                );
             },
             |spec, err| {
-                eprintln!("  Failed to load extension {}: {}", spec.path.display(), err);
+                eprintln!(
+                    "  Failed to load extension {}: {}",
+                    spec.path.display(),
+                    err
+                );
             },
         );
         if loaded > 0 {
@@ -151,7 +166,11 @@ pub async fn run_serve(
         "  sandbox: {:?}, max-concurrent: {}, auth: {}",
         config.sandbox,
         config.max_concurrent,
-        if config.auth_token.is_some() { "required" } else { "none" },
+        if config.auth_token.is_some() {
+            "required"
+        } else {
+            "none"
+        },
     );
 
     loop {
@@ -163,7 +182,8 @@ pub async fn run_serve(
         let language_runtimes = language_runtimes.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, &config, &semaphore, &language_runtimes).await {
+            if let Err(e) = handle_connection(socket, &config, &semaphore, &language_runtimes).await
+            {
                 eprintln!("Connection error from {}: {}", peer, e);
             }
         });
@@ -197,8 +217,8 @@ async fn handle_connection(
         socket.read_exact(&mut payload).await?;
 
         // Decode framing (flags byte + optional zstd decompression)
-        let decompressed = decode_framed(&payload)
-            .map_err(|e| anyhow::anyhow!("framing decode error: {}", e))?;
+        let decompressed =
+            decode_framed(&payload).map_err(|e| anyhow::anyhow!("framing decode error: {}", e))?;
 
         // Deserialize from MessagePack
         let message: WireMessage = shape_wire::decode_message(&decompressed)
@@ -215,14 +235,18 @@ async fn handle_connection(
                         success: false,
                         value: WireValue::Null,
                         stdout: None,
-                        error: Some("Authentication required. Send Auth message first.".to_string()),
+                        error: Some(
+                            "Authentication required. Send Auth message first.".to_string(),
+                        ),
                         content_terminal: None,
                         content_html: None,
                         diagnostics: vec![],
                         metrics: None,
                     }))
                 } else {
-                    let _permit = semaphore.acquire().await
+                    let _permit = semaphore
+                        .acquire()
+                        .await
                         .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
                     Some(handle_execute(req, config).await)
                 }
@@ -245,21 +269,23 @@ async fn handle_connection(
             }
             WireMessage::Call(req) => {
                 if requires_auth(config) && !state.authenticated {
-                    Some(WireMessage::CallResponse(shape_vm::remote::RemoteCallResponse {
-                        result: Err(shape_vm::remote::RemoteCallError {
-                            message: "Authentication required.".to_string(),
-                            kind: shape_vm::remote::RemoteErrorKind::RuntimeError,
-                        }),
-                    }))
+                    Some(WireMessage::CallResponse(
+                        shape_vm::remote::RemoteCallResponse {
+                            result: Err(shape_vm::remote::RemoteCallError {
+                                message: "Authentication required.".to_string(),
+                                kind: shape_vm::remote::RemoteErrorKind::RuntimeError,
+                            }),
+                        },
+                    ))
                 } else {
-                    let _permit = semaphore.acquire().await
+                    let _permit = semaphore
+                        .acquire()
+                        .await
                         .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
                     Some(handle_call(req, &mut state, language_runtimes))
                 }
             }
-            WireMessage::BlobNegotiation(req) => {
-                Some(handle_negotiation(req, &state.blob_cache))
-            }
+            WireMessage::BlobNegotiation(req) => Some(handle_negotiation(req, &state.blob_cache)),
             WireMessage::Sidecar(s) => {
                 state.pending_sidecars.insert(s.sidecar_id, s);
                 continue;
@@ -455,8 +481,8 @@ fn execute_code_in_process(
 
     let start = Instant::now();
 
-    let mut engine = ShapeEngine::new()
-        .map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
+    let mut engine =
+        ShapeEngine::new().map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
 
     let mut executor = BytecodeExecutor::new();
 
@@ -479,12 +505,19 @@ fn execute_code_in_process(
     let wall_time_ms = start.elapsed().as_millis() as u64;
 
     // Collect print output — NOT the return value
-    let stdout: String = result.messages.iter()
-        .map(|m| format!("{}\n", m.text)).collect();
+    let stdout: String = result
+        .messages
+        .iter()
+        .map(|m| format!("{}\n", m.text))
+        .collect();
 
     Ok(InProcessResult {
         value: result.value,
-        stdout: if stdout.is_empty() { None } else { Some(stdout) },
+        stdout: if stdout.is_empty() {
+            None
+        } else {
+            Some(stdout)
+        },
         content_terminal: result.content_terminal,
         content_html: result.content_html,
         wall_time_ms,
@@ -531,11 +564,8 @@ fn extract_location(err: &shape_runtime::error::ShapeError) -> (Option<u32>, Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_vm::remote::{
-        ExecuteRequest, WireMessage,
-        build_call_request,
-    };
     use shape_runtime::snapshot::SerializableVMValue;
+    use shape_vm::remote::{ExecuteRequest, WireMessage, build_call_request};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -562,7 +592,8 @@ mod tests {
                 let semaphore = semaphore.clone();
                 let language_runtimes = language_runtimes.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(socket, &config, &semaphore, &language_runtimes).await;
+                    let _ =
+                        handle_connection(socket, &config, &semaphore, &language_runtimes).await;
                 });
             }
         });
@@ -593,7 +624,11 @@ mod tests {
         let addr = start_test_server().await;
         let mut stream = TcpStream::connect(addr).await.unwrap();
 
-        let resp = roundtrip(&mut stream, &WireMessage::Ping(shape_vm::remote::PingRequest {})).await;
+        let resp = roundtrip(
+            &mut stream,
+            &WireMessage::Ping(shape_vm::remote::PingRequest {}),
+        )
+        .await;
         match resp {
             WireMessage::Pong(info) => {
                 assert_eq!(info.wire_protocol, shape_wire::WIRE_PROTOCOL_V2);
@@ -657,9 +692,8 @@ mod tests {
 
         // Compile a Shape program with a function, then call it remotely
         let bytecode = {
-            let program = shape_ast::parser::parse_program(
-                "function multiply(a, b) { a * b }"
-            ).expect("parse");
+            let program = shape_ast::parser::parse_program("function multiply(a, b) { a * b }")
+                .expect("parse");
             let compiler = shape_vm::compiler::BytecodeCompiler::new();
             compiler.compile(&program).expect("compile")
         };
@@ -678,15 +712,13 @@ mod tests {
         let resp = roundtrip(&mut stream, &msg).await;
 
         match resp {
-            WireMessage::CallResponse(r) => {
-                match r.result {
-                    Ok(SerializableVMValue::Number(n)) => {
-                        assert_eq!(n, 42.0, "6 * 7 should be 42");
-                    }
-                    Ok(other) => panic!("Expected Number(42.0), got {:?}", other),
-                    Err(e) => panic!("Remote call failed: {:?}", e),
+            WireMessage::CallResponse(r) => match r.result {
+                Ok(SerializableVMValue::Number(n)) => {
+                    assert_eq!(n, 42.0, "6 * 7 should be 42");
                 }
-            }
+                Ok(other) => panic!("Expected Number(42.0), got {:?}", other),
+                Err(e) => panic!("Remote call failed: {:?}", e),
+            },
             other => panic!("Expected CallResponse, got {:?}", other),
         }
     }
@@ -715,7 +747,8 @@ mod tests {
                 let semaphore = semaphore.clone();
                 let language_runtimes = language_runtimes.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(socket, &config, &semaphore, &language_runtimes).await;
+                    let _ =
+                        handle_connection(socket, &config, &semaphore, &language_runtimes).await;
                 });
             }
         });
@@ -737,7 +770,9 @@ mod tests {
         }
 
         // Now authenticate
-        let auth_msg = WireMessage::Auth(AuthRequest { token: "secret".to_string() });
+        let auth_msg = WireMessage::Auth(AuthRequest {
+            token: "secret".to_string(),
+        });
         let resp = roundtrip(&mut stream, &auth_msg).await;
         match resp {
             WireMessage::AuthResponse(r) => assert!(r.authenticated),

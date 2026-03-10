@@ -2,15 +2,15 @@
 //!
 //! Handles: LoadLocal, StoreLocal, LoadModuleBinding, StoreModuleBinding, LoadClosure, StoreClosure, CloseUpvalue
 
+use crate::executor::objects::object_creation::clone_slots_with_update;
+use crate::executor::typed_object_ops::{read_slot_fast, tag_to_field_type};
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
     memory::{record_heap_write, write_barrier_vw},
 };
-use crate::executor::objects::object_creation::clone_slots_with_update;
-use crate::executor::typed_object_ops::{read_slot_fast, tag_to_field_type};
-use shape_value::nanboxed::RefTarget;
 use shape_value::heap_value::HeapValue;
+use shape_value::nanboxed::RefTarget;
 use shape_value::{RefProjection, VMError, ValueWord};
 use std::sync::{Arc, RwLock};
 impl VirtualMachine {
@@ -19,7 +19,11 @@ impl VirtualMachine {
         target: &RefTarget,
     ) -> Result<ValueWord, VMError> {
         match target {
-            RefTarget::Stack(slot) => Ok(self.stack.get(*slot).cloned().unwrap_or_else(ValueWord::none)),
+            RefTarget::Stack(slot) => Ok(self
+                .stack
+                .get(*slot)
+                .cloned()
+                .unwrap_or_else(ValueWord::none)),
             RefTarget::ModuleBinding(slot) => Ok(self
                 .module_bindings
                 .get(*slot)
@@ -37,14 +41,13 @@ impl VirtualMachine {
                                 .to_string(),
                         )
                     })?;
-                    let base_value =
-                        if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
-                            base_value.as_heap_ref()
-                        {
-                            value.as_ref().clone()
-                        } else {
-                            base_value
-                        };
+                    let base_value = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
+                        base_value.as_heap_ref()
+                    {
+                        value.as_ref().clone()
+                    } else {
+                        base_value
+                    };
                     if let Some(HeapValue::TypedObject {
                         slots, heap_mask, ..
                     }) = base_value.as_heap_ref()
@@ -75,7 +78,8 @@ impl VirtualMachine {
             }
             RefTarget::ModuleBinding(target) => {
                 if *target >= self.module_bindings.len() {
-                    self.module_bindings.resize_with(*target + 1, ValueWord::none);
+                    self.module_bindings
+                        .resize_with(*target + 1, ValueWord::none);
                 }
                 write_barrier_vw(&self.module_bindings[*target], &value);
                 self.module_bindings[*target] = value;
@@ -93,14 +97,13 @@ impl VirtualMachine {
                                 .to_string(),
                         )
                     })?;
-                    let base_value =
-                        if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
-                            base_value.as_heap_ref()
-                        {
-                            value.as_ref().clone()
-                        } else {
-                            base_value
-                        };
+                    let base_value = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
+                        base_value.as_heap_ref()
+                    {
+                        value.as_ref().clone()
+                    } else {
+                        base_value
+                    };
                     if let Some(HeapValue::TypedObject {
                         schema_id,
                         slots,

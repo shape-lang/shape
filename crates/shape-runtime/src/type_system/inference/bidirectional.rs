@@ -334,7 +334,9 @@ impl TypeInferenceEngine {
                     result_fields.push(shape_ast::ast::ObjectTypeField {
                         name: key.clone(),
                         optional: false,
-                        type_annotation: field_type.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
+                        type_annotation: field_type
+                            .to_annotation()
+                            .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
                         annotations: vec![],
                     });
                 }

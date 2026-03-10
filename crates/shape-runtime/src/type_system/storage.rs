@@ -149,9 +149,7 @@ impl StorageType {
             SemanticType::Function(_) => StorageType::Function,
 
             // Type variables and unresolved - use dynamic
-            SemanticType::TypeVar(_) | SemanticType::Generic { .. } => {
-                StorageType::Dynamic
-            }
+            SemanticType::TypeVar(_) | SemanticType::Generic { .. } => StorageType::Dynamic,
 
             // Named types — resolve known primitives, default to Struct for user types
             SemanticType::Named(name) => {

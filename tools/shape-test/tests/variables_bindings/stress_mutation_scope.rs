@@ -29,8 +29,7 @@ fn test_var_multiple_reassign() {
 /// Verifies var reassign different value.
 #[test]
 fn test_var_reassign_different_value() {
-    ShapeTest::new("fn test() -> int { var x = 10\nx = 20\nreturn x }\ntest()")
-        .expect_number(20.0);
+    ShapeTest::new("fn test() -> int { var x = 10\nx = 20\nreturn x }\ntest()").expect_number(20.0);
 }
 
 /// Verifies self-increment pattern.

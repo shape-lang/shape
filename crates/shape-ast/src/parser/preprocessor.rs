@@ -25,8 +25,7 @@ pub fn preprocess_semicolons(source: &str) -> String {
         let last_char = effective_last_char(line, &mut in_block_comment, &mut in_triple_string);
 
         let needs_semicolon = if let Some(ch) = last_char {
-            is_statement_ender(ch)
-                && next_nonblank_starts_with_bracket_or_paren(&lines, i + 1)
+            is_statement_ender(ch) && next_nonblank_starts_with_bracket_or_paren(&lines, i + 1)
         } else {
             false
         };
@@ -284,10 +283,7 @@ mod tests {
     fn test_insert_before_paren_after_identifier() {
         let input = "let dy = self.y2 - self.y1\n(dx * dx + dy * dy)";
         let output = preprocess_semicolons(input);
-        assert_eq!(
-            output,
-            "let dy = self.y2 - self.y1;\n(dx * dx + dy * dy)"
-        );
+        assert_eq!(output, "let dy = self.y2 - self.y1;\n(dx * dx + dy * dy)");
     }
 
     #[test]

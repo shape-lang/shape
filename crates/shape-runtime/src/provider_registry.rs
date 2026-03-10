@@ -373,7 +373,10 @@ impl ProviderRegistry {
     /// Return all loaded language runtimes, keyed by language identifier.
     pub fn language_runtimes(
         &self,
-    ) -> std::collections::HashMap<String, Arc<crate::plugins::language_runtime::PluginLanguageRuntime>> {
+    ) -> std::collections::HashMap<
+        String,
+        Arc<crate::plugins::language_runtime::PluginLanguageRuntime>,
+    > {
         let runtimes = self.language_runtimes.read().unwrap();
         runtimes.clone()
     }

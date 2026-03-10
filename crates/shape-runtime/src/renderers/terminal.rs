@@ -410,8 +410,7 @@ fn render_code(language: Option<&str>, source: &str) -> String {
 
 fn render_chart(spec: &ChartSpec) -> String {
     // If the chart has actual data, render with braille/block characters
-    let has_data = !spec.channels.is_empty()
-        && spec.channels.iter().any(|c| !c.values.is_empty());
+    let has_data = !spec.channels.is_empty() && spec.channels.iter().any(|c| !c.values.is_empty());
     if has_data {
         return super::terminal_chart::render_chart_text(spec);
     }
@@ -420,10 +419,7 @@ fn render_chart(spec: &ChartSpec) -> String {
     let title = spec.title.as_deref().unwrap_or("untitled");
     let type_name = chart_type_display_name(spec.chart_type);
     let y_count = spec.channels_by_name("y").len();
-    format!(
-        "[{} Chart: {} ({} series)]\n",
-        type_name, title, y_count
-    )
+    format!("[{} Chart: {} ({} series)]\n", type_name, title, y_count)
 }
 
 fn chart_type_display_name(ct: shape_value::content::ChartType) -> &'static str {

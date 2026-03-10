@@ -38,7 +38,8 @@ pub fn resolve_doc_link(
         return None;
     }
 
-    if let Some(current_module) = current_module_import_path(module_cache, current_file, workspace_root)
+    if let Some(current_module) =
+        current_module_import_path(module_cache, current_file, workspace_root)
     {
         if let Some(resolved) = resolve_in_program(
             program,
@@ -91,7 +92,8 @@ fn resolve_in_module_cache(
     let (module_cache, current_file) = (module_cache?, current_file?);
 
     for module_path in module_candidates(target) {
-        let Some(resolved_path) = module_cache.resolve_import(&module_path, current_file, workspace_root)
+        let Some(resolved_path) =
+            module_cache.resolve_import(&module_path, current_file, workspace_root)
         else {
             continue;
         };
@@ -116,7 +118,8 @@ fn resolve_in_module_cache(
         };
         let Some(symbol) = collect_program_doc_symbols(&module_info.program, &module_path)
             .into_iter()
-            .find(|symbol| symbol.local_path == local_target) else {
+            .find(|symbol| symbol.local_path == local_target)
+        else {
             continue;
         };
 

@@ -119,7 +119,10 @@ impl FieldType {
     /// (closure, function reference). Primitive numeric/bool/string types are
     /// never callable. `Any`, `Object`, and `Array` might hold callables.
     pub fn is_potentially_callable(&self) -> bool {
-        matches!(self, FieldType::Any | FieldType::Object(_) | FieldType::Array(_))
+        matches!(
+            self,
+            FieldType::Any | FieldType::Object(_) | FieldType::Array(_)
+        )
     }
 
     /// Returns true if this is a sub-64 or unsigned-64 integer width type.

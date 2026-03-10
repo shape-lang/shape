@@ -22,10 +22,10 @@ pub mod blob_prefetch;
 pub mod blob_store;
 pub mod blob_wire_format;
 pub mod builtin_metadata;
+pub mod chart_detect;
 pub mod closure;
 pub mod code_search;
 pub mod columnar_aggregations;
-pub mod chart_detect;
 pub mod const_eval;
 pub mod content_builders;
 pub mod content_dispatch;
@@ -35,8 +35,8 @@ pub mod context;
 pub mod crypto;
 pub mod data;
 pub mod dependency_resolver;
-pub mod doc_extract;
 pub mod distributed_gc;
+pub mod doc_extract;
 pub mod engine;
 pub mod event_queue;
 pub mod execution_proof;
@@ -52,13 +52,13 @@ pub mod join_executor;
 pub mod leakage;
 pub mod lookahead_guard;
 pub mod metadata;
-pub mod native_resolution;
 pub mod module_bindings;
 pub mod module_exports;
 pub mod module_loader;
 pub mod module_manifest;
 pub mod multi_table;
 pub mod multiple_testing;
+pub mod native_resolution;
 pub mod output_adapter;
 pub mod package_bundle;
 pub mod package_lock;
@@ -135,7 +135,9 @@ pub use query_result::{AlertResult, QueryResult, QueryType};
 use shape_value::ValueWord;
 pub use shape_value::ValueWord as Value;
 pub use stream_executor::{StreamEvent, StreamExecutor, StreamState};
-pub use sync_bridge::{SyncDataProvider, block_on_shared, get_runtime_handle, initialize_shared_runtime};
+pub use sync_bridge::{
+    SyncDataProvider, block_on_shared, get_runtime_handle, initialize_shared_runtime,
+};
 pub use type_schema::{
     FieldDef, FieldType, SchemaId, TypeSchema, TypeSchemaBuilder, TypeSchemaRegistry,
 };

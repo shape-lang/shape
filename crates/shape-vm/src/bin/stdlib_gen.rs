@@ -4,8 +4,7 @@ use std::path::PathBuf;
 fn main() {
     let verify = std::env::args().any(|a| a == "--verify");
 
-    let out_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("embedded/core_stdlib.msgpack");
+    let out_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("embedded/core_stdlib.msgpack");
 
     // Always compile from source (bypass embedded artifact loading)
     eprintln!("Compiling core stdlib from source...");
@@ -37,9 +36,8 @@ fn main() {
         // Deserialize existing artifact and compare semantically
         // (byte-level comparison fails due to non-deterministic HashMap serialization order)
         let existing_bytes = std::fs::read(&out_path).expect("Failed to read existing artifact");
-        let existing: shape_vm::bytecode::BytecodeProgram =
-            rmp_serde::from_slice(&existing_bytes)
-                .expect("Failed to deserialize existing artifact");
+        let existing: shape_vm::bytecode::BytecodeProgram = rmp_serde::from_slice(&existing_bytes)
+            .expect("Failed to deserialize existing artifact");
 
         let mut errors = Vec::new();
         if existing.functions.len() != program.functions.len() {
@@ -79,9 +77,7 @@ fn main() {
             for e in &errors {
                 eprintln!("  - {}", e);
             }
-            eprintln!(
-                "Run `cargo run -p shape-vm --bin stdlib_gen` to regenerate."
-            );
+            eprintln!("Run `cargo run -p shape-vm --bin stdlib_gen` to regenerate.");
             std::process::exit(1);
         }
     } else {

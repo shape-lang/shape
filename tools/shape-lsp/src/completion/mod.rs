@@ -476,12 +476,7 @@ fn analyze_parsed_program(
     let mut ann_discovery = AnnotationDiscovery::new();
     ann_discovery.discover_from_program(program);
     if let (Some(cache), Some(file_path)) = (module_cache, current_file) {
-        ann_discovery.discover_from_imports_with_cache(
-            program,
-            file_path,
-            cache,
-            workspace_root,
-        );
+        ann_discovery.discover_from_imports_with_cache(program, file_path, cache, workspace_root);
     } else {
         ann_discovery.discover_from_imports(program);
     }

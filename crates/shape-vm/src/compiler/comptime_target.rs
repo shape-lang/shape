@@ -12,10 +12,10 @@
 //! - `return_type`: string (for function targets)
 //! - `annotations`: array of annotation names already applied
 
-pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
-use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
 use shape_ast::ast::functions::Annotation;
+pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
+use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
 use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_nb_pairs};
 use shape_value::ValueWord;
 use std::sync::Arc;
@@ -98,8 +98,7 @@ impl ComptimeTarget {
                 let field_anns: Vec<FieldAnnotation> = anns
                     .iter()
                     .map(|a| {
-                        let args: Vec<String> =
-                            a.args.iter().map(expr_to_string_lossy).collect();
+                        let args: Vec<String> = a.args.iter().map(expr_to_string_lossy).collect();
                         (a.name.clone(), args)
                     })
                     .collect();

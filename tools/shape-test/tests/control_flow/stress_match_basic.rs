@@ -11,19 +11,22 @@ use shape_test::shape_test::ShapeTest;
 /// Verifies match int literal first arm.
 #[test]
 fn test_match_int_literal_first_arm() {
-    ShapeTest::new("function test() {\n  return match 1 { 1 => 10, 2 => 20, _ => 0 };\n}\ntest()").expect_number(10.0);
+    ShapeTest::new("function test() {\n  return match 1 { 1 => 10, 2 => 20, _ => 0 };\n}\ntest()")
+        .expect_number(10.0);
 }
 
 /// Verifies match int literal second arm.
 #[test]
 fn test_match_int_literal_second_arm() {
-    ShapeTest::new("function test() {\n  return match 2 { 1 => 10, 2 => 20, _ => 0 };\n}\ntest()").expect_number(20.0);
+    ShapeTest::new("function test() {\n  return match 2 { 1 => 10, 2 => 20, _ => 0 };\n}\ntest()")
+        .expect_number(20.0);
 }
 
 /// Verifies match int literal wildcard.
 #[test]
 fn test_match_int_literal_wildcard() {
-    ShapeTest::new("function test() {\n  return match 99 { 1 => 10, 2 => 20, _ => 0 };\n}\ntest()").expect_number(0.0);
+    ShapeTest::new("function test() {\n  return match 99 { 1 => 10, 2 => 20, _ => 0 };\n}\ntest()")
+        .expect_number(0.0);
 }
 
 /// Verifies match string literal.
@@ -57,7 +60,8 @@ fn test_match_negative_literal() {
 /// Verifies match with only wildcard.
 #[test]
 fn test_match_only_wildcard() {
-    ShapeTest::new("function test() {\n  return match 42 { _ => 99 };\n}\ntest()").expect_number(99.0);
+    ShapeTest::new("function test() {\n  return match 42 { _ => 99 };\n}\ntest()")
+        .expect_number(99.0);
 }
 
 /// Verifies match wildcard captures all unmatched.
@@ -73,7 +77,8 @@ fn test_match_wildcard_captures_all() {
 /// Verifies match two arms.
 #[test]
 fn test_match_two_arms() {
-    ShapeTest::new("function test() {\n  return match 1 { 1 => 10, _ => 0 };\n}\ntest()").expect_number(10.0);
+    ShapeTest::new("function test() {\n  return match 1 { 1 => 10, _ => 0 };\n}\ntest()")
+        .expect_number(10.0);
 }
 
 /// Verifies match five arms.
@@ -101,7 +106,8 @@ fn test_match_as_expression_assign() {
 /// Verifies match as expression return.
 #[test]
 fn test_match_as_expression_return() {
-    ShapeTest::new("function test() {\n  return match 5 { 5 => 500, _ => 0 };\n}\ntest()").expect_number(500.0);
+    ShapeTest::new("function test() {\n  return match 5 { 5 => 500, _ => 0 };\n}\ntest()")
+        .expect_number(500.0);
 }
 
 /// Verifies match expression in arithmetic.
@@ -185,7 +191,8 @@ fn test_match_deeply_nested() {
 /// Verifies match identifier binding.
 #[test]
 fn test_match_identifier_binding() {
-    ShapeTest::new("function test() {\n  return match 42 {\n    x => x + 1\n  };\n}\ntest()").expect_number(43.0);
+    ShapeTest::new("function test() {\n  return match 42 {\n    x => x + 1\n  };\n}\ntest()")
+        .expect_number(43.0);
 }
 
 /// Verifies match identifier with prior literal.

@@ -170,9 +170,8 @@ impl VirtualMachine {
                 got: args.first().map_or("missing", |a| a.type_name()),
             })? as i64;
 
-        let dt = chrono::DateTime::from_timestamp(secs, 0).ok_or_else(|| {
-            VMError::RuntimeError(format!("Invalid epoch seconds: {}", secs))
-        })?;
+        let dt = chrono::DateTime::from_timestamp(secs, 0)
+            .ok_or_else(|| VMError::RuntimeError(format!("Invalid epoch seconds: {}", secs)))?;
         Ok(ValueWord::from_time_utc(dt))
     }
 }

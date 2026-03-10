@@ -100,7 +100,10 @@ fn test_while_true_break() {
 /// Verifies while true immediate break.
 #[test]
 fn test_while_true_immediate_break() {
-    ShapeTest::new("fn run() {\n    let mut x = 42\n    while true {\n        break\n    }\n    x\n}\nrun()").expect_number(42.0);
+    ShapeTest::new(
+        "fn run() {\n    let mut x = 42\n    while true {\n        break\n    }\n    x\n}\nrun()",
+    )
+    .expect_number(42.0);
 }
 
 // =========================================================================
@@ -152,7 +155,10 @@ fn test_while_halving() {
 /// Verifies while false body never executes.
 #[test]
 fn test_while_false_body() {
-    ShapeTest::new("fn run() {\n    let mut x = 42\n    while false {\n        x = 0\n    }\n    x\n}\nrun()").expect_number(42.0);
+    ShapeTest::new(
+        "fn run() {\n    let mut x = 42\n    while false {\n        x = 0\n    }\n    x\n}\nrun()",
+    )
+    .expect_number(42.0);
 }
 
 // =========================================================================

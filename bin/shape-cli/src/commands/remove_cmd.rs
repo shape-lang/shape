@@ -21,8 +21,9 @@ pub async fn run_remove(name: String) -> Result<()> {
     }
 
     // Remove the dependency line using string manipulation to preserve formatting
-    let updated = remove_dependency_from_toml(&toml_text, &name)
-        .ok_or_else(|| anyhow::anyhow!("could not find dependency '{}' line in shape.toml", name))?;
+    let updated = remove_dependency_from_toml(&toml_text, &name).ok_or_else(|| {
+        anyhow::anyhow!("could not find dependency '{}' line in shape.toml", name)
+    })?;
 
     std::fs::write(&toml_path, &updated)
         .with_context(|| format!("failed to write {}", toml_path.display()))?;

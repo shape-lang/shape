@@ -39,9 +39,7 @@ pub(crate) fn nb_extract_f64_data(value: &ValueWord) -> Result<Vec<f64>, VMError
             })
             .collect(),
         Some(HeapValue::FloatArray(arr)) => Ok(arr.as_slice().to_vec()),
-        Some(HeapValue::IntArray(arr)) => {
-            Ok(arr.as_slice().iter().map(|&v| v as f64).collect())
-        }
+        Some(HeapValue::IntArray(arr)) => Ok(arr.as_slice().iter().map(|&v| v as f64).collect()),
         Some(HeapValue::ColumnRef { table, col_id, .. }) => {
             use arrow_array::{Float64Array, Int64Array};
             let col = table.inner().column(*col_id as usize);

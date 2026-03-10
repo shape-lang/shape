@@ -96,7 +96,9 @@ impl VirtualMachine {
 
         let deref_value;
         let value = if value.is_ref() {
-            deref_value = self.resolve_ref_value(value).unwrap_or_else(|| value.clone());
+            deref_value = self
+                .resolve_ref_value(value)
+                .unwrap_or_else(|| value.clone());
             &deref_value
         } else {
             value
@@ -627,9 +629,9 @@ impl VirtualMachine {
         };
 
         // Handle DataTable / TypedTable (Table<T>) directly via columnar access
-        let dt_ref = value.as_datatable().or_else(|| {
-            value.as_typed_table().map(|(_, t)| t)
-        });
+        let dt_ref = value
+            .as_datatable()
+            .or_else(|| value.as_typed_table().map(|(_, t)| t));
         if let Some(dt) = dt_ref {
             return self.chart_from_datatable(dt, chart_type, x_column, y_columns);
         }
@@ -764,11 +766,7 @@ impl VirtualMachine {
         };
 
         let y_cols: Vec<String> = if y_columns.is_empty() {
-            col_names
-                .iter()
-                .filter(|n| *n != &x_col)
-                .cloned()
-                .collect()
+            col_names.iter().filter(|n| *n != &x_col).cloned().collect()
         } else {
             y_columns
         };
@@ -831,8 +829,7 @@ impl VirtualMachine {
         if let Some((schema_id, slots, heap_mask)) = row.as_typed_object() {
             let sid = schema_id as u32;
             if let Some(schema) = self.lookup_schema(sid) {
-                let mut map =
-                    std::collections::HashMap::with_capacity(schema.fields.len());
+                let mut map = std::collections::HashMap::with_capacity(schema.fields.len());
                 for field_def in &schema.fields {
                     let val = read_slot_nb(
                         slots,
@@ -860,8 +857,7 @@ impl VirtualMachine {
         if let Some((schema_id, slots, heap_mask)) = row.as_typed_object() {
             let sid = schema_id as u32;
             if let Some(schema) = self.lookup_schema(sid) {
-                let mut map =
-                    std::collections::HashMap::with_capacity(schema.fields.len());
+                let mut map = std::collections::HashMap::with_capacity(schema.fields.len());
                 for field_def in &schema.fields {
                     let val = read_slot_nb(
                         slots,
@@ -994,12 +990,9 @@ impl VirtualMachine {
             use shape_runtime::type_schema::FieldType;
             match &field_def.field_type {
                 FieldType::I64 => {
-                    let arr: Vec<i64> = col_values
-                        .iter()
-                        .map(|v| v.as_i64().unwrap_or(0))
-                        .collect();
-                    arrow_fields
-                        .push(Field::new(field_name.clone(), DataType::Int64, false));
+                    let arr: Vec<i64> =
+                        col_values.iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+                    arrow_fields.push(Field::new(field_name.clone(), DataType::Int64, false));
                     columns.push(Arc::new(Int64Array::from(arr)) as arrow_array::ArrayRef);
                 }
                 FieldType::F64 => {
@@ -1011,8 +1004,7 @@ impl VirtualMachine {
                                 .unwrap_or(0.0)
                         })
                         .collect();
-                    arrow_fields
-                        .push(Field::new(field_name.clone(), DataType::Float64, false));
+                    arrow_fields.push(Field::new(field_name.clone(), DataType::Float64, false));
                     columns.push(Arc::new(Float64Array::from(arr)) as arrow_array::ArrayRef);
                 }
                 FieldType::Bool => {
@@ -1020,8 +1012,7 @@ impl VirtualMachine {
                         .iter()
                         .map(|v| v.as_bool().unwrap_or(false))
                         .collect();
-                    arrow_fields
-                        .push(Field::new(field_name.clone(), DataType::Boolean, false));
+                    arrow_fields.push(Field::new(field_name.clone(), DataType::Boolean, false));
                     columns.push(Arc::new(BooleanArray::from(arr)) as arrow_array::ArrayRef);
                 }
                 FieldType::Decimal => {
@@ -1034,28 +1025,26 @@ impl VirtualMachine {
                                 .unwrap_or(0.0)
                         })
                         .collect();
-                    arrow_fields
-                        .push(Field::new(field_name.clone(), DataType::Float64, false));
+                    arrow_fields.push(Field::new(field_name.clone(), DataType::Float64, false));
                     columns.push(Arc::new(Float64Array::from(arr)) as arrow_array::ArrayRef);
                 }
                 FieldType::Timestamp => {
-                    let arr: Vec<i64> = col_values
-                        .iter()
-                        .map(|v| v.as_i64().unwrap_or(0))
-                        .collect();
-                    arrow_fields
-                        .push(Field::new(field_name.clone(), DataType::Int64, false));
+                    let arr: Vec<i64> =
+                        col_values.iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+                    arrow_fields.push(Field::new(field_name.clone(), DataType::Int64, false));
                     columns.push(Arc::new(Int64Array::from(arr)) as arrow_array::ArrayRef);
                 }
-                FieldType::I8 | FieldType::U8 | FieldType::I16 | FieldType::U16
-                | FieldType::I32 | FieldType::U32 | FieldType::U64 => {
+                FieldType::I8
+                | FieldType::U8
+                | FieldType::I16
+                | FieldType::U16
+                | FieldType::I32
+                | FieldType::U32
+                | FieldType::U64 => {
                     // Width-typed integers stored as i64
-                    let arr: Vec<i64> = col_values
-                        .iter()
-                        .map(|v| v.as_i64().unwrap_or(0))
-                        .collect();
-                    arrow_fields
-                        .push(Field::new(field_name.clone(), DataType::Int64, false));
+                    let arr: Vec<i64> =
+                        col_values.iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+                    arrow_fields.push(Field::new(field_name.clone(), DataType::Int64, false));
                     columns.push(Arc::new(Int64Array::from(arr)) as arrow_array::ArrayRef);
                 }
                 FieldType::String | FieldType::Object(_) | FieldType::Any | FieldType::Array(_) => {
@@ -1073,8 +1062,7 @@ impl VirtualMachine {
                             }
                         })
                         .collect();
-                    arrow_fields
-                        .push(Field::new(field_name.clone(), DataType::Utf8, false));
+                    arrow_fields.push(Field::new(field_name.clone(), DataType::Utf8, false));
                     columns.push(Arc::new(StringArray::from(arr)) as arrow_array::ArrayRef);
                 }
             }
@@ -1082,11 +1070,13 @@ impl VirtualMachine {
 
         let arrow_schema = Arc::new(Schema::new(arrow_fields));
         let batch = RecordBatch::try_new(arrow_schema, columns).map_err(|e| {
-            VMError::RuntimeError(format!("MakeTableFromRows: failed to create RecordBatch: {}", e))
+            VMError::RuntimeError(format!(
+                "MakeTableFromRows: failed to create RecordBatch: {}",
+                e
+            ))
         })?;
 
-        let dt = DataTable::with_type_name(batch, type_name)
-            .with_schema_id(schema_id);
+        let dt = DataTable::with_type_name(batch, type_name).with_schema_id(schema_id);
         let table = Arc::new(dt);
 
         Ok(ValueWord::from_heap_value(HeapValue::TypedTable {

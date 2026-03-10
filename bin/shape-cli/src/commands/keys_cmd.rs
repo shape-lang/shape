@@ -173,10 +173,8 @@ pub async fn run_sign(bundle_path: PathBuf, key_path: PathBuf) -> Result<()> {
         .map_err(|v: Vec<u8>| anyhow::anyhow!("expected 32-byte secret key, got {}", v.len()))?;
 
     // Read the bundle
-    let mut bundle = shape_runtime::package_bundle::PackageBundle::read_from_file(
-        &bundle_path,
-    )
-    .map_err(|e| anyhow::anyhow!("failed to read bundle '{}': {}", bundle_path.display(), e))?;
+    let mut bundle = shape_runtime::package_bundle::PackageBundle::read_from_file(&bundle_path)
+        .map_err(|e| anyhow::anyhow!("failed to read bundle '{}': {}", bundle_path.display(), e))?;
 
     let mut signed_count = 0usize;
     for manifest in &mut bundle.manifests {
@@ -213,9 +211,7 @@ pub async fn run_sign(bundle_path: PathBuf, key_path: PathBuf) -> Result<()> {
 /// `shape verify` -- verify signatures on a .shapec bundle.
 pub async fn run_verify(bundle_path: PathBuf) -> Result<()> {
     let bundle = shape_runtime::package_bundle::PackageBundle::read_from_file(&bundle_path)
-        .map_err(|e| {
-        anyhow::anyhow!("failed to read bundle '{}': {}", bundle_path.display(), e)
-    })?;
+        .map_err(|e| anyhow::anyhow!("failed to read bundle '{}': {}", bundle_path.display(), e))?;
 
     if bundle.manifests.is_empty() {
         eprintln!("Bundle contains no manifests.");

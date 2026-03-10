@@ -35,11 +35,13 @@ pub use async_symbols::{declare_async_functions, register_async_symbols};
 pub use control_symbols::{declare_control_functions, register_control_symbols};
 pub use data_symbols::{declare_data_functions, register_data_symbols};
 pub use gc_symbols::{declare_gc_functions, register_gc_symbols};
+pub use generic_builtin_symbols::{
+    declare_generic_builtin_functions, register_generic_builtin_symbols,
+};
 pub use math_symbols::{declare_math_functions, register_math_symbols};
 pub use object_symbols::{declare_object_functions, register_object_symbols};
 pub use reference_symbols::{declare_reference_functions, register_reference_symbols};
 pub use result_option_symbols::{declare_result_option_functions, register_result_option_symbols};
-pub use generic_builtin_symbols::{declare_generic_builtin_functions, register_generic_builtin_symbols};
 pub use simd_symbols::{declare_simd_functions, register_simd_symbols};
 
 /// Register all FFI function symbols with the JIT builder

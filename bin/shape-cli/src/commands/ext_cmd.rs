@@ -17,8 +17,7 @@ pub async fn run_ext_install(name: String, version: Option<String>) -> Result<()
     let lib_name = crate_name.replace('-', "_");
     let version_spec = version.as_deref().unwrap_or("*");
 
-    let ext_dir =
-        default_extensions_dir().context("could not determine home directory")?;
+    let ext_dir = default_extensions_dir().context("could not determine home directory")?;
     std::fs::create_dir_all(&ext_dir)?;
 
     println!("Installing extension '{name}' (crate: {crate_name} {version_spec})...");
@@ -114,10 +113,7 @@ pub async fn run_ext_list() -> Result<()> {
 
             for path in entries {
                 if is_shared_lib(&path) {
-                    let stem = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("?");
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
                     let display_name = stem
                         .strip_prefix("libshape_ext_")
                         .or_else(|| stem.strip_prefix("shape_ext_"))
@@ -152,8 +148,7 @@ pub async fn run_ext_list() -> Result<()> {
 }
 
 pub async fn run_ext_remove(name: String) -> Result<()> {
-    let ext_dir =
-        default_extensions_dir().context("could not determine home directory")?;
+    let ext_dir = default_extensions_dir().context("could not determine home directory")?;
 
     let lib_name = format!("shape_ext_{name}");
     let so_filename = format!(

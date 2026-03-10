@@ -115,10 +115,7 @@ fn render_chart(spec: &ChartSpec) -> String {
     let title = spec.title.as_deref().unwrap_or("untitled");
     let type_name = chart_type_display_name(spec.chart_type);
     let y_count = spec.channels_by_name("y").len();
-    format!(
-        "*[{} Chart: {} ({} series)]*\n",
-        type_name, title, y_count
-    )
+    format!("*[{} Chart: {} ({} series)]*\n", type_name, title, y_count)
 }
 
 fn chart_type_display_name(ct: shape_value::content::ChartType) -> &'static str {

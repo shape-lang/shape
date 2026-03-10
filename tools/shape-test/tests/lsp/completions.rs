@@ -408,9 +408,7 @@ fn completions_after_dot_on_string_via_resilient_parse() {
 #[test]
 fn completions_after_dot_on_number_via_resilient_parse() {
     let code = "let n = 42\nn.";
-    ShapeTest::new(code)
-        .at(pos(1, 2))
-        .expect_completion("abs");
+    ShapeTest::new(code).at(pos(1, 2)).expect_completion("abs");
 }
 
 #[test]

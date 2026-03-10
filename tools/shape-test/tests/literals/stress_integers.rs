@@ -111,8 +111,7 @@ fn test_int_literal_negative_thousand() {
 /// Verifies max safe integer for f64 (2^53) is representable.
 #[test]
 fn test_int_literal_max_safe_for_f64() {
-    ShapeTest::new("fn test() { 9007199254740992 }\ntest()")
-        .expect_number(9007199254740992.0);
+    ShapeTest::new("fn test() { 9007199254740992 }\ntest()").expect_number(9007199254740992.0);
 }
 
 /// Verifies integer literal 255.
@@ -300,10 +299,8 @@ fn test_int_negative_of_negative() {
 /// Verifies shadowing in same scope is allowed (second `let` shadows first).
 #[test]
 fn test_shadow_bool_with_int() {
-    ShapeTest::new(
-        "fn test() {\n    let x = true\n    let x = 99\n    x\n}\ntest()",
-    )
-    .expect_number(99.0);
+    ShapeTest::new("fn test() {\n    let x = true\n    let x = 99\n    x\n}\ntest()")
+        .expect_number(99.0);
 }
 
 // =============================================================================

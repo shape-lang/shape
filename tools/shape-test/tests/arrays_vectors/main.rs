@@ -1,7 +1,6 @@
 mod creation;
 mod indexing;
 mod methods;
-mod transforms;
 mod stress_access_length;
 mod stress_chained;
 mod stress_creation;
@@ -9,3 +8,4 @@ mod stress_map_filter;
 mod stress_mutation;
 mod stress_reduce_fold;
 mod stress_sort_find;
+mod transforms;

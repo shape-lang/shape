@@ -138,7 +138,8 @@ fn parse_char_literal_inner(s: &str) -> std::result::Result<char, String> {
             let hex = &s[3..s.len() - 1];
             let code = u32::from_str_radix(hex, 16)
                 .map_err(|_| format!("Invalid unicode escape: {}", s))?;
-            char::from_u32(code).ok_or_else(|| format!("Invalid unicode code point: U+{:04X}", code))
+            char::from_u32(code)
+                .ok_or_else(|| format!("Invalid unicode code point: U+{:04X}", code))
         } else if s.len() == 2 {
             // Simple escape: \n, \t, \r, \\, \', \0
             match s.as_bytes()[1] {
@@ -155,9 +156,14 @@ fn parse_char_literal_inner(s: &str) -> std::result::Result<char, String> {
         }
     } else {
         let mut chars = s.chars();
-        let c = chars.next().ok_or_else(|| "Empty char literal".to_string())?;
+        let c = chars
+            .next()
+            .ok_or_else(|| "Empty char literal".to_string())?;
         if chars.next().is_some() {
-            return Err(format!("Char literal must be a single character, got: {}", s));
+            return Err(format!(
+                "Char literal must be a single character, got: {}",
+                s
+            ));
         }
         Ok(c)
     }

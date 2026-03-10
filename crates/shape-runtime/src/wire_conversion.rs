@@ -602,7 +602,11 @@ pub fn nb_extract_content(
 ) -> (Option<serde_json::Value>, Option<String>, Option<String>) {
     let extracted = nb_extract_content_full(nb);
     match extracted {
-        Some(e) => (Some(e.content_json), Some(e.content_html), Some(e.content_terminal)),
+        Some(e) => (
+            Some(e.content_json),
+            Some(e.content_html),
+            Some(e.content_terminal),
+        ),
         None => (None, None, None),
     }
 }

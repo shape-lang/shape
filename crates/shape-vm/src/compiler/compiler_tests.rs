@@ -2875,11 +2875,7 @@ fn test_u8_overflow_wraps_end_to_end() {
         "#,
         "test",
     );
-    assert_eq!(
-        result.as_i64(),
-        Some(0),
-        "255u8 + 1u8 should wrap to 0"
-    );
+    assert_eq!(result.as_i64(), Some(0), "255u8 + 1u8 should wrap to 0");
 }
 
 #[test]

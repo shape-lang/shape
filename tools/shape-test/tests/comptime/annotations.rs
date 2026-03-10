@@ -534,7 +534,6 @@ greet()
 /// the int to a "number" type, which does not match the `int` parameter type.
 /// When fixed, `add(5, 3)` with doubled first arg should produce 13 (10 + 3).
 #[test]
-
 #[should_panic(expected = "Trusted AddInt invariant violated")]
 fn ct_15_annotation_modify_args() {
     let code = r#"
@@ -595,8 +594,7 @@ impl Calculator {
 let c = Calculator { value: 10 }
 print(c.add(5))
 "#;
-    ShapeTest::new(code)
-        .expect_run_err_contains("found identifier");
+    ShapeTest::new(code).expect_run_err_contains("found identifier");
 }
 
 /// BUG: Annotations on inline type methods (fn inside type body) are not supported.
@@ -630,8 +628,7 @@ type Calculator {
 let c = Calculator { value: 10 }
 print(c.add(5))
 "#;
-    ShapeTest::new(code)
-        .expect_run_err_contains("found identifier");
+    ShapeTest::new(code).expect_run_err_contains("found identifier");
 }
 
 /// BUG: `set param` directive with annotation arguments not supported.
@@ -712,6 +709,5 @@ fn greet(name: string) -> string {
 
 print(greet("World"))
 "#;
-    ShapeTest::new(code)
-        .expect_run_err_contains("unknown parameter");
+    ShapeTest::new(code).expect_run_err_contains("unknown parameter");
 }

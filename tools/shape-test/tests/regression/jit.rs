@@ -4,10 +4,10 @@
 //! they produce the same results as the VM. This catches regressions from
 //! JIT optimization phases (inline array access, fused cmp-branch, etc.).
 
-use shape_runtime::engine::ShapeEngine;
-use shape_runtime::initialize_shared_runtime;
 use shape_jit::JITExecutor;
 use shape_runtime::engine::ProgramExecutor;
+use shape_runtime::engine::ShapeEngine;
+use shape_runtime::initialize_shared_runtime;
 use shape_wire::WireValue;
 
 /// Run a Shape program through JIT and return the result as WireValue.

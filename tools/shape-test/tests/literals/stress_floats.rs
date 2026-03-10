@@ -162,8 +162,7 @@ fn test_number_division() {
 /// Verifies let binding with number type annotation.
 #[test]
 fn test_let_number_annotation() {
-    ShapeTest::new("fn test() -> number { let x: number = 3.14\n x }\ntest()")
-        .expect_number(3.14);
+    ShapeTest::new("fn test() -> number { let x: number = 3.14\n x }\ntest()").expect_number(3.14);
 }
 
 /// Verifies let binding with inferred number type.

@@ -364,10 +364,7 @@ impl VirtualMachine {
         }
 
         // return_ip for innermost: instruction after the last inline frame's call
-        let innermost_return_ip = frames
-            .last()
-            .map(|f| f.resume_ip + 1)
-            .unwrap_or(self.ip);
+        let innermost_return_ip = frames.last().map(|f| f.resume_ip + 1).unwrap_or(self.ip);
 
         let blob_hash = self.blob_hash_for_function(innermost_id);
         self.call_stack.push(super::super::CallFrame {
@@ -628,15 +625,13 @@ mod tests {
             local_kinds: vec![SlotKind::NanBoxed, SlotKind::Int64],
             stack_depth: 1,
             innermost_function_id: Some(3),
-            inline_frames: vec![
-                InlineFrameInfo {
-                    function_id: 2,
-                    resume_ip: 30,
-                    local_mapping: vec![(200, 0)],
-                    local_kinds: vec![SlotKind::Float64],
-                    stack_depth: 0,
-                },
-            ],
+            inline_frames: vec![InlineFrameInfo {
+                function_id: 2,
+                resume_ip: 30,
+                local_mapping: vec![(200, 0)],
+                local_kinds: vec![SlotKind::Float64],
+                stack_depth: 0,
+            }],
         };
 
         assert_eq!(info.inline_frames.len(), 1);
@@ -717,7 +712,10 @@ mod tests {
             return_ips.push(rip);
         }
         // Innermost frame's return_ip
-        let innermost_rip = frames.last().map(|f| f.resume_ip + 1).unwrap_or(interpreter_ip);
+        let innermost_rip = frames
+            .last()
+            .map(|f| f.resume_ip + 1)
+            .unwrap_or(interpreter_ip);
 
         // Verify return_ip for A (outermost): interpreter ip = 11
         assert_eq!(return_ips[0], 11, "A return_ip");
@@ -756,6 +754,9 @@ mod tests {
         // = call_ip + 1. Our deopt reconstruction must use resume_ip + 1
         // for consistency.
         let return_ip = iframe.resume_ip + 1;
-        assert_eq!(return_ip, 43, "return_ip should be instruction AFTER the call");
+        assert_eq!(
+            return_ip, 43,
+            "return_ip should be instruction AFTER the call"
+        );
     }
 }

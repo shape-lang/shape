@@ -239,8 +239,10 @@ impl super::ExecutionContext {
     /// Return all loaded language runtimes, keyed by language identifier.
     pub fn language_runtimes(
         &self,
-    ) -> std::collections::HashMap<String, std::sync::Arc<super::super::plugins::language_runtime::PluginLanguageRuntime>>
-    {
+    ) -> std::collections::HashMap<
+        String,
+        std::sync::Arc<super::super::plugins::language_runtime::PluginLanguageRuntime>,
+    > {
         self.provider_registry.language_runtimes()
     }
 

@@ -297,7 +297,8 @@ fn build_echarts_option(spec: &ChartSpec, type_name: &str) -> String {
     });
 
     if let Some(ref t) = spec.title {
-        option["title"] = serde_json::json!({"text": t, "textStyle": {"color": "#ccc", "fontSize": 14}});
+        option["title"] =
+            serde_json::json!({"text": t, "textStyle": {"color": "#ccc", "fontSize": 14}});
     }
 
     // xAxis: category for bar/histogram, value for others
@@ -331,7 +332,8 @@ fn build_echarts_option(spec: &ChartSpec, type_name: &str) -> String {
         option["legend"] = serde_json::json!({"show": true, "textStyle": {"color": "#ccc"}});
     }
 
-    option["grid"] = serde_json::json!({"left": "10%", "right": "10%", "bottom": "10%", "top": "15%"});
+    option["grid"] =
+        serde_json::json!({"left": "10%", "right": "10%", "bottom": "10%", "top": "15%"});
 
     serde_json::to_string(&option).unwrap_or_default()
 }

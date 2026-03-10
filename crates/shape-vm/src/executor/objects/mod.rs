@@ -656,11 +656,7 @@ impl VirtualMachine {
     }
 
     /// Handle char methods (is_alphabetic, to_uppercase, etc.)
-    fn handle_char_method(
-        &mut self,
-        method: &str,
-        args: Vec<ValueWord>,
-    ) -> Result<(), VMError> {
+    fn handle_char_method(&mut self, method: &str, args: Vec<ValueWord>) -> Result<(), VMError> {
         let c = args[0].as_char().ok_or_else(|| VMError::TypeError {
             expected: "char",
             got: args[0].type_name(),
@@ -689,9 +685,7 @@ impl VirtualMachine {
                     ValueWord::from_string(std::sync::Arc::new(lower))
                 }
             }
-            "to_string" | "toString" => {
-                ValueWord::from_string(std::sync::Arc::new(c.to_string()))
-            }
+            "to_string" | "toString" => ValueWord::from_string(std::sync::Arc::new(c.to_string())),
             _ => {
                 return Err(VMError::RuntimeError(format!(
                     "Unknown method '{}' on char type",
@@ -1154,16 +1148,16 @@ impl VirtualMachine {
             }
             "toInt" | "to_int" => {
                 let trimmed = string.trim();
-                let parsed: i64 = trimmed.parse().map_err(|_| VMError::RuntimeError(
-                    format!("Cannot convert '{}' to int", string),
-                ))?;
+                let parsed: i64 = trimmed.parse().map_err(|_| {
+                    VMError::RuntimeError(format!("Cannot convert '{}' to int", string))
+                })?;
                 ValueWord::from_i64(parsed)
             }
             "toNumber" | "to_number" | "toFloat" | "to_float" => {
                 let trimmed = string.trim();
-                let parsed: f64 = trimmed.parse().map_err(|_| VMError::RuntimeError(
-                    format!("Cannot convert '{}' to number", string),
-                ))?;
+                let parsed: f64 = trimmed.parse().map_err(|_| {
+                    VMError::RuntimeError(format!("Cannot convert '{}' to number", string))
+                })?;
                 ValueWord::from_f64(parsed)
             }
             "codePointAt" | "code_point_at" => {

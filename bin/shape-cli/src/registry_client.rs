@@ -77,29 +77,18 @@ impl RegistryClient {
     /// Load credentials from ~/.shape/credentials.json
     pub fn load_credentials() -> Result<Credentials, String> {
         let path = Self::credentials_path()?;
-        let contents = std::fs::read_to_string(&path).map_err(|e| {
-            format!(
-                "failed to read credentials from {}: {}",
-                path.display(),
-                e
-            )
-        })?;
-        serde_json::from_str(&contents).map_err(|e| {
-            format!(
-                "failed to parse credentials from {}: {}",
-                path.display(),
-                e
-            )
-        })
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read credentials from {}: {}", path.display(), e))?;
+        serde_json::from_str(&contents)
+            .map_err(|e| format!("failed to parse credentials from {}: {}", path.display(), e))
     }
 
     /// Save credentials to ~/.shape/credentials.json (mode 0600)
     pub fn save_credentials(credentials: &Credentials) -> Result<(), String> {
         let path = Self::credentials_path()?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                format!("failed to create directory {}: {}", parent.display(), e)
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create directory {}: {}", parent.display(), e))?;
         }
         let json = serde_json::to_string_pretty(credentials)
             .map_err(|e| format!("failed to serialize credentials: {}", e))?;

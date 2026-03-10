@@ -183,8 +183,7 @@ fn chained_coalesce_first_value() {
 /// Chained coalesce with variables.
 #[test]
 fn chained_coalesce_with_variables() {
-    ShapeTest::new("let a = None\nlet b = None\nlet c = 77\na ?? b ?? c")
-        .expect_number(77.0);
+    ShapeTest::new("let a = None\nlet b = None\nlet c = 77\na ?? b ?? c").expect_number(77.0);
 }
 
 /// Chained coalesce four levels.
@@ -200,31 +199,33 @@ fn chained_coalesce_four_levels() {
 /// Match some value.
 #[test]
 fn match_some_value() {
-    ShapeTest::new("let x = Some(42)\nmatch x { Some(v) => v, None => -1 }")
-        .expect_number(42.0);
+    ShapeTest::new("let x = Some(42)\nmatch x { Some(v) => v, None => -1 }").expect_number(42.0);
 }
 
 /// Match null fallback.
 #[test]
 fn match_null_fallback() {
-    ShapeTest::new("let x = None\nmatch x { Some(v) => v, None => -1 }")
-        .expect_number(-1.0);
+    ShapeTest::new("let x = None\nmatch x { Some(v) => v, None => -1 }").expect_number(-1.0);
 }
 
 /// Match some string value.
 #[test]
 fn match_some_string_value() {
-    ShapeTest::new(r#"let x = Some("hello")
-match x { Some(v) => v, None => "default" }"#)
-        .expect_string("hello");
+    ShapeTest::new(
+        r#"let x = Some("hello")
+match x { Some(v) => v, None => "default" }"#,
+    )
+    .expect_string("hello");
 }
 
 /// Match null string fallback.
 #[test]
 fn match_null_string_fallback() {
-    ShapeTest::new(r#"let x = None
-match x { Some(v) => v, None => "default" }"#)
-        .expect_string("default");
+    ShapeTest::new(
+        r#"let x = None
+match x { Some(v) => v, None => "default" }"#,
+    )
+    .expect_string("default");
 }
 
 // =============================================================================
@@ -234,15 +235,13 @@ match x { Some(v) => v, None => "default" }"#)
 /// Function returning Some value.
 #[test]
 fn fn_returning_some_value() {
-    ShapeTest::new("fn test() -> int { let x = Some(55)\nx ?? 0 }\ntest()")
-        .expect_number(55.0);
+    ShapeTest::new("fn test() -> int { let x = Some(55)\nx ?? 0 }\ntest()").expect_number(55.0);
 }
 
 /// Function returning null.
 #[test]
 fn fn_returning_null() {
-    ShapeTest::new("fn test() -> int { let x = None\nx ?? 99 }\ntest()")
-        .expect_number(99.0);
+    ShapeTest::new("fn test() -> int { let x = None\nx ?? 99 }\ntest()").expect_number(99.0);
 }
 
 /// Function conditional some or null — some path.
@@ -284,11 +283,13 @@ fn default_value_pattern_non_null_param() {
 /// Default value string fallback.
 #[test]
 fn default_value_string_fallback() {
-    ShapeTest::new(r#"fn test() -> string { let x = None
+    ShapeTest::new(
+        r#"fn test() -> string { let x = None
 let val = x ?? "unknown"
 val }
-test()"#)
-        .expect_string("unknown");
+test()"#,
+    )
+    .expect_string("unknown");
 }
 
 // =============================================================================
@@ -298,29 +299,25 @@ test()"#)
 /// Option not null check with value.
 #[test]
 fn option_not_null_check_with_value() {
-    ShapeTest::new("fn test() -> bool { let x = 42\nx != None }\ntest()")
-        .expect_bool(true);
+    ShapeTest::new("fn test() -> bool { let x = 42\nx != None }\ntest()").expect_bool(true);
 }
 
 /// Option not null check with null.
 #[test]
 fn option_not_null_check_with_null() {
-    ShapeTest::new("fn test() -> bool { let x = None\nx != None }\ntest()")
-        .expect_bool(false);
+    ShapeTest::new("fn test() -> bool { let x = None\nx != None }\ntest()").expect_bool(false);
 }
 
 /// Option eq null check with null.
 #[test]
 fn option_eq_null_check_with_null() {
-    ShapeTest::new("fn test() -> bool { let x = None\nx == None }\ntest()")
-        .expect_bool(true);
+    ShapeTest::new("fn test() -> bool { let x = None\nx == None }\ntest()").expect_bool(true);
 }
 
 /// Option eq null check with value.
 #[test]
 fn option_eq_null_check_with_value() {
-    ShapeTest::new("fn test() -> bool { let x = 42\nx == None }\ntest()")
-        .expect_bool(false);
+    ShapeTest::new("fn test() -> bool { let x = 42\nx == None }\ntest()").expect_bool(false);
 }
 
 /// If not null then use value.
@@ -401,8 +398,10 @@ fn null_coalesce_with_fn_returning_null() {
 /// Null coalesce with fn returning value.
 #[test]
 fn null_coalesce_with_fn_returning_value() {
-    ShapeTest::new("fn get_val() -> int { return 10 }\nfn test() -> int { get_val() ?? 42 }\ntest()")
-        .expect_number(10.0);
+    ShapeTest::new(
+        "fn get_val() -> int { return 10 }\nfn test() -> int { get_val() ?? 42 }\ntest()",
+    )
+    .expect_number(10.0);
 }
 
 // =============================================================================
@@ -412,8 +411,7 @@ fn null_coalesce_with_fn_returning_value() {
 /// Ok inside null coalesce.
 #[test]
 fn ok_inside_null_coalesce() {
-    ShapeTest::new("match (Ok(42) ?? 0) { Ok(v) => v, Err(e) => -1 }")
-        .expect_number(42.0);
+    ShapeTest::new("match (Ok(42) ?? 0) { Ok(v) => v, Err(e) => -1 }").expect_number(42.0);
 }
 
 /// Null coalesce then match.
@@ -430,8 +428,7 @@ fn null_coalesce_then_match() {
 /// Ok wrapping null.
 #[test]
 fn ok_wrapping_null() {
-    ShapeTest::new("match Ok(None) { Ok(v) => v ?? 99, Err(e) => -1 }")
-        .expect_number(99.0);
+    ShapeTest::new("match Ok(None) { Ok(v) => v ?? 99, Err(e) => -1 }").expect_number(99.0);
 }
 
 /// Match ok null inner.
@@ -523,8 +520,10 @@ fn null_coalesce_as_function_return() {
 /// Null coalesce as argument.
 #[test]
 fn null_coalesce_as_argument() {
-    ShapeTest::new("fn double(x: int) -> int { x * 2 }\nfn test() -> int { double(None ?? 5) }\ntest()")
-        .expect_number(10.0);
+    ShapeTest::new(
+        "fn double(x: int) -> int { x * 2 }\nfn test() -> int { double(None ?? 5) }\ntest()",
+    )
+    .expect_number(10.0);
 }
 
 // =============================================================================

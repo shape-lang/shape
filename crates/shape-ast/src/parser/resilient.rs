@@ -27,8 +27,7 @@ impl PartialProgram {
             items: self.items,
             docs: crate::ast::ProgramDocs::default(),
         };
-        program.docs =
-            crate::parser::docs::build_program_docs(&program, self.doc_comment.as_ref());
+        program.docs = crate::parser::docs::build_program_docs(&program, self.doc_comment.as_ref());
         program
     }
 

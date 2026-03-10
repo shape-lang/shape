@@ -207,10 +207,12 @@ impl JitCompilationBackend {
 
         // Tier 2: feedback-guided optimizing compilation with populated user_funcs
         if let Some(fv) = request.feedback.clone() {
-            return match self
-                .jit
-                .compile_optimizing_function(program, func_id as usize, fv, &request.callee_feedback)
-            {
+            return match self.jit.compile_optimizing_function(
+                program,
+                func_id as usize,
+                fv,
+                &request.callee_feedback,
+            ) {
                 Ok((code_ptr, deopt_points, shape_guards)) => CompilationResult {
                     function_id: func_id,
                     compiled_tier: request.target_tier,

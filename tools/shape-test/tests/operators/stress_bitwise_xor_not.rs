@@ -270,8 +270,10 @@ fn test_xor_assign() {
 /// Verifies XOR is commutative with hex values.
 #[test]
 fn test_xor_commutative_hex() {
-    ShapeTest::new("fn test() {\n    if (0xAB ^ 0xCD) == (0xCD ^ 0xAB) { 1 } else { 0 }\n}\ntest()")
-        .expect_number(1.0);
+    ShapeTest::new(
+        "fn test() {\n    if (0xAB ^ 0xCD) == (0xCD ^ 0xAB) { 1 } else { 0 }\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 /// Verifies XOR is associative.
@@ -320,8 +322,7 @@ fn test_not_on_float_fails() {
 /// Verifies gray code encode: n ^ (n >> 1).
 #[test]
 fn test_gray_code_encode() {
-    ShapeTest::new("fn test() {\n    let n = 13\n    n ^ (n >> 1)\n}\ntest()")
-        .expect_number(11.0);
+    ShapeTest::new("fn test() {\n    let n = 13\n    n ^ (n >> 1)\n}\ntest()").expect_number(11.0);
 }
 
 /// Verifies sign detection via XOR: different signs → (a ^ b) < 0.
@@ -334,22 +335,28 @@ fn test_sign_of_xor() {
 /// Verifies sign detection via XOR: same signs → (a ^ b) >= 0.
 #[test]
 fn test_sign_same_xor() {
-    ShapeTest::new("fn test() {\n    let a = 5\n    let b = 3\n    if (a ^ b) < 0 { 1 } else { 0 }\n}\ntest()")
-        .expect_number(0.0);
+    ShapeTest::new(
+        "fn test() {\n    let a = 5\n    let b = 3\n    if (a ^ b) < 0 { 1 } else { 0 }\n}\ntest()",
+    )
+    .expect_number(0.0);
 }
 
 /// Verifies branchless abs: (x ^ mask) - mask where mask = x >> 63.
 #[test]
 fn test_abs_without_branch() {
-    ShapeTest::new("fn test() {\n    let x = -42\n    let mask = x >> 63\n    (x ^ mask) - mask\n}\ntest()")
-        .expect_number(42.0);
+    ShapeTest::new(
+        "fn test() {\n    let x = -42\n    let mask = x >> 63\n    (x ^ mask) - mask\n}\ntest()",
+    )
+    .expect_number(42.0);
 }
 
 /// Verifies branchless abs with positive input.
 #[test]
 fn test_abs_positive_unchanged() {
-    ShapeTest::new("fn test() {\n    let x = 42\n    let mask = x >> 63\n    (x ^ mask) - mask\n}\ntest()")
-        .expect_number(42.0);
+    ShapeTest::new(
+        "fn test() {\n    let x = 42\n    let mask = x >> 63\n    (x ^ mask) - mask\n}\ntest()",
+    )
+    .expect_number(42.0);
 }
 
 // ============================================================

@@ -1585,12 +1585,14 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
                 .members
                 .iter()
                 .filter_map(|member| match member {
-                    TraitMember::Required(im @ InterfaceMember::Method {
-                        name,
-                        params,
-                        return_type,
-                        ..
-                    }) => {
+                    TraitMember::Required(
+                        im @ InterfaceMember::Method {
+                            name,
+                            params,
+                            return_type,
+                            ..
+                        },
+                    ) => {
                         let param_names: Vec<String> = params
                             .iter()
                             .map(|p| p.name.clone().unwrap_or_else(|| "_".to_string()))

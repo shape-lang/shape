@@ -47,7 +47,9 @@ impl BuiltinTypes {
 
     pub fn array(element_type: Type) -> Type {
         Type::Concrete(TypeAnnotation::Array(Box::new(
-            element_type.to_annotation().unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
+            element_type
+                .to_annotation()
+                .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
         )))
     }
 

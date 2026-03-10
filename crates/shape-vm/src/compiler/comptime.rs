@@ -51,13 +51,17 @@ fn comptime_target_param_type() -> TypeAnnotation {
         ObjectTypeField {
             name: "fields".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "unknown".to_string(),
+            ))),
             annotations: vec![],
         },
         ObjectTypeField {
             name: "params".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "unknown".to_string(),
+            ))),
             annotations: vec![],
         },
         ObjectTypeField {
@@ -69,13 +73,17 @@ fn comptime_target_param_type() -> TypeAnnotation {
         ObjectTypeField {
             name: "annotations".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "unknown".to_string(),
+            ))),
             annotations: vec![],
         },
         ObjectTypeField {
             name: "captures".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "unknown".to_string(),
+            ))),
             annotations: vec![],
         },
     ])
@@ -211,10 +219,7 @@ fn rewrite_implements_in_expr(expr: &mut Expr) {
         if name == "implements" {
             for arg in args.iter_mut() {
                 if let Expr::Identifier(ident, span) = arg {
-                    *arg = Expr::Literal(
-                        shape_ast::ast::Literal::String(ident.clone()),
-                        *span,
-                    );
+                    *arg = Expr::Literal(shape_ast::ast::Literal::String(ident.clone()), *span);
                 }
             }
         }
@@ -935,13 +940,7 @@ mod tests {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(
-            &stmts,
-            &[],
-            &[],
-            Default::default(),
-            Default::default(),
-        );
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "Comptime should succeed: {:?}",
@@ -960,13 +959,7 @@ mod tests {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(
-            &stmts,
-            &[],
-            &[],
-            Default::default(),
-            Default::default(),
-        );
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "Comptime should succeed: {:?}",
@@ -992,13 +985,7 @@ mod tests {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(
-            &stmts,
-            &[],
-            &[],
-            Default::default(),
-            Default::default(),
-        );
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "Comptime arithmetic should succeed: {:?}",
@@ -1141,13 +1128,7 @@ mod tests {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(
-            &stmts,
-            &[],
-            &[],
-            Default::default(),
-            Default::default(),
-        );
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "Comptime multiplication should succeed: {:?}",
@@ -1176,14 +1157,8 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let result = execute_comptime(
-            &stmts,
-            &[],
-            &[],
-            Default::default(),
-            Default::default(),
-        )
-        .map(|r| r.value);
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default())
+            .map(|r| r.value);
         assert!(
             result.is_ok(),
             "build_config() should work in comptime: {:?}",
@@ -1220,13 +1195,7 @@ mod tests {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(
-            &stmts,
-            &[],
-            &[],
-            Default::default(),
-            Default::default(),
-        );
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "print(build_config()) should execute in comptime: {:?}",

@@ -312,9 +312,9 @@ impl VirtualMachine {
                 let kind = *kind;
                 let task_ids = task_ids.clone();
 
-                let result =
-                    self.task_scheduler
-                        .resolve_task_group(kind, &task_ids, |callable| Ok(callable));
+                let result = self
+                    .task_scheduler
+                    .resolve_task_group(kind, &task_ids, |callable| Ok(callable));
 
                 match result {
                     Ok(value) => {

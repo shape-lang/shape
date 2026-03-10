@@ -224,34 +224,69 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::Neg
             | OpCode::Not => (1, 1),
             // Binary ops (2→1)
-            OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div
-            | OpCode::Mod | OpCode::Pow
-            | OpCode::AddInt | OpCode::SubInt | OpCode::MulInt
-            | OpCode::DivInt | OpCode::ModInt | OpCode::PowInt
-            | OpCode::AddIntTrusted | OpCode::SubIntTrusted
-            | OpCode::MulIntTrusted | OpCode::DivIntTrusted
-            | OpCode::AddNumber | OpCode::SubNumber | OpCode::MulNumber
-            | OpCode::DivNumber | OpCode::ModNumber | OpCode::PowNumber
-            | OpCode::AddNumberTrusted | OpCode::SubNumberTrusted
-            | OpCode::MulNumberTrusted | OpCode::DivNumberTrusted
-            | OpCode::Gt | OpCode::Lt | OpCode::Gte | OpCode::Lte
-            | OpCode::Eq | OpCode::Neq
-            | OpCode::GtInt | OpCode::LtInt | OpCode::GteInt | OpCode::LteInt
-            | OpCode::EqInt | OpCode::NeqInt
-            | OpCode::GtIntTrusted | OpCode::LtIntTrusted
-            | OpCode::GteIntTrusted | OpCode::LteIntTrusted
-            | OpCode::GtNumber | OpCode::LtNumber | OpCode::GteNumber | OpCode::LteNumber
-            | OpCode::EqNumber | OpCode::NeqNumber
-            | OpCode::GtNumberTrusted | OpCode::LtNumberTrusted
-            | OpCode::GteNumberTrusted | OpCode::LteNumberTrusted
+            OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Div
+            | OpCode::Mod
+            | OpCode::Pow
+            | OpCode::AddInt
+            | OpCode::SubInt
+            | OpCode::MulInt
+            | OpCode::DivInt
+            | OpCode::ModInt
+            | OpCode::PowInt
+            | OpCode::AddIntTrusted
+            | OpCode::SubIntTrusted
+            | OpCode::MulIntTrusted
+            | OpCode::DivIntTrusted
+            | OpCode::AddNumber
+            | OpCode::SubNumber
+            | OpCode::MulNumber
+            | OpCode::DivNumber
+            | OpCode::ModNumber
+            | OpCode::PowNumber
+            | OpCode::AddNumberTrusted
+            | OpCode::SubNumberTrusted
+            | OpCode::MulNumberTrusted
+            | OpCode::DivNumberTrusted
+            | OpCode::Gt
+            | OpCode::Lt
+            | OpCode::Gte
+            | OpCode::Lte
+            | OpCode::Eq
+            | OpCode::Neq
+            | OpCode::GtInt
+            | OpCode::LtInt
+            | OpCode::GteInt
+            | OpCode::LteInt
+            | OpCode::EqInt
+            | OpCode::NeqInt
+            | OpCode::GtIntTrusted
+            | OpCode::LtIntTrusted
+            | OpCode::GteIntTrusted
+            | OpCode::LteIntTrusted
+            | OpCode::GtNumber
+            | OpCode::LtNumber
+            | OpCode::GteNumber
+            | OpCode::LteNumber
+            | OpCode::EqNumber
+            | OpCode::NeqNumber
+            | OpCode::GtNumberTrusted
+            | OpCode::LtNumberTrusted
+            | OpCode::GteNumberTrusted
+            | OpCode::LteNumberTrusted
             | OpCode::GetProp => (2, 1),
             // Stack manipulation
             OpCode::Dup => (1, 2),
             OpCode::Swap => (2, 2),
             // Store (1→0)
-            OpCode::StoreLocal | OpCode::StoreLocalTyped
-            | OpCode::StoreModuleBinding | OpCode::StoreModuleBindingTyped
-            | OpCode::StoreClosure | OpCode::Pop => (1, 0),
+            OpCode::StoreLocal
+            | OpCode::StoreLocalTyped
+            | OpCode::StoreModuleBinding
+            | OpCode::StoreModuleBindingTyped
+            | OpCode::StoreClosure
+            | OpCode::Pop => (1, 0),
             _ => return None,
         };
         Some(eff)
@@ -1158,9 +1193,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                             let f64_val = self.builder.use_var(f64_var);
                             let boxed = self.f64_to_i64(f64_val);
                             self.stack_push(boxed);
-                            self.typed_stack.replace_top(
-                                crate::translator::storage::TypedValue::f64(f64_val),
-                            );
+                            self.typed_stack
+                                .replace_top(crate::translator::storage::TypedValue::f64(f64_val));
                             return Ok(());
                         }
                     }

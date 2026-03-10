@@ -127,10 +127,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
         for i in (info.header_idx + 1)..info.end_idx.saturating_sub(1) {
             let instr = &instructions[i];
-            if matches!(
-                instr.opcode,
-                OpCode::LoadLocal | OpCode::LoadLocalTrusted
-            ) {
+            if matches!(instr.opcode, OpCode::LoadLocal | OpCode::LoadLocalTrusted) {
                 if let Some(Operand::Local(idx)) = &instr.operand {
                     if *idx == local_idx {
                         let next = &instructions[i + 1];
@@ -912,8 +909,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     int_mbs_vec.sort_unstable();
                     eprintln!(
                         "[shape-jit-unbox] loop_header={} int_locals={:?} float_locals={:?} int_module_bindings={:?} already_unboxed_int={:?} already_unboxed_f64={:?}",
-                        info.header_idx, int_locals_vec, float_locals_vec, int_mbs_vec,
-                        self.unboxed_int_locals.len(), self.unboxed_f64_locals.len()
+                        info.header_idx,
+                        int_locals_vec,
+                        float_locals_vec,
+                        int_mbs_vec,
+                        self.unboxed_int_locals.len(),
+                        self.unboxed_f64_locals.len()
                     );
                 }
 
@@ -947,11 +948,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     {
                         continue;
                     }
-                    if Self::local_feeds_int_to_number(
-                        &self.program.instructions,
-                        &info,
-                        local_idx,
-                    ) {
+                    if Self::local_feeds_int_to_number(&self.program.instructions, &info, local_idx)
+                    {
                         precompute_candidates.push(local_idx);
                     }
                 }
@@ -1011,8 +1009,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                         for local_idx in &precompute_candidates {
                             let var = self.get_or_create_local(*local_idx);
                             let raw_i64 = self.builder.use_var(var);
-                            let f64_val =
-                                self.builder.ins().fcvt_from_sint(types::F64, raw_i64);
+                            let f64_val = self.builder.ins().fcvt_from_sint(types::F64, raw_i64);
                             let f64_var = Variable::new(self.next_var);
                             self.next_var += 1;
                             self.builder.declare_var(f64_var, types::F64);

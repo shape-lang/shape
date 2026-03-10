@@ -20,17 +20,17 @@ mod typed_array_ops;
 
 // Deep tests — gated behind `deep-tests` feature
 #[cfg(feature = "deep-tests")]
-mod drop_deep_tests;
-#[cfg(feature = "deep-tests")]
-mod module_deep_tests;
-#[cfg(feature = "deep-tests")]
 mod differential_trusted;
+#[cfg(feature = "deep-tests")]
+mod drop_deep_tests;
 #[cfg(feature = "deep-tests")]
 mod extend_blocks;
 #[cfg(feature = "deep-tests")]
 mod hashmap_ops;
 #[cfg(feature = "deep-tests")]
 mod iterator_ops;
+#[cfg(feature = "deep-tests")]
+mod module_deep_tests;
 #[cfg(feature = "deep-tests")]
 mod operator_overload;
 #[cfg(feature = "deep-tests")]

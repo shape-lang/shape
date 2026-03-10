@@ -36,7 +36,11 @@ pub fn render_doc_comment(
             .filter(|tag| matches!(tag.kind, DocTagKind::Param))
             .collect(),
     );
-    push_singleton_section(&mut sections, "Returns", tag_body(comment, DocTagKind::Returns));
+    push_singleton_section(
+        &mut sections,
+        "Returns",
+        tag_body(comment, DocTagKind::Returns),
+    );
     push_singleton_section(
         &mut sections,
         "Deprecated",
@@ -62,8 +66,13 @@ pub fn render_doc_comment(
         .filter(|tag| matches!(tag.kind, DocTagKind::See | DocTagKind::Link))
         .filter_map(|tag| {
             let link = tag.link.as_ref()?;
-            let resolved =
-                resolve_doc_link(program, &link.target, module_cache, current_file, workspace_root);
+            let resolved = resolve_doc_link(
+                program,
+                &link.target,
+                module_cache,
+                current_file,
+                workspace_root,
+            );
             let rendered =
                 render_doc_link_target(&link.target, link.label.as_deref(), resolved.as_ref());
             Some(format!("- {rendered}"))

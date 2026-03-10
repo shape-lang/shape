@@ -211,14 +211,8 @@ fn render_braille_chart(spec: &ChartSpec, width: usize, height: usize) -> String
             .zip(ch.values.iter())
             .filter(|(_, y)| y.is_finite())
             .map(|(x, y)| {
-                let x_min = x_values
-                    .iter()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min);
-                let x_max = x_values
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
+                let x_min = x_values.iter().copied().fold(f64::INFINITY, f64::min);
+                let x_max = x_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let x_range = if (x_max - x_min).abs() < f64::EPSILON {
                     1.0
                 } else {
@@ -534,7 +528,11 @@ mod tests {
         let output = render_chart_text(&spec);
         assert!(output.contains("Test Line"));
         // Should contain braille characters
-        assert!(output.chars().any(|c| c as u32 >= BRAILLE_BASE && c as u32 <= BRAILLE_BASE + 0xFF));
+        assert!(
+            output
+                .chars()
+                .any(|c| c as u32 >= BRAILLE_BASE && c as u32 <= BRAILLE_BASE + 0xFF)
+        );
     }
 
     #[test]

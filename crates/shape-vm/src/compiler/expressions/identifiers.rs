@@ -13,7 +13,9 @@ impl BytecodeCompiler {
     /// Map a storage hint to a numeric type (if applicable).
     /// Width-specific hints (Int8, UInt16, etc.) → IntWidth(w);
     /// default Int64 → Int; Float64 → Number.
-    pub(in crate::compiler) fn storage_hint_to_numeric_type(hint: StorageHint) -> Option<NumericType> {
+    pub(in crate::compiler) fn storage_hint_to_numeric_type(
+        hint: StorageHint,
+    ) -> Option<NumericType> {
         use shape_ast::IntWidth;
         match hint {
             StorageHint::Int8 | StorageHint::NullableInt8 => {
@@ -74,10 +76,7 @@ impl BytecodeCompiler {
             } else {
                 let source_loc = self.span_to_source_location(span);
                 self.borrow_checker
-                    .check_read_allowed(
-                        Self::borrow_key_for_local(local_idx),
-                        Some(source_loc),
-                    )
+                    .check_read_allowed(Self::borrow_key_for_local(local_idx), Some(source_loc))
                     .map_err(|e| match e {
                         ShapeError::SemanticError { message, location } => {
                             let user_msg = message
@@ -142,7 +141,10 @@ impl BytecodeCompiler {
                 .map_err(|e| match e {
                     ShapeError::SemanticError { message, location } => {
                         let user_msg = message.replace(
-                            &format!("(slot {})", Self::borrow_key_for_module_binding(binding_idx)),
+                            &format!(
+                                "(slot {})",
+                                Self::borrow_key_for_module_binding(binding_idx)
+                            ),
                             &format!("'{}'", name),
                         );
                         ShapeError::SemanticError {

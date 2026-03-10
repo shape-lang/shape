@@ -543,7 +543,10 @@ pub fn execute_remote_call(
 pub fn execute_remote_call_with_runtimes(
     request: RemoteCallRequest,
     store: &SnapshotStore,
-    language_runtimes: &std::collections::HashMap<String, std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>>,
+    language_runtimes: &std::collections::HashMap<
+        String,
+        std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
+    >,
 ) -> RemoteCallResponse {
     match execute_inner_with_runtimes(request, store, language_runtimes) {
         Ok(value) => RemoteCallResponse { result: Ok(value) },
@@ -720,7 +723,10 @@ fn execute_inner(
 fn execute_inner_with_runtimes(
     request: RemoteCallRequest,
     store: &SnapshotStore,
-    language_runtimes: &std::collections::HashMap<String, std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>>,
+    language_runtimes: &std::collections::HashMap<
+        String,
+        std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
+    >,
 ) -> Result<SerializableVMValue, RemoteCallError> {
     // 1. Reconstruct program with type schemas (same logic as execute_inner)
     let mut program = if let Some(blobs) = request.function_blobs {
@@ -814,17 +820,22 @@ fn execute_inner_with_runtimes(
                 vm.program.foreign_functions[idx].dynamic_errors =
                     lang_runtime.has_dynamic_errors();
 
-                let compiled = lang_runtime.compile(
-                    &entry.name,
-                    &entry.body_text,
-                    &entry.param_names,
-                    &entry.param_types,
-                    entry.return_type.as_deref(),
-                    entry.is_async,
-                ).map_err(|e| RemoteCallError {
-                    message: format!("Failed to compile foreign function '{}': {}", entry.name, e),
-                    kind: RemoteErrorKind::RuntimeError,
-                })?;
+                let compiled = lang_runtime
+                    .compile(
+                        &entry.name,
+                        &entry.body_text,
+                        &entry.param_names,
+                        &entry.param_types,
+                        entry.return_type.as_deref(),
+                        entry.is_async,
+                    )
+                    .map_err(|e| RemoteCallError {
+                        message: format!(
+                            "Failed to compile foreign function '{}': {}",
+                            entry.name, e
+                        ),
+                        kind: RemoteErrorKind::RuntimeError,
+                    })?;
                 handles.push(Some(crate::executor::ForeignFunctionHandle::Runtime {
                     runtime: std::sync::Arc::clone(lang_runtime),
                     compiled,
@@ -1818,8 +1829,7 @@ mod tests {
             request_id: 7,
         });
         let bytes = shape_wire::encode_message(&msg).expect("encode Execute");
-        let decoded: WireMessage =
-            shape_wire::decode_message(&bytes).expect("decode Execute");
+        let decoded: WireMessage = shape_wire::decode_message(&bytes).expect("decode Execute");
         match decoded {
             WireMessage::Execute(req) => {
                 assert_eq!(req.code, "fn main() { 42 }");
@@ -1876,8 +1886,7 @@ mod tests {
     fn test_ping_pong_roundtrip() {
         let ping = WireMessage::Ping(PingRequest {});
         let bytes = shape_wire::encode_message(&ping).expect("encode Ping");
-        let decoded: WireMessage =
-            shape_wire::decode_message(&bytes).expect("decode Ping");
+        let decoded: WireMessage = shape_wire::decode_message(&bytes).expect("decode Ping");
         assert!(matches!(decoded, WireMessage::Ping(_)));
 
         let pong = WireMessage::Pong(ServerInfo {
@@ -1886,8 +1895,7 @@ mod tests {
             capabilities: vec!["execute".to_string(), "validate".to_string()],
         });
         let bytes = shape_wire::encode_message(&pong).expect("encode Pong");
-        let decoded: WireMessage =
-            shape_wire::decode_message(&bytes).expect("decode Pong");
+        let decoded: WireMessage = shape_wire::decode_message(&bytes).expect("decode Pong");
         match decoded {
             WireMessage::Pong(info) => {
                 assert_eq!(info.shape_version, "0.1.3");
@@ -1904,8 +1912,7 @@ mod tests {
             token: "secret-token".to_string(),
         });
         let bytes = shape_wire::encode_message(&msg).expect("encode Auth");
-        let decoded: WireMessage =
-            shape_wire::decode_message(&bytes).expect("decode Auth");
+        let decoded: WireMessage = shape_wire::decode_message(&bytes).expect("decode Auth");
         match decoded {
             WireMessage::Auth(req) => assert_eq!(req.token, "secret-token"),
             _ => panic!("Expected Auth"),
@@ -1916,8 +1923,7 @@ mod tests {
             error: None,
         });
         let bytes = shape_wire::encode_message(&resp).expect("encode AuthResponse");
-        let decoded: WireMessage =
-            shape_wire::decode_message(&bytes).expect("decode AuthResponse");
+        let decoded: WireMessage = shape_wire::decode_message(&bytes).expect("decode AuthResponse");
         match decoded {
             WireMessage::AuthResponse(r) => {
                 assert!(r.authenticated);
@@ -1934,8 +1940,7 @@ mod tests {
             request_id: 99,
         });
         let bytes = shape_wire::encode_message(&msg).expect("encode Validate");
-        let decoded: WireMessage =
-            shape_wire::decode_message(&bytes).expect("decode Validate");
+        let decoded: WireMessage = shape_wire::decode_message(&bytes).expect("decode Validate");
         match decoded {
             WireMessage::Validate(req) => {
                 assert_eq!(req.code, "let x = 1");
@@ -1969,7 +1974,7 @@ mod tests {
 
     #[test]
     fn test_ping_framing_roundtrip() {
-        use shape_wire::transport::framing::{encode_framed, decode_framed};
+        use shape_wire::transport::framing::{decode_framed, encode_framed};
 
         let ping = WireMessage::Ping(PingRequest {});
         let mp = shape_wire::encode_message(&ping).expect("encode Ping");
@@ -1988,7 +1993,7 @@ mod tests {
 
     #[test]
     fn test_execute_framing_roundtrip() {
-        use shape_wire::transport::framing::{encode_framed, decode_framed};
+        use shape_wire::transport::framing::{decode_framed, encode_framed};
 
         let exec = WireMessage::Execute(ExecuteRequest {
             code: "42".to_string(),

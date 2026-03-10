@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use crate::registry_client::RegistryClient;
 use shape_runtime::crypto::signing::ModuleSignatureData;
-use shape_runtime::package_bundle::{verify_bundle_checksum, PackageBundle};
+use shape_runtime::package_bundle::{PackageBundle, verify_bundle_checksum};
 
 /// Registry index file format (mirrors dependency_resolver's private type).
 #[derive(Debug, Deserialize)]
@@ -44,7 +44,8 @@ pub async fn run_add(name: String, version: Option<String>) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
     let index_dir = home.join(".shape").join("registry").join("index");
     std::fs::create_dir_all(&index_dir)
         .with_context(|| format!("failed to create index directory: {}", index_dir.display()))?;
@@ -186,10 +187,7 @@ pub async fn run_add(name: String, version: Option<String>) -> Result<()> {
                 .native_platforms
                 .contains(&current.to_string())
         {
-            eprintln!(
-                "Warning: your platform ({}) may not be supported!",
-                current
-            );
+            eprintln!("Warning: your platform ({}) may not be supported!", current);
         }
     }
 
@@ -251,7 +249,8 @@ fn add_dependency_to_toml(toml_text: &str, name: &str, version: &str) -> String 
                             lines[..i].iter().map(|s| s.to_string()).collect();
                         result.push(dep_line);
                         result.extend(lines[i + 1..].iter().map(|s| s.to_string()));
-                        return result.join("\n") + if toml_text.ends_with('\n') { "\n" } else { "" };
+                        return result.join("\n")
+                            + if toml_text.ends_with('\n') { "\n" } else { "" };
                     }
                 }
             }

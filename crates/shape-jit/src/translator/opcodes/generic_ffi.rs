@@ -46,10 +46,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         // from BuiltinFunction discriminants (which are < 0x8000).
         let opcode_id = 0x8000u16 | (opcode as u16);
         let opcode_id_val = self.builder.ins().iconst(cl_types::I16, opcode_id as i64);
-        let arg_count_val = self
-            .builder
-            .ins()
-            .iconst(cl_types::I16, pop_count as i64);
+        let arg_count_val = self.builder.ins().iconst(cl_types::I16, pop_count as i64);
 
         // Call jit_generic_builtin(ctx, opcode_id, arg_count)
         let call = self.builder.ins().call(
