@@ -94,6 +94,11 @@ impl VirtualMachine {
                         }
                         Self::push_to_array_slot(&mut self.module_bindings[target], value_nb)
                     }
+                    Some(target) => {
+                        let mut array_nb = self.read_ref_target(&target)?;
+                        Self::push_to_array_slot(&mut array_nb, value_nb)?;
+                        self.write_ref_target(&target, array_nb)
+                    }
                     None => Self::push_to_array_slot(&mut self.stack[slot], value_nb),
                 }
             }
@@ -117,6 +122,11 @@ impl VirtualMachine {
                             )));
                         }
                         Self::push_to_array_slot(&mut self.module_bindings[target], value_nb)
+                    }
+                    Some(target) => {
+                        let mut array_nb = self.read_ref_target(&target)?;
+                        Self::push_to_array_slot(&mut array_nb, value_nb)?;
+                        self.write_ref_target(&target, array_nb)
                     }
                     None => Self::push_to_array_slot(&mut self.module_bindings[slot], value_nb),
                 }

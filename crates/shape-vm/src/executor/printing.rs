@@ -89,6 +89,7 @@ impl<'a> ValueFormatter<'a> {
         match value.as_heap_ref() {
             Some(HeapValue::String(s)) => s.as_ref().clone(),
             Some(HeapValue::Array(arr)) => self.format_nanboxed_array(arr.as_ref(), depth),
+            Some(HeapValue::ProjectedRef(_)) => "&ref".to_string(),
             Some(HeapValue::TypedObject {
                 schema_id,
                 slots,

@@ -3,7 +3,7 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::NumericType;
-use shape_ast::ast::{DataIndex, Expr, TypeAnnotation};
+use shape_ast::ast::{DataIndex, Expr, Spanned, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
 use shape_runtime::type_system::{BuiltinTypes, Type};
@@ -187,6 +187,48 @@ impl BytecodeCompiler {
                 self.last_expr_type_info = None;
                 return Ok(());
             }
+        }
+
+        if !optional
+            && let Some(place) = self.try_resolve_typed_field_place(object, property)
+        {
+            let label = format!("{}.{}", place.root_name, property);
+            let source_loc = self.span_to_source_location(object.span());
+            self.borrow_checker
+                .check_read_allowed(place.borrow_key, Some(source_loc))
+                .map_err(|err| Self::relabel_borrow_error(err, place.borrow_key, &label))?;
+
+            let field_ref = self.declare_temp_local("__field_read_ref_")?;
+            let root_operand = if place.is_local {
+                Operand::Local(place.slot)
+            } else {
+                Operand::ModuleBinding(place.slot)
+            };
+            self.emit(Instruction::new(OpCode::MakeRef, Some(root_operand)));
+            self.emit(Instruction::new(
+                OpCode::MakeFieldRef,
+                Some(place.typed_operand),
+            ));
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(field_ref)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::DerefLoad,
+                Some(Operand::Local(field_ref)),
+            ));
+
+            self.last_expr_schema = match &place.field_type_info {
+                FieldType::Object(type_name) => self
+                    .type_tracker
+                    .schema_registry()
+                    .get(type_name)
+                    .map(|s| s.id),
+                _ => None,
+            };
+            self.last_expr_type_info = None;
+            self.last_expr_numeric_type = field_type_to_numeric(&place.field_type_info);
+            return Ok(());
         }
 
         // Fall back to standard property access

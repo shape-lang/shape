@@ -247,6 +247,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
         HeapValue::Decimal(d) => WireValue::Number(d.to_string().parse().unwrap_or(0.0)),
 
         HeapValue::BigInt(i) => WireValue::Integer(*i),
+        HeapValue::ProjectedRef(_) => WireValue::Null,
 
         HeapValue::Time(dt) => WireValue::Timestamp(dt.timestamp_millis()),
 

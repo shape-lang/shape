@@ -207,6 +207,7 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
             rows: table.row_count(),
             columns: table.column_names().iter().map(|s| s.to_string()).collect(),
         },
+        HeapValue::ProjectedRef(..) => ExternalValue::Opaque("<ref>".to_string()),
 
         // Container types
         HeapValue::Range {

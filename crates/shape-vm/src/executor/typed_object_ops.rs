@@ -49,7 +49,11 @@ pub fn field_type_to_tag(ft: &FieldType) -> u16 {
 /// Read a ValueWord from a TypedObject slot using the precomputed field type tag.
 /// No schema lookup required — the tag was embedded at compile time.
 #[inline(always)]
-fn read_slot_fast(slot: &ValueSlot, is_heap: bool, field_type_tag: u16) -> ValueWord {
+pub(in crate::executor) fn read_slot_fast(
+    slot: &ValueSlot,
+    is_heap: bool,
+    field_type_tag: u16,
+) -> ValueWord {
     if is_heap {
         return slot.as_heap_nb();
     }
@@ -68,7 +72,7 @@ fn read_slot_fast(slot: &ValueSlot, is_heap: bool, field_type_tag: u16) -> Value
 }
 
 /// Convert a field_type_tag back to a FieldType for set operations.
-fn tag_to_field_type(tag: u16) -> Option<FieldType> {
+pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
     match tag {
         FIELD_TAG_F64 => Some(FieldType::F64),
         FIELD_TAG_I64 => Some(FieldType::I64),

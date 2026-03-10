@@ -113,6 +113,23 @@ pub struct DataReferenceData {
     pub timeframe: Timeframe,
 }
 
+/// A projection applied to a base reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefProjection {
+    TypedField {
+        type_id: u16,
+        field_idx: u16,
+        field_type_tag: u16,
+    },
+}
+
+/// Heap-backed projected reference data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedRefData {
+    pub base: ValueWord,
+    pub projection: RefProjection,
+}
+
 /// Data for HashMap variant (boxed to keep HeapValue small).
 ///
 /// Uses bucket chaining (`HashMap<u64, Vec<usize>>`) so that hash collisions
@@ -1079,6 +1096,7 @@ impl HeapValue {
             (HeapValue::FunctionRef { name: n1, .. }, HeapValue::FunctionRef { name: n2, .. }) => {
                 n1 == n2
             }
+            (HeapValue::ProjectedRef(a), HeapValue::ProjectedRef(b)) => a == b,
             (HeapValue::DataReference(a), HeapValue::DataReference(b)) => {
                 a.datetime == b.datetime && a.id == b.id && a.timeframe == b.timeframe
             }

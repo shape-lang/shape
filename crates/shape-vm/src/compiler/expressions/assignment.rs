@@ -233,6 +233,47 @@ impl BytecodeCompiler {
             Expr::PropertyAccess {
                 object, property, ..
             } => {
+                if let Some(place) = self.try_resolve_typed_field_place(object, property) {
+                    let label = format!("{}.{}", place.root_name, property);
+                    let source_loc = self.span_to_source_location(assign_expr.target.span());
+                    self.borrow_checker
+                        .check_write_allowed(place.borrow_key, Some(source_loc))
+                        .map_err(|err| Self::relabel_borrow_error(err, place.borrow_key, &label))?;
+
+                    let field_ref = self.declare_temp_local("__field_assign_ref_")?;
+                    let root_operand = if place.is_local {
+                        Operand::Local(place.slot)
+                    } else {
+                        Operand::ModuleBinding(place.slot)
+                    };
+                    self.emit(Instruction::new(OpCode::MakeRef, Some(root_operand)));
+                    self.emit(Instruction::new(
+                        OpCode::MakeFieldRef,
+                        Some(place.typed_operand),
+                    ));
+                    self.emit(Instruction::new(
+                        OpCode::StoreLocal,
+                        Some(Operand::Local(field_ref)),
+                    ));
+
+                    self.compile_expr(&assign_expr.value)?;
+                    let value_local = self.declare_temp_local("__assign_value_")?;
+                    self.emit(Instruction::simple(OpCode::Dup));
+                    self.emit(Instruction::new(
+                        OpCode::StoreLocal,
+                        Some(Operand::Local(value_local)),
+                    ));
+                    self.emit(Instruction::new(
+                        OpCode::DerefStore,
+                        Some(Operand::Local(field_ref)),
+                    ));
+                    self.emit(Instruction::new(
+                        OpCode::LoadLocal,
+                        Some(Operand::Local(value_local)),
+                    ));
+                    return Ok(());
+                }
+
                 if let Expr::Identifier(name, id_span) = object.as_ref()
                     && let Some(local_idx) = self.resolve_local(name)
                     && !self.ref_locals.contains(&local_idx)

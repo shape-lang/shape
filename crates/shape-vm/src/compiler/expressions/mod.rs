@@ -1136,15 +1136,7 @@ impl BytecodeCompiler {
                 } else {
                     BorrowMode::Shared
                 };
-                match inner.as_ref() {
-                    Expr::Identifier(name, id_span) => {
-                        self.compile_reference_identifier(name, *id_span, mode)
-                    }
-                    _ => Err(ShapeError::SemanticError {
-                        message: "`&` can only be applied to a simple variable name (e.g., `&x`), not a complex expression".to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    }),
-                }
+                self.compile_reference_expr(inner, *span, mode)
             }
 
             // Table row literals — compiled via compile_table_rows() in the VariableDecl handler.

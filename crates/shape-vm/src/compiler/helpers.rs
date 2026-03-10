@@ -1,13 +1,24 @@
 //! Helper methods for bytecode compilation
 
-use crate::borrow_checker::BorrowMode;
+use crate::borrow_checker::{BorrowMode, BorrowPlace};
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
-use crate::type_tracking::{NumericType, StorageHint, TypeTracker, VariableTypeInfo};
-use shape_ast::ast::{Spanned, TypeAnnotation};
+use crate::executor::typed_object_ops::field_type_to_tag;
+use crate::type_tracking::{NumericType, StorageHint, TypeTracker, VariableKind, VariableTypeInfo};
+use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
+use shape_runtime::type_schema::FieldType;
 use std::collections::{BTreeSet, HashMap};
 
 use super::{BytecodeCompiler, DropKind, ParamPassMode};
+
+pub(super) struct TypedFieldPlace {
+    pub root_name: String,
+    pub is_local: bool,
+    pub slot: u16,
+    pub typed_operand: Operand,
+    pub borrow_key: BorrowPlace,
+    pub field_type_info: FieldType,
+}
 
 /// Extract the core error message from a ShapeError, stripping redundant
 /// "Type error:", "Runtime error:", "Compile error:", etc. prefixes that
@@ -57,14 +68,190 @@ pub(crate) fn strip_error_prefix(e: &ShapeError) -> String {
 }
 
 impl BytecodeCompiler {
-    const MODULE_BINDING_BORROW_FLAG: u16 = 0x8000;
+    const MODULE_BINDING_BORROW_FLAG: BorrowPlace = 0x8000_0000;
+    const FIELD_BORROW_SHIFT: u32 = 16;
 
-    pub(super) fn borrow_key_for_local(local_idx: u16) -> u16 {
-        local_idx
+    pub(super) fn borrow_key_for_local(local_idx: u16) -> BorrowPlace {
+        local_idx as BorrowPlace
     }
 
-    pub(super) fn borrow_key_for_module_binding(binding_idx: u16) -> u16 {
-        Self::MODULE_BINDING_BORROW_FLAG | binding_idx
+    pub(super) fn borrow_key_for_module_binding(binding_idx: u16) -> BorrowPlace {
+        Self::MODULE_BINDING_BORROW_FLAG | binding_idx as BorrowPlace
+    }
+
+    fn encode_field_borrow(field_idx: u16) -> BorrowPlace {
+        ((field_idx as BorrowPlace + 1) & 0x7FFF) << Self::FIELD_BORROW_SHIFT
+    }
+
+    pub(super) fn borrow_key_for_local_field(local_idx: u16, field_idx: u16) -> BorrowPlace {
+        Self::borrow_key_for_local(local_idx) | Self::encode_field_borrow(field_idx)
+    }
+
+    pub(super) fn borrow_key_for_module_binding_field(
+        binding_idx: u16,
+        field_idx: u16,
+    ) -> BorrowPlace {
+        Self::borrow_key_for_module_binding(binding_idx) | Self::encode_field_borrow(field_idx)
+    }
+
+    pub(super) fn relabel_borrow_error(
+        err: ShapeError,
+        borrow_key: BorrowPlace,
+        label: &str,
+    ) -> ShapeError {
+        match err {
+            ShapeError::SemanticError { message, location } => ShapeError::SemanticError {
+                message: message.replace(&format!("(slot {})", borrow_key), &format!("'{}'", label)),
+                location,
+            },
+            other => other,
+        }
+    }
+
+    pub(super) fn try_resolve_typed_field_place(
+        &self,
+        object: &Expr,
+        property: &str,
+    ) -> Option<TypedFieldPlace> {
+        let (root_name, is_local, slot, type_info) = match object {
+            Expr::Identifier(name, _) => {
+                if let Some(local_idx) = self.resolve_local(name) {
+                    if self.ref_locals.contains(&local_idx)
+                        || self.reference_value_locals.contains(&local_idx)
+                    {
+                        return None;
+                    }
+                    (
+                        name.clone(),
+                        true,
+                        local_idx,
+                        self.type_tracker.get_local_type(local_idx)?.clone(),
+                    )
+                } else {
+                    let scoped_name = self.resolve_scoped_module_binding_name(name)?;
+                    let binding_idx = *self.module_bindings.get(&scoped_name)?;
+                    if self.reference_value_module_bindings.contains(&binding_idx) {
+                        return None;
+                    }
+                    (
+                        name.clone(),
+                        false,
+                        binding_idx,
+                        self.type_tracker.get_binding_type(binding_idx)?.clone(),
+                    )
+                }
+            }
+            _ => return None,
+        };
+
+        if !matches!(type_info.kind, VariableKind::Value) {
+            return None;
+        }
+
+        let schema_id = type_info.schema_id?;
+        if schema_id > u16::MAX as u32 {
+            return None;
+        }
+
+        let schema = self.type_tracker.schema_registry().get_by_id(schema_id)?;
+        let field = schema.get_field(property)?;
+        let field_idx = field.index as u16;
+        let borrow_key = if is_local {
+            Self::borrow_key_for_local_field(slot, field_idx)
+        } else {
+            Self::borrow_key_for_module_binding_field(slot, field_idx)
+        };
+
+        Some(TypedFieldPlace {
+            root_name,
+            is_local,
+            slot,
+            typed_operand: Operand::TypedField {
+                type_id: schema_id as u16,
+                field_idx,
+                field_type_tag: field_type_to_tag(&field.field_type),
+            },
+            borrow_key,
+            field_type_info: field.field_type.clone(),
+        })
+    }
+
+    pub(super) fn compile_reference_expr(
+        &mut self,
+        expr: &Expr,
+        span: shape_ast::ast::Span,
+        mode: BorrowMode,
+    ) -> Result<()> {
+        match expr {
+            Expr::Identifier(name, id_span) => self.compile_reference_identifier(name, *id_span, mode),
+            Expr::PropertyAccess {
+                object,
+                property,
+                optional: false,
+                ..
+            } => self.compile_reference_property_access(object, property, span, mode),
+            _ => Err(ShapeError::SemanticError {
+                message:
+                    "`&` can only be applied to a simple variable name or compile-time-resolved field access (e.g., `&x`, `&obj.a`)".to_string(),
+                location: Some(self.span_to_source_location(span)),
+            }),
+        }
+    }
+
+    fn compile_reference_property_access(
+        &mut self,
+        object: &Expr,
+        property: &str,
+        span: shape_ast::ast::Span,
+        mode: BorrowMode,
+    ) -> Result<()> {
+        let Some(place) = self.try_resolve_typed_field_place(object, property) else {
+            return Err(ShapeError::SemanticError {
+                message:
+                    "`&` can only be applied to a simple variable name or compile-time-resolved field access (e.g., `&x`, `&obj.a`)".to_string(),
+                location: Some(self.span_to_source_location(span)),
+            });
+        };
+
+        if mode == BorrowMode::Exclusive {
+            if place.is_local {
+                if self.const_locals.contains(&place.slot) {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot pass const variable '{}.{}' by exclusive reference",
+                            place.root_name, property
+                        ),
+                        location: Some(self.span_to_source_location(span)),
+                    });
+                }
+            } else if self.const_module_bindings.contains(&place.slot) {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Cannot pass const variable '{}.{}' by exclusive reference",
+                        place.root_name, property
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+        }
+
+        let label = format!("{}.{}", place.root_name, property);
+        let source_loc = self.span_to_source_location(span);
+        self.borrow_checker
+            .create_borrow(place.borrow_key, place.slot, mode, span, Some(source_loc))
+            .map_err(|err| Self::relabel_borrow_error(err, place.borrow_key, &label))?;
+
+        let root_operand = if place.is_local {
+            Operand::Local(place.slot)
+        } else {
+            Operand::ModuleBinding(place.slot)
+        };
+        self.emit(Instruction::new(OpCode::MakeRef, Some(root_operand)));
+        self.emit(Instruction::new(
+            OpCode::MakeFieldRef,
+            Some(place.typed_operand),
+        ));
+        Ok(())
     }
 
     pub(super) fn mark_reference_binding(
@@ -456,6 +643,12 @@ impl BytecodeCompiler {
         use shape_ast::ast::Expr;
         match arg {
             Expr::Identifier(name, span) => self.compile_reference_identifier(name, *span, mode),
+            Expr::PropertyAccess {
+                object,
+                property,
+                optional: false,
+                span,
+            } => self.compile_reference_property_access(object, property, *span, mode),
             _ if mode == BorrowMode::Exclusive => Err(ShapeError::SemanticError {
                 message: "[B0004] mutable reference arguments must be simple variables".to_string(),
                 location: Some(self.span_to_source_location(arg.span())),

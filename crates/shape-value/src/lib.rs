@@ -59,7 +59,7 @@ pub use extraction::{
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
 pub use heap_value::{
     ChannelData, DataReferenceData, DequeData, HashMapData, HeapKind, HeapValue, PriorityQueueData,
-    SetData, SimulationCallData,
+    ProjectedRefData, RefProjection, SetData, SimulationCallData,
 };
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;

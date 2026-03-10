@@ -7,16 +7,145 @@ use crate::{
     executor::VirtualMachine,
     memory::{record_heap_write, write_barrier_vw},
 };
+use crate::executor::objects::object_creation::clone_slots_with_update;
+use crate::executor::typed_object_ops::{read_slot_fast, tag_to_field_type};
 use shape_value::nanboxed::RefTarget;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{RefProjection, VMError, ValueWord};
 use std::sync::{Arc, RwLock};
 impl VirtualMachine {
-    pub(in crate::executor) fn resolve_ref_value(&self, value: &ValueWord) -> Option<ValueWord> {
-        match value.as_ref_target()? {
-            RefTarget::Stack(slot) => self.stack.get(slot).cloned(),
-            RefTarget::ModuleBinding(slot) => self.module_bindings.get(slot).cloned(),
+    pub(in crate::executor) fn read_ref_target(
+        &self,
+        target: &RefTarget,
+    ) -> Result<ValueWord, VMError> {
+        match target {
+            RefTarget::Stack(slot) => Ok(self.stack.get(*slot).cloned().unwrap_or_else(ValueWord::none)),
+            RefTarget::ModuleBinding(slot) => Ok(self
+                .module_bindings
+                .get(*slot)
+                .cloned()
+                .unwrap_or_else(ValueWord::none)),
+            RefTarget::Projected(data) => match &data.projection {
+                RefProjection::TypedField {
+                    field_idx,
+                    field_type_tag,
+                    ..
+                } => {
+                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "internal error: projected reference base is not a reference"
+                                .to_string(),
+                        )
+                    })?;
+                    let base_value =
+                        if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
+                            base_value.as_heap_ref()
+                        {
+                            value.as_ref().clone()
+                        } else {
+                            base_value
+                        };
+                    if let Some(HeapValue::TypedObject {
+                        slots, heap_mask, ..
+                    }) = base_value.as_heap_ref()
+                    {
+                        let index = *field_idx as usize;
+                        if index < slots.len() {
+                            let is_heap = (*heap_mask & (1u64 << index)) != 0;
+                            return Ok(read_slot_fast(&slots[index], is_heap, *field_type_tag));
+                        }
+                    }
+                    Ok(ValueWord::none())
+                }
+            },
         }
+    }
+
+    pub(in crate::executor) fn write_ref_target(
+        &mut self,
+        target: &RefTarget,
+        value: ValueWord,
+    ) -> Result<(), VMError> {
+        record_heap_write();
+        match target {
+            RefTarget::Stack(target) => {
+                write_barrier_vw(&self.stack[*target], &value);
+                self.stack[*target] = value;
+                Ok(())
+            }
+            RefTarget::ModuleBinding(target) => {
+                if *target >= self.module_bindings.len() {
+                    self.module_bindings.resize_with(*target + 1, ValueWord::none);
+                }
+                write_barrier_vw(&self.module_bindings[*target], &value);
+                self.module_bindings[*target] = value;
+                Ok(())
+            }
+            RefTarget::Projected(data) => match &data.projection {
+                RefProjection::TypedField {
+                    field_idx,
+                    field_type_tag,
+                    ..
+                } => {
+                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "internal error: projected reference base is not a reference"
+                                .to_string(),
+                        )
+                    })?;
+                    let base_value =
+                        if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
+                            base_value.as_heap_ref()
+                        {
+                            value.as_ref().clone()
+                        } else {
+                            base_value
+                        };
+                    if let Some(HeapValue::TypedObject {
+                        schema_id,
+                        slots,
+                        heap_mask,
+                    }) = base_value.as_heap_ref()
+                    {
+                        let field_type = tag_to_field_type(*field_type_tag);
+                        let (new_slots, new_mask) = clone_slots_with_update(
+                            slots,
+                            *heap_mask,
+                            *field_idx as usize,
+                            &value,
+                            field_type.as_ref(),
+                        );
+                        return self.write_ref_value(
+                            &data.base,
+                            ValueWord::from_heap_value(HeapValue::TypedObject {
+                                schema_id: *schema_id,
+                                slots: new_slots.into_boxed_slice(),
+                                heap_mask: new_mask,
+                            }),
+                        );
+                    }
+                    Err(VMError::RuntimeError(
+                        "cannot write through a field reference to a non-object value".to_string(),
+                    ))
+                }
+            },
+        }
+    }
+
+    fn write_ref_value(&mut self, reference: &ValueWord, value: ValueWord) -> Result<(), VMError> {
+        let target = reference.as_ref_target().ok_or_else(|| {
+            VMError::RuntimeError(
+                "internal error: expected a reference value (&) but found a regular value. \
+                 This is a compiler bug — please report it"
+                    .to_string(),
+            )
+        })?;
+        self.write_ref_target(&target, value)
+    }
+
+    pub(in crate::executor) fn resolve_ref_value(&self, value: &ValueWord) -> Option<ValueWord> {
+        let target = value.as_ref_target()?;
+        self.read_ref_target(&target).ok()
     }
 
     #[inline(always)]
@@ -37,6 +166,7 @@ impl VirtualMachine {
             StoreClosure => self.op_store_closure(instruction)?,
             CloseUpvalue => self.op_close_upvalue(instruction)?,
             MakeRef => self.op_make_ref(instruction)?,
+            MakeFieldRef => self.op_make_field_ref(instruction)?,
             DerefLoad => self.op_deref_load(instruction)?,
             DerefStore => self.op_deref_store(instruction)?,
             SetIndexRef => self.op_set_index_ref(instruction)?,
@@ -303,6 +433,34 @@ impl VirtualMachine {
         Ok(())
     }
 
+    /// MakeFieldRef: pop a base reference and push a projected typed-field reference.
+    pub(in crate::executor) fn op_make_field_ref(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let base_ref = self.pop_vw()?;
+        if base_ref.as_ref_target().is_none() {
+            return Err(VMError::RuntimeError(
+                "internal error: MakeFieldRef expected a base reference".to_string(),
+            ));
+        }
+        match instruction.operand {
+            Some(Operand::TypedField {
+                type_id,
+                field_idx,
+                field_type_tag,
+            }) => self.push_vw(ValueWord::from_projected_ref(
+                base_ref,
+                RefProjection::TypedField {
+                    type_id,
+                    field_idx,
+                    field_type_tag,
+                },
+            )),
+            _ => Err(VMError::InvalidOperand),
+        }
+    }
+
     /// DerefLoad: Follow a reference stored in a local slot and push the target value.
     ///
     /// The operand is the local slot holding the TAG_REF value. We extract the
@@ -322,17 +480,7 @@ impl VirtualMachine {
                         .to_string(),
                 )
             })?;
-            let nb = match target {
-                RefTarget::Stack(target) => unsafe {
-                    let bits = *(self.stack.as_ptr().add(target) as *const u64);
-                    ValueWord::clone_from_bits(bits)
-                },
-                RefTarget::ModuleBinding(target) => self
-                    .module_bindings
-                    .get(target)
-                    .cloned()
-                    .unwrap_or_else(ValueWord::none),
-            };
+            let nb = self.read_ref_target(&target)?;
             self.push_vw(nb)?;
         } else {
             return Err(VMError::InvalidOperand);
@@ -352,27 +500,7 @@ impl VirtualMachine {
             let value = self.pop_vw()?;
             let bp = self.current_locals_base();
             let slot = bp + ref_slot as usize;
-            let target = self.stack[slot].as_ref_target().ok_or_else(|| {
-                VMError::RuntimeError(
-                    "internal error: expected a reference value (&) but found a regular value. \
-                     This is a compiler bug — please report it"
-                        .to_string(),
-                )
-            })?;
-            record_heap_write();
-            match target {
-                RefTarget::Stack(target) => {
-                    write_barrier_vw(&self.stack[target], &value);
-                    self.stack[target] = value;
-                }
-                RefTarget::ModuleBinding(target) => {
-                    if target >= self.module_bindings.len() {
-                        self.module_bindings.resize_with(target + 1, ValueWord::none);
-                    }
-                    write_barrier_vw(&self.module_bindings[target], &value);
-                    self.module_bindings[target] = value;
-                }
-            }
+            self.write_ref_value(&self.stack[slot].clone(), value)?;
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -404,8 +532,16 @@ impl VirtualMachine {
                 )
             })?;
 
-            let target_slot = match target {
-                RefTarget::Stack(target) => &mut self.stack[target],
+            match target {
+                RefTarget::Stack(target) => {
+                    let target_slot = &mut self.stack[target];
+                    let mut object_nb = std::mem::replace(target_slot, ValueWord::none());
+                    let result = Self::set_array_index_on_object(&mut object_nb, &index_nb, value);
+                    record_heap_write();
+                    write_barrier_vw(&ValueWord::none(), &object_nb);
+                    *target_slot = object_nb;
+                    result
+                }
                 RefTarget::ModuleBinding(target) => {
                     if target >= self.module_bindings.len() {
                         return Err(VMError::RuntimeError(format!(
@@ -413,16 +549,20 @@ impl VirtualMachine {
                             target
                         )));
                     }
-                    &mut self.module_bindings[target]
+                    let target_slot = &mut self.module_bindings[target];
+                    let mut object_nb = std::mem::replace(target_slot, ValueWord::none());
+                    let result = Self::set_array_index_on_object(&mut object_nb, &index_nb, value);
+                    record_heap_write();
+                    write_barrier_vw(&ValueWord::none(), &object_nb);
+                    *target_slot = object_nb;
+                    result
                 }
-            };
-
-            let mut object_nb = std::mem::replace(target_slot, ValueWord::none());
-            let result = Self::set_array_index_on_object(&mut object_nb, &index_nb, value);
-            record_heap_write();
-            write_barrier_vw(&ValueWord::none(), &object_nb);
-            *target_slot = object_nb;
-            result
+                RefTarget::Projected(_) => {
+                    let mut object_nb = self.read_ref_target(&target)?;
+                    Self::set_array_index_on_object(&mut object_nb, &index_nb, value)?;
+                    self.write_ref_target(&target, object_nb)
+                }
+            }
         } else {
             Err(VMError::InvalidOperand)
         }

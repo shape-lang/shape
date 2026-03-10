@@ -680,6 +680,7 @@ fn heap_value_to_serializable(
         | HeapValue::FilterExpr(_)
         | HeapValue::TaskGroup { .. }
         | HeapValue::TraitObject { .. }
+        | HeapValue::ProjectedRef(_)
         | HeapValue::NativeView(_) => {
             return Err(anyhow::anyhow!(
                 "Cannot snapshot transient value: {}",

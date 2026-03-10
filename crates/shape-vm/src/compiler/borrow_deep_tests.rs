@@ -2568,6 +2568,113 @@ fn test_module_binding_mut_ref_param_method_mutates_original() {
     assert_eq!(result, ValueWord::from_i64(4));
 }
 
+#[test]
+fn test_projected_field_ref_arithmetic_autoderef() {
+    let code = r#"
+        type Pair {
+            a: int,
+            b: int
+        }
+
+        function test() {
+            let obj = Pair { a: 41, b: 1 }
+            let r = &obj.a
+            return r + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_projected_field_disjoint_exclusive_borrows_ok() {
+    let code = r#"
+        type Pair {
+            a: int,
+            b: int
+        }
+
+        function set_value(&mut x, value) {
+            x = value
+        }
+
+        function test() {
+            let mut obj = Pair { a: 1, b: 2 }
+            let ra = &mut obj.a
+            let rb = &mut obj.b
+            set_value(ra, 10)
+            set_value(rb, 20)
+            return ra + rb
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(30));
+}
+
+#[test]
+fn test_projected_field_write_other_field_while_borrowed_ok() {
+    let code = r#"
+        type Pair {
+            a: int,
+            b: int
+        }
+
+        function set_value(&mut x, value) {
+            x = value
+        }
+
+        function test() {
+            let mut obj = Pair { a: 1, b: 2 }
+            let rb = &mut obj.b
+            obj.a = 10
+            set_value(rb, 20)
+            return obj.a + rb
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(30));
+}
+
+#[test]
+fn test_projected_field_shared_plus_exclusive_same_field_rejected() {
+    assert_compile_error(
+        r#"
+        type Pair {
+            a: int,
+            b: int
+        }
+
+        function test() {
+            let mut obj = Pair { a: 1, b: 2 }
+            let r = &obj.a
+            let m = &mut obj.a
+            return r + m
+        }
+        "#,
+        "[B0001]",
+    );
+}
+
+#[test]
+fn test_projected_field_whole_owner_write_rejected() {
+    assert_compile_error(
+        r#"
+        type Pair {
+            a: int,
+            b: int
+        }
+
+        function test() {
+            let mut obj = Pair { a: 1, b: 2 }
+            let r = &obj.a
+            obj = Pair { a: 3, b: 4 }
+            return r
+        }
+        "#,
+        "[B0002]",
+    );
+}
+
 // ── Concurrency boundary tests (Phase 6: Three Rules) ──────────────
 
 #[test]

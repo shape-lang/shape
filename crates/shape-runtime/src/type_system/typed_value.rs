@@ -279,6 +279,7 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
                 is_fallible: false,
             }))
         }
+        HeapValue::ProjectedRef(_) => SemanticType::Named("Unknown".to_string()),
         HeapValue::Decimal(_) => SemanticType::Named("Decimal".to_string()),
         HeapValue::BigInt(_) => SemanticType::Integer,
         HeapValue::HostClosure(_) => SemanticType::Named("HostClosure".to_string()),

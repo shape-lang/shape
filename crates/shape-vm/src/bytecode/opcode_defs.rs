@@ -232,6 +232,8 @@ define_opcodes! {
     /// Box a module binding into a SharedCell for mutable closure capture.
     /// Same as BoxLocal but operates on the module_bindings vector.
     BoxModuleBinding = 0x5D, Variable, pops: 0, pushes: 1;
+    /// Create a projected typed-field reference from a base reference on the stack.
+    MakeFieldRef = 0x5E, Variable, pops: 1, pushes: 1;
 
     // ===== Object/Array Operations =====
     /// Create new array

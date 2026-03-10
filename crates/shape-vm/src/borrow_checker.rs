@@ -8,7 +8,7 @@
 
 use shape_ast::ast::Span;
 use shape_ast::error::{ErrorNote, ShapeError, SourceLocation};
-use std::collections::{HashMap, HashSet};
+pub type BorrowPlace = u32;
 
 /// Unique identifier for a lexical scope region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,8 +17,8 @@ pub struct RegionId(pub u32);
 /// Record of an active borrow.
 #[derive(Debug, Clone)]
 pub struct BorrowRecord {
-    /// The local slot being borrowed (the original variable).
-    pub borrowed_slot: u16,
+    /// The place being borrowed (root binding or projected field).
+    pub borrowed_place: BorrowPlace,
     /// True if the callee mutates through this ref (exclusive borrow).
     pub is_exclusive: bool,
     /// The region where the borrowed variable was defined.
@@ -58,14 +58,9 @@ pub struct BorrowChecker {
     region_stack: Vec<RegionId>,
     /// Next region ID to allocate.
     next_region_id: u32,
-    /// Active borrows per slot: slot -> list of active borrows.
-    active_borrows: HashMap<u16, Vec<BorrowRecord>>,
-    /// Slots with at least one exclusive (mutating) borrow.
-    exclusively_borrowed: HashSet<u16>,
-    /// Count of shared (non-mutating) borrows per slot.
-    shared_borrow_count: HashMap<u16, u32>,
-    /// Reference slots created in each region (for cleanup on scope exit).
-    ref_slots_by_region: HashMap<RegionId, Vec<u16>>,
+    /// Active borrows. We keep a flat list so overlap checks can reason about
+    /// whole-owner places vs projected field places.
+    active_borrows: Vec<BorrowRecord>,
 }
 
 impl BorrowChecker {
@@ -75,10 +70,30 @@ impl BorrowChecker {
             current_region: RegionId(0),
             region_stack: vec![RegionId(0)],
             next_region_id: 1,
-            active_borrows: HashMap::new(),
-            exclusively_borrowed: HashSet::new(),
-            shared_borrow_count: HashMap::new(),
-            ref_slots_by_region: HashMap::new(),
+            active_borrows: Vec::new(),
+        }
+    }
+
+    fn root_key(place: BorrowPlace) -> BorrowPlace {
+        place & 0x8000_FFFF
+    }
+
+    fn field_key(place: BorrowPlace) -> Option<u16> {
+        let encoded = ((place >> 16) & 0x7FFF) as u16;
+        if encoded == 0 {
+            None
+        } else {
+            Some(encoded - 1)
+        }
+    }
+
+    fn places_overlap(lhs: BorrowPlace, rhs: BorrowPlace) -> bool {
+        if Self::root_key(lhs) != Self::root_key(rhs) {
+            return false;
+        }
+        match (Self::field_key(lhs), Self::field_key(rhs)) {
+            (Some(lhs_field), Some(rhs_field)) => lhs_field == rhs_field,
+            _ => true,
         }
     }
 
@@ -116,49 +131,48 @@ impl BorrowChecker {
     /// - No exclusive borrows exist for `slot`
     pub fn create_borrow(
         &mut self,
-        slot: u16,
+        place: BorrowPlace,
         ref_slot: u16,
         mode: BorrowMode,
         span: Span,
         source_location: Option<SourceLocation>,
     ) -> Result<(), ShapeError> {
-        if mode.is_exclusive() {
-            // Exclusive borrow: no other borrows allowed
-            if self.exclusively_borrowed.contains(&slot) {
+        for borrow in &self.active_borrows {
+            if !Self::places_overlap(place, borrow.borrowed_place) {
+                continue;
+            }
+            if mode.is_exclusive() {
+                let message = if borrow.is_exclusive {
+                    "cannot mutably borrow this value because it is already borrowed"
+                } else {
+                    "cannot mutably borrow this value while shared borrows are active"
+                };
+                let help = if borrow.is_exclusive {
+                    "end the previous borrow before creating a mutable borrow, or use a shared borrow"
+                } else {
+                    "move the mutable borrow later, or make prior borrows immutable-only reads"
+                };
                 return Err(self.make_borrow_conflict_error(
                     "B0001",
-                    slot,
+                    place,
                     source_location,
-                    "cannot mutably borrow this value because it is already borrowed",
-                    "end the previous borrow before creating a mutable borrow, or use a shared borrow",
+                    message,
+                    help,
                 ));
             }
-            if self.shared_borrow_count.get(&slot).copied().unwrap_or(0) > 0 {
+            if borrow.is_exclusive {
                 return Err(self.make_borrow_conflict_error(
                     "B0001",
-                    slot,
-                    source_location,
-                    "cannot mutably borrow this value while shared borrows are active",
-                    "move the mutable borrow later, or make prior borrows immutable-only reads",
-                ));
-            }
-            self.exclusively_borrowed.insert(slot);
-        } else {
-            // Shared borrow: no exclusive borrows allowed
-            if self.exclusively_borrowed.contains(&slot) {
-                return Err(self.make_borrow_conflict_error(
-                    "B0001",
-                    slot,
+                    place,
                     source_location,
                     "cannot immutably borrow this value because it is mutably borrowed",
                     "drop the mutable borrow before taking an immutable borrow",
                 ));
             }
-            *self.shared_borrow_count.entry(slot).or_insert(0) += 1;
         }
 
         let record = BorrowRecord {
-            borrowed_slot: slot,
+            borrowed_place: place,
             is_exclusive: mode.is_exclusive(),
             origin_region: self.current_region,
             borrow_region: self.current_region,
@@ -167,12 +181,7 @@ impl BorrowChecker {
             source_location,
         };
 
-        self.active_borrows.entry(slot).or_default().push(record);
-
-        self.ref_slots_by_region
-            .entry(self.current_region)
-            .or_default()
-            .push(slot);
+        self.active_borrows.push(record);
 
         Ok(())
     }
@@ -180,14 +189,14 @@ impl BorrowChecker {
     /// Check whether a write to `slot` is allowed (fails if any borrow exists).
     pub fn check_write_allowed(
         &self,
-        slot: u16,
+        place: BorrowPlace,
         source_location: Option<SourceLocation>,
     ) -> Result<(), ShapeError> {
-        if let Some(borrows) = self.active_borrows.get(&slot) {
-            if !borrows.is_empty() {
+        for borrow in &self.active_borrows {
+            if Self::places_overlap(place, borrow.borrowed_place) {
                 return Err(self.make_borrow_conflict_error(
                     "B0002",
-                    slot,
+                    place,
                     source_location,
                     "cannot write to this value while it is borrowed",
                     "move this write after the borrow ends",
@@ -202,17 +211,19 @@ impl BorrowChecker {
     /// Reads are blocked while the slot has an active exclusive borrow.
     pub fn check_read_allowed(
         &self,
-        slot: u16,
+        place: BorrowPlace,
         source_location: Option<SourceLocation>,
     ) -> Result<(), ShapeError> {
-        if self.exclusively_borrowed.contains(&slot) {
-            return Err(self.make_borrow_conflict_error(
-                "B0001",
-                slot,
-                source_location,
-                "cannot read this value while it is mutably borrowed",
-                "read through the existing reference, or move the read after the borrow ends",
-            ));
+        for borrow in &self.active_borrows {
+            if borrow.is_exclusive && Self::places_overlap(place, borrow.borrowed_place) {
+                return Err(self.make_borrow_conflict_error(
+                    "B0001",
+                    place,
+                    source_location,
+                    "cannot read this value while it is mutably borrowed",
+                    "read through the existing reference, or move the read after the borrow ends",
+                ));
+            }
         }
         Ok(())
     }
@@ -224,26 +235,23 @@ impl BorrowChecker {
         ref_slot: u16,
         source_location: Option<SourceLocation>,
     ) -> Result<(), ShapeError> {
-        // Check if this ref_slot is in any active borrow
-        for borrows in self.active_borrows.values() {
-            for borrow in borrows {
-                if borrow.ref_slot == ref_slot {
-                    let mut location = source_location;
-                    if let Some(loc) = location.as_mut() {
-                        loc.hints.push(
-                            "keep references within the call/lexical scope where they were created"
-                                .to_string(),
-                        );
-                        loc.notes.push(ErrorNote {
-                            message: "borrow originates here".to_string(),
-                            location: borrow.source_location.clone(),
-                        });
-                    }
-                    return Err(ShapeError::SemanticError {
-                        message: "[B0003] reference cannot escape its scope".to_string(),
-                        location,
+        for borrow in &self.active_borrows {
+            if borrow.ref_slot == ref_slot {
+                let mut location = source_location;
+                if let Some(loc) = location.as_mut() {
+                    loc.hints.push(
+                        "keep references within the call/lexical scope where they were created"
+                            .to_string(),
+                    );
+                    loc.notes.push(ErrorNote {
+                        message: "borrow originates here".to_string(),
+                        location: borrow.source_location.clone(),
                     });
                 }
+                return Err(ShapeError::SemanticError {
+                    message: "[B0003] reference cannot escape its scope".to_string(),
+                    location,
+                });
             }
         }
         Ok(())
@@ -251,30 +259,7 @@ impl BorrowChecker {
 
     /// Release all borrows created in a specific region.
     fn release_borrows_in_region(&mut self, region: RegionId) {
-        if let Some(slots) = self.ref_slots_by_region.remove(&region) {
-            for slot in slots {
-                if let Some(borrows) = self.active_borrows.get_mut(&slot) {
-                    borrows.retain(|b| b.borrow_region != region);
-
-                    // Update exclusive/shared tracking
-                    let has_exclusive = borrows.iter().any(|b| b.is_exclusive);
-                    let shared_count = borrows.iter().filter(|b| !b.is_exclusive).count() as u32;
-
-                    if !has_exclusive {
-                        self.exclusively_borrowed.remove(&slot);
-                    }
-                    if shared_count == 0 {
-                        self.shared_borrow_count.remove(&slot);
-                    } else {
-                        self.shared_borrow_count.insert(slot, shared_count);
-                    }
-
-                    if borrows.is_empty() {
-                        self.active_borrows.remove(&slot);
-                    }
-                }
-            }
-        }
+        self.active_borrows.retain(|b| b.borrow_region != region);
     }
 
     /// Reset the borrow checker state (e.g., when entering a new function body).
@@ -283,21 +268,18 @@ impl BorrowChecker {
         self.region_stack = vec![RegionId(0)];
         self.next_region_id = 1;
         self.active_borrows.clear();
-        self.exclusively_borrowed.clear();
-        self.shared_borrow_count.clear();
-        self.ref_slots_by_region.clear();
     }
 
-    fn first_conflicting_borrow(&self, slot: u16) -> Option<&BorrowRecord> {
+    fn first_conflicting_borrow(&self, place: BorrowPlace) -> Option<&BorrowRecord> {
         self.active_borrows
-            .get(&slot)
-            .and_then(|borrows| borrows.first())
+            .iter()
+            .find(|borrow| Self::places_overlap(place, borrow.borrowed_place))
     }
 
     fn make_borrow_conflict_error(
         &self,
         code: &str,
-        slot: u16,
+        place: BorrowPlace,
         source_location: Option<SourceLocation>,
         message: &str,
         help: &str,
@@ -305,7 +287,7 @@ impl BorrowChecker {
         let mut location = source_location;
         if let Some(loc) = location.as_mut() {
             loc.hints.push(help.to_string());
-            if let Some(conflict) = self.first_conflicting_borrow(slot) {
+            if let Some(conflict) = self.first_conflicting_borrow(place) {
                 loc.notes.push(ErrorNote {
                     message: "first conflicting borrow occurs here".to_string(),
                     location: conflict.source_location.clone(),
@@ -313,7 +295,7 @@ impl BorrowChecker {
             }
         }
         ShapeError::SemanticError {
-            message: format!("[{}] {} (slot {})", code, message, slot),
+            message: format!("[{}] {} (slot {})", code, message, place),
             location,
         }
     }
@@ -325,6 +307,10 @@ mod tests {
 
     fn span() -> Span {
         Span { start: 0, end: 1 }
+    }
+
+    fn field_place(slot: u16, field: u16) -> BorrowPlace {
+        (((field as BorrowPlace) + 1) << 16) | slot as BorrowPlace
     }
 
     #[test]
@@ -404,6 +390,29 @@ mod tests {
     fn test_write_allowed_when_no_borrows() {
         let bc = BorrowChecker::new();
         assert!(bc.check_write_allowed(0, None).is_ok());
+    }
+
+    #[test]
+    fn test_disjoint_field_exclusive_borrows_ok() {
+        let mut bc = BorrowChecker::new();
+        assert!(
+            bc.create_borrow(field_place(0, 0), 0, BorrowMode::Exclusive, span(), None)
+                .is_ok()
+        );
+        assert!(
+            bc.create_borrow(field_place(0, 1), 1, BorrowMode::Exclusive, span(), None)
+                .is_ok()
+        );
+        assert!(bc.check_write_allowed(field_place(0, 0), None).is_err());
+        assert!(bc.check_write_allowed(field_place(0, 1), None).is_err());
+    }
+
+    #[test]
+    fn test_root_write_blocked_by_field_borrow() {
+        let mut bc = BorrowChecker::new();
+        bc.create_borrow(field_place(0, 0), 0, BorrowMode::Shared, span(), None)
+            .unwrap();
+        assert!(bc.check_write_allowed(0, None).is_err());
     }
 
     #[test]

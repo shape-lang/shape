@@ -35,7 +35,7 @@ use crate::datatable::DataTable;
 use crate::enums::EnumValue;
 use crate::heap_value::{
     ChannelData, DequeData, HashMapData, HeapValue, NativeScalar, NativeTypeLayout, NativeViewData,
-    PriorityQueueData, SetData,
+    PriorityQueueData, ProjectedRefData, RefProjection, SetData,
 };
 use crate::slot::ValueSlot;
 use crate::value::{FilterNode, HostCallable, PrintResult, VMArray, VTable};
@@ -48,10 +48,11 @@ use std::sync::Arc;
 const REF_TARGET_MODULE_FLAG: u64 = 1 << 47;
 const REF_TARGET_INDEX_MASK: u64 = REF_TARGET_MODULE_FLAG - 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefTarget {
     Stack(usize),
     ModuleBinding(usize),
+    Projected(ProjectedRefData),
 }
 
 // --- Bit layout constants (imported from shared tags module) ---
@@ -573,6 +574,15 @@ impl ValueWord {
             TAG_REF,
             REF_TARGET_MODULE_FLAG | (binding_idx as u64 & REF_TARGET_INDEX_MASK),
         ))
+    }
+
+    /// Create a projected reference backed by heap metadata.
+    #[inline]
+    pub fn from_projected_ref(base: ValueWord, projection: RefProjection) -> Self {
+        Self::heap_box(HeapValue::ProjectedRef(Box::new(ProjectedRefData {
+            base,
+            projection,
+        })))
     }
 
     /// Heap-box a HeapValue directly.
@@ -1191,22 +1201,27 @@ impl ValueWord {
     /// Returns true if this value is a stack reference.
     #[inline(always)]
     pub fn is_ref(&self) -> bool {
-        is_tagged(self.0) && get_tag(self.0) == TAG_REF
+        if is_tagged(self.0) {
+            return get_tag(self.0) == TAG_REF;
+        }
+        matches!(self.as_heap_ref(), Some(HeapValue::ProjectedRef(_)))
     }
 
     /// Extract the reference target.
     #[inline]
     pub fn as_ref_target(&self) -> Option<RefTarget> {
-        let payload = get_payload(self.0);
-        if !self.is_ref() {
-            return None;
+        if is_tagged(self.0) && get_tag(self.0) == TAG_REF {
+            let payload = get_payload(self.0);
+            let idx = (payload & REF_TARGET_INDEX_MASK) as usize;
+            if payload & REF_TARGET_MODULE_FLAG != 0 {
+                return Some(RefTarget::ModuleBinding(idx));
+            }
+            return Some(RefTarget::Stack(idx));
         }
-        let idx = (payload & REF_TARGET_INDEX_MASK) as usize;
-        if payload & REF_TARGET_MODULE_FLAG != 0 {
-            Some(RefTarget::ModuleBinding(idx))
-        } else {
-            Some(RefTarget::Stack(idx))
+        if let Some(HeapValue::ProjectedRef(data)) = self.as_heap_ref() {
+            return Some(RefTarget::Projected((**data).clone()));
         }
+        None
     }
 
     /// Extract the absolute stack slot index from a stack reference.
@@ -2682,8 +2697,12 @@ impl std::fmt::Display for ValueWord {
             write!(f, "<function:{}>", unsafe { self.as_function_unchecked() })
         } else if self.is_module_function() {
             write!(f, "<module_function>")
-        } else if self.is_ref() {
-            write!(f, "&slot_{}", get_payload(self.0))
+        } else if let Some(target) = self.as_ref_target() {
+            match target {
+                RefTarget::Stack(slot) => write!(f, "&slot_{}", slot),
+                RefTarget::ModuleBinding(slot) => write!(f, "&module_{}", slot),
+                RefTarget::Projected(_) => write!(f, "&ref"),
+            }
         } else if let Some(hv) = self.as_heap_ref() {
             match hv {
                 HeapValue::Char(c) => write!(f, "{}", c),
@@ -2805,6 +2824,7 @@ impl std::fmt::Display for ValueWord {
                 HeapValue::PrintResult(_) => write!(f, "<print_result>"),
                 HeapValue::SimulationCall(data) => write!(f, "<simulation:{}>", data.name),
                 HeapValue::FunctionRef { name, .. } => write!(f, "<fn:{}>", name),
+                HeapValue::ProjectedRef(_) => write!(f, "&ref"),
                 HeapValue::DataReference(data) => write!(f, "<data:{}>", data.id),
                 HeapValue::NativeScalar(v) => write!(f, "{v}"),
                 HeapValue::NativeView(v) => write!(
@@ -2991,8 +3011,8 @@ impl std::fmt::Debug for ValueWord {
             write!(f, "ValueWord(Function({}))", unsafe {
                 self.as_function_unchecked()
             })
-        } else if self.is_ref() {
-            write!(f, "ValueWord(Ref({}))", get_payload(self.0))
+        } else if let Some(target) = self.as_ref_target() {
+            write!(f, "ValueWord(Ref({:?}))", target)
         } else if self.is_heap() {
             let ptr = get_payload(self.0) as *const HeapValue;
             let hv = unsafe { &*ptr };
