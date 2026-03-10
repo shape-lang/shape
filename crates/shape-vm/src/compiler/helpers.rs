@@ -7,7 +7,10 @@ use crate::type_tracking::{
     BindingOwnershipClass, BindingSemantics, BindingStorageClass, NumericType, StorageHint,
     TypeTracker, VariableKind, VariableTypeInfo,
 };
-use shape_ast::ast::{BlockItem, Expr, Item, Spanned, Statement, TypeAnnotation};
+use shape_ast::ast::{
+    BlockItem, DestructurePattern, Expr, FunctionParameter, Item, Spanned, Statement,
+    TypeAnnotation,
+};
 use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -501,7 +504,43 @@ impl BytecodeCompiler {
             }
             shape_ast::ast::VarKind::Var => BindingOwnershipClass::Flexible,
         };
-        BindingSemantics::deferred(ownership_class)
+        Self::binding_semantics_for_ownership_class(ownership_class)
+    }
+
+    pub(super) const fn default_storage_class_for_ownership_class(
+        ownership_class: BindingOwnershipClass,
+    ) -> BindingStorageClass {
+        match ownership_class {
+            BindingOwnershipClass::OwnedImmutable | BindingOwnershipClass::OwnedMutable => {
+                BindingStorageClass::Direct
+            }
+            BindingOwnershipClass::Flexible => BindingStorageClass::Deferred,
+        }
+    }
+
+    pub(super) const fn binding_semantics_for_ownership_class(
+        ownership_class: BindingOwnershipClass,
+    ) -> BindingSemantics {
+        BindingSemantics {
+            ownership_class,
+            storage_class: Self::default_storage_class_for_ownership_class(ownership_class),
+        }
+    }
+
+    pub(super) fn binding_semantics_for_param(
+        param: &FunctionParameter,
+        pass_mode: ParamPassMode,
+    ) -> BindingSemantics {
+        let ownership_class = if param.is_const || matches!(pass_mode, ParamPassMode::ByRefShared) {
+            BindingOwnershipClass::OwnedImmutable
+        } else {
+            BindingOwnershipClass::OwnedMutable
+        };
+        let mut semantics = Self::binding_semantics_for_ownership_class(ownership_class);
+        if pass_mode.is_reference() {
+            semantics.storage_class = BindingStorageClass::Reference;
+        }
+        semantics
     }
 
     pub(super) fn apply_binding_semantics_for_decl(
@@ -519,6 +558,30 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn apply_binding_semantics_to_pattern_bindings(
+        &mut self,
+        pattern: &DestructurePattern,
+        is_local: bool,
+        semantics: BindingSemantics,
+    ) {
+        for (name, _) in pattern.get_bindings() {
+            if is_local {
+                if let Some(local_idx) = self.resolve_local(&name) {
+                    self.type_tracker
+                        .set_local_binding_semantics(local_idx, semantics);
+                }
+            } else {
+                let scoped_name = self
+                    .resolve_scoped_module_binding_name(&name)
+                    .unwrap_or(name);
+                if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                    self.type_tracker
+                        .set_binding_semantics(binding_idx, semantics);
+                }
+            }
+        }
+    }
+
     pub(super) fn set_binding_storage_class(
         &mut self,
         slot: u16,
@@ -532,6 +595,43 @@ impl BytecodeCompiler {
             self.type_tracker
                 .set_binding_storage_class(slot, storage_class);
         }
+    }
+
+    pub(super) fn set_binding_storage_class_for_name(
+        &mut self,
+        name: &str,
+        storage_class: BindingStorageClass,
+    ) {
+        if let Some(local_idx) = self.resolve_local(name) {
+            self.set_binding_storage_class(local_idx, true, storage_class);
+            return;
+        }
+
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+            self.set_binding_storage_class(binding_idx, false, storage_class);
+        }
+    }
+
+    fn default_binding_storage_class_for_slot(
+        &self,
+        slot: u16,
+        is_local: bool,
+    ) -> BindingStorageClass {
+        let ownership_class = if is_local {
+            self.type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.ownership_class)
+        } else {
+            self.type_tracker
+                .get_binding_semantics(slot)
+                .map(|semantics| semantics.ownership_class)
+        };
+        ownership_class
+            .map(Self::default_storage_class_for_ownership_class)
+            .unwrap_or(BindingStorageClass::Deferred)
     }
 
     pub(super) fn relabel_borrow_error(
@@ -806,7 +906,8 @@ impl BytecodeCompiler {
             self.reference_value_module_bindings.remove(&slot);
             self.exclusive_reference_value_module_bindings.remove(&slot);
         }
-        self.set_binding_storage_class(slot, is_local, BindingStorageClass::Deferred);
+        let fallback_storage = self.default_binding_storage_class_for_slot(slot, is_local);
+        self.set_binding_storage_class(slot, is_local, fallback_storage);
     }
 
     pub(super) fn update_reference_binding_from_expr(

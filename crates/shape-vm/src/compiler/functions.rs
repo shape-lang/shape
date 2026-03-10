@@ -2847,9 +2847,25 @@ impl BytecodeCompiler {
             self.program.strings.len(),
         ));
 
+        let inferred_modes = self.inferred_param_pass_modes.get(&func_def.name).cloned();
+
         // Bind parameters as locals - destructure each parameter value
         // Parameters arrive in local slots 0, 1, 2, ... from caller
         for (idx, param) in func_def.params.iter().enumerate() {
+            let effective_pass_mode = inferred_modes
+                .as_ref()
+                .and_then(|modes| modes.get(idx))
+                .copied()
+                .unwrap_or_else(|| {
+                    if param.is_mut_reference {
+                        ParamPassMode::ByRefExclusive
+                    } else if param.is_reference {
+                        ParamPassMode::ByRefShared
+                    } else {
+                        ParamPassMode::ByValue
+                    }
+                });
+
             // Load parameter value from its slot
             self.emit(Instruction::new(
                 OpCode::LoadLocal,
@@ -2857,6 +2873,21 @@ impl BytecodeCompiler {
             ));
             // Destructure into bindings (self declares locals and binds them)
             self.compile_destructure_pattern(&param.pattern)?;
+            self.apply_binding_semantics_to_pattern_bindings(
+                &param.pattern,
+                true,
+                Self::binding_semantics_for_param(param, effective_pass_mode),
+            );
+            for (binding_name, _) in param.pattern.get_bindings() {
+                if let Some(local_idx) = self.resolve_local(&binding_name) {
+                    if param.is_const {
+                        self.const_locals.insert(local_idx);
+                        self.immutable_locals.insert(local_idx);
+                    } else if matches!(effective_pass_mode, ParamPassMode::ByRefShared) {
+                        self.immutable_locals.insert(local_idx);
+                    }
+                }
+            }
 
             // Propagate parameter type annotations into local type tracker so
             // dot-access compiles to typed field ops (no runtime property fallback).
@@ -2911,7 +2942,6 @@ impl BytecodeCompiler {
         // emits DerefLoad/DerefStore/SetIndexRef instead of LoadLocal/StoreLocal/SetLocalIndex.
         // Also track which ref_locals were INFERRED (not explicitly declared) so that
         // closure capture can distinguish true borrows from pass-by-ref optimizations.
-        let inferred_modes = self.inferred_param_pass_modes.get(&func_def.name).cloned();
         for (idx, param) in func_def.params.iter().enumerate() {
             if param.is_reference {
                 self.ref_locals.insert(idx as u16);
@@ -3141,8 +3171,10 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use crate::bytecode::Constant;
-    use crate::compiler::BytecodeCompiler;
+    use crate::compiler::{BytecodeCompiler, ParamPassMode};
     use crate::executor::{VMConfig, VirtualMachine};
+    use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
+    use shape_ast::ast::{DestructurePattern, FunctionParameter, Span};
     use shape_value::ValueWord;
 
     fn eval(code: &str) -> ValueWord {
@@ -3163,6 +3195,61 @@ mod tests {
         compiler
             .compile(&program)
             .map_err(|e| format!("compile: {}", e))
+    }
+
+    fn test_param(is_const: bool, is_reference: bool, is_mut_reference: bool) -> FunctionParameter {
+        FunctionParameter {
+            pattern: DestructurePattern::Identifier("value".to_string(), Span::DUMMY),
+            is_const,
+            is_reference,
+            is_mut_reference,
+            is_out: false,
+            type_annotation: None,
+            default_value: None,
+        }
+    }
+
+    #[test]
+    fn test_binding_semantics_for_param_modes() {
+        let by_value = BytecodeCompiler::binding_semantics_for_param(
+            &test_param(false, false, false),
+            ParamPassMode::ByValue,
+        );
+        assert_eq!(
+            by_value.ownership_class,
+            BindingOwnershipClass::OwnedMutable
+        );
+        assert_eq!(by_value.storage_class, BindingStorageClass::Direct);
+
+        let const_value = BytecodeCompiler::binding_semantics_for_param(
+            &test_param(true, false, false),
+            ParamPassMode::ByValue,
+        );
+        assert_eq!(
+            const_value.ownership_class,
+            BindingOwnershipClass::OwnedImmutable
+        );
+        assert_eq!(const_value.storage_class, BindingStorageClass::Direct);
+
+        let shared_ref = BytecodeCompiler::binding_semantics_for_param(
+            &test_param(false, true, false),
+            ParamPassMode::ByRefShared,
+        );
+        assert_eq!(
+            shared_ref.ownership_class,
+            BindingOwnershipClass::OwnedImmutable
+        );
+        assert_eq!(shared_ref.storage_class, BindingStorageClass::Reference);
+
+        let exclusive_ref = BytecodeCompiler::binding_semantics_for_param(
+            &test_param(false, true, true),
+            ParamPassMode::ByRefExclusive,
+        );
+        assert_eq!(
+            exclusive_ref.ownership_class,
+            BindingOwnershipClass::OwnedMutable
+        );
+        assert_eq!(exclusive_ref.storage_class, BindingStorageClass::Reference);
     }
 
     #[test]

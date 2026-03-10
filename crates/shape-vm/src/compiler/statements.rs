@@ -3278,7 +3278,6 @@ impl BytecodeCompiler {
                     // Top-level: create module_binding variable
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         let binding_idx = self.get_or_create_module_binding(name);
-                        self.apply_binding_semantics_for_decl(binding_idx, false, var_decl);
 
                         // Emit StoreModuleBindingTyped for width-typed bindings,
                         // otherwise emit regular StoreModuleBinding.
@@ -3305,16 +3304,6 @@ impl BytecodeCompiler {
                                 OpCode::StoreModuleBinding,
                                 Some(Operand::ModuleBinding(binding_idx)),
                             ));
-                        }
-
-                        // Track const module bindings for reassignment checks
-                        if var_decl.kind == VarKind::Const {
-                            self.const_module_bindings.insert(binding_idx);
-                        }
-
-                        // Track immutable `let` bindings at module level
-                        if var_decl.kind == VarKind::Let && !var_decl.is_mut {
-                            self.immutable_module_bindings.insert(binding_idx);
                         }
 
                         // Track type annotation if present (for type checker)
@@ -3367,6 +3356,25 @@ impl BytecodeCompiler {
                     } else {
                         self.compile_destructure_pattern_global(&var_decl.pattern)?;
                     }
+
+                    for (binding_name, _) in var_decl.pattern.get_bindings() {
+                        let scoped_name = self
+                            .resolve_scoped_module_binding_name(&binding_name)
+                            .unwrap_or(binding_name);
+                        if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                            if var_decl.kind == VarKind::Const {
+                                self.const_module_bindings.insert(binding_idx);
+                            }
+                            if var_decl.kind == VarKind::Let && !var_decl.is_mut {
+                                self.immutable_module_bindings.insert(binding_idx);
+                            }
+                        }
+                    }
+                    self.apply_binding_semantics_to_pattern_bindings(
+                        &var_decl.pattern,
+                        false,
+                        Self::binding_semantics_for_var_decl(var_decl),
+                    );
                 } else {
                     // Inside function: create local variable
                     self.compile_destructure_pattern(&var_decl.pattern)?;
@@ -3393,31 +3401,21 @@ impl BytecodeCompiler {
                         }
                     }
 
-                    // Track const locals for reassignment checks
-                    if var_decl.kind == VarKind::Const {
-                        if let Some(name) = var_decl.pattern.as_identifier() {
-                            if let Some(local_idx) = self.resolve_local(name) {
+                    for (binding_name, _) in var_decl.pattern.get_bindings() {
+                        if let Some(local_idx) = self.resolve_local(&binding_name) {
+                            if var_decl.kind == VarKind::Const {
                                 self.const_locals.insert(local_idx);
                             }
-                        }
-                    }
-
-                    // Track immutable `let` bindings (not `let mut` and not `var`)
-                    // `let` without `mut` is immutable by default.
-                    // `var` is always mutable (inferred from usage).
-                    // `let mut` is explicitly mutable.
-                    if var_decl.kind == VarKind::Let && !var_decl.is_mut {
-                        if let Some(name) = var_decl.pattern.as_identifier() {
-                            if let Some(local_idx) = self.resolve_local(name) {
+                            if var_decl.kind == VarKind::Let && !var_decl.is_mut {
                                 self.immutable_locals.insert(local_idx);
                             }
                         }
                     }
-                    if let Some(name) = var_decl.pattern.as_identifier() {
-                        if let Some(local_idx) = self.resolve_local(name) {
-                            self.apply_binding_semantics_for_decl(local_idx, true, var_decl);
-                        }
-                    }
+                    self.apply_binding_semantics_to_pattern_bindings(
+                        &var_decl.pattern,
+                        true,
+                        Self::binding_semantics_for_var_decl(var_decl),
+                    );
 
                     // Track type annotation first (so drop tracking can resolve the type)
                     if let Some(name) = var_decl.pattern.as_identifier() {
@@ -4611,7 +4609,7 @@ mod tests {
         );
         assert_eq!(
             let_semantics.storage_class,
-            crate::type_tracking::BindingStorageClass::Deferred
+            crate::type_tracking::BindingStorageClass::Direct
         );
 
         let let_mut_semantics = BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(
@@ -4622,6 +4620,10 @@ mod tests {
             let_mut_semantics.ownership_class,
             crate::type_tracking::BindingOwnershipClass::OwnedMutable
         );
+        assert_eq!(
+            let_mut_semantics.storage_class,
+            crate::type_tracking::BindingStorageClass::Direct
+        );
 
         let var_semantics = BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(
             shape_ast::ast::VarKind::Var,
@@ -4630,6 +4632,67 @@ mod tests {
         assert_eq!(
             var_semantics.ownership_class,
             crate::type_tracking::BindingOwnershipClass::Flexible
+        );
+        assert_eq!(
+            var_semantics.storage_class,
+            crate::type_tracking::BindingStorageClass::Deferred
+        );
+    }
+
+    #[test]
+    fn test_destructured_module_bindings_get_binding_semantics() {
+        let mut compiler = BytecodeCompiler::new();
+        let pattern = shape_ast::ast::DestructurePattern::Array(vec![
+            shape_ast::ast::DestructurePattern::Identifier(
+                "left".to_string(),
+                shape_ast::ast::Span::DUMMY,
+            ),
+            shape_ast::ast::DestructurePattern::Identifier(
+                "right".to_string(),
+                shape_ast::ast::Span::DUMMY,
+            ),
+        ]);
+        compiler
+            .compile_destructure_pattern_global(&pattern)
+            .expect("destructure should compile");
+        compiler.apply_binding_semantics_to_pattern_bindings(
+            &pattern,
+            false,
+            BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(
+                shape_ast::ast::VarKind::Let,
+                false,
+            )),
+        );
+
+        let left_idx = *compiler
+            .module_bindings
+            .get("left")
+            .expect("left binding should exist");
+        let right_idx = *compiler
+            .module_bindings
+            .get("right")
+            .expect("right binding should exist");
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_binding_semantics(left_idx)
+                .map(|semantics| semantics.ownership_class),
+            Some(crate::type_tracking::BindingOwnershipClass::OwnedImmutable)
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_binding_semantics(left_idx)
+                .map(|semantics| semantics.storage_class),
+            Some(crate::type_tracking::BindingStorageClass::Direct)
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_binding_semantics(right_idx)
+                .map(|semantics| semantics.ownership_class),
+            Some(crate::type_tracking::BindingOwnershipClass::OwnedImmutable)
         );
     }
 }

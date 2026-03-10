@@ -1,6 +1,7 @@
 //! Closure (function expression) compilation
 
 use crate::bytecode::{Function, Instruction, OpCode, Operand};
+use crate::type_tracking::BindingStorageClass;
 use shape_ast::ast::{Expr, FunctionDef, Span};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
@@ -146,6 +147,7 @@ impl BytecodeCompiler {
                 // Track that this variable has been boxed so subsequent closures
                 // in the same scope also use the SharedCell path.
                 self.boxed_locals.insert(captured.clone());
+                self.set_binding_storage_class_for_name(captured, BindingStorageClass::SharedCow);
                 if let Some(local_idx) = self.resolve_local(captured) {
                     self.emit(Instruction::new(
                         OpCode::BoxLocal,
@@ -182,5 +184,57 @@ impl BytecodeCompiler {
         // Closures don't produce TypedObjects
         self.last_expr_schema = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::compiler::BytecodeCompiler;
+    use crate::type_tracking::BindingStorageClass;
+    use shape_ast::ast::{Expr, Item, Span, Statement, VarKind, VariableDecl};
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn test_mutable_closure_capture_marks_binding_as_shared_storage() {
+        let program =
+            parse_program("let inc = || { counter = counter + 1; counter }").expect("parse failed");
+        let var_decl = match &program.items[0] {
+            Item::VariableDecl(var_decl, _) => var_decl,
+            Item::Statement(Statement::VariableDecl(var_decl, _), _) => var_decl,
+            _ => panic!("expected variable declaration"),
+        };
+        let Some(Expr::FunctionExpr { params, body, .. }) = var_decl.value.as_ref() else {
+            panic!("expected closure initializer");
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        let counter_idx = compiler.get_or_create_module_binding("counter");
+        compiler.apply_binding_semantics_for_decl(
+            counter_idx,
+            false,
+            &VariableDecl {
+                kind: VarKind::Let,
+                is_mut: false,
+                pattern: shape_ast::ast::DestructurePattern::Identifier(
+                    "counter".to_string(),
+                    Span::DUMMY,
+                ),
+                type_annotation: None,
+                value: None,
+                ownership: Default::default(),
+            },
+        );
+
+        compiler
+            .compile_expr_closure(params, body)
+            .expect("closure should compile");
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_binding_semantics(counter_idx)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::SharedCow)
+        );
     }
 }
