@@ -1210,6 +1210,124 @@ fn lower_join_expr(builder: &mut MirBuilder, join_expr: &ast::JoinExpr, temp: Sl
     );
 }
 
+fn lower_list_comprehension_expr(
+    builder: &mut MirBuilder,
+    comp: &ast::ListComprehension,
+    temp: SlotId,
+    span: Span,
+) {
+    builder.push_scope();
+    for clause in &comp.clauses {
+        let _ = lower_expr_to_temp(builder, &clause.iterable);
+        let element_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+        assign_none(builder, element_slot, clause.iterable.span());
+        lower_destructure_bindings_from_place(
+            builder,
+            &clause.pattern,
+            &Place::Local(element_slot),
+            clause.iterable.span(),
+        );
+        if let Some(filter) = &clause.filter {
+            let _ = lower_expr_to_temp(builder, filter);
+        }
+    }
+    let element_slot = lower_expr_to_temp(builder, &comp.element);
+    assign_copy_from_slot(builder, temp, element_slot, span);
+    builder.pop_scope();
+}
+
+fn lower_from_query_expr(
+    builder: &mut MirBuilder,
+    from_query: &ast::FromQueryExpr,
+    temp: SlotId,
+    span: Span,
+) {
+    builder.push_scope();
+    let _ = lower_expr_to_temp(builder, &from_query.source);
+    let source_slot = builder.alloc_local(from_query.variable.clone(), LocalTypeInfo::Unknown);
+    assign_none(builder, source_slot, from_query.source.span());
+
+    for clause in &from_query.clauses {
+        match clause {
+            ast::QueryClause::Where(expr) => {
+                let _ = lower_expr_to_temp(builder, expr);
+            }
+            ast::QueryClause::OrderBy(specs) => {
+                for spec in specs {
+                    let _ = lower_expr_to_temp(builder, &spec.key);
+                }
+            }
+            ast::QueryClause::GroupBy {
+                element,
+                key,
+                into_var,
+            } => {
+                let _ = lower_expr_to_temp(builder, element);
+                let _ = lower_expr_to_temp(builder, key);
+                if let Some(into_var) = into_var {
+                    let group_slot = builder.alloc_local(into_var.clone(), LocalTypeInfo::Unknown);
+                    assign_none(builder, group_slot, key.span());
+                }
+            }
+            ast::QueryClause::Join {
+                variable,
+                source,
+                left_key,
+                right_key,
+                into_var,
+            } => {
+                let _ = lower_expr_to_temp(builder, source);
+                let join_slot = builder.alloc_local(variable.clone(), LocalTypeInfo::Unknown);
+                assign_none(builder, join_slot, source.span());
+                let _ = lower_expr_to_temp(builder, left_key);
+                let _ = lower_expr_to_temp(builder, right_key);
+                if let Some(into_var) = into_var {
+                    let into_slot = builder.alloc_local(into_var.clone(), LocalTypeInfo::Unknown);
+                    assign_none(builder, into_slot, right_key.span());
+                }
+            }
+            ast::QueryClause::Let { variable, value } => {
+                let value_slot = lower_expr_to_temp(builder, value);
+                let local_slot = builder.alloc_local(variable.clone(), LocalTypeInfo::Unknown);
+                assign_copy_from_slot(builder, local_slot, value_slot, value.span());
+            }
+        }
+    }
+
+    let select_slot = lower_expr_to_temp(builder, &from_query.select);
+    assign_copy_from_slot(builder, temp, select_slot, span);
+    builder.pop_scope();
+}
+
+fn lower_comptime_expr(
+    builder: &mut MirBuilder,
+    stmts: &[Statement],
+    temp: SlotId,
+    span: Span,
+) {
+    builder.push_scope();
+    let exit_block = builder.exit_block();
+    lower_statements(builder, stmts, exit_block);
+    assign_none(builder, temp, span);
+    builder.pop_scope();
+}
+
+fn lower_comptime_for_expr(
+    builder: &mut MirBuilder,
+    comptime_for: &ast::ComptimeForExpr,
+    temp: SlotId,
+    span: Span,
+) {
+    builder.push_scope();
+    let _ = lower_expr_to_temp(builder, &comptime_for.iterable);
+    let local_slot = builder.alloc_local(comptime_for.variable.clone(), LocalTypeInfo::Unknown);
+    assign_none(builder, local_slot, comptime_for.iterable.span());
+    let exit_block = builder.exit_block();
+    lower_statements(builder, &comptime_for.body, exit_block);
+    assign_none(builder, temp, span);
+    builder.pop_scope();
+}
+
 fn operand_crosses_task_boundary(outer_locals_cutoff: u16, operand: &Operand) -> bool {
     match operand {
         Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
@@ -1512,6 +1630,9 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         Expr::Array(elements, _) => {
             lower_array_expr(builder, elements, temp, span);
         }
+        Expr::ListComprehension(comp, _) => {
+            lower_list_comprehension_expr(builder, comp, temp, span);
+        }
         Expr::TypeAssertion {
             expr,
             meta_param_overrides,
@@ -1638,9 +1759,16 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         Expr::AsyncScope(inner, _) => {
             lower_async_scope_expr(builder, inner, temp, span);
         }
+        Expr::FromQuery(from_query, _) => {
+            lower_from_query_expr(builder, from_query, temp, span);
+        }
+        Expr::Comptime(stmts, _) => {
+            lower_comptime_expr(builder, stmts, temp, span);
+        }
+        Expr::ComptimeFor(comptime_for, _) => {
+            lower_comptime_for_expr(builder, comptime_for, temp, span);
+        }
         _ => {
-            // Remaining fallbacks are the intentionally deferred step-4 forms:
-            // queries/comprehensions and comptime-evaluated expression families.
             builder.mark_fallback();
             assign_none(builder, temp, span);
         }
@@ -4407,6 +4535,94 @@ mod tests {
             analysis.errors.is_empty(),
             "owned-value closure capture should stay borrow-clean, got {:?}",
             analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_list_comprehension_write_conflict_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let mut x = 1
+                    let r = &x
+                    let xs = [(x = 2) for y in [1]]
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "list comprehensions should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected list-comprehension write conflict, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_from_query_write_conflict_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let mut x = 1
+                    let r = &x
+                    let rows = from y in [1] where (x = 2) > 0 select y
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "from-query expressions should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected from-query write conflict, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_comptime_expr_stays_supported() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let generated = comptime {
+                        let x = 1
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "comptime expressions should stay in the supported MIR subset"
+        );
+    }
+
+    #[test]
+    fn test_lowered_comptime_for_expr_stays_supported() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let generated = comptime for f in [1, 2] {
+                        let y = f
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "comptime-for expressions should stay in the supported MIR subset"
         );
     }
 }

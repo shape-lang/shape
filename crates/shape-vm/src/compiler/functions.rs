@@ -6399,4 +6399,92 @@ mod tests {
             analysis.errors
         );
     }
+
+    #[test]
+    fn test_compile_function_records_mir_list_comprehension_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function list_comp_conflict() {
+                    let mut x = 1
+                    let shared = &x
+                    let xs = [(x = 2) for y in [1]]
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler.compile_function(func).expect_err(
+            "MIR list-comprehension write conflict should surface as a compile error",
+        );
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("list_comp_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR list-comprehension write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_from_query_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function from_query_conflict() {
+                    let mut x = 1
+                    let shared = &x
+                    let rows = from y in [1] where (x = 2) > 0 select y
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR from-query write conflict should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("from_query_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR from-query write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
 }
