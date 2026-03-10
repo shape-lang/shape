@@ -39,6 +39,8 @@ pub struct BorrowFacts {
     pub loan_info: HashMap<u32, LoanInfo>,
     /// Points where two loans conflict (same place, incompatible borrows).
     pub potential_conflicts: Vec<(u32, u32)>, // (loan_a, loan_b)
+    /// Writes that may conflict with active loans: (point, place, span).
+    pub writes: Vec<(u32, Place, shape_ast::ast::Span)>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
@@ -87,6 +89,7 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                     );
                 }
                 StatementKind::Assign(place, _) => {
+                    facts.writes.push((stmt.point.0, place.clone(), stmt.span));
                     // Assignment to a place invalidates all loans on that place
                     for (lid, info) in &facts.loan_info {
                         if place.conflicts_with(&info.borrowed_place) {
@@ -156,17 +159,18 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
     // loan_live_at(point2, loan) :-
     //   loan_live_at(point1, loan),
     //   cfg_edge(point1, point2),
-    //   !invalidates(point2, loan).
+    //   !invalidates(point1, loan).
     while iteration.changed() {
         // For each (point1, loan) in loan_live_at,
         // join with cfg_edge on point1 to get point2,
-        // filter out if invalidates(point2, loan).
+        // filter out if invalidates(point1, loan).
         loan_live_at.from_leapjoin(
             &loan_live_at,
             cfg_edge.extend_with(|&(point1, _loan)| point1),
-            |&(_point1, loan), &point2| {
-                if invalidates_set.contains(&(point2, loan)) {
-                    // Loan is invalidated at point2 — don't propagate
+            |&(point1, loan), &point2| {
+                if invalidates_set.contains(&(point1, loan)) {
+                    // Loan is invalidated at point1 — keep it live at point1,
+                    // but don't propagate it to successors.
                     (u32::MAX, u32::MAX) // sentinel that won't match anything useful
                 } else {
                     (point2, loan)
@@ -232,6 +236,33 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
                     repairs: Vec::new(),
                 });
             }
+        }
+    }
+
+    let mut seen_writes = std::collections::HashSet::new();
+    for (point, place, span) in &facts.writes {
+        let point_key = Point(*point);
+        let Some(loans) = loans_at_point.get(&point_key) else {
+            continue;
+        };
+        for loan in loans {
+            let info = &facts.loan_info[&loan.0];
+            if !place.conflicts_with(&info.borrowed_place) {
+                continue;
+            }
+            let key = (*point, loan.0);
+            if !seen_writes.insert(key) {
+                continue;
+            }
+            errors.push(BorrowError {
+                kind: BorrowErrorKind::WriteWhileBorrowed,
+                span: *span,
+                conflicting_loan: *loan,
+                loan_span: info.span,
+                last_use_span: None,
+                repairs: Vec::new(),
+            });
+            break;
         }
     }
 

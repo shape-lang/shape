@@ -841,4 +841,53 @@ mod tests {
             analysis.errors
         );
     }
+
+    #[test]
+    fn test_lowered_write_while_borrowed_is_visible_to_solver() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test", &[], &body, span());
+        let analysis = solver::analyze(&mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
 }

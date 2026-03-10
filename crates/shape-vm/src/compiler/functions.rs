@@ -4523,4 +4523,48 @@ mod tests {
             analysis.errors
         );
     }
+
+    #[test]
+    fn test_compile_function_records_mir_write_while_borrowed() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function reassign() {
+                    let mut x = 1
+                    let shared = &x
+                    x = 2
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR write-while-borrowed should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("reassign")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
 }
