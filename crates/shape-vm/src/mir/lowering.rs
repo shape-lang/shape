@@ -1072,6 +1072,13 @@ fn emit_closure_capture_if_needed(builder: &mut MirBuilder, operands: Vec<Operan
     builder.push_stmt(StatementKind::ClosureCapture(operands), span);
 }
 
+fn emit_array_store_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+    if operands.is_empty() {
+        return;
+    }
+    builder.push_stmt(StatementKind::ArrayStore(operands), span);
+}
+
 fn collect_function_expr_capture_operands(
     builder: &MirBuilder,
     params: &[ast::FunctionParameter],
@@ -1120,6 +1127,18 @@ fn lower_function_expr(
     let captures = collect_function_expr_capture_operands(builder, params, body);
     emit_closure_capture_if_needed(builder, captures, span);
     assign_none(builder, temp, span);
+}
+
+fn lower_array_expr(builder: &mut MirBuilder, elements: &[Expr], temp: SlotId, span: Span) {
+    let operands: Vec<_> = elements
+        .iter()
+        .map(|expr| lower_expr_as_moved_operand(builder, expr))
+        .collect();
+    builder.push_stmt(
+        StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
+        span,
+    );
+    emit_array_store_if_needed(builder, operands, span);
 }
 
 fn lower_await_expr(builder: &mut MirBuilder, inner: &Expr, temp: SlotId, span: Span) {
@@ -1460,7 +1479,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
             );
         }
         Expr::Array(elements, _) => {
-            lower_exprs_to_aggregate(builder, temp, elements.iter(), span);
+            lower_array_expr(builder, elements, temp, span);
         }
         Expr::TypeAssertion {
             expr,
@@ -2629,6 +2648,59 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
             "expected reference-escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_array_direct_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let arr = [&x]
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "array literals with ref elements should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected array-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_array_indirect_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let r = &x
+                    let arr = [r]
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "indirect array ref storage should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected indirect array-stored-reference error, got {:?}",
             analysis.errors
         );
     }

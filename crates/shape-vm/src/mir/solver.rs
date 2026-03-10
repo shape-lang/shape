@@ -51,6 +51,8 @@ pub struct BorrowFacts {
     pub task_boundary_loans: Vec<(u32, shape_ast::ast::Span)>,
     /// Loans captured into a closure environment.
     pub closure_capture_loans: Vec<(u32, shape_ast::ast::Span)>,
+    /// Loans stored into array literals.
+    pub array_store_loans: Vec<(u32, shape_ast::ast::Span)>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
@@ -144,6 +146,11 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                         facts.closure_capture_loans.push((loan_id, stmt.span));
                     }
                 }
+                StatementKind::ArrayStore(operands) => {
+                    for loan_id in local_loans_from_operands(&slot_loans, operands) {
+                        facts.array_store_loans.push((loan_id, stmt.span));
+                    }
+                }
                 StatementKind::Nop => {}
             }
 
@@ -232,6 +239,11 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
             }
         }
         StatementKind::ClosureCapture(operands) => {
+            for operand in operands {
+                operand_read_places(operand, &mut reads);
+            }
+        }
+        StatementKind::ArrayStore(operands) => {
             for operand in operands {
                 operand_read_places(operand, &mut reads);
             }
@@ -474,6 +486,22 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         let info = &facts.loan_info[loan_id];
         errors.push(BorrowError {
             kind: BorrowErrorKind::ReferenceEscape,
+            span: *span,
+            conflicting_loan: LoanId(*loan_id),
+            loan_span: info.span,
+            last_use_span: last_use_span_for_loan(facts, *loan_id),
+            repairs: Vec::new(),
+        });
+    }
+
+    let mut seen_array_store = std::collections::HashSet::new();
+    for (loan_id, span) in &facts.array_store_loans {
+        if !seen_array_store.insert((*loan_id, span.start, span.end)) {
+            continue;
+        }
+        let info = &facts.loan_info[loan_id];
+        errors.push(BorrowError {
+            kind: BorrowErrorKind::ReferenceStoredInArray,
             span: *span,
             conflicting_loan: LoanId(*loan_id),
             loan_span: info.span,
@@ -772,7 +800,9 @@ fn statement_borrow_place(kind: &StatementKind) -> Option<&Place> {
 fn statement_dest_place(kind: &StatementKind) -> Option<&Place> {
     match kind {
         StatementKind::Assign(place, _) | StatementKind::Drop(place) => Some(place),
-        StatementKind::TaskBoundary(_) | StatementKind::ClosureCapture(_) => None,
+        StatementKind::TaskBoundary(_)
+        | StatementKind::ClosureCapture(_)
+        | StatementKind::ArrayStore(_) => None,
         StatementKind::Nop => None,
     }
 }

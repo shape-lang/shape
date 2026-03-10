@@ -74,6 +74,8 @@ pub enum BorrowErrorKind {
     WriteWhileBorrowed,
     /// Reference escapes its scope.
     ReferenceEscape,
+    /// Reference stored into an array.
+    ReferenceStoredInArray,
     /// Reference escapes into a closure environment.
     ReferenceEscapeIntoClosure,
     /// Use after move.

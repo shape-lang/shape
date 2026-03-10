@@ -92,6 +92,13 @@ pub fn generate_repairs(
                 diff: None,
             });
         }
+        BorrowErrorKind::ReferenceStoredInArray => {
+            candidates.push(RepairCandidate {
+                kind: RepairKind::Clone,
+                description: "store an owned value in the array instead of a reference".to_string(),
+                diff: None,
+            });
+        }
         _ => {
             // Fallback: suggest extract
             candidates.push(RepairCandidate {

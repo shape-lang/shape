@@ -156,6 +156,10 @@ impl BytecodeCompiler {
                 "cannot return or store a reference that outlives its owner",
                 "return an owned value instead of a reference",
             ),
+            crate::mir::analysis::BorrowErrorKind::ReferenceStoredInArray => (
+                "cannot store a reference in an array — references are scoped borrows that cannot escape into collections. Use owned values instead",
+                "store owned values in the array instead of references",
+            ),
             crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure => (
                 "[B0003] reference cannot escape into a closure",
                 "capture an owned value instead of a reference",
@@ -180,6 +184,7 @@ impl BytecodeCompiler {
                 "conflicting borrow originates here"
             }
             crate::mir::analysis::BorrowErrorKind::ReferenceEscape
+            | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInArray
             | crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure => {
                 "reference originates here"
             }
@@ -4903,6 +4908,93 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure),
             "expected MIR closure escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_array_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function array_escape() {
+                    let x = 1
+                    let arr = [&x]
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("array reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an array"),
+            "expected array-storage error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("array_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected MIR array-storage error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_indirect_array_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function indirect_array_escape() {
+                    let x = 1
+                    let r = &x
+                    let arr = [r]
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("indirect array reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an array"),
+            "expected array-storage error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("indirect_array_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected MIR indirect array-storage error, got {:?}",
             analysis.errors
         );
     }

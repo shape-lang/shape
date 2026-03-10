@@ -276,6 +276,9 @@ pub enum StatementKind {
     /// Capture values into a closure environment.
     /// Operands are the outer values flowing into the closure.
     ClosureCapture(Vec<Operand>),
+    /// Store values into an array literal.
+    /// Operands are the array elements being stored.
+    ArrayStore(Vec<Operand>),
     /// No-op (placeholder, padding).
     Nop,
 }
