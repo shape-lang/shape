@@ -43,9 +43,12 @@ impl BytecodeCompiler {
 
         // Shape references are call-scoped; we do not allow closure capture of
         // reference-typed locals because that would permit escaping borrows.
+        // Exception: inferred-ref locals (params passed by reference for performance)
+        // are owned values and CAN be captured — the value is dereferenced at capture time.
         for captured in &captured_vars {
             if let Some(local_idx) = self.resolve_local(captured)
                 && self.ref_locals.contains(&local_idx)
+                && !self.inferred_ref_locals.contains(&local_idx)
             {
                 return Err(ShapeError::SemanticError {
                     message: format!(

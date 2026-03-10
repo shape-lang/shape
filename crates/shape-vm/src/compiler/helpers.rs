@@ -1069,6 +1069,24 @@ impl BytecodeCompiler {
                 OpCode::StoreModuleBinding,
                 Some(Operand::ModuleBinding(binding_idx)),
             ));
+            // Patch StoreModuleBinding → StoreModuleBindingTyped for width-typed bindings
+            if let Some(type_name) = self
+                .type_tracker
+                .get_binding_type(binding_idx)
+                .and_then(|info| info.type_name.as_deref())
+            {
+                if let Some(w) = shape_ast::IntWidth::from_name(type_name) {
+                    if let Some(last) = self.program.instructions.last_mut() {
+                        if last.opcode == OpCode::StoreModuleBinding {
+                            last.opcode = OpCode::StoreModuleBindingTyped;
+                            last.operand = Some(Operand::TypedModuleBinding(
+                                binding_idx,
+                                crate::bytecode::NumericWidth::from_int_width(w),
+                            ));
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1225,6 +1243,18 @@ impl BytecodeCompiler {
             "__intrinsic_cumprod" => Some(BuiltinFunction::IntrinsicCumprod),
             "__intrinsic_clip" => Some(BuiltinFunction::IntrinsicClip),
 
+            // Trigonometric intrinsics (map __intrinsic_ forms to existing builtins)
+            "__intrinsic_sin" => Some(BuiltinFunction::Sin),
+            "__intrinsic_cos" => Some(BuiltinFunction::Cos),
+            "__intrinsic_tan" => Some(BuiltinFunction::Tan),
+            "__intrinsic_asin" => Some(BuiltinFunction::Asin),
+            "__intrinsic_acos" => Some(BuiltinFunction::Acos),
+            "__intrinsic_atan" => Some(BuiltinFunction::Atan),
+            "__intrinsic_atan2" => Some(BuiltinFunction::IntrinsicAtan2),
+            "__intrinsic_sinh" => Some(BuiltinFunction::IntrinsicSinh),
+            "__intrinsic_cosh" => Some(BuiltinFunction::IntrinsicCosh),
+            "__intrinsic_tanh" => Some(BuiltinFunction::IntrinsicTanh),
+
             // Statistical intrinsics
             "__intrinsic_correlation" => Some(BuiltinFunction::IntrinsicCorrelation),
             "__intrinsic_covariance" => Some(BuiltinFunction::IntrinsicCovariance),
@@ -1374,6 +1404,10 @@ impl BytecodeCompiler {
                 | BuiltinFunction::IntrinsicCovariance
                 | BuiltinFunction::IntrinsicPercentile
                 | BuiltinFunction::IntrinsicMedian
+                | BuiltinFunction::IntrinsicAtan2
+                | BuiltinFunction::IntrinsicSinh
+                | BuiltinFunction::IntrinsicCosh
+                | BuiltinFunction::IntrinsicTanh
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
                 | BuiltinFunction::IntrinsicSeries

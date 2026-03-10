@@ -2845,3 +2845,57 @@ fn test_emit_store_identifier_truncates_width_typed() {
         "3000000000 truncated to i32 should be -1294967296"
     );
 }
+
+#[test]
+fn test_i8_overflow_wraps_end_to_end() {
+    // 127i8 + 1i8 should wrap to -128
+    let result = compile_and_run_fn(
+        r#"
+        function test() -> int {
+            return 127i8 + 1i8
+        }
+        "#,
+        "test",
+    );
+    assert_eq!(
+        result.as_i64(),
+        Some(-128),
+        "127i8 + 1i8 should wrap to -128"
+    );
+}
+
+#[test]
+fn test_u8_overflow_wraps_end_to_end() {
+    // 255u8 + 1u8 should wrap to 0
+    let result = compile_and_run_fn(
+        r#"
+        function test() -> int {
+            return 255u8 + 1u8
+        }
+        "#,
+        "test",
+    );
+    assert_eq!(
+        result.as_i64(),
+        Some(0),
+        "255u8 + 1u8 should wrap to 0"
+    );
+}
+
+#[test]
+fn test_i8_cmp_returns_bool_end_to_end() {
+    // 10i8 < 20i8 should return true (1), not -1
+    let result = compile_and_run_fn(
+        r#"
+        function test() -> bool {
+            return 10i8 < 20i8
+        }
+        "#,
+        "test",
+    );
+    assert_eq!(
+        result.as_bool(),
+        Some(true),
+        "10i8 < 20i8 should return true"
+    );
+}

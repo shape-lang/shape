@@ -172,7 +172,8 @@ fn remap_operand(
         | Operand::ForeignFunction(_)
         | Operand::MatrixDims { .. }
         | Operand::Width(_)
-        | Operand::TypedLocal(_, _) => operand,
+        | Operand::TypedLocal(_, _)
+        | Operand::TypedModuleBinding(_, _) => operand,
     }
 }
 

@@ -100,17 +100,25 @@ pub fn intrinsic_percentile(args: &[ValueWord], _ctx: &mut ExecutionContext) -> 
 }
 
 /// Intrinsic: Median (50th percentile)
-pub fn intrinsic_median(args: &[ValueWord], ctx: &mut ExecutionContext) -> Result<ValueWord> {
+pub fn intrinsic_median(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
     if args.is_empty() {
         return Err(ShapeError::RuntimeError {
             message: "__intrinsic_median requires 1 argument (series)".to_string(),
             location: None,
         });
     }
-    // Build args slice with the percentile appended
-    let p50 = ValueWord::from_f64(50.0);
-    let combined = [args[0].clone(), p50];
-    intrinsic_percentile(&combined, ctx)
+    let mut data = extract_f64_array(&args[0], "Argument")?;
+    if data.is_empty() {
+        return Ok(ValueWord::from_f64(f64::NAN));
+    }
+    data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = data.len();
+    let result = if n % 2 == 0 {
+        (data[n / 2 - 1] + data[n / 2]) / 2.0
+    } else {
+        data[n / 2]
+    };
+    Ok(ValueWord::from_f64(result))
 }
 
 /// Quickselect algorithm for O(n) average case percentile calculation

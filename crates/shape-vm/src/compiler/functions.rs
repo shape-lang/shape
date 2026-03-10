@@ -2768,6 +2768,7 @@ impl BytecodeCompiler {
         let saved_is_async = self.current_function_is_async;
         let saved_ref_locals = std::mem::take(&mut self.ref_locals);
         let saved_exclusive_ref_locals = std::mem::take(&mut self.exclusive_ref_locals);
+        let saved_inferred_ref_locals = std::mem::take(&mut self.inferred_ref_locals);
         let saved_comptime_mode = self.comptime_mode;
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
         let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
@@ -2789,6 +2790,7 @@ impl BytecodeCompiler {
         self.borrow_checker.reset(); // Reset borrow checker for new function scope
         self.ref_locals.clear();
         self.exclusive_ref_locals.clear();
+        self.inferred_ref_locals.clear();
         self.immutable_locals.clear();
         self.param_locals.clear();
         self.push_scope();
@@ -2875,11 +2877,25 @@ impl BytecodeCompiler {
 
         // Mark reference parameters in ref_locals so identifier/assignment compilation
         // emits DerefLoad/DerefStore/SetIndexRef instead of LoadLocal/StoreLocal/SetLocalIndex.
+        // Also track which ref_locals were INFERRED (not explicitly declared) so that
+        // closure capture can distinguish true borrows from pass-by-ref optimizations.
+        let inferred_modes = self.inferred_param_pass_modes.get(&func_def.name).cloned();
         for (idx, param) in func_def.params.iter().enumerate() {
             if param.is_reference {
                 self.ref_locals.insert(idx as u16);
                 if param.is_mut_reference {
                     self.exclusive_ref_locals.insert(idx as u16);
+                }
+                // A param is "inferred ref" if it has no type annotation and no explicit
+                // mut reference — the compiler's pass-mode inference set is_reference.
+                let was_inferred = param.type_annotation.is_none()
+                    && !param.is_mut_reference
+                    && inferred_modes
+                        .as_ref()
+                        .and_then(|modes| modes.get(idx))
+                        .map_or(false, |mode| mode.is_reference());
+                if was_inferred {
+                    self.inferred_ref_locals.insert(idx as u16);
                 }
             }
         }
@@ -2961,6 +2977,7 @@ impl BytecodeCompiler {
                         self.next_local = saved_next_local;
                         self.ref_locals = saved_ref_locals;
                         self.exclusive_ref_locals = saved_exclusive_ref_locals.clone();
+                        self.inferred_ref_locals = saved_inferred_ref_locals.clone();
                         self.comptime_mode = saved_comptime_mode;
                         // Patch the jump-over instruction if we emitted one
                         if let Some(jump_addr) = jump_over {
@@ -3013,6 +3030,7 @@ impl BytecodeCompiler {
         self.next_local = saved_next_local;
         self.ref_locals = saved_ref_locals;
         self.exclusive_ref_locals = saved_exclusive_ref_locals;
+        self.inferred_ref_locals = saved_inferred_ref_locals;
         self.comptime_mode = saved_comptime_mode;
 
         // Patch the jump-over instruction if we emitted one

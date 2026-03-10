@@ -90,6 +90,11 @@ impl VirtualMachine {
             BuiltinFunction::IntrinsicCovariance => intrinsics::vm_intrinsic_covariance(&nb_args),
             BuiltinFunction::IntrinsicPercentile => intrinsics::vm_intrinsic_percentile(&nb_args),
             BuiltinFunction::IntrinsicMedian => intrinsics::vm_intrinsic_median(&nb_args),
+            // Trigonometric intrinsics
+            BuiltinFunction::IntrinsicAtan2 => intrinsics::vm_intrinsic_atan2(&nb_args),
+            BuiltinFunction::IntrinsicSinh => intrinsics::vm_intrinsic_sinh(&nb_args),
+            BuiltinFunction::IntrinsicCosh => intrinsics::vm_intrinsic_cosh(&nb_args),
+            BuiltinFunction::IntrinsicTanh => intrinsics::vm_intrinsic_tanh(&nb_args),
             // Character code intrinsics
             BuiltinFunction::IntrinsicCharCode => intrinsics::vm_intrinsic_char_code(&nb_args),
             BuiltinFunction::IntrinsicFromCharCode => {

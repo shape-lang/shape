@@ -1210,6 +1210,7 @@ impl Visitor for InterpolationExprTokenCollector<'_, '_> {
                     Literal::String(_)
                     | Literal::FormattedString { .. }
                     | Literal::ContentString { .. } => 9,
+                    Literal::Char(_) => 9,
                     Literal::Bool(_) | Literal::None | Literal::Unit => 8,
                     Literal::Timeframe(_) => 10,
                 };
@@ -1791,6 +1792,7 @@ impl<'a> Visitor for TokenCollector<'a> {
                             Literal::Number(_) => 10,  // number
                             Literal::Decimal(_) => 10, // number (decimal)
                             Literal::String(_) => 9,   // string
+                            Literal::Char(_) => 9, // string-like
                             Literal::Bool(_) | Literal::None | Literal::Unit => 8, // keyword
                             Literal::Timeframe(_) => 10, // number-like
                             Literal::FormattedString { .. } | Literal::ContentString { .. } => 9, // unreachable in self branch

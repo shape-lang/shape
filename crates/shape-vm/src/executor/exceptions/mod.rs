@@ -213,9 +213,10 @@ impl VirtualMachine {
                 "i64" | "i32" | "i16" | "isize" | "u32" | "u64" | "usize" | "integer" => {
                     as_int(value).is_some()
                 }
-                "i8" | "char" => {
+                "i8" => {
                     as_int(value).is_some_and(|v| (i8::MIN as i64..=i8::MAX as i64).contains(&v))
                 }
+                "char" => value.as_char().is_some(),
                 "u8" | "byte" => as_int(value).is_some_and(|v| (0..=u8::MAX as i64).contains(&v)),
                 "u16" => as_int(value).is_some_and(|v| (0..=u16::MAX as i64).contains(&v)),
                 "string" => value.as_str().is_some(),

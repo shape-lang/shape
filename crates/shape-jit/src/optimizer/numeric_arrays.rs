@@ -238,6 +238,7 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::StoreLocal
         | OpCode::StoreLocalTyped
         | OpCode::StoreModuleBinding
+        | OpCode::StoreModuleBindingTyped
         | OpCode::StoreClosure
         | OpCode::DerefStore
         | OpCode::DropCall

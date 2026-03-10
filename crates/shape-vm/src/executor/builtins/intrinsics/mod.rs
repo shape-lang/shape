@@ -86,8 +86,9 @@ pub(crate) fn nb_create_array_result(data: Vec<f64>) -> NbIntrinsicResult {
 // =============================================================================
 
 pub use self::math::{
-    vm_intrinsic_char_code, vm_intrinsic_from_char_code, vm_intrinsic_max, vm_intrinsic_mean,
-    vm_intrinsic_min, vm_intrinsic_std, vm_intrinsic_sum, vm_intrinsic_variance,
+    vm_intrinsic_atan2, vm_intrinsic_char_code, vm_intrinsic_cosh, vm_intrinsic_from_char_code,
+    vm_intrinsic_max, vm_intrinsic_mean, vm_intrinsic_min, vm_intrinsic_sinh, vm_intrinsic_std,
+    vm_intrinsic_sum, vm_intrinsic_tanh, vm_intrinsic_variance,
 };
 pub use self::signal::{
     vm_intrinsic_clip, vm_intrinsic_cumprod, vm_intrinsic_cumsum, vm_intrinsic_diff,

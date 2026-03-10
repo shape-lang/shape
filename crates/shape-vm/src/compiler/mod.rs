@@ -529,6 +529,10 @@ pub struct BytecodeCompiler {
     /// Subset of ref_locals that hold exclusive (`&mut`) borrows.
     /// Used to enforce the three concurrency rules at task boundaries.
     pub(crate) exclusive_ref_locals: HashSet<u16>,
+    /// Subset of ref_locals that were INFERRED as by-reference (not explicitly declared `&`).
+    /// Inferred-ref params are owned values passed by reference for performance;
+    /// closures may capture them (the value is dereferenced at capture time).
+    pub(crate) inferred_ref_locals: HashSet<u16>,
     /// Local variable indices declared as `const` (immutable binding).
     pub(crate) const_locals: HashSet<u16>,
     /// Module binding indices declared as `const` (immutable binding).

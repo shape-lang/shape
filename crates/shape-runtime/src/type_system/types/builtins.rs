@@ -21,6 +21,10 @@ impl BuiltinTypes {
         Type::Concrete(TypeAnnotation::Basic("string".to_string()))
     }
 
+    pub fn char() -> Type {
+        Type::Concrete(TypeAnnotation::Basic("char".to_string()))
+    }
+
     pub fn boolean() -> Type {
         Type::Concrete(TypeAnnotation::Basic("bool".to_string()))
     }

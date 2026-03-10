@@ -516,6 +516,11 @@ define_opcodes! {
     /// Operand: Width(NumericWidth) — target width
     /// Pops one value, truncates, pushes result.
     CastWidth = 0xF7, Arithmetic, pops: 1, pushes: 1;
+
+    /// Store a module binding with width truncation.
+    /// Operand: TypedModuleBinding(u16, NumericWidth) — binding index + width
+    /// Pops one value, truncates to declared width, stores to module binding.
+    StoreModuleBindingTyped = 0xF8, Variable, pops: 1, pushes: 0;
 }
 
 impl OpCode {
@@ -803,6 +808,8 @@ pub enum Operand {
     Width(NumericWidth),
     /// Local index + width for StoreLocalTyped
     TypedLocal(u16, NumericWidth),
+    /// Module binding index + width for StoreModuleBindingTyped
+    TypedModuleBinding(u16, NumericWidth),
 }
 
 /// Built-in functions
@@ -955,6 +962,12 @@ pub enum BuiltinFunction {
     IntrinsicCovariance,
     IntrinsicPercentile,
     IntrinsicMedian,
+
+    // Trigonometric intrinsics (4 functions)
+    IntrinsicAtan2,
+    IntrinsicSinh,
+    IntrinsicCosh,
+    IntrinsicTanh,
 
     // Character code intrinsics
     IntrinsicCharCode,
@@ -1233,6 +1246,11 @@ impl BuiltinFunction {
             BuiltinFunction::IntrinsicCovariance,
             BuiltinFunction::IntrinsicPercentile,
             BuiltinFunction::IntrinsicMedian,
+            // Trigonometric (4)
+            BuiltinFunction::IntrinsicAtan2,
+            BuiltinFunction::IntrinsicSinh,
+            BuiltinFunction::IntrinsicCosh,
+            BuiltinFunction::IntrinsicTanh,
             // Char codes (2)
             BuiltinFunction::IntrinsicCharCode,
             BuiltinFunction::IntrinsicFromCharCode,

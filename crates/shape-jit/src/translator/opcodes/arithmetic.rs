@@ -38,12 +38,25 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             }
             return Ok(());
         }
+        // Known non-numeric (String, Bool, etc.): dispatch to generic_add FFI
+        // which handles string concatenation, Time+Duration, etc.
+        if self.either_operand_non_numeric() {
+            if self.stack_len() >= 2 {
+                let b = self.stack_pop().unwrap();
+                let a = self.stack_pop().unwrap();
+                let inst = self.builder.ins().call(self.ffi.generic_add, &[a, b]);
+                let result = self.builder.inst_results(inst)[0];
+                self.stack_push(result);
+            }
+            return Ok(());
+        }
         // Feedback-guided speculation: if we have monomorphic type feedback
         // for this instruction, emit a guarded typed fast path.
         if self.has_feedback() && self.try_speculative_add(self.current_instr_idx) {
             return Ok(());
         }
-        self.nullable_float64_binary_op(|b, a_f64, b_f64| b.ins().fadd(a_f64, b_f64));
+        // Unknown types: runtime check — numeric fast path with generic_add fallback
+        self.generic_binary_op_with_fallback(|b, a_f64, b_f64| b.ins().fadd(a_f64, b_f64), true);
         Ok(())
     }
 
@@ -237,8 +250,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             OpCode::Swap => (2, 2),
             // Store (1→0)
             OpCode::StoreLocal | OpCode::StoreLocalTyped
-            | OpCode::StoreModuleBinding | OpCode::StoreClosure
-            | OpCode::Pop => (1, 0),
+            | OpCode::StoreModuleBinding | OpCode::StoreModuleBindingTyped
+            | OpCode::StoreClosure | OpCode::Pop => (1, 0),
             _ => return None,
         };
         Some(eff)
@@ -261,6 +274,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         // fdiv throughput: ~4 cycles; fmul throughput: ~0.5 cycles on modern x86-64.
         if let Some(recip) = self.div_const_reciprocal_from_stack() {
             if self.typed_stack.either_top_i64() {
+                // Check if both operands are integers BEFORE modifying the stack,
+                // so we know to truncate the result (int / int -> int).
+                let both_int = self.typed_stack.both_top_i64();
                 // Pop divisor (the constant) and replace with reciprocal
                 let _ = self.stack_pop();
                 let recip_f64 = self.builder.ins().f64const(recip);
@@ -268,7 +284,15 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 self.stack_push(recip_boxed);
                 self.typed_stack
                     .replace_top(crate::translator::storage::TypedValue::f64(recip_f64));
-                self.mixed_numeric_binary_op(|b, a, c| b.ins().fmul(a, c));
+                if both_int {
+                    // int / int -> int: multiply by reciprocal then truncate toward zero
+                    self.mixed_numeric_binary_op(|b, a, c| {
+                        let prod = b.ins().fmul(a, c);
+                        b.ins().trunc(prod)
+                    });
+                } else {
+                    self.mixed_numeric_binary_op(|b, a, c| b.ins().fmul(a, c));
+                }
                 return Ok(());
             }
             if self.typed_stack.either_top_f64() {
@@ -286,8 +310,17 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 return Ok(());
             }
         }
+        if self.typed_stack.both_top_i64() {
+            // Both operands are integers: int / int -> int (truncated toward zero),
+            // matching VM semantics (checked_div on i64 values).
+            self.mixed_numeric_binary_op(|b, a, c| {
+                let div = b.ins().fdiv(a, c);
+                b.ins().trunc(div)
+            });
+            return Ok(());
+        }
         if self.typed_stack.either_top_i64() {
-            // Generic Div always uses numeric (f64) semantics.
+            // Mixed int/float: promote to f64, result is float.
             self.mixed_numeric_binary_op(|b, a, c| b.ins().fdiv(a, c));
             return Ok(());
         }
@@ -507,7 +540,20 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             }
             return Ok(());
         }
-        self.typed_comparison(FloatCC::Equal);
+        // Known non-numeric (String, Bool): dispatch to generic_eq FFI
+        // which compares string contents, not pointer identity.
+        if self.either_operand_non_numeric() {
+            if self.stack_len() >= 2 {
+                let b = self.stack_pop().unwrap();
+                let a = self.stack_pop().unwrap();
+                let inst = self.builder.ins().call(self.ffi.generic_eq, &[a, b]);
+                let result = self.builder.inst_results(inst)[0];
+                self.stack_push(result);
+            }
+            return Ok(());
+        }
+        // Unknown types: runtime check — numeric fast path with generic_eq fallback
+        self.generic_comparison_with_fallback(FloatCC::Equal);
         Ok(())
     }
 
@@ -528,7 +574,19 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             }
             return Ok(());
         }
-        self.typed_comparison(FloatCC::NotEqual);
+        // Known non-numeric (String, Bool): dispatch to generic_neq FFI
+        if self.either_operand_non_numeric() {
+            if self.stack_len() >= 2 {
+                let b = self.stack_pop().unwrap();
+                let a = self.stack_pop().unwrap();
+                let inst = self.builder.ins().call(self.ffi.generic_neq, &[a, b]);
+                let result = self.builder.inst_results(inst)[0];
+                self.stack_push(result);
+            }
+            return Ok(());
+        }
+        // Unknown types: runtime check — numeric fast path with generic_neq fallback
+        self.generic_comparison_with_fallback(FloatCC::NotEqual);
         Ok(())
     }
 
@@ -804,8 +862,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 self.propagate_result_type(StorageHint::Int64);
             }
             OpCode::DivInt => {
-                self.nullable_float64_binary_op(|b, a, c| b.ins().fdiv(a, c));
-                self.propagate_result_type(StorageHint::Float64);
+                // int / int -> int (truncated toward zero), matching VM semantics.
+                self.nullable_float64_binary_op(|b, a, c| {
+                    let div = b.ins().fdiv(a, c);
+                    b.ins().trunc(div)
+                });
+                self.propagate_result_type(StorageHint::Int64);
             }
             OpCode::ModInt => {
                 self.nullable_float64_binary_op(|b, a, c| {

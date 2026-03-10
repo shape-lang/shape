@@ -400,6 +400,7 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
             }
             ExternalValue::Opaque("<lazy:uninitialized>".to_string())
         }
+        HeapValue::Char(c) => ExternalValue::String(c.to_string()),
     }
 }
 

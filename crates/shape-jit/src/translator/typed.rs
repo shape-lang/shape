@@ -176,11 +176,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 TypedValue::new(result, CraneliftRepr::F64, a.nullable || b.nullable)
             }
             (CraneliftRepr::I64, CraneliftRepr::I64) => {
-                // i64 division - promote to f64 for consistent semantics
-                let a_f64 = self.builder.ins().fcvt_from_sint(types::F64, a.value);
-                let b_f64 = self.builder.ins().fcvt_from_sint(types::F64, b.value);
-                let result = self.builder.ins().fdiv(a_f64, b_f64);
-                TypedValue::new(result, CraneliftRepr::F64, a.nullable || b.nullable)
+                // i64 division - truncated toward zero, matching VM semantics.
+                let result = self.builder.ins().sdiv(a.value, b.value);
+                TypedValue::new(result, CraneliftRepr::I64, a.nullable || b.nullable)
             }
             _ => {
                 let a_boxed = self.ensure_boxed(a);

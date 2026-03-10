@@ -1015,6 +1015,7 @@ fn heap_value_to_serializable(
                 cols: m.cols,
             }
         }
+        HeapValue::Char(c) => SerializableVMValue::String(c.to_string()),
         HeapValue::Iterator(_)
         | HeapValue::Generator(_)
         | HeapValue::Mutex(_)

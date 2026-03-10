@@ -42,6 +42,8 @@ pub enum Literal {
     /// Decimal type for exact arithmetic (finance, currency)
     Decimal(Decimal),
     String(String),
+    /// Unicode scalar value char literal (`'a'`, `'\n'`, `'\u{1F600}'`)
+    Char(char),
     /// Formatted string literal (`f"..."`, `f$"..."`, `f#"..."` + triple variants)
     FormattedString {
         value: String,
@@ -75,6 +77,7 @@ impl std::fmt::Display for Literal {
             }
             Literal::Decimal(d) => write!(f, "{}D", d),
             Literal::String(s) => write!(f, "\"{}\"", s),
+            Literal::Char(c) => write!(f, "'{}'", c.escape_default()),
             Literal::FormattedString { value, mode } => write!(f, "{}\"{}\"", mode.prefix(), value),
             Literal::ContentString { value, mode } => {
                 let prefix = match mode {
@@ -102,6 +105,7 @@ impl Literal {
             Literal::Number(n) => serde_json::json!(*n),
             Literal::Decimal(d) => serde_json::json!(d.to_string()),
             Literal::String(s) => serde_json::json!(s),
+            Literal::Char(c) => serde_json::json!(c.to_string()),
             Literal::FormattedString { value, .. } => serde_json::json!(value),
             Literal::ContentString { value, .. } => serde_json::json!(value),
             Literal::Bool(b) => serde_json::json!(*b),

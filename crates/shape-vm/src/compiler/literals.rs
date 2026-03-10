@@ -29,6 +29,7 @@ impl BytecodeCompiler {
             Literal::Number(n) => Some(Constant::Number(*n)),
             Literal::Decimal(d) => Some(Constant::Decimal(*d)),
             Literal::String(s) => Some(Constant::String(s.clone())),
+            Literal::Char(c) => Some(Constant::Char(*c)),
             Literal::FormattedString { .. } => unreachable!("handled above"),
             Literal::ContentString { .. } => unreachable!("handled above"),
             Literal::Bool(b) => Some(Constant::Bool(*b)),

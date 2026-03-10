@@ -118,6 +118,8 @@ pub struct FFIFuncRefs {
     pub(crate) generic_sub: FuncRef,
     pub(crate) generic_mul: FuncRef,
     pub(crate) generic_div: FuncRef,
+    pub(crate) generic_eq: FuncRef,
+    pub(crate) generic_neq: FuncRef,
     pub(crate) series_shift: FuncRef,
     pub(crate) series_fillna: FuncRef,
     pub(crate) series_rolling_mean: FuncRef,

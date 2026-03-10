@@ -627,6 +627,9 @@ impl VirtualMachine {
                     );
                     handler(self, args_nb, ctx)?;
                 }
+                HeapKind::Char => {
+                    self.handle_char_method(&method_name, args_nb)?;
+                }
                 _ => {
                     return Err(VMError::RuntimeError(format!(
                         "Method '{}' not available on type '{}'",
@@ -645,6 +648,53 @@ impl VirtualMachine {
         }
 
         Ok(())
+    }
+
+    /// Handle char methods (is_alphabetic, to_uppercase, etc.)
+    fn handle_char_method(
+        &mut self,
+        method: &str,
+        args: Vec<ValueWord>,
+    ) -> Result<(), VMError> {
+        let c = args[0].as_char().ok_or_else(|| VMError::TypeError {
+            expected: "char",
+            got: args[0].type_name(),
+        })?;
+        let result = match method {
+            "is_alphabetic" | "isAlphabetic" => ValueWord::from_bool(c.is_alphabetic()),
+            "is_numeric" | "isNumeric" => ValueWord::from_bool(c.is_numeric()),
+            "is_alphanumeric" | "isAlphanumeric" => ValueWord::from_bool(c.is_alphanumeric()),
+            "is_whitespace" | "isWhitespace" => ValueWord::from_bool(c.is_whitespace()),
+            "is_uppercase" | "isUppercase" => ValueWord::from_bool(c.is_uppercase()),
+            "is_lowercase" | "isLowercase" => ValueWord::from_bool(c.is_lowercase()),
+            "is_ascii" | "isAscii" => ValueWord::from_bool(c.is_ascii()),
+            "to_uppercase" | "toUppercase" => {
+                let upper: String = c.to_uppercase().collect();
+                if upper.len() == 1 {
+                    ValueWord::from_char(upper.chars().next().unwrap())
+                } else {
+                    ValueWord::from_string(std::sync::Arc::new(upper))
+                }
+            }
+            "to_lowercase" | "toLowercase" => {
+                let lower: String = c.to_lowercase().collect();
+                if lower.len() == 1 {
+                    ValueWord::from_char(lower.chars().next().unwrap())
+                } else {
+                    ValueWord::from_string(std::sync::Arc::new(lower))
+                }
+            }
+            "to_string" | "toString" => {
+                ValueWord::from_string(std::sync::Arc::new(c.to_string()))
+            }
+            _ => {
+                return Err(VMError::RuntimeError(format!(
+                    "Unknown method '{}' on char type",
+                    method
+                )));
+            }
+        };
+        self.push_vw(result)
     }
 
     /// Handle TypedObject methods via direct schema-based access.
@@ -1026,8 +1076,8 @@ impl VirtualMachine {
                     })? as usize;
                 let ch = string.chars().nth(index);
                 match ch {
-                    Some(c) => ValueWord::from_string(Arc::new(c.to_string())),
-                    None => ValueWord::from_string(Arc::new(String::new())),
+                    Some(c) => ValueWord::from_char(c),
+                    None => ValueWord::none(),
                 }
             }
             "reverse" => {
@@ -1096,6 +1146,20 @@ impl VirtualMachine {
                 use unicode_segmentation::UnicodeSegmentation;
                 let count = string.graphemes(true).count();
                 ValueWord::from_i64(count as i64)
+            }
+            "toInt" | "to_int" => {
+                let trimmed = string.trim();
+                let parsed: i64 = trimmed.parse().map_err(|_| VMError::RuntimeError(
+                    format!("Cannot convert '{}' to int", string),
+                ))?;
+                ValueWord::from_i64(parsed)
+            }
+            "toNumber" | "to_number" | "toFloat" | "to_float" => {
+                let trimmed = string.trim();
+                let parsed: f64 = trimmed.parse().map_err(|_| VMError::RuntimeError(
+                    format!("Cannot convert '{}' to number", string),
+                ))?;
+                ValueWord::from_f64(parsed)
             }
             "codePointAt" | "code_point_at" => {
                 let index = args

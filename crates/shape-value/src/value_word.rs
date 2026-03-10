@@ -600,6 +600,22 @@ impl ValueWord {
         Self::heap_box(HeapValue::String(s))
     }
 
+    /// Create a ValueWord from a char.
+    #[inline]
+    pub fn from_char(c: char) -> Self {
+        Self::heap_box(HeapValue::Char(c))
+    }
+
+    /// Extract a char if this is a HeapValue::Char.
+    #[inline]
+    pub fn as_char(&self) -> Option<char> {
+        if let Some(HeapValue::Char(c)) = self.as_heap_ref() {
+            Some(*c)
+        } else {
+            std::option::Option::None
+        }
+    }
+
     /// Create a ValueWord from a VMArray directly (no intermediate conversion).
     #[inline]
     pub fn from_array(a: crate::value::VMArray) -> Self {
@@ -2643,6 +2659,7 @@ impl std::fmt::Display for ValueWord {
             write!(f, "&slot_{}", get_payload(self.0))
         } else if let Some(hv) = self.as_heap_ref() {
             match hv {
+                HeapValue::Char(c) => write!(f, "{}", c),
                 HeapValue::String(s) => write!(f, "{}", s),
                 HeapValue::Array(arr) => {
                     write!(f, "[")?;

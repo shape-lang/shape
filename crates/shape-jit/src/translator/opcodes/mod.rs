@@ -133,7 +133,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             OpCode::LoadLocal | OpCode::LoadLocalTrusted => self.compile_load_local(instr),
             OpCode::StoreLocal | OpCode::StoreLocalTyped => self.compile_store_local(instr),
             OpCode::LoadModuleBinding => self.compile_load_global(instr),
-            OpCode::StoreModuleBinding => self.compile_store_global(instr),
+            OpCode::StoreModuleBinding | OpCode::StoreModuleBindingTyped => {
+                self.compile_store_global(instr)
+            }
             OpCode::LoadClosure => self.compile_load_closure(instr),
             OpCode::StoreClosure => self.compile_store_closure(instr),
             OpCode::MakeClosure => self.compile_make_closure(instr),

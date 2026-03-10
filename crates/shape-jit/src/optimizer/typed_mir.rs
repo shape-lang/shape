@@ -155,7 +155,8 @@ pub fn build_typed_mir(program: &BytecodeProgram) -> TypedMirFunction {
                 stack.push(result_type);
                 MirOp::LoadModuleBinding(*binding)
             }
-            (OpCode::StoreModuleBinding, Some(Operand::ModuleBinding(binding))) => {
+            (OpCode::StoreModuleBinding, Some(Operand::ModuleBinding(binding)))
+            | (OpCode::StoreModuleBindingTyped, Some(Operand::TypedModuleBinding(binding, _))) => {
                 let ty = stack.pop().unwrap_or(ScalarType::Unknown);
                 module_types.insert(*binding, ty);
                 if matches!(ty, ScalarType::I64 | ScalarType::F64) {

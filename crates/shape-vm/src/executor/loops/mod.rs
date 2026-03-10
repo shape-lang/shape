@@ -193,12 +193,10 @@ impl VirtualMachine {
                 if idx < 0 {
                     ValueWord::none()
                 } else {
-                    let ch = s
-                        .chars()
+                    s.chars()
                         .nth(idx as usize)
-                        .map(|c| c.to_string())
-                        .unwrap_or_default();
-                    ValueWord::from_string(Arc::new(ch))
+                        .map(ValueWord::from_char)
+                        .unwrap_or_else(ValueWord::none)
                 }
             }
             Some(HeapValue::Range {

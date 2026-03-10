@@ -276,8 +276,12 @@ documented_method_def = {
 }
 
 method_def = {
-    "async"? ~ ("method" | "fn") ~ ident ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type? ~ "{" ~ function_body ~ "}"
+    "async"? ~ ("method" | "fn") ~ method_name ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type? ~ "{" ~ function_body ~ "}"
 }
+
+// Method names allow `from` (keyword in import context) to be used as a method name
+// in impl/extend blocks, needed for `impl From<T> for U { fn from(v: T) -> U { ... } }`.
+method_name = @{ ident | "from" }
 
 when_clause = {
     "when" ~ expression
@@ -1009,7 +1013,7 @@ assignment_expr_no_range = { postfix_expr ~ (compound_assign_op | assign_op) ~ a
 null_coalesce_expr_no_range = { context_expr_no_range ~ ("??" ~ context_expr_no_range)* }
 context_expr_no_range = { or_expr_no_range ~ ("!!" ~ or_expr_no_range)* }
 
-or_expr_no_range = { and_expr_no_range ~ (("||" | "or") ~ and_expr_no_range)* }
+or_expr_no_range = { and_expr_no_range ~ (("||" ~ !("{" | "|") | "or") ~ and_expr_no_range)* }
 and_expr_no_range = { bitwise_or_expr_no_range ~ (("&&" | "and") ~ bitwise_or_expr_no_range)* }
 bitwise_or_expr_no_range = { bitwise_xor_expr_no_range ~ ("|" ~ !"|" ~ !">" ~ bitwise_xor_expr_no_range)* }
 bitwise_xor_expr_no_range = { bitwise_and_expr_no_range ~ ("^" ~ !"=" ~ bitwise_and_expr_no_range)* }
@@ -1026,7 +1030,7 @@ fuzzy_comparison_tail_no_range = { fuzzy_op ~ additive_expr ~ within_clause? }
 null_coalesce_expr = { context_expr ~ ("??" ~ context_expr)* }
 context_expr = { or_expr ~ ("!!" ~ or_expr)* }
 
-or_expr = { and_expr ~ (("||" | "or") ~ and_expr)* }
+or_expr = { and_expr ~ (("||" ~ !("{" | "|") | "or") ~ and_expr)* }
 and_expr = { bitwise_or_expr ~ (("&&" | "and") ~ bitwise_or_expr)* }
 bitwise_or_expr = { bitwise_xor_expr ~ ("|" ~ !"|" ~ !">" ~ bitwise_xor_expr)* }
 bitwise_xor_expr = { bitwise_and_expr ~ ("^" ~ !"=" ~ bitwise_and_expr)* }
@@ -1398,11 +1402,18 @@ literal = {
     decimal   // Must come before number to match "123.45D" suffix
     | percent_literal  // Must come before number to match "5%" suffix
     | number
+    | char_literal  // Must come before string to match single-quoted chars
     | string
     | boolean
     | none_literal
     | timeframe
 }
+
+// Char literal: 'a', '\n', '\t', '\\', '\'', '\u{1F600}'
+char_literal = @{ "'" ~ char_literal_inner ~ "'" }
+char_literal_inner = { char_escape | char_unicode_escape | (!"'" ~ !"\\" ~ ANY) }
+char_escape = { "\\" ~ ("n" | "t" | "r" | "\\" | "'" | "0") }
+char_unicode_escape = { "\\u{" ~ ASCII_HEX_DIGIT{1,6} ~ "}" }
 
 // Percent literal: 5% → 0.05, 100% → 1.0
 percent_literal = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ "%" ~ !(ASCII_ALPHANUMERIC) }

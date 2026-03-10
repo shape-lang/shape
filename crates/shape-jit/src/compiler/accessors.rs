@@ -273,6 +273,7 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::ModTyped,
     OpCode::CmpTyped,
     OpCode::StoreLocalTyped,
+    OpCode::StoreModuleBindingTyped,
     OpCode::CastWidth,
 ];
 
@@ -403,6 +404,11 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::IntrinsicCovariance,
     BuiltinFunction::IntrinsicPercentile,
     BuiltinFunction::IntrinsicMedian,
+    // Trigonometric (4)
+    BuiltinFunction::IntrinsicAtan2,
+    BuiltinFunction::IntrinsicSinh,
+    BuiltinFunction::IntrinsicCosh,
+    BuiltinFunction::IntrinsicTanh,
     // Char codes (2)
     BuiltinFunction::IntrinsicCharCode,
     BuiltinFunction::IntrinsicFromCharCode,

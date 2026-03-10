@@ -179,6 +179,24 @@ impl BytecodeCompiler {
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
+                    // Patch StoreModuleBinding → StoreModuleBindingTyped for width-typed bindings
+                    if let Some(type_name) = self
+                        .type_tracker
+                        .get_binding_type(binding_idx)
+                        .and_then(|info| info.type_name.as_deref())
+                    {
+                        if let Some(w) = shape_ast::IntWidth::from_name(type_name) {
+                            if let Some(last) = self.program.instructions.last_mut() {
+                                if last.opcode == OpCode::StoreModuleBinding {
+                                    last.opcode = OpCode::StoreModuleBindingTyped;
+                                    last.operand = Some(Operand::TypedModuleBinding(
+                                        binding_idx,
+                                        crate::bytecode::NumericWidth::from_int_width(w),
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
                 self.propagate_assignment_type_to_identifier(name);
                 Ok(())

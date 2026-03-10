@@ -146,6 +146,63 @@ pub fn vm_intrinsic_std(args: &[ValueWord]) -> NbIntrinsicResult {
     Ok(ValueWord::from_f64(var.sqrt()))
 }
 
+// ===== Trigonometric Intrinsics =====
+
+/// Two-argument arc tangent
+pub fn vm_intrinsic_atan2(args: &[ValueWord]) -> NbIntrinsicResult {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "atan2() requires 2 arguments (y, x)".to_string(),
+        ));
+    }
+    let y = args[0]
+        .as_number_coerce()
+        .ok_or_else(|| VMError::RuntimeError("atan2: y must be a number".to_string()))?;
+    let x = args[1]
+        .as_number_coerce()
+        .ok_or_else(|| VMError::RuntimeError("atan2: x must be a number".to_string()))?;
+    Ok(ValueWord::from_f64(y.atan2(x)))
+}
+
+/// Hyperbolic sine
+pub fn vm_intrinsic_sinh(args: &[ValueWord]) -> NbIntrinsicResult {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(
+            "sinh() requires 1 argument".to_string(),
+        ));
+    }
+    let x = args[0]
+        .as_number_coerce()
+        .ok_or_else(|| VMError::RuntimeError("sinh: argument must be a number".to_string()))?;
+    Ok(ValueWord::from_f64(x.sinh()))
+}
+
+/// Hyperbolic cosine
+pub fn vm_intrinsic_cosh(args: &[ValueWord]) -> NbIntrinsicResult {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(
+            "cosh() requires 1 argument".to_string(),
+        ));
+    }
+    let x = args[0]
+        .as_number_coerce()
+        .ok_or_else(|| VMError::RuntimeError("cosh: argument must be a number".to_string()))?;
+    Ok(ValueWord::from_f64(x.cosh()))
+}
+
+/// Hyperbolic tangent
+pub fn vm_intrinsic_tanh(args: &[ValueWord]) -> NbIntrinsicResult {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(
+            "tanh() requires 1 argument".to_string(),
+        ));
+    }
+    let x = args[0]
+        .as_number_coerce()
+        .ok_or_else(|| VMError::RuntimeError("tanh: argument must be a number".to_string()))?;
+    Ok(ValueWord::from_f64(x.tanh()))
+}
+
 // ===== Character Code Intrinsics =====
 
 /// Get the Unicode code point of the first character in a string

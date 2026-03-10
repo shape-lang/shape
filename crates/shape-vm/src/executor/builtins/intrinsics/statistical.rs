@@ -615,8 +615,18 @@ pub fn vm_intrinsic_median(args: &[ValueWord]) -> NbIntrinsicResult {
         ));
     }
 
-    let percentile_args = vec![args[0].clone(), ValueWord::from_f64(50.0)];
-    vm_intrinsic_percentile(&percentile_args)
+    let mut data = nb_extract_f64_data(&args[0])?;
+    if data.is_empty() {
+        return Ok(ValueWord::from_f64(f64::NAN));
+    }
+    data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = data.len();
+    let result = if n % 2 == 0 {
+        (data[n / 2 - 1] + data[n / 2]) / 2.0
+    } else {
+        data[n / 2]
+    };
+    Ok(ValueWord::from_f64(result))
 }
 
 // =============================================================================

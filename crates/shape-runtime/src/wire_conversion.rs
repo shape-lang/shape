@@ -577,6 +577,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
                 WireValue::String("<channel:receiver>".to_string())
             }
         }
+        HeapValue::Char(c) => WireValue::String(c.to_string()),
     }
 }
 

@@ -130,6 +130,7 @@ impl ConstEvaluator {
                 Literal::ContentString { value, .. } => {
                     Ok(ValueWord::from_string(Arc::new(value.clone())))
                 }
+                Literal::Char(c) => Ok(ValueWord::from_char(*c)),
                 Literal::Bool(b) => Ok(ValueWord::from_bool(*b)),
                 Literal::None => Ok(ValueWord::none()),
                 Literal::Unit => Ok(ValueWord::unit()),

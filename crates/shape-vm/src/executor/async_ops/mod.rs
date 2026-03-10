@@ -299,23 +299,36 @@ impl VirtualMachine {
         Ok(AsyncExecutionResult::Continue)
     }
 
-    /// Await a task group, suspending until the join condition is met
+    /// Await a task group, resolving tasks inline
     ///
     /// Pops a ValueWord::TaskGroup from the stack.
-    /// Suspends execution with WaitType::TaskGroup so the host can resolve it
-    /// according to the join strategy (all/race/any/settle).
-    /// On resume, the host pushes the result value onto the stack.
+    /// Resolves all tasks inline using the task scheduler's `resolve_task_group`,
+    /// which executes each task's callable synchronously (same strategy as `op_await`).
+    /// Pushes the result value onto the stack according to the join strategy.
     fn op_join_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let nb = self.pop_vw()?;
         match nb.as_heap_ref() {
             Some(HeapValue::TaskGroup { kind, task_ids }) => {
-                Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
-                    wait_type: WaitType::TaskGroup {
-                        kind: *kind,
-                        task_ids: task_ids.clone(),
-                    },
-                    resume_ip: self.ip,
-                }))
+                let kind = *kind;
+                let task_ids = task_ids.clone();
+
+                let result =
+                    self.task_scheduler
+                        .resolve_task_group(kind, &task_ids, |callable| Ok(callable));
+
+                match result {
+                    Ok(value) => {
+                        self.push_vw(value)?;
+                        Ok(AsyncExecutionResult::Continue)
+                    }
+                    Err(_) => {
+                        // Could not resolve inline — suspend for host runtime
+                        Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
+                            wait_type: WaitType::TaskGroup { kind, task_ids },
+                            resume_ip: self.ip,
+                        }))
+                    }
+                }
             }
             _ => Err(VMError::RuntimeError(format!(
                 "JoinAwait expected TaskGroup, got {}",

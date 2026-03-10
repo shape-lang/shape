@@ -1161,6 +1161,24 @@ impl VirtualMachine {
                                     s_a, s_b
                                 ))));
                             }
+                            (HeapValue::String(s), HeapValue::Char(c)) => {
+                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                    "{}{}",
+                                    s, c
+                                ))));
+                            }
+                            (HeapValue::Char(c), HeapValue::String(s)) => {
+                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                    "{}{}",
+                                    c, s
+                                ))));
+                            }
+                            (HeapValue::Char(a), HeapValue::Char(b)) => {
+                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                    "{}{}",
+                                    a, b
+                                ))));
+                            }
                             (HeapValue::Decimal(a_dec), HeapValue::Decimal(b_dec)) => {
                                 return self.push_vw(ValueWord::from_decimal(*a_dec + *b_dec));
                             }

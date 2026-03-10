@@ -515,6 +515,7 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::StoreLocalTyped
             | OpCode::LoadModuleBinding
             | OpCode::StoreModuleBinding
+            | OpCode::StoreModuleBindingTyped
             | OpCode::LoadClosure
             | OpCode::StoreClosure
             // Type casting (inline, no allocation)

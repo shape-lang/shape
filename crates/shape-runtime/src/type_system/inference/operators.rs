@@ -28,6 +28,7 @@ impl TypeInferenceEngine {
             Literal::Number(_) => BuiltinTypes::number(),
             Literal::Decimal(_) => Type::Concrete(TypeAnnotation::Basic("decimal".to_string())),
             Literal::String(_) => BuiltinTypes::string(),
+            Literal::Char(_) => Type::Concrete(TypeAnnotation::Basic("char".to_string())),
             Literal::FormattedString { .. } => BuiltinTypes::string(),
             Literal::ContentString { .. } => BuiltinTypes::string(),
             Literal::Bool(_) => BuiltinTypes::boolean(),

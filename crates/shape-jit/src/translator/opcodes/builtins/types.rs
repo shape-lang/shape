@@ -75,6 +75,46 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 true
             }
 
+            BuiltinFunction::OkCtor => {
+                self.stack_pop(); // arg count
+                if let Some(val) = self.stack_pop() {
+                    let inst = self.builder.ins().call(self.ffi.make_ok, &[val]);
+                    let result = self.builder.inst_results(inst)[0];
+                    self.stack_push(result);
+                }
+                true
+            }
+            BuiltinFunction::ErrCtor => {
+                self.stack_pop(); // arg count
+                if let Some(val) = self.stack_pop() {
+                    let inst = self.builder.ins().call(self.ffi.make_err, &[val]);
+                    let result = self.builder.inst_results(inst)[0];
+                    self.stack_push(result);
+                }
+                true
+            }
+            BuiltinFunction::SomeCtor => {
+                self.stack_pop(); // arg count
+                if let Some(val) = self.stack_pop() {
+                    // Some(x) just returns x — identity wrapper
+                    self.stack_push(val);
+                }
+                true
+            }
+
+            BuiltinFunction::FormatValueWithMeta => {
+                // FormatValueWithMeta(value) -> string representation of value
+                // Used by f-string interpolation: f"text {expr}"
+                // In JIT, we handle this as a simple toString conversion.
+                self.stack_pop(); // pop arg_count
+                if let Some(val) = self.stack_pop_boxed() {
+                    let inst = self.builder.ins().call(self.ffi.to_string, &[val]);
+                    let result = self.builder.inst_results(inst)[0];
+                    self.stack_push(result);
+                }
+                true
+            }
+
             _ => false,
         }
     }

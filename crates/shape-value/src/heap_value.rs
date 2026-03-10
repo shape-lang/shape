@@ -879,6 +879,7 @@ impl HeapValue {
     /// Arc pointers but may contain equal data.
     pub fn structural_eq(&self, other: &HeapValue) -> bool {
         match (self, other) {
+            (HeapValue::Char(a), HeapValue::Char(b)) => a == b,
             (HeapValue::String(a), HeapValue::String(b)) => a == b,
             (HeapValue::Array(a), HeapValue::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
@@ -942,6 +943,7 @@ impl HeapValue {
     #[inline]
     pub fn equals(&self, other: &HeapValue) -> bool {
         match (self, other) {
+            (HeapValue::Char(a), HeapValue::Char(b)) => a == b,
             (HeapValue::String(a), HeapValue::String(b)) => a == b,
             (HeapValue::Array(a), HeapValue::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.vw_equals(y))

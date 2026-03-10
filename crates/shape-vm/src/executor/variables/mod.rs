@@ -24,6 +24,7 @@ impl VirtualMachine {
             StoreLocalTyped => self.op_store_local_typed(instruction)?,
             LoadModuleBinding => self.op_load_module_binding(instruction)?,
             StoreModuleBinding => self.op_store_module_binding(instruction)?,
+            StoreModuleBindingTyped => self.op_store_module_binding_typed(instruction)?,
             LoadClosure => self.op_load_closure(instruction)?,
             StoreClosure => self.op_store_closure(instruction)?,
             CloseUpvalue => self.op_close_upvalue(instruction)?,
@@ -412,6 +413,48 @@ impl VirtualMachine {
                 record_heap_write();
                 write_barrier_vw(&self.module_bindings[index], &nb);
                 self.module_bindings[index] = nb;
+            }
+        } else {
+            return Err(VMError::InvalidOperand);
+        }
+        Ok(())
+    }
+
+    /// Store value to a module_binding variable slot with integer width truncation.
+    ///
+    /// Operand: TypedModuleBinding(idx, width)
+    pub(in crate::executor) fn op_store_module_binding_typed(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        if let Some(Operand::TypedModuleBinding(idx, width)) = instruction.operand {
+            let nb = self.pop_vw()?;
+            let index = idx as usize;
+
+            // Truncate the value to the declared width
+            let truncated = if let Some(int_w) = width.to_int_width() {
+                let raw = Self::int_operand(&nb).unwrap_or(0);
+                ValueWord::from_i64(int_w.truncate(raw))
+            } else {
+                nb
+            };
+
+            // Ensure module_bindings vector is large enough
+            while self.module_bindings.len() <= index {
+                self.module_bindings.push(ValueWord::none());
+            }
+
+            // Auto-deref SharedCell: write through the Arc
+            if let Some(HeapValue::SharedCell(arc)) = self.module_bindings[index].as_heap_ref() {
+                let arc = arc.clone();
+                let old = arc.read().unwrap().clone();
+                record_heap_write();
+                write_barrier_vw(&old, &truncated);
+                *arc.write().unwrap() = truncated;
+            } else {
+                record_heap_write();
+                write_barrier_vw(&self.module_bindings[index], &truncated);
+                self.module_bindings[index] = truncated;
             }
         } else {
             return Err(VMError::InvalidOperand);

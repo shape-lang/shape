@@ -523,12 +523,11 @@ impl VirtualMachine {
                         .as_i64()
                         .or_else(|| key_nb.as_f64().map(|f| f as i64));
                     if let Some(idx) = idx_opt {
-                        let len = s.len() as i64;
-                        let actual = if idx < 0 { len + idx } else { idx };
-                        if actual >= 0 && (actual as usize) < s.len() {
+                        let char_count = s.chars().count() as i64;
+                        let actual = if idx < 0 { char_count + idx } else { idx };
+                        if actual >= 0 && actual < char_count {
                             if let Some(c) = s.chars().nth(actual as usize) {
-                                return self
-                                    .push_vw(ValueWord::from_string(Arc::new(c.to_string())));
+                                return self.push_vw(ValueWord::from_char(c));
                             }
                         }
                         return self.push_vw(ValueWord::none());

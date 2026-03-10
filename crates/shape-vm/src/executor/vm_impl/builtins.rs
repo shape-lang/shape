@@ -437,6 +437,10 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicCovariance
                 | BuiltinFunction::IntrinsicPercentile
                 | BuiltinFunction::IntrinsicMedian
+                | BuiltinFunction::IntrinsicAtan2
+                | BuiltinFunction::IntrinsicSinh
+                | BuiltinFunction::IntrinsicCosh
+                | BuiltinFunction::IntrinsicTanh
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
                 | BuiltinFunction::IntrinsicSeries) => {

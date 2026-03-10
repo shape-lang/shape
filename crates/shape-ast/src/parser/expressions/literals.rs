@@ -99,6 +99,16 @@ pub fn parse_literal(pair: Pair<Rule>) -> Result<Expr> {
         Rule::boolean => Literal::Bool(inner.as_str() == "true"),
         Rule::none_literal => Literal::None,
 
+        Rule::char_literal => {
+            let raw = inner.as_str();
+            // Strip surrounding quotes: 'x' -> x
+            let inner_str = &raw[1..raw.len() - 1];
+            let c = parse_char_literal_inner(inner_str).map_err(|msg| ShapeError::ParseError {
+                message: msg,
+                location: Some(pair_loc.clone()),
+            })?;
+            Literal::Char(c)
+        }
         Rule::timeframe => {
             let tf = Timeframe::parse(inner.as_str()).ok_or_else(|| ShapeError::ParseError {
                 message: format!("Invalid timeframe: {}", inner.as_str()),
@@ -115,6 +125,42 @@ pub fn parse_literal(pair: Pair<Rule>) -> Result<Expr> {
     };
 
     Ok(Expr::Literal(literal, span))
+}
+
+/// Parse the inner content of a char literal (after stripping quotes).
+fn parse_char_literal_inner(s: &str) -> std::result::Result<char, String> {
+    if s.is_empty() {
+        return Err("Empty char literal".to_string());
+    }
+    if s.starts_with('\\') {
+        if s.starts_with("\\u{") && s.ends_with('}') {
+            // Unicode escape: \u{XXXX}
+            let hex = &s[3..s.len() - 1];
+            let code = u32::from_str_radix(hex, 16)
+                .map_err(|_| format!("Invalid unicode escape: {}", s))?;
+            char::from_u32(code).ok_or_else(|| format!("Invalid unicode code point: U+{:04X}", code))
+        } else if s.len() == 2 {
+            // Simple escape: \n, \t, \r, \\, \', \0
+            match s.as_bytes()[1] {
+                b'n' => Ok('\n'),
+                b't' => Ok('\t'),
+                b'r' => Ok('\r'),
+                b'\\' => Ok('\\'),
+                b'\'' => Ok('\''),
+                b'0' => Ok('\0'),
+                other => Err(format!("Unknown escape sequence: \\{}", other as char)),
+            }
+        } else {
+            Err(format!("Invalid escape sequence: {}", s))
+        }
+    } else {
+        let mut chars = s.chars();
+        let c = chars.next().ok_or_else(|| "Empty char literal".to_string())?;
+        if chars.next().is_some() {
+            return Err(format!("Char literal must be a single character, got: {}", s));
+        }
+        Ok(c)
+    }
 }
 
 /// Parse an array literal

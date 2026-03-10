@@ -69,6 +69,9 @@ impl VirtualMachine {
             }
             return Err(format!("cannot convert decimal '{d}' to int"));
         }
+        if let Some(c) = value.as_char() {
+            return Ok(ValueWord::from_i64(c as i64));
+        }
         Err(format!("cannot convert {} to int", value.type_name()))
     }
 
@@ -137,6 +140,37 @@ impl VirtualMachine {
         Err(format!("cannot convert {} to bool", value.type_name()))
     }
 
+    fn convert_to_char_no_checks(value: &ValueWord) -> Result<ValueWord, String> {
+        if let Some(c) = value.as_char() {
+            return Ok(ValueWord::from_char(c));
+        }
+        if let Some(i) = value.as_i64() {
+            let code = i as u32;
+            return char::from_u32(code)
+                .map(ValueWord::from_char)
+                .ok_or_else(|| format!("invalid Unicode code point: {}", code));
+        }
+        if let Some(n) = value.as_f64() {
+            let code = n as u32;
+            return char::from_u32(code)
+                .map(ValueWord::from_char)
+                .ok_or_else(|| format!("invalid Unicode code point: {}", code));
+        }
+        if let Some(s) = value.as_str() {
+            let mut chars = s.chars();
+            if let Some(c) = chars.next() {
+                if chars.next().is_none() {
+                    return Ok(ValueWord::from_char(c));
+                }
+            }
+            return Err(format!(
+                "cannot convert string '{}' to char (must be single character)",
+                s
+            ));
+        }
+        Err(format!("cannot convert {} to char", value.type_name()))
+    }
+
     fn convert_to_string_no_checks(&self, value: &ValueWord) -> ValueWord {
         if let Some(s) = value.as_str() {
             return ValueWord::from_string(Arc::new(s.to_string()));
@@ -151,6 +185,7 @@ impl VirtualMachine {
             "Number" => "number".to_string(),
             "Int" => "int".to_string(),
             "Decimal" => "decimal".to_string(),
+            "Char" => "char".to_string(),
             _ => name.to_string(),
         }
     }
@@ -250,6 +285,7 @@ impl VirtualMachine {
             "decimal" => Self::convert_to_decimal_no_checks(value),
             "bool" => Self::convert_to_bool_no_checks(value),
             "string" => Ok(self.convert_to_string_no_checks(value)),
+            "char" => Self::convert_to_char_no_checks(value),
             unsupported => Err(format!(
                 "unsupported fallible conversion target '{unsupported}'"
             )),

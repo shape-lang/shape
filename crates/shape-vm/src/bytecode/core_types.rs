@@ -338,6 +338,7 @@ pub enum Constant {
     /// Decimal type for exact arithmetic (finance, currency)
     Decimal(rust_decimal::Decimal),
     String(String),
+    Char(char),
     Bool(bool),
     Null,
     Unit,
@@ -624,6 +625,8 @@ impl Instruction {
                 Operand::Width(_) => 1,
                 // TypedLocal: local_idx (2) + width (1) = 3 bytes
                 Operand::TypedLocal(_, _) => 3,
+                // TypedModuleBinding: binding_idx (2) + width (1) = 3 bytes
+                Operand::TypedModuleBinding(_, _) => 3,
             },
         }
     }

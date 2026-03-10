@@ -1286,8 +1286,9 @@ impl BytecodeCompiler {
             }
         };
 
-        // Named impl selector defaults to the source type name
-        let selector = impl_block.impl_name.as_deref().unwrap_or(&source_type);
+        // Named impl selector defaults to the target type name so that
+        // `as TargetType` / `as TargetType?` dispatch finds the right symbol.
+        let selector = impl_block.impl_name.as_deref().unwrap_or(target_type);
 
         for method in &impl_block.methods {
             let func_def =
@@ -3219,10 +3220,33 @@ impl BytecodeCompiler {
                     // Top-level: create module_binding variable
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         let binding_idx = self.get_or_create_module_binding(name);
-                        self.emit(Instruction::new(
-                            OpCode::StoreModuleBinding,
-                            Some(Operand::ModuleBinding(binding_idx)),
-                        ));
+
+                        // Emit StoreModuleBindingTyped for width-typed bindings,
+                        // otherwise emit regular StoreModuleBinding.
+                        let used_typed_store = if let Some(TypeAnnotation::Basic(type_name)) =
+                            var_decl.type_annotation.as_ref()
+                        {
+                            if let Some(w) = shape_ast::IntWidth::from_name(type_name) {
+                                self.emit(Instruction::new(
+                                    OpCode::StoreModuleBindingTyped,
+                                    Some(Operand::TypedModuleBinding(
+                                        binding_idx,
+                                        crate::bytecode::NumericWidth::from_int_width(w),
+                                    )),
+                                ));
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if !used_typed_store {
+                            self.emit(Instruction::new(
+                                OpCode::StoreModuleBinding,
+                                Some(Operand::ModuleBinding(binding_idx)),
+                            ));
+                        }
 
                         // Track const module bindings for reassignment checks
                         if var_decl.kind == VarKind::Const {

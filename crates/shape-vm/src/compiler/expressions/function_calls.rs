@@ -79,6 +79,7 @@ fn literal_to_nanboxed(literal: &Literal) -> Option<ValueWord> {
         Literal::Number(n) => Some(ValueWord::from_f64(*n)),
         Literal::Decimal(d) => Some(ValueWord::from_decimal(*d)),
         Literal::String(s) => Some(ValueWord::from_string(Arc::new(s.clone()))),
+        Literal::Char(c) => Some(ValueWord::from_char(*c)),
         Literal::FormattedString { value, .. } => {
             Some(ValueWord::from_string(Arc::new(value.clone())))
         }

@@ -276,7 +276,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     }
 
     pub(crate) fn compile_store_global(&mut self, instr: &Instruction) -> Result<(), String> {
-        if let Some(Operand::ModuleBinding(idx)) = &instr.operand {
+        let idx_ref = match &instr.operand {
+            Some(Operand::ModuleBinding(idx)) => Some(idx),
+            Some(Operand::TypedModuleBinding(idx, _)) => Some(idx),
+            _ => None,
+        };
+        if let Some(idx) = idx_ref {
             // Check if the value on stack is raw i64 (from unboxed context)
             let top_repr = self
                 .typed_stack

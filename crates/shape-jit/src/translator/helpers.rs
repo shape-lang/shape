@@ -309,6 +309,133 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         }
     }
 
+    /// Binary operation with runtime type check: numeric fast path, generic FFI fallback.
+    ///
+    /// When `is_add` is true, the fallback calls `generic_add` (handles string concat,
+    /// Time+Duration, etc.). Otherwise returns TAG_NULL for non-numeric operands.
+    pub(in crate::translator) fn generic_binary_op_with_fallback<F>(
+        &mut self,
+        op: F,
+        is_add: bool,
+    ) where
+        F: FnOnce(&mut FunctionBuilder, Value, Value) -> Value,
+    {
+        if self.stack_len() >= 2 {
+            let b_boxed = self.stack_pop().unwrap();
+            let a_boxed = self.stack_pop().unwrap();
+
+            let nan_base = self.builder.ins().iconst(types::I64, NAN_BASE as i64);
+            let a_masked = self.builder.ins().band(a_boxed, nan_base);
+            let b_masked = self.builder.ins().band(b_boxed, nan_base);
+            let a_is_num = self.builder.ins().icmp(IntCC::NotEqual, a_masked, nan_base);
+            let b_is_num = self.builder.ins().icmp(IntCC::NotEqual, b_masked, nan_base);
+            let both_num = self.builder.ins().band(a_is_num, b_is_num);
+
+            let then_block = self.builder.create_block();
+            let else_block = self.builder.create_block();
+            let merge_block = self.builder.create_block();
+
+            self.builder.append_block_param(merge_block, types::I64);
+            self.builder
+                .ins()
+                .brif(both_num, then_block, &[], else_block, &[]);
+
+            // Then: numeric fast path
+            self.builder.switch_to_block(then_block);
+            self.builder.seal_block(then_block);
+            let a_f64 = self.i64_to_f64(a_boxed);
+            let b_f64 = self.i64_to_f64(b_boxed);
+            let result_f64 = op(self.builder, a_f64, b_f64);
+            let result_boxed = self.f64_to_i64(result_f64);
+            self.builder.ins().jump(merge_block, &[result_boxed]);
+
+            // Else: non-numeric — call generic FFI
+            self.builder.switch_to_block(else_block);
+            self.builder.seal_block(else_block);
+            let ffi_result = if is_add {
+                let inst = self
+                    .builder
+                    .ins()
+                    .call(self.ffi.generic_add, &[a_boxed, b_boxed]);
+                self.builder.inst_results(inst)[0]
+            } else {
+                self.builder.ins().iconst(types::I64, TAG_NULL as i64)
+            };
+            self.builder.ins().jump(merge_block, &[ffi_result]);
+
+            // Merge
+            self.builder.switch_to_block(merge_block);
+            self.builder.seal_block(merge_block);
+            let result = self.builder.block_params(merge_block)[0];
+            self.stack_push(result);
+        }
+    }
+
+    /// Comparison with runtime type check: numeric fast path, generic FFI fallback.
+    ///
+    /// For Equal/NotEqual, the fallback calls `generic_eq`/`generic_neq` which
+    /// compares string contents, booleans by tag, etc.
+    pub(in crate::translator) fn generic_comparison_with_fallback(&mut self, cc: FloatCC) {
+        if self.stack_len() >= 2 {
+            let b_boxed = self.stack_pop().unwrap();
+            let a_boxed = self.stack_pop().unwrap();
+
+            let nan_base = self.builder.ins().iconst(types::I64, NAN_BASE as i64);
+            let a_masked = self.builder.ins().band(a_boxed, nan_base);
+            let b_masked = self.builder.ins().band(b_boxed, nan_base);
+            let a_is_num = self.builder.ins().icmp(IntCC::NotEqual, a_masked, nan_base);
+            let b_is_num = self.builder.ins().icmp(IntCC::NotEqual, b_masked, nan_base);
+            let both_num = self.builder.ins().band(a_is_num, b_is_num);
+
+            let then_block = self.builder.create_block();
+            let else_block = self.builder.create_block();
+            let merge_block = self.builder.create_block();
+
+            self.builder.append_block_param(merge_block, types::I64);
+            self.builder
+                .ins()
+                .brif(both_num, then_block, &[], else_block, &[]);
+
+            // Then: numeric comparison
+            self.builder.switch_to_block(then_block);
+            self.builder.seal_block(then_block);
+            let a_f64 = self.i64_to_f64(a_boxed);
+            let b_f64 = self.i64_to_f64(b_boxed);
+            let cmp = self.builder.ins().fcmp(cc, a_f64, b_f64);
+            let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
+            let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
+            let result_bool = self.builder.ins().select(cmp, true_val, false_val);
+            self.builder.ins().jump(merge_block, &[result_bool]);
+
+            // Else: non-numeric — call generic FFI for eq/neq, raw bits for others
+            self.builder.switch_to_block(else_block);
+            self.builder.seal_block(else_block);
+            let non_num_result = if cc == FloatCC::Equal {
+                let inst = self
+                    .builder
+                    .ins()
+                    .call(self.ffi.generic_eq, &[a_boxed, b_boxed]);
+                self.builder.inst_results(inst)[0]
+            } else if cc == FloatCC::NotEqual {
+                let inst = self
+                    .builder
+                    .ins()
+                    .call(self.ffi.generic_neq, &[a_boxed, b_boxed]);
+                self.builder.inst_results(inst)[0]
+            } else {
+                // Other comparisons on non-numerics return false
+                self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64)
+            };
+            self.builder.ins().jump(merge_block, &[non_num_result]);
+
+            // Merge
+            self.builder.switch_to_block(merge_block);
+            self.builder.seal_block(merge_block);
+            let result = self.builder.block_params(merge_block)[0];
+            self.stack_push(result);
+        }
+    }
+
     /// Get or create a Cranelift Variable for a stack position
     /// This enables proper SSA PHI insertion at control flow merge points
     pub(in crate::translator) fn get_or_create_stack_var(&mut self, depth: usize) -> Variable {

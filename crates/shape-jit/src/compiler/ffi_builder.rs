@@ -279,6 +279,12 @@ impl JITCompiler {
             generic_div: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_generic_div"], builder.func),
+            generic_eq: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_generic_eq"], builder.func),
+            generic_neq: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_generic_neq"], builder.func),
             series_shift: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_series_shift"], builder.func),

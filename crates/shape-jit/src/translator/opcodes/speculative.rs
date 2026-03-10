@@ -610,12 +610,65 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         false
     }
 
+    /// Emit a speculative integer division with type guards.
+    /// int / int -> int (truncated toward zero), matching VM semantics.
+    pub(crate) fn emit_speculative_int_div(
+        &mut self,
+        a: Value,
+        b: Value,
+        bytecode_offset: usize,
+    ) -> Option<Value> {
+        let tag_mask_val = self.builder.ins().iconst(types::I64, TAG_MASK as i64);
+        let i48_tag_val = self.builder.ins().iconst(types::I64, I48_TAG_BITS as i64);
+
+        let a_tag = self.builder.ins().band(a, tag_mask_val);
+        let b_tag = self.builder.ins().band(b, tag_mask_val);
+
+        let a_is_int = self.builder.ins().icmp(IntCC::Equal, a_tag, i48_tag_val);
+        let b_is_int = self.builder.ins().icmp(IntCC::Equal, b_tag, i48_tag_val);
+        let both_int = self.builder.ins().band(a_is_int, b_is_int);
+
+        let (deopt_id, spill_block) = self.emit_deopt_point_with_spill(bytecode_offset, &[a, b]);
+        if let Some(sb) = spill_block {
+            self.deopt_if_false_with_spill(both_int, sb, &[a, b]);
+        } else {
+            self.deopt_if_false_with_id(both_int, deopt_id as u32);
+        }
+
+        let payload_mask_val = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
+        let a_raw = self.builder.ins().band(a, payload_mask_val);
+        let b_raw = self.builder.ins().band(b, payload_mask_val);
+
+        let shift = self.builder.ins().iconst(types::I32, 16);
+        let a_ext = self.builder.ins().ishl(a_raw, shift);
+        let a_ext = self.builder.ins().sshr(a_ext, shift);
+        let b_ext = self.builder.ins().ishl(b_raw, shift);
+        let b_ext = self.builder.ins().sshr(b_ext, shift);
+
+        let quot = self.builder.ins().sdiv(a_ext, b_ext);
+
+        let quot_masked = self.builder.ins().band(quot, payload_mask_val);
+        let result = self.builder.ins().bor(quot_masked, i48_tag_val);
+
+        Some(result)
+    }
+
     /// Try to emit speculative division.
     pub(crate) fn try_speculative_div(&mut self, bytecode_offset: usize) -> bool {
         if let Some((left_tag, right_tag)) = self.speculative_arithmetic_types(bytecode_offset) {
-            // Division always goes f64 path (integer division with remainder
-            // is handled separately by DivInt opcode)
-            if left_tag == Self::FEEDBACK_TAG_F64 && right_tag == Self::FEEDBACK_TAG_F64 {
+            if left_tag == Self::FEEDBACK_TAG_I48 && right_tag == Self::FEEDBACK_TAG_I48 {
+                // int / int -> int (truncated toward zero)
+                if self.stack_len() >= 2 {
+                    let b = self.stack_pop().unwrap();
+                    let a = self.stack_pop().unwrap();
+                    if let Some(result) = self.emit_speculative_int_div(a, b, bytecode_offset) {
+                        self.stack_push(result);
+                        return true;
+                    }
+                    self.stack_push(a);
+                    self.stack_push(b);
+                }
+            } else if left_tag == Self::FEEDBACK_TAG_F64 && right_tag == Self::FEEDBACK_TAG_F64 {
                 if self.stack_len() >= 2 {
                     let b = self.stack_pop().unwrap();
                     let a = self.stack_pop().unwrap();

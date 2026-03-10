@@ -127,7 +127,11 @@ impl BytecodeCompiler {
     /// This does NOT consult the type tracker — it only looks at the AST node itself.
     fn is_expr_confirmed_numeric(expr: &Expr) -> bool {
         match expr {
-            Expr::Literal(Literal::Int(_), _) | Expr::Literal(Literal::Number(_), _) => true,
+            Expr::Literal(Literal::Int(_), _)
+            | Expr::Literal(Literal::Number(_), _)
+            | Expr::Literal(Literal::TypedInt(..), _)
+            | Expr::Literal(Literal::UInt(_), _)
+            | Expr::Literal(Literal::Decimal(_), _) => true,
             Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => {
                 Self::is_expr_confirmed_numeric(operand)
             }

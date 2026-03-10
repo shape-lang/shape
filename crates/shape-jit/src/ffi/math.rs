@@ -424,6 +424,49 @@ where
     TAG_BOOL_FALSE
 }
 
+/// Generic equality that handles strings, booleans, and other non-numeric types.
+/// Compares string contents (not pointer identity), numbers by value, booleans by tag.
+pub extern "C" fn jit_generic_eq(a_bits: u64, b_bits: u64) -> u64 {
+    // Both numbers - fast path
+    if is_number(a_bits) && is_number(b_bits) {
+        return if unbox_number(a_bits) == unbox_number(b_bits) {
+            TAG_BOOL_TRUE
+        } else {
+            TAG_BOOL_FALSE
+        };
+    }
+
+    // Identical tags (bools, null, unit)
+    if a_bits == b_bits {
+        return TAG_BOOL_TRUE;
+    }
+
+    // Both heap values
+    let a_kind = heap_kind(a_bits);
+    let b_kind = heap_kind(b_bits);
+
+    if a_kind == Some(HK_STRING) && b_kind == Some(HK_STRING) {
+        let a_str = unsafe { jit_unbox::<String>(a_bits) };
+        let b_str = unsafe { jit_unbox::<String>(b_bits) };
+        return if a_str == b_str {
+            TAG_BOOL_TRUE
+        } else {
+            TAG_BOOL_FALSE
+        };
+    }
+
+    TAG_BOOL_FALSE
+}
+
+/// Generic inequality — inverse of jit_generic_eq.
+pub extern "C" fn jit_generic_neq(a_bits: u64, b_bits: u64) -> u64 {
+    if jit_generic_eq(a_bits, b_bits) == TAG_BOOL_TRUE {
+        TAG_BOOL_FALSE
+    } else {
+        TAG_BOOL_TRUE
+    }
+}
+
 /// Helper: convert JITDuration to seconds
 fn duration_to_seconds(dur: &super::super::context::JITDuration) -> f64 {
     match dur.unit {

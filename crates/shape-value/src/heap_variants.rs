@@ -100,6 +100,7 @@ macro_rules! define_heap_types {
             Deque,              // 66
             PriorityQueue,      // 67
             Channel,            // 68
+            Char,               // 69
         }
 
         /// Compact heap-allocated value for ValueWord TAG_HEAP.
@@ -167,6 +168,7 @@ macro_rules! define_heap_types {
             Atomic(Box<$crate::heap_value::AtomicData>),
             Lazy(Box<$crate::heap_value::LazyData>),
             Channel(Box<$crate::heap_value::ChannelData>),
+            Char(char),
             // ===== Struct variants =====
             TypedObject {
                 schema_id: u64,
@@ -255,6 +257,7 @@ macro_rules! define_heap_types {
                     HeapValue::Atomic(..) => HeapKind::Atomic,
                     HeapValue::Lazy(..) => HeapKind::Lazy,
                     HeapValue::Channel(..) => HeapKind::Channel,
+                    HeapValue::Char(..) => HeapKind::Char,
                     HeapValue::I8Array(..) => HeapKind::I8Array,
                     HeapValue::I16Array(..) => HeapKind::I16Array,
                     HeapValue::I32Array(..) => HeapKind::I32Array,
@@ -337,6 +340,7 @@ macro_rules! define_heap_types {
                     }
                     HeapValue::Lazy(_v) => _v.is_initialized(),
                     HeapValue::Channel(_v) => !_v.is_closed(),
+                    HeapValue::Char(_) => true,
                     HeapValue::Enum(_) => true,
                     HeapValue::Some(_) => true,
                     HeapValue::Ok(_) => true,
@@ -415,6 +419,7 @@ macro_rules! define_heap_types {
                     HeapValue::Atomic(_) => "atomic",
                     HeapValue::Lazy(_) => "lazy",
                     HeapValue::Channel(_) => "channel",
+                    HeapValue::Char(_) => "char",
                     HeapValue::Enum(_) => "enum",
                     HeapValue::Some(_) => "option",
                     HeapValue::Ok(_) => "result",

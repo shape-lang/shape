@@ -197,9 +197,11 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
     }
 }
 
-/// Print a NaN-boxed value to stdout with a newline
-pub extern "C" fn jit_print(value_bits: u64) {
-    let s = if is_number(value_bits) {
+/// Format a NaN-boxed value as a string for display
+fn format_nan_boxed(value_bits: u64) -> String {
+    use shape_value::tags::{get_tag, is_tagged, sign_extend_i48, get_payload, TAG_INT};
+
+    if is_number(value_bits) {
         let n = unbox_number(value_bits);
         if n.is_finite() && n == n.trunc() && n.abs() < 1e15 {
             format!("{}", n as i64)
@@ -212,6 +214,9 @@ pub extern "C" fn jit_print(value_bits: u64) {
         "false".to_string()
     } else if value_bits == TAG_NULL {
         "null".to_string()
+    } else if is_tagged(value_bits) && get_tag(value_bits) == TAG_INT {
+        let int_val = sign_extend_i48(get_payload(value_bits));
+        format!("{}", int_val)
     } else {
         match heap_kind(value_bits) {
             Some(HK_STRING) => {
@@ -222,25 +227,30 @@ pub extern "C" fn jit_print(value_bits: u64) {
                 let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
                 let elems: Vec<String> = arr
                     .iter()
-                    .map(|&bits| {
-                        if is_number(bits) {
-                            let n = unbox_number(bits);
-                            if n.is_finite() && n == n.trunc() && n.abs() < 1e15 {
-                                format!("{}", n as i64)
-                            } else {
-                                format!("{}", n)
-                            }
-                        } else {
-                            "[value]".to_string()
-                        }
-                    })
+                    .map(|&bits| format_nan_boxed(bits))
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
+            Some(HK_OK) => {
+                let inner = unsafe { *jit_unbox::<u64>(value_bits) };
+                format!("Ok({})", format_nan_boxed(inner))
+            }
+            Some(HK_ERR) => {
+                let inner = unsafe { *jit_unbox::<u64>(value_bits) };
+                format!("Err({})", format_nan_boxed(inner))
+            }
+            Some(HK_SOME) => {
+                let inner = unsafe { *jit_unbox::<u64>(value_bits) };
+                format!("Some({})", format_nan_boxed(inner))
+            }
             _ => "[object]".to_string(),
         }
-    };
-    println!("{}", s);
+    }
+}
+
+/// Print a NaN-boxed value to stdout with a newline
+pub extern "C" fn jit_print(value_bits: u64) {
+    println!("{}", format_nan_boxed(value_bits));
 }
 
 /// Convert value to number

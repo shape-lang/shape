@@ -68,6 +68,7 @@ impl BytecodeCompiler {
             borrow_checker: crate::borrow_checker::BorrowChecker::new(),
             ref_locals: HashSet::new(),
             exclusive_ref_locals: HashSet::new(),
+            inferred_ref_locals: HashSet::new(),
             const_locals: HashSet::new(),
             const_module_bindings: HashSet::new(),
             immutable_locals: HashSet::new(),

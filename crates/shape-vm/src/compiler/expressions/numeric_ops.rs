@@ -224,9 +224,14 @@ pub(super) fn typed_opcode_for(op: &BinaryOp, nt: NumericType) -> Option<OpCode>
             BinaryOp::Mul => Some(OpCode::MulTyped),
             BinaryOp::Div => Some(OpCode::DivTyped),
             BinaryOp::Mod => Some(OpCode::ModTyped),
-            BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
-                Some(OpCode::CmpTyped)
-            }
+            // Use regular int comparison opcodes for width types — they return
+            // booleans (CmpTyped returns an ordering which callers don't expect).
+            // Sub-64-bit unsigned values are non-negative in i64 so signed
+            // comparison is correct for u8/u16/u32. u64 is handled separately.
+            BinaryOp::Greater => Some(OpCode::GtInt),
+            BinaryOp::Less => Some(OpCode::LtInt),
+            BinaryOp::GreaterEq => Some(OpCode::GteInt),
+            BinaryOp::LessEq => Some(OpCode::LteInt),
             BinaryOp::Equal => Some(OpCode::EqInt),
             BinaryOp::NotEqual => Some(OpCode::NeqInt),
             _ => None,

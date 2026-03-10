@@ -86,6 +86,9 @@ impl VirtualMachine {
                 crate::bytecode::Constant::String(s) => {
                     return self.push_vw(ValueWord::from_string(Arc::new(s.clone())));
                 }
+                crate::bytecode::Constant::Char(c) => {
+                    return self.push_vw(ValueWord::from_char(*c));
+                }
                 crate::bytecode::Constant::Decimal(d) => {
                     return self.push_vw(ValueWord::from_decimal(*d));
                 }

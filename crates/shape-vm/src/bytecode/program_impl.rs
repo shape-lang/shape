@@ -232,7 +232,8 @@ impl BytecodeProgram {
                     | Operand::ColumnAccess { .. }
                     | Operand::MatrixDims { .. }
                     | Operand::Width(_)
-                    | Operand::TypedLocal(_, _) => {}
+                    | Operand::TypedLocal(_, _)
+                    | Operand::TypedModuleBinding(_, _) => {}
                 }
             }
         }

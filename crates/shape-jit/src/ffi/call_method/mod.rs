@@ -201,7 +201,6 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         } else {
             return method_bits; // Return non-string value as-is
         };
-
         // Pop args from stack
         let mut args = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {

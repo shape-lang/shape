@@ -339,6 +339,7 @@ impl<'a> ValueFormatter<'a> {
                     "<channel:receiver>".to_string()
                 }
             }
+            Some(HeapValue::Char(c)) => c.to_string(),
             None => format!("<unknown:{}>", value.type_name()),
         }
     }

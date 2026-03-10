@@ -4,11 +4,22 @@
 /// Provides mathematical constants and convenience functions
 /// built on the trig intrinsics (sin, cos, tan, etc.).
 
-// ===== Constants =====
+// ===== Constants (exported as functions) =====
 
-let PI = 3.141592653589793;
-let E = 2.718281828459045;
-let TAU = 6.283185307179586;
+/// The mathematical constant pi (3.14159...).
+pub fn PI() {
+    3.141592653589793
+}
+
+/// Euler's number e (2.71828...).
+pub fn E() {
+    2.718281828459045
+}
+
+/// Tau = 2 * pi (6.28318...).
+pub fn TAU() {
+    6.283185307179586
+}
 
 // ===== Trig Wrappers (delegate to intrinsics) =====
 
@@ -114,9 +125,9 @@ pub fn sign(x) {
 /// @returns Angle in degrees
 ///
 /// @example
-/// degrees(PI)  // 180
-pub fn degrees(radians) {
-    radians * 180 / PI
+/// degrees(PI())  // 180
+pub fn degrees(rad) {
+    rad * 180.0 / 3.141592653589793
 }
 
 /// Convert degrees to radians.
@@ -127,5 +138,5 @@ pub fn degrees(radians) {
 /// @example
 /// radians(180)  // PI
 pub fn radians(deg) {
-    deg * PI / 180
+    deg * 3.141592653589793 / 180.0
 }

@@ -560,7 +560,22 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     }
 
     pub(crate) fn compile_length(&mut self) -> Result<(), String> {
-        if let Some(value) = self.stack_pop() {
+        if self.stack_depth == 0 {
+            return Ok(());
+        }
+        // Peek type before popping to decide path
+        let hint = self.peek_stack_type();
+
+        if matches!(hint, StorageHint::String | StorageHint::Unknown) {
+            // String or unknown type — use jit_length FFI which handles
+            // arrays, strings, objects, etc.
+            let value = self.stack_pop_boxed().unwrap();
+            let inst = self.builder.ins().call(self.ffi.length, &[value]);
+            let result = self.builder.inst_results(inst)[0];
+            self.stack_push_typed(result, StorageHint::Float64);
+        } else {
+            // Known array — inline the fast path
+            let value = self.stack_pop().unwrap();
             let result = self.inline_array_length(value);
             self.stack_push_typed(result, StorageHint::Int64);
         }

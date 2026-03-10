@@ -12,7 +12,8 @@ use std::collections::HashMap;
 
 use super::super::ffi::math::{
     jit_acos, jit_asin, jit_atan, jit_cos, jit_exp, jit_generic_add, jit_generic_div,
-    jit_generic_mul, jit_generic_sub, jit_ln, jit_log, jit_pow, jit_sin, jit_tan,
+    jit_generic_eq, jit_generic_mul, jit_generic_neq, jit_generic_sub, jit_ln, jit_log, jit_pow,
+    jit_sin, jit_tan,
 };
 use super::intrinsics::{
     jit_intrinsic_correlation, jit_intrinsic_covariance, jit_intrinsic_max, jit_intrinsic_mean,
@@ -43,6 +44,8 @@ pub fn register_math_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_generic_sub", jit_generic_sub as *const u8);
     builder.symbol("jit_generic_mul", jit_generic_mul as *const u8);
     builder.symbol("jit_generic_div", jit_generic_div as *const u8);
+    builder.symbol("jit_generic_eq", jit_generic_eq as *const u8);
+    builder.symbol("jit_generic_neq", jit_generic_neq as *const u8);
 
     // Series comparison functions
     builder.symbol(
@@ -150,13 +153,15 @@ pub fn declare_math_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<St
         ffi_funcs.insert("jit_pow".to_string(), func_id);
     }
 
-    // Generic binary ops for non-numeric types (Time + Duration, Series ops, etc.)
-    // jit_generic_add/sub/mul/div(a_bits, b_bits) -> u64
+    // Generic binary ops for non-numeric types (Time + Duration, Series ops, String concat/eq, etc.)
+    // jit_generic_add/sub/mul/div/eq/neq(a_bits, b_bits) -> u64
     for name in [
         "jit_generic_add",
         "jit_generic_sub",
         "jit_generic_mul",
         "jit_generic_div",
+        "jit_generic_eq",
+        "jit_generic_neq",
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // a
