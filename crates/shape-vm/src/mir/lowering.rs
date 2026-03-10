@@ -5,6 +5,7 @@
 
 use super::types::*;
 use shape_ast::ast::{self, Expr, Span, Spanned, Statement};
+use shape_runtime::closure::EnvironmentAnalyzer;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +134,14 @@ impl MirBuilder {
     /// Look up the current slot for a named local.
     pub fn lookup_local(&self, name: &str) -> Option<SlotId> {
         self.local_slots.get(name).copied()
+    }
+
+    pub fn visible_named_locals(&self) -> Vec<String> {
+        self.local_slots
+            .keys()
+            .filter(|name| !name.starts_with("__mir_"))
+            .cloned()
+            .collect()
     }
 
     /// Get or allocate a stable field index for a property name.
@@ -1056,6 +1065,63 @@ fn emit_task_boundary_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>
     builder.push_stmt(StatementKind::TaskBoundary(operands), span);
 }
 
+fn emit_closure_capture_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+    if operands.is_empty() {
+        return;
+    }
+    builder.push_stmt(StatementKind::ClosureCapture(operands), span);
+}
+
+fn collect_function_expr_capture_operands(
+    builder: &MirBuilder,
+    params: &[ast::FunctionParameter],
+    body: &[Statement],
+) -> Vec<Operand> {
+    let proto_def = ast::FunctionDef {
+        name: "__mir_closure".to_string(),
+        name_span: Span::DUMMY,
+        declaring_module_path: None,
+        doc_comment: None,
+        type_params: None,
+        params: params.to_vec(),
+        return_type: None,
+        body: body.to_vec(),
+        annotations: vec![],
+        where_clause: None,
+        is_async: false,
+        is_comptime: false,
+    };
+
+    let mut captured_vars =
+        EnvironmentAnalyzer::analyze_function(&proto_def, &builder.visible_named_locals());
+    captured_vars.sort();
+    captured_vars.dedup();
+
+    let mut operands = Vec::new();
+    for name in captured_vars {
+        let Some(slot) = builder.lookup_local(&name) else {
+            continue;
+        };
+        let operand = Operand::Copy(Place::Local(slot));
+        if !operands.contains(&operand) {
+            operands.push(operand);
+        }
+    }
+    operands
+}
+
+fn lower_function_expr(
+    builder: &mut MirBuilder,
+    params: &[ast::FunctionParameter],
+    body: &[Statement],
+    temp: SlotId,
+    span: Span,
+) {
+    let captures = collect_function_expr_capture_operands(builder, params, body);
+    emit_closure_capture_if_needed(builder, captures, span);
+    assign_none(builder, temp, span);
+}
+
 fn lower_await_expr(builder: &mut MirBuilder, inner: &Expr, temp: SlotId, span: Span) {
     let operand = lower_expr_to_operand(builder, inner, true);
     builder.push_stmt(
@@ -1419,6 +1485,9 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         Expr::InstanceOf { expr, .. } => {
             lower_exprs_to_aggregate(builder, temp, [expr.as_ref()], span);
         }
+        Expr::FunctionExpr { params, body, .. } => {
+            lower_function_expr(builder, params, body, temp, span);
+        }
         Expr::Spread(expr, _) => {
             let expr_slot = lower_expr_to_temp(builder, expr);
             assign_copy_from_slot(builder, temp, expr_slot, span);
@@ -1513,8 +1582,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         }
         _ => {
             // Remaining fallbacks are the intentionally deferred step-4 forms:
-            // closures/captures, queries/comprehensions,
-            // and comptime-evaluated expression families.
+            // queries/comprehensions and comptime-evaluated expression families.
             builder.mark_fallback();
             assign_none(builder, temp, span);
         }
@@ -3855,6 +3923,56 @@ mod tests {
         assert!(
             analysis.errors.is_empty(),
             "shared async-scope captures should stay borrow-clean, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_closure_capture_of_reference_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let r = &x
+                    let f = || r
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "closure creation should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure),
+            "expected closure-capture reference escape, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_closure_capture_of_owned_value_stays_clean() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let f = || x
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "owned-value closure capture should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis.errors.is_empty(),
+            "owned-value closure capture should stay borrow-clean, got {:?}",
             analysis.errors
         );
     }

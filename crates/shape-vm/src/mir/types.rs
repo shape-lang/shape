@@ -273,6 +273,9 @@ pub enum StatementKind {
     /// Cross a task boundary (spawn/join branch capture).
     /// Operands are the values flowing into the spawned task.
     TaskBoundary(Vec<Operand>),
+    /// Capture values into a closure environment.
+    /// Operands are the outer values flowing into the closure.
+    ClosureCapture(Vec<Operand>),
     /// No-op (placeholder, padding).
     Nop,
 }

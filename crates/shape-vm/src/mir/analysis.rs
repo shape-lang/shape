@@ -74,6 +74,8 @@ pub enum BorrowErrorKind {
     WriteWhileBorrowed,
     /// Reference escapes its scope.
     ReferenceEscape,
+    /// Reference escapes into a closure environment.
+    ReferenceEscapeIntoClosure,
     /// Use after move.
     UseAfterMove,
     /// Cannot share exclusive reference across task boundary.
