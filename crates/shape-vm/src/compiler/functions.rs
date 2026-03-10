@@ -4718,6 +4718,145 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_function_records_mir_async_let_exclusive_ref_task_boundary() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                async function spawn_conflict() {
+                    let mut x = 1
+                    async let fut = &mut x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR task-boundary error should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("task boundary"),
+            "expected task-boundary error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("spawn_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary),
+            "expected MIR task-boundary error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_async_let_nested_task_boundary() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                async function compute(a, &mut b, c) {
+                    return a
+                }
+                async function spawn_nested_conflict() {
+                    let mut x = 1
+                    async let fut = compute(1, &mut x, 3)
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[1] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        for item in &program.items {
+            if let Item::Function(func, _) = item {
+                compiler
+                    .register_function(func)
+                    .expect("function should register");
+            }
+        }
+        let err = compiler
+            .compile_function(func)
+            .expect_err("nested MIR task-boundary error should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("task boundary"),
+            "expected task-boundary error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("spawn_nested_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary),
+            "expected MIR task-boundary error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_join_task_boundary() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                async function join_conflict() {
+                    let mut x = 1
+                    await join all {
+                        &mut x,
+                        2,
+                    }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("join MIR task-boundary error should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("task boundary"),
+            "expected task-boundary error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("join_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary),
+            "expected MIR task-boundary error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
     fn test_compile_function_records_mir_assignment_expr_write_conflict() {
         let program = shape_ast::parser::parse_program(
             r#"

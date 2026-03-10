@@ -128,6 +128,11 @@ fn update_liveness_for_statement(live: &mut HashSet<SlotId>, kind: &StatementKin
             // Drop uses the place
             live.insert(place.root_local());
         }
+        StatementKind::TaskBoundary(operands) => {
+            for operand in operands {
+                add_operand_uses(live, operand);
+            }
+        }
         StatementKind::Nop => {}
     }
 }

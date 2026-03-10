@@ -47,6 +47,8 @@ pub struct BorrowFacts {
     pub reads: Vec<(u32, Place, shape_ast::ast::Span)>,
     /// Loans that flow into the dedicated return slot and would escape.
     pub escaped_loans: Vec<(u32, shape_ast::ast::Span)>,
+    /// Exclusive loans captured across an async/task boundary.
+    pub task_boundary_loans: Vec<(u32, shape_ast::ast::Span)>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
@@ -121,6 +123,17 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                     for (lid, info) in &facts.loan_info {
                         if place.conflicts_with(&info.borrowed_place) {
                             facts.invalidates.push((stmt.point.0, *lid));
+                        }
+                    }
+                }
+                StatementKind::TaskBoundary(operands) => {
+                    for loan_id in local_loans_from_operands(&slot_loans, operands) {
+                        if facts
+                            .loan_info
+                            .get(&loan_id)
+                            .is_some_and(|info| info.kind == BorrowKind::Exclusive)
+                        {
+                            facts.task_boundary_loans.push((loan_id, stmt.span));
                         }
                     }
                 }
@@ -206,9 +219,40 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
             }
         },
         StatementKind::Drop(place) => place_nested_read_places(place, &mut reads),
+        StatementKind::TaskBoundary(operands) => {
+            for operand in operands {
+                operand_read_places(operand, &mut reads);
+            }
+        }
         StatementKind::Nop => {}
     }
     reads
+}
+
+fn local_loans_from_operand(slot_loans: &HashMap<SlotId, Vec<u32>>, operand: &Operand) -> Vec<u32> {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => slot_loans
+            .get(&place.root_local())
+            .cloned()
+            .unwrap_or_default(),
+        Operand::Constant(_) => Vec::new(),
+    }
+}
+
+fn local_loans_from_operands(
+    slot_loans: &HashMap<SlotId, Vec<u32>>,
+    operands: &[Operand],
+) -> Vec<u32> {
+    let mut loans = Vec::new();
+    let mut seen = HashSet::new();
+    for operand in operands {
+        for loan in local_loans_from_operand(slot_loans, operand) {
+            if seen.insert(loan) {
+                loans.push(loan);
+            }
+        }
+    }
+    loans
 }
 
 fn update_slot_loan_aliases(
@@ -418,6 +462,22 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         let info = &facts.loan_info[loan_id];
         errors.push(BorrowError {
             kind: BorrowErrorKind::ReferenceEscape,
+            span: *span,
+            conflicting_loan: LoanId(*loan_id),
+            loan_span: info.span,
+            last_use_span: last_use_span_for_loan(facts, *loan_id),
+            repairs: Vec::new(),
+        });
+    }
+
+    let mut seen_task_boundary = std::collections::HashSet::new();
+    for (loan_id, span) in &facts.task_boundary_loans {
+        if !seen_task_boundary.insert((*loan_id, span.start, span.end)) {
+            continue;
+        }
+        let info = &facts.loan_info[loan_id];
+        errors.push(BorrowError {
+            kind: BorrowErrorKind::ExclusiveRefAcrossTaskBoundary,
             span: *span,
             conflicting_loan: LoanId(*loan_id),
             loan_span: info.span,
@@ -684,6 +744,7 @@ fn statement_borrow_place(kind: &StatementKind) -> Option<&Place> {
 fn statement_dest_place(kind: &StatementKind) -> Option<&Place> {
     match kind {
         StatementKind::Assign(place, _) | StatementKind::Drop(place) => Some(place),
+        StatementKind::TaskBoundary(_) => None,
         StatementKind::Nop => None,
     }
 }

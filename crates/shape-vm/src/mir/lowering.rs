@@ -14,6 +14,12 @@ struct MirLoopContext {
     break_value_slot: Option<SlotId>,
 }
 
+#[derive(Debug, Clone)]
+struct TaskBoundaryCaptureScope {
+    outer_locals_cutoff: u16,
+    operands: Vec<Operand>,
+}
+
 /// Builder for constructing a MIR function from AST.
 pub struct MirBuilder {
     /// Name of the function being built.
@@ -50,6 +56,8 @@ pub struct MirBuilder {
     scope_bindings: Vec<Vec<(String, Option<SlotId>)>>,
     /// Active loop control-flow targets.
     loop_contexts: Vec<MirLoopContext>,
+    /// Active task-boundary capture scopes for async lowering.
+    task_boundary_capture_scopes: Vec<TaskBoundaryCaptureScope>,
     /// Exit block for the enclosing function.
     exit_block: Option<BasicBlockId>,
     /// Function span.
@@ -89,6 +97,7 @@ impl MirBuilder {
             param_slots: Vec::new(),
             scope_bindings: vec![Vec::new()],
             loop_contexts: Vec::new(),
+            task_boundary_capture_scopes: Vec::new(),
             exit_block: None,
             span,
             had_fallbacks: false,
@@ -201,6 +210,48 @@ impl MirBuilder {
 
     fn current_loop(&self) -> Option<MirLoopContext> {
         self.loop_contexts.last().copied()
+    }
+
+    pub fn push_task_boundary_capture_scope(&mut self) {
+        self.task_boundary_capture_scopes
+            .push(TaskBoundaryCaptureScope {
+                outer_locals_cutoff: self.next_local,
+                operands: Vec::new(),
+            });
+    }
+
+    pub fn pop_task_boundary_capture_scope(&mut self) -> Vec<Operand> {
+        self.task_boundary_capture_scopes
+            .pop()
+            .map(|scope| scope.operands)
+            .unwrap_or_default()
+    }
+
+    pub fn record_task_boundary_operand(&mut self, operand: Operand) {
+        for scope in &mut self.task_boundary_capture_scopes {
+            if !operand_crosses_task_boundary(scope.outer_locals_cutoff, &operand) {
+                continue;
+            }
+            if !scope.operands.contains(&operand) {
+                scope.operands.push(operand.clone());
+            }
+        }
+    }
+
+    pub fn record_task_boundary_reference_capture(
+        &mut self,
+        reference_slot: SlotId,
+        borrowed_place: &Place,
+    ) {
+        let reference_operand = Operand::Copy(Place::Local(reference_slot));
+        for scope in &mut self.task_boundary_capture_scopes {
+            if borrowed_place.root_local().0 >= scope.outer_locals_cutoff {
+                continue;
+            }
+            if !scope.operands.contains(&reference_operand) {
+                scope.operands.push(reference_operand.clone());
+            }
+        }
     }
 
     /// Allocate a new program point.
@@ -482,7 +533,15 @@ fn assign_copy_from_slot(
 }
 
 fn lower_expr_as_moved_operand(builder: &mut MirBuilder, expr: &Expr) -> Operand {
-    Operand::Move(Place::Local(lower_expr_to_temp(builder, expr)))
+    if let Some(place) = lower_expr_to_place(builder, expr) {
+        let operand = Operand::Move(place);
+        builder.record_task_boundary_operand(operand.clone());
+        operand
+    } else {
+        let operand = Operand::Move(Place::Local(lower_expr_to_temp(builder, expr)));
+        builder.record_task_boundary_operand(operand.clone());
+        operand
+    }
 }
 
 fn lower_exprs_to_aggregate<'a>(
@@ -942,7 +1001,9 @@ fn lower_assign_target_place(builder: &mut MirBuilder, target: &Expr) -> Option<
 /// This is a simplified version — full expression lowering will be more complex.
 fn lower_expr_to_place(builder: &mut MirBuilder, expr: &Expr) -> Option<Place> {
     match expr {
-        Expr::Identifier(name, _) => builder.lookup_local(name).map(Place::Local),
+        Expr::Identifier(name, _) | Expr::PatternRef(name, _) => {
+            builder.lookup_local(name).map(Place::Local)
+        }
         Expr::PropertyAccess {
             object, property, ..
         } => {
@@ -968,19 +1029,94 @@ fn lower_expr_to_place(builder: &mut MirBuilder, expr: &Expr) -> Option<Place> {
 
 fn lower_expr_to_operand(builder: &mut MirBuilder, expr: &Expr, prefer_move: bool) -> Operand {
     if let Some(place) = lower_expr_to_place(builder, expr) {
-        if prefer_move {
+        let operand = if prefer_move {
             Operand::Move(place)
         } else {
             Operand::Copy(place)
-        }
+        };
+        builder.record_task_boundary_operand(operand.clone());
+        operand
     } else {
         let slot = lower_expr_to_temp(builder, expr);
         let place = Place::Local(slot);
-        if prefer_move {
+        let operand = if prefer_move {
             Operand::Move(place)
         } else {
             Operand::Copy(place)
+        };
+        builder.record_task_boundary_operand(operand.clone());
+        operand
+    }
+}
+
+fn emit_task_boundary_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+    if operands.is_empty() {
+        return;
+    }
+    builder.push_stmt(StatementKind::TaskBoundary(operands), span);
+}
+
+fn lower_await_expr(builder: &mut MirBuilder, inner: &Expr, temp: SlotId, span: Span) {
+    let operand = lower_expr_to_operand(builder, inner, true);
+    builder.push_stmt(
+        StatementKind::Assign(Place::Local(temp), Rvalue::Use(operand)),
+        span,
+    );
+}
+
+fn lower_async_scope_expr(builder: &mut MirBuilder, inner: &Expr, temp: SlotId, span: Span) {
+    let inner_slot = lower_expr_to_temp(builder, inner);
+    assign_copy_from_slot(builder, temp, inner_slot, span);
+}
+
+fn lower_async_let_expr(
+    builder: &mut MirBuilder,
+    async_let: &ast::AsyncLetExpr,
+    temp: SlotId,
+    span: Span,
+) {
+    builder.push_task_boundary_capture_scope();
+    let _ = lower_expr_to_operand(builder, &async_let.expr, true);
+    let captures = builder.pop_task_boundary_capture_scope();
+    emit_task_boundary_if_needed(builder, captures, async_let.span);
+
+    let future_slot = builder.alloc_local(async_let.name.clone(), LocalTypeInfo::Unknown);
+    assign_none(builder, future_slot, async_let.span);
+    assign_copy_from_slot(builder, temp, future_slot, span);
+}
+
+fn lower_join_expr(builder: &mut MirBuilder, join_expr: &ast::JoinExpr, temp: SlotId, span: Span) {
+    if join_expr.branches.is_empty() {
+        assign_none(builder, temp, span);
+        return;
+    }
+
+    let mut branch_operands = Vec::with_capacity(join_expr.branches.len());
+    for branch in &join_expr.branches {
+        builder.push_task_boundary_capture_scope();
+        for annotation in &branch.annotations {
+            for arg in &annotation.args {
+                let _ = lower_expr_to_temp(builder, arg);
+            }
         }
+        let branch_operand = lower_expr_to_operand(builder, &branch.expr, true);
+        let captures = builder.pop_task_boundary_capture_scope();
+        emit_task_boundary_if_needed(builder, captures, branch.expr.span());
+        branch_operands.push(branch_operand);
+    }
+
+    builder.push_stmt(
+        StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(branch_operands)),
+        join_expr.span,
+    );
+}
+
+fn operand_crosses_task_boundary(outer_locals_cutoff: u16, operand: &Operand) -> bool {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+            place.root_local().0 < outer_locals_cutoff
+        }
+        Operand::Constant(_) => false,
     }
 }
 
@@ -1010,6 +1146,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 .map(Place::Local)
                 .map(Operand::Copy)
                 .unwrap_or(Operand::Constant(MirConstant::None));
+            builder.record_task_boundary_operand(operand.clone());
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::Use(operand)),
                 span,
@@ -1021,6 +1158,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 .map(Place::Local)
                 .map(Operand::Copy)
                 .unwrap_or(Operand::Constant(MirConstant::None));
+            builder.record_task_boundary_operand(operand.clone());
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::Use(operand)),
                 span,
@@ -1028,6 +1166,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         }
         Expr::PropertyAccess { object, .. } => {
             if let Some(place) = lower_expr_to_place(builder, expr) {
+                builder.record_task_boundary_operand(Operand::Copy(place.clone()));
                 assign_copy_from_place(builder, temp, place, span);
             } else {
                 lower_exprs_to_aggregate(builder, temp, [object.as_ref()], span);
@@ -1040,6 +1179,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
             ..
         } => {
             if let Some(place) = lower_expr_to_place(builder, expr) {
+                builder.record_task_boundary_operand(Operand::Copy(place.clone()));
                 assign_copy_from_place(builder, temp, place, span);
             } else {
                 let mut operands = vec![
@@ -1075,9 +1215,13 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 Place::Local(lower_expr_to_temp(builder, inner))
             };
             builder.push_stmt(
-                StatementKind::Assign(Place::Local(temp), Rvalue::Borrow(kind, borrowed_place)),
+                StatementKind::Assign(
+                    Place::Local(temp),
+                    Rvalue::Borrow(kind, borrowed_place.clone()),
+                ),
                 *ref_span,
             );
+            builder.record_task_boundary_reference_capture(temp, &borrowed_place);
         }
         Expr::UnaryOp { op, operand, .. } => {
             let operand = lower_expr_to_operand(builder, operand, false);
@@ -1355,9 +1499,21 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 span,
             );
         }
+        Expr::Await(inner, _) => {
+            lower_await_expr(builder, inner, temp, span);
+        }
+        Expr::Join(join_expr, _) => {
+            lower_join_expr(builder, join_expr, temp, span);
+        }
+        Expr::AsyncLet(async_let, _) => {
+            lower_async_let_expr(builder, async_let, temp, span);
+        }
+        Expr::AsyncScope(inner, _) => {
+            lower_async_scope_expr(builder, inner, temp, span);
+        }
         _ => {
             // Remaining fallbacks are the intentionally deferred step-4 forms:
-            // closures/captures, queries/comprehensions, async/task boundaries,
+            // closures/captures, queries/comprehensions,
             // and comptime-evaluated expression families.
             builder.mark_fallback();
             assign_none(builder, temp, span);
@@ -3562,6 +3718,143 @@ mod tests {
         assert!(
             analysis.errors.is_empty(),
             "simple branch-local borrows should stay borrow-clean here, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_async_let_exclusive_ref_task_boundary_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                async function test() {
+                    let mut x = 1
+                    async let fut = &mut x
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "async let with direct ref capture should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary),
+            "expected task-boundary exclusive-ref error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_async_let_nested_ref_binding_task_boundary_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                async function test() {
+                    let mut x = 1
+                    async let fut = {
+                        let r = &mut x
+                        r
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "async let block bodies should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary),
+            "expected nested task-boundary exclusive-ref error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_async_let_shared_ref_task_boundary_stays_clean() {
+        let lowering = lower_parsed_function(
+            r#"
+                async function test() {
+                    let x = 1
+                    async let fut = &x
+                    await fut
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "shared-ref async let should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            !analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary),
+            "shared refs should not trigger task-boundary exclusivity errors, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_join_exclusive_ref_task_boundary_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                async function test() {
+                    let mut x = 1
+                    await join all {
+                        &mut x,
+                        2,
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "join branches should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary),
+            "expected join task-boundary exclusive-ref error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_async_scope_with_async_let_stays_supported() {
+        let lowering = lower_parsed_function(
+            r#"
+                async function test() {
+                    let x = 1
+                    async scope {
+                        async let fut = &x
+                        await fut
+                    }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "async scope with supported async forms should stay in the MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis.errors.is_empty(),
+            "shared async-scope captures should stay borrow-clean, got {:?}",
             analysis.errors
         );
     }

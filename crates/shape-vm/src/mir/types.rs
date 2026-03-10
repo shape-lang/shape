@@ -270,6 +270,9 @@ pub enum StatementKind {
     /// Drop a place (scope exit, explicit drop).
     /// Generates invalidation facts for any loans on this place.
     Drop(Place),
+    /// Cross a task boundary (spawn/join branch capture).
+    /// Operands are the values flowing into the spawned task.
+    TaskBoundary(Vec<Operand>),
     /// No-op (placeholder, padding).
     Nop,
 }
