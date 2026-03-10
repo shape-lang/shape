@@ -3189,6 +3189,7 @@ mod tests {
     use crate::bytecode::Constant;
     use crate::compiler::{BytecodeCompiler, ParamPassMode};
     use crate::executor::{VMConfig, VirtualMachine};
+    use crate::mir::analysis::BorrowErrorKind;
     use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
     use shape_ast::ast::{DestructurePattern, FunctionParameter, Item, Span};
     use shape_value::ValueWord;
@@ -4409,5 +4410,42 @@ mod tests {
             .expect("borrow analysis should be recorded");
         assert_eq!(analysis.loans.len(), 0);
         assert!(analysis.errors.is_empty(), "analysis should be clean");
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_borrow_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function clash() {
+                    let mut x = 1
+                    let shared = &x
+                    let exclusive = &mut x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let _ = compiler.compile_function(func);
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("clash")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ConflictSharedExclusive),
+            "expected MIR borrow conflict, got {:?}",
+            analysis.errors
+        );
     }
 }

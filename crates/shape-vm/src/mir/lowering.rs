@@ -5,6 +5,7 @@
 
 use super::types::*;
 use shape_ast::ast::{self, Expr, Span, Spanned, Statement};
+use std::collections::HashMap;
 
 /// Builder for constructing a MIR function from AST.
 pub struct MirBuilder {
@@ -20,12 +21,20 @@ pub struct MirBuilder {
     next_block_id: u32,
     /// Next local slot to allocate.
     next_local: u16,
+    /// Dedicated return slot used by explicit `return` statements.
+    return_slot: SlotId,
     /// Next program point.
     next_point: u32,
     /// Next loan ID.
     next_loan: u32,
     /// Local variable name → slot mapping.
     locals: Vec<(String, SlotId, LocalTypeInfo)>,
+    /// Active local name → slot mapping for place resolution.
+    local_slots: HashMap<String, SlotId>,
+    /// Stable field indices for property-place lowering.
+    field_indices: HashMap<String, FieldIdx>,
+    /// Next field index to allocate.
+    next_field_idx: u16,
     /// Parameter slots.
     param_slots: Vec<SlotId>,
     /// Function span.
@@ -34,16 +43,25 @@ pub struct MirBuilder {
 
 impl MirBuilder {
     pub fn new(name: String, span: Span) -> Self {
+        let return_slot = SlotId(0);
         MirBuilder {
             name,
             blocks: Vec::new(),
             current_stmts: Vec::new(),
             current_block: BasicBlockId(0),
             next_block_id: 1,
-            next_local: 0,
+            next_local: 1,
+            return_slot,
             next_point: 0,
             next_loan: 0,
-            locals: Vec::new(),
+            locals: vec![(
+                "__mir_return".to_string(),
+                return_slot,
+                LocalTypeInfo::Unknown,
+            )],
+            local_slots: HashMap::new(),
+            field_indices: HashMap::new(),
+            next_field_idx: 0,
             param_slots: Vec::new(),
             span,
         }
@@ -54,7 +72,18 @@ impl MirBuilder {
         let slot = SlotId(self.next_local);
         self.next_local += 1;
         self.locals.push((name, slot, type_info));
+        if let Some((name, _, _)) = self.locals.last()
+            && !name.starts_with("__mir_")
+        {
+            self.local_slots.insert(name.clone(), slot);
+        }
         slot
+    }
+
+    /// Allocate a temporary local slot that should not participate in name resolution.
+    pub fn alloc_temp(&mut self, type_info: LocalTypeInfo) -> SlotId {
+        let name = format!("__mir_tmp{}", self.next_local);
+        self.alloc_local(name, type_info)
     }
 
     /// Register a parameter slot.
@@ -62,6 +91,26 @@ impl MirBuilder {
         let slot = self.alloc_local(name, type_info);
         self.param_slots.push(slot);
         slot
+    }
+
+    /// Look up the current slot for a named local.
+    pub fn lookup_local(&self, name: &str) -> Option<SlotId> {
+        self.local_slots.get(name).copied()
+    }
+
+    /// Get or allocate a stable field index for a property name.
+    pub fn field_idx(&mut self, property: &str) -> FieldIdx {
+        if let Some(idx) = self.field_indices.get(property).copied() {
+            return idx;
+        }
+        let idx = FieldIdx(self.next_field_idx);
+        self.next_field_idx += 1;
+        self.field_indices.insert(property.to_string(), idx);
+        idx
+    }
+
+    pub fn return_slot(&self) -> SlotId {
+        self.return_slot
     }
 
     /// Allocate a new program point.
@@ -180,12 +229,9 @@ fn lower_statement(builder: &mut MirBuilder, stmt: &Statement, exit_block: Basic
         }
         Statement::Return(value, span) => {
             if let Some(expr) = value {
-                let result_slot = lower_expr_to_temp(builder, expr);
+                let result = lower_expr_to_operand(builder, expr, true);
                 builder.push_stmt(
-                    StatementKind::Assign(
-                        Place::Local(SlotId(0)), // return slot convention
-                        Rvalue::Use(Operand::Move(Place::Local(result_slot))),
-                    ),
+                    StatementKind::Assign(Place::Local(builder.return_slot()), Rvalue::Use(result)),
                     *span,
                 );
             }
@@ -230,15 +276,14 @@ fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span
     let slot = builder.alloc_local(name, type_info);
 
     if let Some(init_expr) = &decl.value {
-        let init_slot = lower_expr_to_temp(builder, init_expr);
         // Determine operand based on ownership modifier
         let operand = match decl.ownership {
-            ast::OwnershipModifier::Move => Operand::Move(Place::Local(init_slot)),
-            ast::OwnershipModifier::Clone => Operand::Copy(Place::Local(init_slot)),
+            ast::OwnershipModifier::Move => lower_expr_to_operand(builder, init_expr, true),
+            ast::OwnershipModifier::Clone => lower_expr_to_operand(builder, init_expr, false),
             ast::OwnershipModifier::Inferred => {
                 // For `var`: decision deferred to liveness analysis
                 // For `let`: default to Move
-                Operand::Move(Place::Local(init_slot))
+                lower_expr_to_operand(builder, init_expr, true)
             }
         };
         let rvalue = match decl.ownership {
@@ -251,23 +296,70 @@ fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span
 
 /// Lower an assignment statement.
 fn lower_assignment(builder: &mut MirBuilder, assign: &ast::Assignment, span: Span) {
-    let value_slot = lower_expr_to_temp(builder, &assign.value);
-    // Simplified: assume LHS is a simple identifier for now
-    // Full place resolution will be added for field/index assignments
+    let Some(name) = assign.pattern.as_identifier() else {
+        builder.push_stmt(StatementKind::Nop, span);
+        return;
+    };
+    let Some(slot) = builder.lookup_local(name) else {
+        builder.push_stmt(StatementKind::Nop, span);
+        return;
+    };
+    let value = lower_expr_to_operand(builder, &assign.value, true);
     builder.push_stmt(
-        StatementKind::Assign(
-            Place::Local(SlotId(0)), // placeholder - real resolution TBD
-            Rvalue::Use(Operand::Move(Place::Local(value_slot))),
-        ),
+        StatementKind::Assign(Place::Local(slot), Rvalue::Use(value)),
         span,
     );
 }
 
 /// Lower an expression and return the temp slot it was placed in.
 /// This is a simplified version — full expression lowering will be more complex.
+fn lower_expr_to_place(builder: &mut MirBuilder, expr: &Expr) -> Option<Place> {
+    match expr {
+        Expr::Identifier(name, _) => builder.lookup_local(name).map(Place::Local),
+        Expr::PropertyAccess {
+            object, property, ..
+        } => {
+            let base = lower_expr_to_place(builder, object)?;
+            Some(Place::Field(Box::new(base), builder.field_idx(property)))
+        }
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            ..
+        } => {
+            if end_index.is_some() {
+                return None;
+            }
+            let base = lower_expr_to_place(builder, object)?;
+            let index_operand = lower_expr_to_operand(builder, index, false);
+            Some(Place::Index(Box::new(base), Box::new(index_operand)))
+        }
+        _ => None,
+    }
+}
+
+fn lower_expr_to_operand(builder: &mut MirBuilder, expr: &Expr, prefer_move: bool) -> Operand {
+    if let Some(place) = lower_expr_to_place(builder, expr) {
+        if prefer_move {
+            Operand::Move(place)
+        } else {
+            Operand::Copy(place)
+        }
+    } else {
+        let slot = lower_expr_to_temp(builder, expr);
+        let place = Place::Local(slot);
+        if prefer_move {
+            Operand::Move(place)
+        } else {
+            Operand::Copy(place)
+        }
+    }
+}
+
 fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
     let span = expr.span();
-    let temp = builder.alloc_local("_tmp".to_string(), LocalTypeInfo::Unknown);
+    let temp = builder.alloc_temp(LocalTypeInfo::Unknown);
 
     match expr {
         Expr::Literal(_, _) => {
@@ -279,13 +371,14 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 span,
             );
         }
-        Expr::Identifier(_, _) => {
-            // Reference to a local — would resolve to actual slot
+        Expr::Identifier(name, _) => {
+            let operand = builder
+                .lookup_local(name)
+                .map(Place::Local)
+                .map(Operand::Copy)
+                .unwrap_or(Operand::Constant(MirConstant::None));
             builder.push_stmt(
-                StatementKind::Assign(
-                    Place::Local(temp),
-                    Rvalue::Use(Operand::Copy(Place::Local(SlotId(0)))),
-                ),
+                StatementKind::Assign(Place::Local(temp), Rvalue::Use(operand)),
                 span,
             );
         }
@@ -294,32 +387,23 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
             is_mutable,
             span: ref_span,
         } => {
-            let inner_slot = lower_expr_to_temp(builder, inner);
             let kind = if *is_mutable {
                 BorrowKind::Exclusive
             } else {
                 BorrowKind::Shared
             };
+            let borrowed_place = lower_expr_to_place(builder, inner)
+                .unwrap_or_else(|| Place::Local(lower_expr_to_temp(builder, inner)));
             builder.push_stmt(
-                StatementKind::Assign(
-                    Place::Local(temp),
-                    Rvalue::Borrow(kind, Place::Local(inner_slot)),
-                ),
+                StatementKind::Assign(Place::Local(temp), Rvalue::Borrow(kind, borrowed_place)),
                 *ref_span,
             );
         }
         Expr::BinaryOp { left, right, .. } => {
-            let l = lower_expr_to_temp(builder, left);
-            let r = lower_expr_to_temp(builder, right);
+            let l = lower_expr_to_operand(builder, left, false);
+            let r = lower_expr_to_operand(builder, right, false);
             builder.push_stmt(
-                StatementKind::Assign(
-                    Place::Local(temp),
-                    Rvalue::BinaryOp(
-                        BinOp::Add, // simplified — real op from AST
-                        Operand::Copy(Place::Local(l)),
-                        Operand::Copy(Place::Local(r)),
-                    ),
-                ),
+                StatementKind::Assign(Place::Local(temp), Rvalue::BinaryOp(BinOp::Add, l, r)),
                 span,
             );
         }
@@ -489,8 +573,10 @@ impl StatementSpan for Statement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mir::analysis::BorrowErrorKind;
     use crate::mir::cfg::ControlFlowGraph;
     use crate::mir::liveness;
+    use crate::mir::solver;
     use shape_ast::ast::{self, DestructurePattern, OwnershipModifier, VarKind};
 
     fn span() -> Span {
@@ -502,7 +588,7 @@ mod tests {
         let mir = lower_function("empty", &[], &[], span());
         assert_eq!(mir.name, "empty");
         assert!(mir.blocks.len() >= 2); // entry + exit
-        assert_eq!(mir.num_locals, 0);
+        assert_eq!(mir.num_locals, 1);
     }
 
     #[test]
@@ -555,5 +641,169 @@ mod tests {
         let cfg = ControlFlowGraph::build(&mir);
         let _liveness = liveness::compute_liveness(&mir, &cfg);
         // The MIR lowers and liveness computes without panic
+    }
+
+    #[test]
+    fn test_lower_reference_to_identifier_borrows_original_local() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("r".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test", &[], &body, span());
+        let borrow_place = mir
+            .blocks
+            .iter()
+            .flat_map(|block| block.statements.iter())
+            .find_map(|stmt| match &stmt.kind {
+                StatementKind::Assign(_, Rvalue::Borrow(_, place)) => Some(place.clone()),
+                _ => None,
+            })
+            .expect("expected borrow statement");
+        assert_eq!(borrow_place, Place::Local(SlotId(1)));
+    }
+
+    #[test]
+    fn test_lowered_local_borrow_conflict_is_visible_to_solver() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("exclusive".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        is_mutable: true,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test", &[], &body, span());
+        let analysis = solver::analyze(&mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ConflictSharedExclusive),
+            "expected shared/exclusive conflict, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_property_borrows_preserve_disjoint_places() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("pair".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(0), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("left".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::PropertyAccess {
+                            object: Box::new(Expr::Identifier("pair".to_string(), span())),
+                            property: "left".to_string(),
+                            optional: false,
+                            span: span(),
+                        }),
+                        is_mutable: true,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("right".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::PropertyAccess {
+                            object: Box::new(Expr::Identifier("pair".to_string(), span())),
+                            property: "right".to_string(),
+                            optional: false,
+                            span: span(),
+                        }),
+                        is_mutable: true,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test", &[], &body, span());
+        let analysis = solver::analyze(&mir);
+        assert!(
+            analysis.errors.is_empty(),
+            "disjoint field borrows should not conflict, got {:?}",
+            analysis.errors
+        );
     }
 }
