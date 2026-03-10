@@ -451,6 +451,50 @@ pub enum VariableKind {
     },
 }
 
+/// Source-level ownership class for a binding slot.
+///
+/// This tracks how the binding was declared, independent of the value's type.
+/// Later storage planning uses this to decide whether a slot can stay direct,
+/// must allow aliasing, or should preserve reference representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BindingOwnershipClass {
+    /// `let` — immutable owned binding.
+    OwnedImmutable,
+    /// `let mut` — mutable owned binding.
+    OwnedMutable,
+    /// `var` — flexible/aliasable binding whose storage is chosen later.
+    Flexible,
+}
+
+/// Planned runtime storage strategy for a binding slot.
+///
+/// `Deferred` is the initial state for ordinary bindings until a later planner
+/// decides whether the slot can stay direct or must be upgraded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BindingStorageClass {
+    Deferred,
+    Direct,
+    UniqueHeap,
+    SharedCow,
+    Reference,
+}
+
+/// Ownership/storage metadata for a binding slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindingSemantics {
+    pub ownership_class: BindingOwnershipClass,
+    pub storage_class: BindingStorageClass,
+}
+
+impl BindingSemantics {
+    pub const fn deferred(ownership_class: BindingOwnershipClass) -> Self {
+        Self {
+            ownership_class,
+            storage_class: BindingStorageClass::Deferred,
+        }
+    }
+}
+
 /// Type information for a variable
 #[derive(Debug, Clone)]
 pub struct VariableTypeInfo {
@@ -715,8 +759,17 @@ pub struct TypeTracker {
     /// Type info for module_binding variables (by slot index)
     binding_types: HashMap<u16, VariableTypeInfo>,
 
+    /// Binding ownership/storage metadata for locals.
+    local_binding_semantics: HashMap<u16, BindingSemantics>,
+
+    /// Binding ownership/storage metadata for module bindings.
+    binding_semantics: HashMap<u16, BindingSemantics>,
+
     /// Scoped local type mappings (for scope push/pop)
     local_type_scopes: Vec<HashMap<u16, VariableTypeInfo>>,
+
+    /// Scoped local binding metadata mappings (for scope push/pop).
+    local_binding_semantic_scopes: Vec<HashMap<u16, BindingSemantics>>,
 
     /// Function return types (function name -> type name)
     function_return_types: HashMap<String, String>,
@@ -733,7 +786,10 @@ impl TypeTracker {
             schema_registry,
             local_types: HashMap::new(),
             binding_types: HashMap::new(),
+            local_binding_semantics: HashMap::new(),
+            binding_semantics: HashMap::new(),
             local_type_scopes: vec![HashMap::new()],
+            local_binding_semantic_scopes: vec![HashMap::new()],
             function_return_types: HashMap::new(),
             object_field_contracts: HashMap::new(),
         }
@@ -762,6 +818,7 @@ impl TypeTracker {
     /// Push a new scope for local types
     pub fn push_scope(&mut self) {
         self.local_type_scopes.push(HashMap::new());
+        self.local_binding_semantic_scopes.push(HashMap::new());
     }
 
     /// Pop a scope, removing local type info for that scope
@@ -770,6 +827,11 @@ impl TypeTracker {
             // Remove type info for variables in this scope
             for slot in scope.keys() {
                 self.local_types.remove(slot);
+            }
+        }
+        if let Some(scope) = self.local_binding_semantic_scopes.pop() {
+            for slot in scope.keys() {
+                self.local_binding_semantics.remove(slot);
             }
         }
     }
@@ -800,6 +862,43 @@ impl TypeTracker {
         self.binding_types.insert(slot, resolved_info);
     }
 
+    /// Set ownership/storage metadata for a local binding.
+    pub fn set_local_binding_semantics(&mut self, slot: u16, semantics: BindingSemantics) {
+        if let Some(scope) = self.local_binding_semantic_scopes.last_mut() {
+            scope.insert(slot, semantics);
+        }
+        self.local_binding_semantics.insert(slot, semantics);
+    }
+
+    /// Set ownership/storage metadata for a module binding.
+    pub fn set_binding_semantics(&mut self, slot: u16, semantics: BindingSemantics) {
+        self.binding_semantics.insert(slot, semantics);
+    }
+
+    /// Update only the storage strategy for a local binding.
+    pub fn set_local_binding_storage_class(
+        &mut self,
+        slot: u16,
+        storage_class: BindingStorageClass,
+    ) {
+        if let Some(existing) = self.local_binding_semantics.get_mut(&slot) {
+            existing.storage_class = storage_class;
+        }
+        for scope in self.local_binding_semantic_scopes.iter_mut().rev() {
+            if let Some(existing) = scope.get_mut(&slot) {
+                existing.storage_class = storage_class;
+                break;
+            }
+        }
+    }
+
+    /// Update only the storage strategy for a module binding.
+    pub fn set_binding_storage_class(&mut self, slot: u16, storage_class: BindingStorageClass) {
+        if let Some(existing) = self.binding_semantics.get_mut(&slot) {
+            existing.storage_class = storage_class;
+        }
+    }
+
     /// Get type info for a local variable
     pub fn get_local_type(&self, slot: u16) -> Option<&VariableTypeInfo> {
         self.local_types.get(&slot)
@@ -808,6 +907,16 @@ impl TypeTracker {
     /// Get type info for a module_binding variable
     pub fn get_binding_type(&self, slot: u16) -> Option<&VariableTypeInfo> {
         self.binding_types.get(&slot)
+    }
+
+    /// Get ownership/storage metadata for a local binding.
+    pub fn get_local_binding_semantics(&self, slot: u16) -> Option<&BindingSemantics> {
+        self.local_binding_semantics.get(&slot)
+    }
+
+    /// Get ownership/storage metadata for a module binding.
+    pub fn get_binding_semantics(&self, slot: u16) -> Option<&BindingSemantics> {
+        self.binding_semantics.get(&slot)
     }
 
     /// Register a function's return type
@@ -935,8 +1044,11 @@ impl TypeTracker {
     /// Clear all local type info (for function entry)
     pub fn clear_locals(&mut self) {
         self.local_types.clear();
+        self.local_binding_semantics.clear();
         self.local_type_scopes.clear();
         self.local_type_scopes.push(HashMap::new());
+        self.local_binding_semantic_scopes.clear();
+        self.local_binding_semantic_scopes.push(HashMap::new());
     }
 
     /// Register an inline object schema from field names
@@ -1116,6 +1228,80 @@ mod tests {
         // Outer still exists, inner removed
         assert!(tracker.get_local_type(0).is_some());
         assert!(tracker.get_local_type(1).is_none());
+    }
+
+    #[test]
+    fn test_binding_semantics_scope_tracking() {
+        let mut tracker = TypeTracker::empty();
+
+        tracker.set_local_binding_semantics(
+            0,
+            BindingSemantics::deferred(BindingOwnershipClass::OwnedImmutable),
+        );
+        tracker.set_binding_semantics(
+            5,
+            BindingSemantics::deferred(BindingOwnershipClass::Flexible),
+        );
+
+        tracker.push_scope();
+        tracker.set_local_binding_semantics(
+            1,
+            BindingSemantics::deferred(BindingOwnershipClass::OwnedMutable),
+        );
+
+        assert_eq!(
+            tracker
+                .get_local_binding_semantics(0)
+                .map(|s| s.ownership_class),
+            Some(BindingOwnershipClass::OwnedImmutable)
+        );
+        assert_eq!(
+            tracker
+                .get_local_binding_semantics(1)
+                .map(|s| s.ownership_class),
+            Some(BindingOwnershipClass::OwnedMutable)
+        );
+        assert_eq!(
+            tracker.get_binding_semantics(5).map(|s| s.ownership_class),
+            Some(BindingOwnershipClass::Flexible)
+        );
+
+        tracker.pop_scope();
+
+        assert!(tracker.get_local_binding_semantics(1).is_none());
+        assert!(tracker.get_local_binding_semantics(0).is_some());
+        assert!(tracker.get_binding_semantics(5).is_some());
+    }
+
+    #[test]
+    fn test_binding_storage_class_updates() {
+        let mut tracker = TypeTracker::empty();
+        tracker.set_local_binding_semantics(
+            0,
+            BindingSemantics::deferred(BindingOwnershipClass::OwnedMutable),
+        );
+        tracker.set_binding_semantics(
+            4,
+            BindingSemantics::deferred(BindingOwnershipClass::Flexible),
+        );
+
+        tracker.set_local_binding_storage_class(0, BindingStorageClass::Reference);
+        tracker.set_binding_storage_class(4, BindingStorageClass::SharedCow);
+
+        assert_eq!(
+            tracker
+                .get_local_binding_semantics(0)
+                .map(|s| s.storage_class),
+            Some(BindingStorageClass::Reference)
+        );
+        assert_eq!(
+            tracker.get_binding_semantics(4).map(|s| s.storage_class),
+            Some(BindingStorageClass::SharedCow)
+        );
+
+        tracker.clear_locals();
+        assert!(tracker.get_local_binding_semantics(0).is_none());
+        assert!(tracker.get_binding_semantics(4).is_some());
     }
 
     #[test]

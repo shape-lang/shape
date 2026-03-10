@@ -102,6 +102,7 @@ impl BytecodeCompiler {
                             &var_decl.pattern
                         {
                             if let Some(local_idx) = self.resolve_local(name) {
+                                self.apply_binding_semantics_for_decl(local_idx, true, var_decl);
                                 // Track type annotation (so drop tracking can resolve the type)
                                 if let Some(ref type_ann) = var_decl.type_annotation {
                                     if let Some(type_name) =

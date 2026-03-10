@@ -3278,6 +3278,7 @@ impl BytecodeCompiler {
                     // Top-level: create module_binding variable
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         let binding_idx = self.get_or_create_module_binding(name);
+                        self.apply_binding_semantics_for_decl(binding_idx, false, var_decl);
 
                         // Emit StoreModuleBindingTyped for width-typed bindings,
                         // otherwise emit regular StoreModuleBinding.
@@ -3410,6 +3411,11 @@ impl BytecodeCompiler {
                             if let Some(local_idx) = self.resolve_local(name) {
                                 self.immutable_locals.insert(local_idx);
                             }
+                        }
+                    }
+                    if let Some(name) = var_decl.pattern.as_identifier() {
+                        if let Some(local_idx) = self.resolve_local(name) {
+                            self.apply_binding_semantics_for_decl(local_idx, true, var_decl);
                         }
                     }
 
@@ -4577,5 +4583,53 @@ mod tests {
         compiler.set_permission_set(Some(shape_abi_v1::PermissionSet::full()));
         // Should not fail
         let _result = compiler.compile(&program);
+    }
+
+    fn test_decl(kind: shape_ast::ast::VarKind, is_mut: bool) -> shape_ast::ast::VariableDecl {
+        shape_ast::ast::VariableDecl {
+            kind,
+            is_mut,
+            pattern: shape_ast::ast::DestructurePattern::Identifier(
+                "x".to_string(),
+                shape_ast::ast::Span::DUMMY,
+            ),
+            type_annotation: None,
+            value: None,
+            ownership: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_binding_semantics_for_decl_maps_let_var_classes() {
+        let let_semantics = BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(
+            shape_ast::ast::VarKind::Let,
+            false,
+        ));
+        assert_eq!(
+            let_semantics.ownership_class,
+            crate::type_tracking::BindingOwnershipClass::OwnedImmutable
+        );
+        assert_eq!(
+            let_semantics.storage_class,
+            crate::type_tracking::BindingStorageClass::Deferred
+        );
+
+        let let_mut_semantics = BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(
+            shape_ast::ast::VarKind::Let,
+            true,
+        ));
+        assert_eq!(
+            let_mut_semantics.ownership_class,
+            crate::type_tracking::BindingOwnershipClass::OwnedMutable
+        );
+
+        let var_semantics = BytecodeCompiler::binding_semantics_for_var_decl(&test_decl(
+            shape_ast::ast::VarKind::Var,
+            false,
+        ));
+        assert_eq!(
+            var_semantics.ownership_class,
+            crate::type_tracking::BindingOwnershipClass::Flexible
+        );
     }
 }
