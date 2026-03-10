@@ -76,6 +76,8 @@ pub enum BorrowErrorKind {
     ReferenceEscape,
     /// Reference stored into an array.
     ReferenceStoredInArray,
+    /// Reference stored into an object or struct literal.
+    ReferenceStoredInObject,
     /// Reference escapes into a closure environment.
     ReferenceEscapeIntoClosure,
     /// Use after move.

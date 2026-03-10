@@ -99,6 +99,14 @@ pub fn generate_repairs(
                 diff: None,
             });
         }
+        BorrowErrorKind::ReferenceStoredInObject => {
+            candidates.push(RepairCandidate {
+                kind: RepairKind::Clone,
+                description: "store an owned value in the object or struct instead of a reference"
+                    .to_string(),
+                diff: None,
+            });
+        }
         _ => {
             // Fallback: suggest extract
             candidates.push(RepairCandidate {

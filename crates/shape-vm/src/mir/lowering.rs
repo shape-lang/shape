@@ -1079,6 +1079,13 @@ fn emit_array_store_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, 
     builder.push_stmt(StatementKind::ArrayStore(operands), span);
 }
 
+fn emit_object_store_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+    if operands.is_empty() {
+        return;
+    }
+    builder.push_stmt(StatementKind::ObjectStore(operands), span);
+}
+
 fn collect_function_expr_capture_operands(
     builder: &MirBuilder,
     params: &[ast::FunctionParameter],
@@ -1474,9 +1481,10 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 }
             }
             builder.push_stmt(
-                StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands)),
+                StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                 span,
             );
+            emit_object_store_if_needed(builder, operands, span);
         }
         Expr::Array(elements, _) => {
             lower_array_expr(builder, elements, temp, span);
@@ -1556,7 +1564,15 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
             lower_exprs_to_aggregate(builder, temp, params.iter().map(|(_, expr)| expr), span);
         }
         Expr::StructLiteral { fields, .. } => {
-            lower_exprs_to_aggregate(builder, temp, fields.iter().map(|(_, expr)| expr), span);
+            let operands: Vec<_> = fields
+                .iter()
+                .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr))
+                .collect();
+            builder.push_stmt(
+                StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
+                span,
+            );
+            emit_object_store_if_needed(builder, operands, span);
         }
         Expr::Annotated {
             annotation, target, ..
@@ -2701,6 +2717,112 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
             "expected indirect array-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_object_direct_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let obj = { value: &x }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "object literals with ref fields should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected object-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_object_indirect_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let r = &x
+                    let obj = { value: r }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "indirect object ref storage should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected indirect object-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_struct_direct_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let point = Point { value: &x }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "struct literals with ref fields should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected struct-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_struct_indirect_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let r = &x
+                    let point = Point { value: r }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "indirect struct ref storage should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected indirect struct-stored-reference error, got {:?}",
             analysis.errors
         );
     }

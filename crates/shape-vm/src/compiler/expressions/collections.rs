@@ -111,6 +111,16 @@ fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
+    fn reject_direct_reference_storage(&self, expr: &Expr, message: &'static str) -> Result<()> {
+        if let Expr::Reference { span, .. } = expr {
+            return Err(ShapeError::SemanticError {
+                message: message.to_string(),
+                location: Some(self.span_to_source_location(*span)),
+            });
+        }
+        Ok(())
+    }
+
     /// Compile an array expression
     pub(super) fn compile_expr_array(&mut self, elements: &[Expr]) -> Result<()> {
         // Reject references in array literals — refs are scoped borrows
@@ -179,6 +189,18 @@ impl BytecodeCompiler {
         entries: &[shape_ast::ast::ObjectEntry],
     ) -> Result<()> {
         use shape_ast::ast::ObjectEntry;
+        const OBJECT_REF_STORAGE_ERROR: &str = "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
+
+        for entry in entries {
+            match entry {
+                ObjectEntry::Field { value, .. } => {
+                    self.reject_direct_reference_storage(value, OBJECT_REF_STORAGE_ERROR)?;
+                }
+                ObjectEntry::Spread(expr) => {
+                    self.reject_direct_reference_storage(expr, OBJECT_REF_STORAGE_ERROR)?;
+                }
+            }
+        }
 
         let has_spreads = entries.iter().any(|e| matches!(e, ObjectEntry::Spread(_)));
 
@@ -526,7 +548,11 @@ impl BytecodeCompiler {
         fields: &[(String, Expr)],
         literal_span: shape_ast::ast::Span,
     ) -> Result<()> {
+        const OBJECT_REF_STORAGE_ERROR: &str = "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
         let literal_loc = self.span_to_source_location(literal_span);
+        for (_, value) in fields {
+            self.reject_direct_reference_storage(value, OBJECT_REF_STORAGE_ERROR)?;
+        }
         // Look up struct type definition, resolving through type aliases if needed
         let struct_info = self.struct_types.get(type_name).cloned().or_else(|| {
             self.type_aliases

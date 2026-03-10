@@ -160,6 +160,10 @@ impl BytecodeCompiler {
                 "cannot store a reference in an array — references are scoped borrows that cannot escape into collections. Use owned values instead",
                 "store owned values in the array instead of references",
             ),
+            crate::mir::analysis::BorrowErrorKind::ReferenceStoredInObject => (
+                "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead",
+                "store owned values in the object or struct instead of references",
+            ),
             crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure => (
                 "[B0003] reference cannot escape into a closure",
                 "capture an owned value instead of a reference",
@@ -185,6 +189,7 @@ impl BytecodeCompiler {
             }
             crate::mir::analysis::BorrowErrorKind::ReferenceEscape
             | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInArray
+            | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInObject
             | crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure => {
                 "reference originates here"
             }
@@ -4996,6 +5001,181 @@ mod tests {
                 .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
             "expected MIR indirect array-storage error, got {:?}",
             analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_object_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function object_escape() {
+                    let x = 1
+                    let obj = { value: &x }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("object reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
+            "expected object-storage error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("object_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected MIR object-storage error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_indirect_object_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function indirect_object_escape() {
+                    let x = 1
+                    let r = &x
+                    let obj = { value: r }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("indirect object reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
+            "expected object-storage error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("indirect_object_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected MIR indirect object-storage error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_struct_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                type Point { value: int }
+
+                function struct_escape() {
+                    let x = 1
+                    let point = Point { value: &x }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[1] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_item_with_context(&program.items[0], false)
+            .expect("struct type should register");
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("struct reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
+            "expected struct-storage error, got {}",
+            err
+        );
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("struct_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
+            "expected MIR struct-storage error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_top_level_object_direct_reference_storage_rejected() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                let x = 1
+                let obj = { value: &x }
+            "#,
+        )
+        .expect("parse failed");
+
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("top-level object reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
+            "expected top-level object-storage error, got {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_compile_top_level_struct_direct_reference_storage_rejected() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                type Point { value: int }
+                let x = 1
+                let point = Point { value: &x }
+            "#,
+        )
+        .expect("parse failed");
+
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("top-level struct reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
+            "expected top-level struct-storage error, got {}",
+            err
         );
     }
 

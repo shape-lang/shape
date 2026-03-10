@@ -279,6 +279,9 @@ pub enum StatementKind {
     /// Store values into an array literal.
     /// Operands are the array elements being stored.
     ArrayStore(Vec<Operand>),
+    /// Store values into an object or struct literal.
+    /// Operands are the fields/spreads being stored.
+    ObjectStore(Vec<Operand>),
     /// No-op (placeholder, padding).
     Nop,
 }
