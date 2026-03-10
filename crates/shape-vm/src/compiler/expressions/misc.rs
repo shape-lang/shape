@@ -101,8 +101,7 @@ impl BytecodeCompiler {
                                 if var_decl.kind == shape_ast::ast::VarKind::Const {
                                     self.const_locals.insert(local_idx);
                                 }
-                                if var_decl.kind == shape_ast::ast::VarKind::Let
-                                    && !var_decl.is_mut
+                                if var_decl.kind == shape_ast::ast::VarKind::Let && !var_decl.is_mut
                                 {
                                     self.immutable_locals.insert(local_idx);
                                 }
@@ -632,6 +631,7 @@ impl BytecodeCompiler {
             // In a full implementation, each branch would be wrapped in a closure
             // and SpawnTask would schedule it. For now, we compile the expression
             // and emit SpawnTask which creates a Future from the top-of-stack value.
+            self.plan_flexible_binding_escape_from_expr(&branch.expr);
             self.compile_expr(&branch.expr)?;
             self.emit(Instruction::simple(OpCode::SpawnTask));
         }
@@ -803,10 +803,8 @@ impl BytecodeCompiler {
                 OpCode::StoreLocal,
                 Some(Operand::Local(local_idx)),
             ));
-            self.type_tracker.set_local_binding_semantics(
-                local_idx,
-                Self::owned_mutable_binding_semantics(),
-            );
+            self.type_tracker
+                .set_local_binding_semantics(local_idx, Self::owned_mutable_binding_semantics());
 
             // Compile body statements.
             // The last statement's value stays on the stack as the iteration result.

@@ -79,10 +79,7 @@ impl BytecodeCompiler {
             .type_tracker
             .get_local_type(scrutinee_local)
             .and_then(|info| Self::storage_hint_to_numeric_type(info.storage_hint));
-        let scrutinee_type_info = self
-            .type_tracker
-            .get_local_type(scrutinee_local)
-            .cloned();
+        let scrutinee_type_info = self.type_tracker.get_local_type(scrutinee_local).cloned();
 
         for arm in &match_expr.arms {
             // Pattern check — restore scrutinee schema before checking
@@ -180,6 +177,7 @@ impl BytecodeCompiler {
         //
         // Walk the RHS expression to detect exclusive references crossing the boundary.
         self.check_task_boundary_safety(&async_let.expr, async_let.span)?;
+        self.plan_flexible_binding_escape_from_expr(&async_let.expr);
 
         // Compile the RHS expression
         self.compile_expr(&async_let.expr)?;
@@ -194,10 +192,8 @@ impl BytecodeCompiler {
             Some(Operand::Local(local_idx)),
         ));
         self.immutable_locals.insert(local_idx);
-        self.type_tracker.set_local_binding_semantics(
-            local_idx,
-            Self::owned_immutable_binding_semantics(),
-        );
+        self.type_tracker
+            .set_local_binding_semantics(local_idx, Self::owned_immutable_binding_semantics());
 
         // `async let` is an expression — push the future back onto the stack
         self.emit(Instruction::new(

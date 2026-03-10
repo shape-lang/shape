@@ -724,6 +724,9 @@ impl BytecodeCompiler {
                     self.plan_flexible_binding_escape_from_expr(element);
                 }
             }
+            Expr::ListComprehension(comp, _) => {
+                self.plan_flexible_binding_escape_from_expr(&comp.element);
+            }
             Expr::Object(entries, _) => {
                 for entry in entries {
                     match entry {
@@ -736,10 +739,23 @@ impl BytecodeCompiler {
                     }
                 }
             }
+            Expr::Block(block, _) => {
+                if let Some(BlockItem::Expression(expr)) = block.items.last() {
+                    self.plan_flexible_binding_escape_from_expr(expr);
+                }
+            }
             Expr::Spread(inner, _)
+            | Expr::Annotated { target: inner, .. }
+            | Expr::AsyncScope(inner, _)
             | Expr::TypeAssertion { expr: inner, .. }
             | Expr::UsingImpl { expr: inner, .. }
             | Expr::TryOperator(inner, _) => self.plan_flexible_binding_escape_from_expr(inner),
+            Expr::If(if_expr, _) => {
+                self.plan_flexible_binding_escape_from_expr(&if_expr.then_branch);
+                if let Some(else_branch) = if_expr.else_branch.as_deref() {
+                    self.plan_flexible_binding_escape_from_expr(else_branch);
+                }
+            }
             Expr::Conditional {
                 then_expr,
                 else_expr,
@@ -749,6 +765,34 @@ impl BytecodeCompiler {
                 if let Some(else_expr) = else_expr.as_deref() {
                     self.plan_flexible_binding_escape_from_expr(else_expr);
                 }
+            }
+            Expr::While(while_expr, _) => {
+                self.plan_flexible_binding_escape_from_expr(&while_expr.body);
+            }
+            Expr::For(for_expr, _) => {
+                self.plan_flexible_binding_escape_from_expr(&for_expr.body);
+            }
+            Expr::Loop(loop_expr, _) => {
+                self.plan_flexible_binding_escape_from_expr(&loop_expr.body);
+            }
+            Expr::Let(let_expr, _) => {
+                self.plan_flexible_binding_escape_from_expr(&let_expr.body);
+            }
+            Expr::Assign(assign_expr, _) => {
+                self.plan_flexible_binding_escape_from_expr(&assign_expr.value);
+            }
+            Expr::Match(match_expr, _) => {
+                for arm in &match_expr.arms {
+                    self.plan_flexible_binding_escape_from_expr(&arm.body);
+                }
+            }
+            Expr::Join(join_expr, _) => {
+                for branch in &join_expr.branches {
+                    self.plan_flexible_binding_escape_from_expr(&branch.expr);
+                }
+            }
+            Expr::AsyncLet(async_let, _) => {
+                self.plan_flexible_binding_escape_from_expr(&async_let.expr);
             }
             Expr::EnumConstructor { payload, .. } => match payload {
                 shape_ast::ast::EnumConstructorPayload::Unit => {}
@@ -763,6 +807,21 @@ impl BytecodeCompiler {
                     }
                 }
             },
+            Expr::StructLiteral { fields, .. } => {
+                for (_, value) in fields {
+                    self.plan_flexible_binding_escape_from_expr(value);
+                }
+            }
+            Expr::TableRows(rows, _) => {
+                for row in rows {
+                    for value in row {
+                        self.plan_flexible_binding_escape_from_expr(value);
+                    }
+                }
+            }
+            Expr::FromQuery(from_query, _) => {
+                self.plan_flexible_binding_escape_from_expr(&from_query.select);
+            }
             _ => {}
         }
     }
@@ -3609,6 +3668,71 @@ mod tests {
 
         let expr = Expr::Array(
             vec![Expr::Identifier("value".to_string(), Span::DUMMY)],
+            Span::DUMMY,
+        );
+        compiler.plan_flexible_binding_escape_from_expr(&expr);
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+    }
+
+    #[test]
+    fn test_escape_planner_marks_if_branch_identifier_as_unique_heap() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        let expr = Expr::If(
+            Box::new(shape_ast::ast::IfExpr {
+                condition: Box::new(Expr::Literal(
+                    shape_ast::ast::Literal::Bool(true),
+                    Span::DUMMY,
+                )),
+                then_branch: Box::new(Expr::Identifier("value".to_string(), Span::DUMMY)),
+                else_branch: None,
+            }),
+            Span::DUMMY,
+        );
+        compiler.plan_flexible_binding_escape_from_expr(&expr);
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+    }
+
+    #[test]
+    fn test_escape_planner_marks_async_let_rhs_identifier_as_unique_heap() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        let expr = Expr::AsyncLet(
+            Box::new(shape_ast::ast::AsyncLetExpr {
+                name: "task".to_string(),
+                expr: Box::new(Expr::Identifier("value".to_string(), Span::DUMMY)),
+                span: Span::DUMMY,
+            }),
             Span::DUMMY,
         );
         compiler.plan_flexible_binding_escape_from_expr(&expr);
