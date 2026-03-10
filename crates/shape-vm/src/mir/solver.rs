@@ -35,18 +35,23 @@ pub struct BorrowFacts {
     pub invalidates: Vec<(u32, u32)>,
     /// (loan_id, point) — the loan (reference) is used at this point
     pub use_of_loan: Vec<(u32, u32)>,
+    /// Source span for each statement point.
+    pub point_spans: HashMap<u32, shape_ast::ast::Span>,
     /// Loan metadata for error reporting.
     pub loan_info: HashMap<u32, LoanInfo>,
     /// Points where two loans conflict (same place, incompatible borrows).
     pub potential_conflicts: Vec<(u32, u32)>, // (loan_a, loan_b)
     /// Writes that may conflict with active loans: (point, place, span).
     pub writes: Vec<(u32, Place, shape_ast::ast::Span)>,
+    /// Reads from owner places that may conflict with active exclusive loans.
+    pub reads: Vec<(u32, Place, shape_ast::ast::Span)>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
 pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
     let mut facts = BorrowFacts::default();
     let mut next_loan = 0u32;
+    let mut loan_ref_slots: HashMap<u32, SlotId> = HashMap::new();
 
     // Extract CFG edges from the block structure
     for block in &mir.blocks {
@@ -71,12 +76,16 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
     // Extract loan facts from statements
     for block in &mir.blocks {
         for stmt in &block.statements {
+            facts.point_spans.insert(stmt.point.0, stmt.span);
             match &stmt.kind {
-                StatementKind::Assign(_dest, Rvalue::Borrow(kind, place)) => {
+                StatementKind::Assign(dest, Rvalue::Borrow(kind, place)) => {
                     let loan_id = next_loan;
                     next_loan += 1;
 
                     facts.loan_issued_at.push((loan_id, stmt.point.0));
+                    if let Place::Local(slot) = dest {
+                        loan_ref_slots.insert(loan_id, *slot);
+                    }
                     facts.loan_info.insert(
                         loan_id,
                         LoanInfo {
@@ -107,6 +116,19 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                 }
                 StatementKind::Nop => {}
             }
+
+            for read_place in statement_read_places(&stmt.kind) {
+                facts
+                    .reads
+                    .push((stmt.point.0, read_place.clone(), stmt.span));
+                if let Place::Local(slot) = read_place {
+                    for (loan_id, ref_slot) in &loan_ref_slots {
+                        if *ref_slot == slot {
+                            facts.use_of_loan.push((*loan_id, stmt.point.0));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -129,6 +151,54 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
     }
 
     facts
+}
+
+fn operand_read_places<'a>(operand: &'a Operand, reads: &mut Vec<Place>) {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) => {
+            reads.push(place.clone());
+            place_nested_read_places(place, reads);
+        }
+        Operand::Constant(_) => {}
+    }
+}
+
+fn place_nested_read_places(place: &Place, reads: &mut Vec<Place>) {
+    match place {
+        Place::Local(_) => {}
+        Place::Field(base, _) | Place::Deref(base) => {
+            place_nested_read_places(base, reads);
+        }
+        Place::Index(base, index) => {
+            place_nested_read_places(base, reads);
+            operand_read_places(index, reads);
+        }
+    }
+}
+
+fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
+    let mut reads = Vec::new();
+    match kind {
+        StatementKind::Assign(_, rvalue) => match rvalue {
+            Rvalue::Use(operand) | Rvalue::Clone(operand) => {
+                operand_read_places(operand, &mut reads)
+            }
+            Rvalue::Borrow(_, _) => {}
+            Rvalue::BinaryOp(_, lhs, rhs) => {
+                operand_read_places(lhs, &mut reads);
+                operand_read_places(rhs, &mut reads);
+            }
+            Rvalue::UnaryOp(_, operand) => operand_read_places(operand, &mut reads),
+            Rvalue::Aggregate(operands) => {
+                for operand in operands {
+                    operand_read_places(operand, &mut reads);
+                }
+            }
+        },
+        StatementKind::Drop(place) => place_nested_read_places(place, &mut reads),
+        StatementKind::Nop => {}
+    }
+    reads
 }
 
 /// Run the Datafrog solver to compute loan liveness and detect errors.
@@ -232,7 +302,7 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
                     span: info_b.span,
                     conflicting_loan: LoanId(loan_a),
                     loan_span: info_a.span,
-                    last_use_span: None,
+                    last_use_span: last_use_span_for_loan(facts, loan_a),
                     repairs: Vec::new(),
                 });
             }
@@ -259,7 +329,34 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
                 span: *span,
                 conflicting_loan: *loan,
                 loan_span: info.span,
-                last_use_span: None,
+                last_use_span: last_use_span_for_loan(facts, loan.0),
+                repairs: Vec::new(),
+            });
+            break;
+        }
+    }
+
+    let mut seen_reads = std::collections::HashSet::new();
+    for (point, place, span) in &facts.reads {
+        let point_key = Point(*point);
+        let Some(loans) = loans_at_point.get(&point_key) else {
+            continue;
+        };
+        for loan in loans {
+            let info = &facts.loan_info[&loan.0];
+            if info.kind != BorrowKind::Exclusive || !place.conflicts_with(&info.borrowed_place) {
+                continue;
+            }
+            let key = (*point, loan.0);
+            if !seen_reads.insert(key) {
+                continue;
+            }
+            errors.push(BorrowError {
+                kind: BorrowErrorKind::ReadWhileExclusivelyBorrowed,
+                span: *span,
+                conflicting_loan: *loan,
+                loan_span: info.span,
+                last_use_span: last_use_span_for_loan(facts, loan.0),
                 repairs: Vec::new(),
             });
             break;
@@ -361,6 +458,15 @@ fn compute_ownership_decisions(
     }
 
     decisions
+}
+
+fn last_use_span_for_loan(facts: &BorrowFacts, loan_id: u32) -> Option<shape_ast::ast::Span> {
+    facts
+        .use_of_loan
+        .iter()
+        .filter(|(candidate, _)| *candidate == loan_id)
+        .filter_map(|(_, point)| facts.point_spans.get(point).copied())
+        .max_by_key(|span| span.start)
 }
 
 #[cfg(test)]
@@ -528,6 +634,58 @@ mod tests {
         assert!(
             analysis.errors.is_empty(),
             "disjoint field borrows should not conflict, got: {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_read_while_exclusive_borrow_error() {
+        let mir = MirFunction {
+            name: "test".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(42))),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Borrow(BorrowKind::Exclusive, Place::Local(SlotId(0))),
+                        ),
+                        1,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(0)))),
+                        ),
+                        2,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals: 3,
+            param_slots: vec![],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+        };
+
+        let analysis = analyze(&mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReadWhileExclusivelyBorrowed),
+            "expected read-while-exclusive error, got {:?}",
             analysis.errors
         );
     }

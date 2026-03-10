@@ -4567,4 +4567,48 @@ mod tests {
             analysis.errors
         );
     }
+
+    #[test]
+    fn test_compile_function_records_mir_read_while_exclusive_borrow() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function read_owner() {
+                    let mut x = 1
+                    let exclusive = &mut x
+                    let copy = x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR read-while-exclusive should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("B0001"),
+            "expected B0001-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("read_owner")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReadWhileExclusivelyBorrowed),
+            "expected MIR read-while-exclusive error, got {:?}",
+            analysis.errors
+        );
+    }
 }
