@@ -1718,14 +1718,40 @@ fn test_borrow_edge_ref_with_string_value() {
 
 #[test]
 fn test_borrow_edge_ref_in_nested_function_definitions() {
-    // Nested function definitions with ref params cannot be called with &
-    // because the compiler treats them as callable values without known param modes.
-    // This is enforced as B0004. Test that the error is properly reported.
+    // Nested function definitions should retain their reference parameter contract
+    // when bound to a local callable value.
     let code = r#"
         function test() {
             function local_inc(&x) { x = x + 1 }
             var a = 0
             local_inc(&a)
+            return a
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(1));
+}
+
+#[test]
+fn test_borrow_edge_ref_in_local_function_expression_binding() {
+    let code = r#"
+        function test() {
+            let local_inc = function(&x) { x = x + 1 }
+            var a = 0
+            local_inc(&a)
+            return a
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(1));
+}
+
+#[test]
+fn test_borrow_edge_ref_on_unknown_callable_value_still_errors() {
+    let code = r#"
+        function test(f) {
+            var a = 0
+            f(&a)
             return a
         }
     "#;

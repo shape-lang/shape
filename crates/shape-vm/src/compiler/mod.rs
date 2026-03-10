@@ -421,6 +421,12 @@ pub struct BytecodeCompiler {
     /// Read by binary op compilation to emit typed opcodes (e.g., MulInt).
     pub(crate) last_expr_numeric_type: Option<crate::type_tracking::NumericType>,
 
+    /// Known pass modes for local callable bindings (closures / function aliases).
+    pub(crate) local_callable_pass_modes: HashMap<u16, Vec<ParamPassMode>>,
+
+    /// Known pass modes for module-binding callable values.
+    pub(crate) module_binding_callable_pass_modes: HashMap<u16, Vec<ParamPassMode>>,
+
     /// Type inference engine for match exhaustiveness and type checking
     pub(crate) type_inference: shape_runtime::type_system::inference::TypeInferenceEngine,
 

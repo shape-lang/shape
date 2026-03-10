@@ -30,8 +30,10 @@ impl BytecodeCompiler {
         {
             if let Some(value) = &let_expr.value {
                 self.finish_reference_binding_from_expr(local_idx, true, name, value, ref_borrow);
+                self.update_callable_binding_from_expr(local_idx, true, value);
             } else {
                 self.clear_reference_binding(local_idx, true);
+                self.clear_callable_binding(local_idx, true);
             }
         }
         self.compile_expr(&let_expr.body)?;
@@ -198,6 +200,7 @@ impl BytecodeCompiler {
                             &assign_expr.value,
                             ref_borrow,
                         );
+                        self.update_callable_binding_from_expr(local_idx, true, &assign_expr.value);
                     }
                     self.plan_flexible_binding_storage_from_expr(
                         local_idx,
@@ -237,6 +240,7 @@ impl BytecodeCompiler {
                         &assign_expr.value,
                         ref_borrow,
                     );
+                    self.update_callable_binding_from_expr(binding_idx, false, &assign_expr.value);
                     self.plan_flexible_binding_storage_from_expr(
                         binding_idx,
                         false,

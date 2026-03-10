@@ -30,6 +30,8 @@ impl BytecodeCompiler {
             type_tracker: TypeTracker::with_stdlib(),
             last_expr_schema: None,
             last_expr_numeric_type: None,
+            local_callable_pass_modes: HashMap::new(),
+            module_binding_callable_pass_modes: HashMap::new(),
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
             type_aliases: HashMap::new(),
             current_line: 1,

@@ -515,11 +515,24 @@ impl BytecodeCompiler {
             || self.mutable_closure_captures.contains_key(name)
             || self.resolve_scoped_module_binding_name(name).is_some()
         {
+            let expected_param_modes = if let Some(local_idx) = self.resolve_local(name) {
+                self.local_callable_pass_modes.get(&local_idx).cloned()
+            } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+                self.module_bindings
+                    .get(&scoped_name)
+                    .and_then(|binding_idx| {
+                        self.module_binding_callable_pass_modes
+                            .get(binding_idx)
+                            .cloned()
+                    })
+            } else {
+                None
+            };
             // Use compile_expr_identifier to correctly load the callee value,
             // handling ref_locals (DerefLoad), mutable closure captures (LoadClosure), etc.
             self.compile_expr_identifier(name, span)?;
 
-            let writebacks = self.compile_call_args(args, None)?;
+            let writebacks = self.compile_call_args(args, expected_param_modes.as_deref())?;
             let arg_count = self
                 .program
                 .add_constant(Constant::Number(args.len() as f64));

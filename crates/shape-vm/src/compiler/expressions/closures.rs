@@ -100,6 +100,20 @@ impl BytecodeCompiler {
             is_comptime: false,
         };
 
+        let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
+        let mut closure_pass_modes = vec![crate::compiler::ParamPassMode::ByValue; captured_vars.len()];
+        closure_pass_modes.extend(user_pass_modes);
+        let ref_params: Vec<_> = closure_pass_modes
+            .iter()
+            .map(|mode| mode.is_reference())
+            .collect();
+        let ref_mutates: Vec<_> = closure_pass_modes
+            .iter()
+            .map(|mode| mode.is_exclusive())
+            .collect();
+        self.inferred_param_pass_modes
+            .insert(closure_name.clone(), closure_pass_modes);
+
         let func_idx = self.program.functions.len();
         self.program.functions.push(Function {
             name: closure_name.clone(),
@@ -115,8 +129,8 @@ impl BytecodeCompiler {
             is_closure: true,
             captures_count: captured_vars.len() as u16,
             is_async: false,
-            ref_params: Vec::new(),
-            ref_mutates: Vec::new(),
+            ref_params,
+            ref_mutates,
             mutable_captures: mutable_flags.clone(),
             frame_descriptor: None,
             osr_entry_points: Vec::new(),

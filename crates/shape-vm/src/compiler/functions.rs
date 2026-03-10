@@ -24,27 +24,157 @@ fn cabi_type_display(ann: &shape_ast::ast::TypeAnnotation) -> String {
 }
 
 impl BytecodeCompiler {
+    pub(super) fn explicit_param_pass_modes(
+        params: &[shape_ast::ast::FunctionParameter],
+    ) -> Vec<ParamPassMode> {
+        params
+            .iter()
+            .map(|param| {
+                if param.is_mut_reference {
+                    ParamPassMode::ByRefExclusive
+                } else if param.is_reference {
+                    ParamPassMode::ByRefShared
+                } else {
+                    ParamPassMode::ByValue
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn effective_function_like_pass_modes(
+        &self,
+        name: Option<&str>,
+        params: &[shape_ast::ast::FunctionParameter],
+        body: Option<&[shape_ast::ast::Statement]>,
+    ) -> Vec<ParamPassMode> {
+        if let Some(name) = name {
+            if let Some(inferred_modes) = self.inferred_param_pass_modes.get(name) {
+                let fallback_modes = Self::explicit_param_pass_modes(params);
+                return fallback_modes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, fallback)| inferred_modes.get(idx).copied().unwrap_or(fallback))
+                    .collect();
+            }
+            if let Some(func_idx) = self.find_function(name)
+                && let Some(func) = self.program.functions.get(func_idx)
+            {
+                let fallback_modes = Self::explicit_param_pass_modes(params);
+                let registered_modes =
+                    Self::pass_modes_from_ref_flags(&func.ref_params, &func.ref_mutates);
+                return fallback_modes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, fallback)| registered_modes.get(idx).copied().unwrap_or(fallback))
+                    .collect();
+            }
+        }
+
+        let mut modes = Self::explicit_param_pass_modes(params);
+        let Some(body) = body else {
+            return modes;
+        };
+
+        let caller_ref_params: Vec<_> = modes.iter().map(|mode| mode.is_reference()).collect();
+        if !caller_ref_params.iter().any(|is_ref| *is_ref) {
+            return modes;
+        }
+
+        let mut known_callable_modes: HashMap<String, Vec<ParamPassMode>> = self
+            .program
+            .functions
+            .iter()
+            .map(|func| {
+                (
+                    func.name.clone(),
+                    Self::pass_modes_from_ref_flags(&func.ref_params, &func.ref_mutates),
+                )
+            })
+            .collect();
+        for scope in &self.locals {
+            for (binding_name, local_idx) in scope {
+                if let Some(pass_modes) = self.local_callable_pass_modes.get(local_idx) {
+                    known_callable_modes.insert(binding_name.clone(), pass_modes.clone());
+                }
+            }
+        }
+        for (binding_name, binding_idx) in &self.module_bindings {
+            if let Some(pass_modes) = self.module_binding_callable_pass_modes.get(binding_idx) {
+                known_callable_modes.insert(binding_name.clone(), pass_modes.clone());
+            }
+        }
+
+        let callee_ref_params: HashMap<String, Vec<bool>> = known_callable_modes
+            .iter()
+            .map(|(callee_name, pass_modes)| {
+                (
+                    callee_name.clone(),
+                    pass_modes.iter().map(|mode| mode.is_reference()).collect(),
+                )
+            })
+            .collect();
+        let caller_name = name.unwrap_or("__function_expr__");
+        let mut direct_mutates = vec![false; params.len()];
+        let mut edges = Vec::new();
+        let mut param_index_by_name = HashMap::new();
+        for (idx, param) in params.iter().enumerate() {
+            for param_name in param.get_identifiers() {
+                param_index_by_name.insert(param_name, idx);
+            }
+        }
+        for stmt in body {
+            Self::analyze_statement_for_ref_mutation(
+                stmt,
+                caller_name,
+                &param_index_by_name,
+                &caller_ref_params,
+                &callee_ref_params,
+                &mut direct_mutates,
+                &mut edges,
+            );
+        }
+        for (_, caller_idx, callee_name, callee_idx) in edges {
+            if known_callable_modes
+                .get(&callee_name)
+                .and_then(|modes| modes.get(callee_idx))
+                .is_some_and(|mode| mode.is_exclusive())
+                && let Some(flag) = direct_mutates.get_mut(caller_idx)
+            {
+                *flag = true;
+            }
+        }
+        for (idx, direct_mutates) in direct_mutates.into_iter().enumerate() {
+            if direct_mutates && modes.get(idx).is_some_and(|mode| mode.is_reference()) {
+                modes[idx] = ParamPassMode::ByRefExclusive;
+            }
+        }
+
+        modes
+    }
+
     pub(super) fn compile_function(&mut self, func_def: &FunctionDef) -> Result<()> {
         // Validate annotation target kinds before compilation
         self.validate_annotation_targets(func_def)?;
 
         let mut effective_def = func_def.clone();
-        if let Some(inferred_modes) = self
-            .inferred_param_pass_modes
-            .get(&effective_def.name)
-            .cloned()
-        {
-            for (idx, param) in effective_def.params.iter_mut().enumerate() {
-                if param.type_annotation.is_none()
-                    && param.simple_name().is_some()
-                    && inferred_modes
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(ParamPassMode::ByValue)
-                        .is_reference()
-                {
-                    param.is_reference = true;
-                }
+        let effective_pass_modes = self.effective_function_like_pass_modes(
+            Some(&effective_def.name),
+            &effective_def.params,
+            Some(&effective_def.body),
+        );
+        for (idx, param) in effective_def.params.iter_mut().enumerate() {
+            let effective_mode = effective_pass_modes
+                .get(idx)
+                .copied()
+                .unwrap_or(ParamPassMode::ByValue);
+            if param.type_annotation.is_none()
+                && param.simple_name().is_some()
+                && effective_mode.is_reference()
+            {
+                param.is_reference = true;
+            }
+            if effective_mode.is_exclusive() {
+                param.is_mut_reference = true;
             }
         }
         let has_const_template_params = effective_def.params.iter().any(|p| p.is_const);
@@ -2891,6 +3021,7 @@ impl BytecodeCompiler {
         let saved_ref_locals = std::mem::take(&mut self.ref_locals);
         let saved_exclusive_ref_locals = std::mem::take(&mut self.exclusive_ref_locals);
         let saved_inferred_ref_locals = std::mem::take(&mut self.inferred_ref_locals);
+        let saved_local_callable_pass_modes = std::mem::take(&mut self.local_callable_pass_modes);
         let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
         let saved_exclusive_reference_value_locals =
             std::mem::take(&mut self.exclusive_reference_value_locals);
@@ -2934,6 +3065,7 @@ impl BytecodeCompiler {
         self.ref_locals.clear();
         self.exclusive_ref_locals.clear();
         self.inferred_ref_locals.clear();
+        self.local_callable_pass_modes.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
         self.tracked_reference_borrow_locals.clear();
@@ -3162,6 +3294,7 @@ impl BytecodeCompiler {
                         self.ref_locals = saved_ref_locals;
                         self.exclusive_ref_locals = saved_exclusive_ref_locals.clone();
                         self.inferred_ref_locals = saved_inferred_ref_locals.clone();
+                        self.local_callable_pass_modes = saved_local_callable_pass_modes.clone();
                         self.reference_value_locals = saved_reference_value_locals;
                         self.exclusive_reference_value_locals =
                             saved_exclusive_reference_value_locals;
@@ -3261,6 +3394,7 @@ impl BytecodeCompiler {
         self.ref_locals = saved_ref_locals;
         self.exclusive_ref_locals = saved_exclusive_ref_locals;
         self.inferred_ref_locals = saved_inferred_ref_locals;
+        self.local_callable_pass_modes = saved_local_callable_pass_modes;
         self.reference_value_locals = saved_reference_value_locals;
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
         self.tracked_reference_borrow_locals = saved_tracked_reference_borrow_locals;

@@ -160,6 +160,7 @@ impl BytecodeCompiler {
                                 self.finish_reference_binding_from_expr(
                                     local_idx, true, name, init_expr, ref_borrow,
                                 );
+                                self.update_callable_binding_from_expr(local_idx, true, init_expr);
                             }
                         }
                     }
@@ -229,6 +230,11 @@ impl BytecodeCompiler {
                                     &assignment.value,
                                     ref_borrow,
                                 );
+                                self.update_callable_binding_from_expr(
+                                    local_idx,
+                                    true,
+                                    &assignment.value,
+                                );
                             }
                             self.plan_flexible_binding_storage_from_expr(
                                 local_idx,
@@ -245,6 +251,11 @@ impl BytecodeCompiler {
                                 name,
                                 &assignment.value,
                                 ref_borrow,
+                            );
+                            self.update_callable_binding_from_expr(
+                                binding_idx,
+                                false,
+                                &assignment.value,
                             );
                             self.plan_flexible_binding_storage_from_expr(
                                 binding_idx,

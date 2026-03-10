@@ -1276,6 +1276,68 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn callable_pass_modes_from_expr(
+        &self,
+        expr: &shape_ast::ast::Expr,
+    ) -> Option<Vec<ParamPassMode>> {
+        match expr {
+            shape_ast::ast::Expr::FunctionExpr { params, body, .. } => Some(
+                self.effective_function_like_pass_modes(None, params, Some(body)),
+            ),
+            shape_ast::ast::Expr::Identifier(name, _)
+            | shape_ast::ast::Expr::PatternRef(name, _) => self.callable_pass_modes_for_name(name),
+            _ => None,
+        }
+    }
+
+    pub(super) fn callable_pass_modes_for_name(&self, name: &str) -> Option<Vec<ParamPassMode>> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            self.local_callable_pass_modes.get(&local_idx).cloned()
+        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+            let binding_idx = *self.module_bindings.get(&scoped_name)?;
+            self.module_binding_callable_pass_modes
+                .get(&binding_idx)
+                .cloned()
+        } else if let Some(func_idx) = self.find_function(name) {
+            let func = &self.program.functions[func_idx];
+            Some(Self::pass_modes_from_ref_flags(
+                &func.ref_params,
+                &func.ref_mutates,
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn update_callable_binding_from_expr(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        expr: &shape_ast::ast::Expr,
+    ) {
+        let pass_modes = self.callable_pass_modes_from_expr(expr);
+        if is_local {
+            if let Some(pass_modes) = pass_modes {
+                self.local_callable_pass_modes.insert(slot, pass_modes);
+            } else {
+                self.local_callable_pass_modes.remove(&slot);
+            }
+        } else if let Some(pass_modes) = pass_modes {
+            self.module_binding_callable_pass_modes
+                .insert(slot, pass_modes);
+        } else {
+            self.module_binding_callable_pass_modes.remove(&slot);
+        }
+    }
+
+    pub(super) fn clear_callable_binding(&mut self, slot: u16, is_local: bool) {
+        if is_local {
+            self.local_callable_pass_modes.remove(&slot);
+        } else {
+            self.module_binding_callable_pass_modes.remove(&slot);
+        }
+    }
+
     pub(super) fn push_module_reference_scope(&mut self) {
         self.scoped_reference_value_module_bindings
             .push(Default::default());

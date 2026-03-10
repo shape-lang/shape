@@ -568,8 +568,10 @@ impl BytecodeCompiler {
                             value,
                             ref_borrow,
                         );
+                        self.update_callable_binding_from_expr(binding_idx, false, value);
                     } else {
                         self.clear_reference_binding(binding_idx, false);
+                        self.clear_callable_binding(binding_idx, false);
                     }
 
                     // Propagate type info from annotation or initializer expression
@@ -657,8 +659,10 @@ impl BytecodeCompiler {
                                 value,
                                 ref_borrow,
                             );
+                            self.update_callable_binding_from_expr(binding_idx, false, value);
                         } else {
                             self.clear_reference_binding(binding_idx, false);
+                            self.clear_callable_binding(binding_idx, false);
                         }
                     }
                 }
@@ -3351,8 +3355,10 @@ impl BytecodeCompiler {
                                 value,
                                 ref_borrow,
                             );
+                            self.update_callable_binding_from_expr(binding_idx, false, value);
                         } else {
                             self.clear_reference_binding(binding_idx, false);
+                            self.clear_callable_binding(binding_idx, false);
                         }
                     } else {
                         self.compile_destructure_pattern_global(&var_decl.pattern)?;
@@ -3487,8 +3493,10 @@ impl BytecodeCompiler {
                                 self.finish_reference_binding_from_expr(
                                     local_idx, true, name, value, ref_borrow,
                                 );
+                                self.update_callable_binding_from_expr(local_idx, true, value);
                             } else {
                                 self.clear_reference_binding(local_idx, true);
+                                self.clear_callable_binding(local_idx, true);
                             }
                         }
                     }
@@ -3657,6 +3665,7 @@ impl BytecodeCompiler {
                                 &assign.value,
                                 ref_borrow,
                             );
+                            self.update_callable_binding_from_expr(local_idx, true, &assign.value);
                         }
                         self.plan_flexible_binding_storage_from_expr(
                             local_idx,
@@ -3672,6 +3681,11 @@ impl BytecodeCompiler {
                                 name,
                                 &assign.value,
                                 ref_borrow,
+                            );
+                            self.update_callable_binding_from_expr(
+                                binding_idx,
+                                false,
+                                &assign.value,
                             );
                             self.plan_flexible_binding_storage_from_expr(
                                 binding_idx,
