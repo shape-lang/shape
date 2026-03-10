@@ -107,6 +107,14 @@ pub fn generate_repairs(
                 diff: None,
             });
         }
+        BorrowErrorKind::ReferenceStoredInEnum => {
+            candidates.push(RepairCandidate {
+                kind: RepairKind::Clone,
+                description: "store an owned value in the enum payload instead of a reference"
+                    .to_string(),
+                diff: None,
+            });
+        }
         _ => {
             // Fallback: suggest extract
             candidates.push(RepairCandidate {

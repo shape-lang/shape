@@ -1086,6 +1086,13 @@ fn emit_object_store_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>,
     builder.push_stmt(StatementKind::ObjectStore(operands), span);
 }
 
+fn emit_enum_store_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+    if operands.is_empty() {
+        return;
+    }
+    builder.push_stmt(StatementKind::EnumStore(operands), span);
+}
+
 fn collect_function_expr_capture_operands(
     builder: &MirBuilder,
     params: &[ast::FunctionParameter],
@@ -1462,10 +1469,26 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 assign_none(builder, temp, span);
             }
             ast::EnumConstructorPayload::Tuple(values) => {
-                lower_exprs_to_aggregate(builder, temp, values.iter(), span);
+                let operands: Vec<_> = values
+                    .iter()
+                    .map(|expr| lower_expr_as_moved_operand(builder, expr))
+                    .collect();
+                builder.push_stmt(
+                    StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
+                    span,
+                );
+                emit_enum_store_if_needed(builder, operands, span);
             }
             ast::EnumConstructorPayload::Struct(fields) => {
-                lower_exprs_to_aggregate(builder, temp, fields.iter().map(|(_, expr)| expr), span);
+                let operands: Vec<_> = fields
+                    .iter()
+                    .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr))
+                    .collect();
+                builder.push_stmt(
+                    StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
+                    span,
+                );
+                emit_enum_store_if_needed(builder, operands, span);
             }
         },
         Expr::Object(entries, _) => {
@@ -2823,6 +2846,112 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
             "expected indirect struct-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_enum_tuple_direct_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let value = Maybe::Some(&x)
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "enum tuple payloads with ref values should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
+            "expected enum tuple-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_enum_tuple_indirect_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let r = &x
+                    let value = Maybe::Some(r)
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "indirect enum tuple ref storage should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
+            "expected indirect enum tuple-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_enum_struct_direct_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let value = Maybe::Err { code: &x }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "enum struct payloads with ref values should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
+            "expected enum struct-stored-reference error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_enum_struct_indirect_ref_escape_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let r = &x
+                    let value = Maybe::Err { code: r }
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "indirect enum struct ref storage should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
+            "expected indirect enum struct-stored-reference error, got {:?}",
             analysis.errors
         );
     }

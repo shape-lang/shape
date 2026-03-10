@@ -745,6 +745,7 @@ impl BytecodeCompiler {
         variant: &str,
         payload: &EnumConstructorPayload,
     ) -> Result<()> {
+        const ENUM_REF_STORAGE_ERROR: &str = "cannot store a reference in an enum payload — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
         // Look up enum schema - must be registered
         let schema = self
             .type_tracker
@@ -785,6 +786,7 @@ impl BytecodeCompiler {
             EnumConstructorPayload::Unit => 0u16,
             EnumConstructorPayload::Tuple(values) => {
                 for value in values {
+                    self.reject_direct_reference_storage(value, ENUM_REF_STORAGE_ERROR)?;
                     self.plan_flexible_binding_escape_from_expr(value);
                     self.compile_expr_as_value_or_placeholder(value)?;
                 }
@@ -794,6 +796,7 @@ impl BytecodeCompiler {
                 // For struct payloads, we only push the values (not keys)
                 // The schema knows the field order
                 for (_key, value) in fields {
+                    self.reject_direct_reference_storage(value, ENUM_REF_STORAGE_ERROR)?;
                     self.plan_flexible_binding_escape_from_expr(value);
                     self.compile_expr_as_value_or_placeholder(value)?;
                 }

@@ -282,6 +282,9 @@ pub enum StatementKind {
     /// Store values into an object or struct literal.
     /// Operands are the fields/spreads being stored.
     ObjectStore(Vec<Operand>),
+    /// Store values into an enum payload.
+    /// Operands are the tuple/struct payload values being stored.
+    EnumStore(Vec<Operand>),
     /// No-op (placeholder, padding).
     Nop,
 }

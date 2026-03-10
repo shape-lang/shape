@@ -164,6 +164,10 @@ impl BytecodeCompiler {
                 "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead",
                 "store owned values in the object or struct instead of references",
             ),
+            crate::mir::analysis::BorrowErrorKind::ReferenceStoredInEnum => (
+                "cannot store a reference in an enum payload — references are scoped borrows that cannot escape into aggregate values. Use owned values instead",
+                "store owned values in the enum payload instead of references",
+            ),
             crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure => (
                 "[B0003] reference cannot escape into a closure",
                 "capture an owned value instead of a reference",
@@ -190,6 +194,7 @@ impl BytecodeCompiler {
             crate::mir::analysis::BorrowErrorKind::ReferenceEscape
             | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInArray
             | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInObject
+            | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInEnum
             | crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure => {
                 "reference originates here"
             }
@@ -5175,6 +5180,174 @@ mod tests {
         assert!(
             format!("{}", err).contains("cannot store a reference in an object or struct literal"),
             "expected top-level struct-storage error, got {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_enum_tuple_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                enum Maybe { Value(int), Other }
+
+                function enum_tuple_escape() {
+                    let x = 1
+                    let value = Maybe::Value(&x)
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[1] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_item_with_context(&program.items[0], false)
+            .expect("enum should register");
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("enum tuple reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an enum payload"),
+            "expected enum-payload error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("enum_tuple_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
+            "expected MIR enum-payload error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_indirect_enum_tuple_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                enum Maybe { Value(int), Other }
+
+                function indirect_enum_tuple_escape() {
+                    let x = 1
+                    let r = &x
+                    let value = Maybe::Value(r)
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[1] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_item_with_context(&program.items[0], false)
+            .expect("enum should register");
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("indirect enum tuple reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an enum payload"),
+            "expected enum-payload error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("indirect_enum_tuple_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
+            "expected MIR indirect enum-payload error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_enum_struct_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                enum Maybe {
+                    Err { code: int }
+                }
+
+                function enum_struct_escape() {
+                    let x = 1
+                    let value = Maybe::Err { code: &x }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[1] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_item_with_context(&program.items[0], false)
+            .expect("enum should register");
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("enum struct reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an enum payload"),
+            "expected enum-payload error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("enum_struct_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
+            "expected MIR enum struct-payload error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_top_level_enum_direct_reference_storage_rejected() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                enum Maybe { Value(int), Other }
+                let x = 1
+                let value = Maybe::Value(&x)
+            "#,
+        )
+        .expect("parse failed");
+
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("top-level enum reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an enum payload"),
+            "expected top-level enum-payload error, got {}",
             err
         );
     }

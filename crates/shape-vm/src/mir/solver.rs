@@ -55,6 +55,8 @@ pub struct BorrowFacts {
     pub array_store_loans: Vec<(u32, shape_ast::ast::Span)>,
     /// Loans stored into object/struct literals.
     pub object_store_loans: Vec<(u32, shape_ast::ast::Span)>,
+    /// Loans stored into enum payloads.
+    pub enum_store_loans: Vec<(u32, shape_ast::ast::Span)>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
@@ -158,6 +160,11 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                         facts.object_store_loans.push((loan_id, stmt.span));
                     }
                 }
+                StatementKind::EnumStore(operands) => {
+                    for loan_id in local_loans_from_operands(&slot_loans, operands) {
+                        facts.enum_store_loans.push((loan_id, stmt.span));
+                    }
+                }
                 StatementKind::Nop => {}
             }
 
@@ -256,6 +263,11 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
             }
         }
         StatementKind::ObjectStore(operands) => {
+            for operand in operands {
+                operand_read_places(operand, &mut reads);
+            }
+        }
+        StatementKind::EnumStore(operands) => {
             for operand in operands {
                 operand_read_places(operand, &mut reads);
             }
@@ -530,6 +542,22 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         let info = &facts.loan_info[loan_id];
         errors.push(BorrowError {
             kind: BorrowErrorKind::ReferenceStoredInObject,
+            span: *span,
+            conflicting_loan: LoanId(*loan_id),
+            loan_span: info.span,
+            last_use_span: last_use_span_for_loan(facts, *loan_id),
+            repairs: Vec::new(),
+        });
+    }
+
+    let mut seen_enum_store = std::collections::HashSet::new();
+    for (loan_id, span) in &facts.enum_store_loans {
+        if !seen_enum_store.insert((*loan_id, span.start, span.end)) {
+            continue;
+        }
+        let info = &facts.loan_info[loan_id];
+        errors.push(BorrowError {
+            kind: BorrowErrorKind::ReferenceStoredInEnum,
             span: *span,
             conflicting_loan: LoanId(*loan_id),
             loan_span: info.span,
@@ -831,7 +859,8 @@ fn statement_dest_place(kind: &StatementKind) -> Option<&Place> {
         StatementKind::TaskBoundary(_)
         | StatementKind::ClosureCapture(_)
         | StatementKind::ArrayStore(_)
-        | StatementKind::ObjectStore(_) => None,
+        | StatementKind::ObjectStore(_)
+        | StatementKind::EnumStore(_) => None,
         StatementKind::Nop => None,
     }
 }
