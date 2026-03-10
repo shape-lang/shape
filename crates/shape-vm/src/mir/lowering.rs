@@ -279,18 +279,23 @@ pub fn lower_function_detailed(
 
     // Register parameters
     for param in params {
-        let Some(param_name) = param.simple_name() else {
-            builder.mark_fallback();
-            let fallback_name = format!("__mir_unsupported_param{}", builder.param_slots.len());
-            builder.add_param(fallback_name, LocalTypeInfo::Unknown);
-            continue;
-        };
         let type_info = if param.is_reference {
             LocalTypeInfo::NonCopy // references are always tracked
         } else {
             LocalTypeInfo::Unknown // will be resolved during analysis
         };
-        builder.add_param(param_name.to_string(), type_info);
+        if let Some(param_name) = param.simple_name() {
+            builder.add_param(param_name.to_string(), type_info);
+        } else {
+            let fallback_name = format!("__mir_param{}", builder.param_slots.len());
+            let slot = builder.add_param(fallback_name, type_info);
+            lower_destructure_bindings_from_place(
+                &mut builder,
+                &param.pattern,
+                &Place::Local(slot),
+                param.span(),
+            );
+        }
     }
 
     // Create the exit block
@@ -379,37 +384,226 @@ fn lower_statement(builder: &mut MirBuilder, stmt: &Statement, exit_block: Basic
 
 /// Lower a variable declaration.
 fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span) {
-    let Some(name) = decl.pattern.as_identifier() else {
-        builder.mark_fallback();
-        if let Some(init_expr) = &decl.value {
-            let _ = lower_expr_to_temp(builder, init_expr);
-        }
-        builder.push_stmt(StatementKind::Nop, span);
-        return;
-    };
-    let type_info = decl
-        .value
-        .as_ref()
-        .map(infer_local_type_from_expr)
-        .unwrap_or(LocalTypeInfo::Unknown);
-    let slot = builder.alloc_local(name.to_string(), type_info);
+    if let Some(name) = decl.pattern.as_identifier() {
+        let type_info = decl
+            .value
+            .as_ref()
+            .map(infer_local_type_from_expr)
+            .unwrap_or(LocalTypeInfo::Unknown);
+        let slot = builder.alloc_local(name.to_string(), type_info);
 
-    if let Some(init_expr) = &decl.value {
-        // Determine operand based on ownership modifier
+        if let Some(init_expr) = &decl.value {
+            // Determine operand based on ownership modifier
+            let operand = match decl.ownership {
+                ast::OwnershipModifier::Move => {
+                    lower_expr_to_explicit_move_operand(builder, init_expr)
+                }
+                ast::OwnershipModifier::Clone => lower_expr_to_operand(builder, init_expr, false),
+                ast::OwnershipModifier::Inferred => {
+                    // For `var`: decision deferred to liveness analysis
+                    // For `let`: default to Move
+                    lower_expr_to_operand(builder, init_expr, true)
+                }
+            };
+            let rvalue = match decl.ownership {
+                ast::OwnershipModifier::Clone => Rvalue::Clone(operand),
+                _ => Rvalue::Use(operand),
+            };
+            builder.push_stmt(StatementKind::Assign(Place::Local(slot), rvalue), span);
+        }
+        return;
+    }
+
+    let source_place = decl.value.as_ref().map(|init_expr| {
+        let type_info = infer_local_type_from_expr(init_expr);
+        let source_slot = builder.alloc_temp(type_info);
         let operand = match decl.ownership {
             ast::OwnershipModifier::Move => lower_expr_to_explicit_move_operand(builder, init_expr),
             ast::OwnershipModifier::Clone => lower_expr_to_operand(builder, init_expr, false),
-            ast::OwnershipModifier::Inferred => {
-                // For `var`: decision deferred to liveness analysis
-                // For `let`: default to Move
-                lower_expr_to_operand(builder, init_expr, true)
-            }
+            ast::OwnershipModifier::Inferred => lower_expr_to_operand(builder, init_expr, true),
         };
         let rvalue = match decl.ownership {
             ast::OwnershipModifier::Clone => Rvalue::Clone(operand),
             _ => Rvalue::Use(operand),
         };
-        builder.push_stmt(StatementKind::Assign(Place::Local(slot), rvalue), span);
+        builder.push_stmt(StatementKind::Assign(Place::Local(source_slot), rvalue), span);
+        Place::Local(source_slot)
+    });
+    lower_destructure_bindings_from_place_opt(builder, &decl.pattern, source_place.as_ref(), span);
+}
+
+fn projected_field_place(builder: &mut MirBuilder, base: &Place, property: &str) -> Place {
+    Place::Field(Box::new(base.clone()), builder.field_idx(property))
+}
+
+fn projected_index_place(base: &Place, index: usize) -> Place {
+    Place::Index(
+        Box::new(base.clone()),
+        Box::new(Operand::Constant(MirConstant::Int(index as i64))),
+    )
+}
+
+fn lower_destructure_bindings_from_place_opt(
+    builder: &mut MirBuilder,
+    pattern: &ast::DestructurePattern,
+    source_place: Option<&Place>,
+    span: Span,
+) {
+    match pattern {
+        ast::DestructurePattern::Identifier(name, _) => {
+            let slot = builder.alloc_local(name.clone(), LocalTypeInfo::Unknown);
+            if let Some(source_place) = source_place {
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(slot),
+                        Rvalue::Use(Operand::Copy(source_place.clone())),
+                    ),
+                    span,
+                );
+            }
+        }
+        ast::DestructurePattern::Array(patterns) => {
+            for (index, pattern) in patterns.iter().enumerate() {
+                let projected_place = source_place.map(|source_place| {
+                    projected_index_place(source_place, index)
+                });
+                lower_destructure_bindings_from_place_opt(
+                    builder,
+                    pattern,
+                    projected_place.as_ref(),
+                    span,
+                );
+            }
+        }
+        ast::DestructurePattern::Object(fields) => {
+            for field in fields {
+                let projected_place = source_place.map(|source_place| {
+                    projected_field_place(builder, source_place, &field.key)
+                });
+                lower_destructure_bindings_from_place_opt(
+                    builder,
+                    &field.pattern,
+                    projected_place.as_ref(),
+                    span,
+                );
+            }
+        }
+        ast::DestructurePattern::Rest(_) | ast::DestructurePattern::Decomposition(_) => {
+            builder.mark_fallback();
+        }
+    }
+}
+
+fn lower_destructure_bindings_from_place(
+    builder: &mut MirBuilder,
+    pattern: &ast::DestructurePattern,
+    source_place: &Place,
+    span: Span,
+) {
+    lower_destructure_bindings_from_place_opt(builder, pattern, Some(source_place), span);
+}
+
+fn lower_pattern_bindings_from_place_opt(
+    builder: &mut MirBuilder,
+    pattern: &ast::Pattern,
+    source_place: Option<&Place>,
+    span: Span,
+) {
+    match pattern {
+        ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+            let slot = builder.alloc_local(name.clone(), LocalTypeInfo::Unknown);
+            if let Some(source_place) = source_place {
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(slot),
+                        Rvalue::Use(Operand::Copy(source_place.clone())),
+                    ),
+                    span,
+                );
+            }
+        }
+        ast::Pattern::Array(patterns) => {
+            for (index, pattern) in patterns.iter().enumerate() {
+                let projected_place = source_place.map(|source_place| {
+                    projected_index_place(source_place, index)
+                });
+                lower_pattern_bindings_from_place_opt(
+                    builder,
+                    pattern,
+                    projected_place.as_ref(),
+                    span,
+                );
+            }
+        }
+        ast::Pattern::Object(fields) => {
+            for (field_name, pattern) in fields {
+                let projected_place = source_place.map(|source_place| {
+                    projected_field_place(builder, source_place, field_name)
+                });
+                lower_pattern_bindings_from_place_opt(
+                    builder,
+                    pattern,
+                    projected_place.as_ref(),
+                    span,
+                );
+            }
+        }
+        ast::Pattern::Wildcard => {}
+        ast::Pattern::Literal(_) | ast::Pattern::Constructor { .. } => {
+            builder.mark_fallback();
+        }
+    }
+}
+
+fn lower_pattern_bindings_from_place(
+    builder: &mut MirBuilder,
+    pattern: &ast::Pattern,
+    source_place: &Place,
+    span: Span,
+) {
+    lower_pattern_bindings_from_place_opt(builder, pattern, Some(source_place), span);
+}
+
+fn lower_destructure_assignment_from_place(
+    builder: &mut MirBuilder,
+    pattern: &ast::DestructurePattern,
+    source_place: &Place,
+    span: Span,
+) {
+    match pattern {
+        ast::DestructurePattern::Identifier(name, _) => {
+            let Some(slot) = builder.lookup_local(name) else {
+                builder.mark_fallback();
+                return;
+            };
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(slot),
+                    Rvalue::Use(Operand::Copy(source_place.clone())),
+                ),
+                span,
+            );
+        }
+        ast::DestructurePattern::Array(patterns) => {
+            for (index, pattern) in patterns.iter().enumerate() {
+                let projected_place = projected_index_place(source_place, index);
+                lower_destructure_assignment_from_place(builder, pattern, &projected_place, span);
+            }
+        }
+        ast::DestructurePattern::Object(fields) => {
+            for field in fields {
+                let projected_place = projected_field_place(builder, source_place, &field.key);
+                lower_destructure_assignment_from_place(
+                    builder,
+                    &field.pattern,
+                    &projected_place,
+                    span,
+                );
+            }
+        }
+        ast::DestructurePattern::Rest(_) | ast::DestructurePattern::Decomposition(_) => {
+            builder.mark_fallback();
+        }
     }
 }
 
@@ -504,21 +698,23 @@ fn infer_local_type_from_expr(expr: &Expr) -> LocalTypeInfo {
 
 /// Lower an assignment statement.
 fn lower_assignment(builder: &mut MirBuilder, assign: &ast::Assignment, span: Span) {
-    let Some(name) = assign.pattern.as_identifier() else {
-        builder.mark_fallback();
-        builder.push_stmt(StatementKind::Nop, span);
+    if let Some(name) = assign.pattern.as_identifier() {
+        let Some(slot) = builder.lookup_local(name) else {
+            builder.mark_fallback();
+            builder.push_stmt(StatementKind::Nop, span);
+            return;
+        };
+        let value = lower_expr_to_operand(builder, &assign.value, true);
+        builder.push_stmt(
+            StatementKind::Assign(Place::Local(slot), Rvalue::Use(value)),
+            span,
+        );
         return;
-    };
-    let Some(slot) = builder.lookup_local(name) else {
-        builder.mark_fallback();
-        builder.push_stmt(StatementKind::Nop, span);
-        return;
-    };
-    let value = lower_expr_to_operand(builder, &assign.value, true);
-    builder.push_stmt(
-        StatementKind::Assign(Place::Local(slot), Rvalue::Use(value)),
-        span,
-    );
+    }
+
+    let source_slot = lower_expr_to_temp(builder, &assign.value);
+    let source_place = Place::Local(source_slot);
+    lower_destructure_assignment_from_place(builder, &assign.pattern, &source_place, span);
 }
 
 fn lower_assign_target_place(builder: &mut MirBuilder, target: &Expr) -> Option<Place> {
@@ -894,36 +1090,34 @@ fn lower_block_expr(builder: &mut MirBuilder, block: &ast::BlockExpr, temp: Slot
 fn lower_let_expr(builder: &mut MirBuilder, let_expr: &ast::LetExpr, temp: SlotId, span: Span) {
     builder.push_scope();
 
-    let Some(name) = let_expr.pattern.as_simple_name() else {
-        builder.mark_fallback();
+    if let Some(name) = let_expr.pattern.as_simple_name() {
+        let slot = builder.alloc_local(name.to_string(), LocalTypeInfo::Unknown);
         if let Some(value) = &let_expr.value {
-            let _ = lower_expr_to_temp(builder, value);
+            let operand = lower_expr_to_operand(builder, value, true);
+            builder.push_stmt(
+                StatementKind::Assign(Place::Local(slot), Rvalue::Use(operand)),
+                value.span(),
+            );
+        } else {
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(slot),
+                    Rvalue::Use(Operand::Constant(MirConstant::None)),
+                ),
+                span,
+            );
         }
-        let body_slot = lower_expr_to_temp(builder, &let_expr.body);
-        builder.push_stmt(
-            StatementKind::Assign(
-                Place::Local(temp),
-                Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
-            ),
-            let_expr.body.span(),
-        );
-        builder.pop_scope();
-        return;
-    };
-
-    let slot = builder.alloc_local(name.to_string(), LocalTypeInfo::Unknown);
-    if let Some(value) = &let_expr.value {
-        let operand = lower_expr_to_operand(builder, value, true);
-        builder.push_stmt(
-            StatementKind::Assign(Place::Local(slot), Rvalue::Use(operand)),
-            value.span(),
-        );
     } else {
-        builder.push_stmt(
-            StatementKind::Assign(
-                Place::Local(slot),
-                Rvalue::Use(Operand::Constant(MirConstant::None)),
-            ),
+        let source_place = if let Some(value) = &let_expr.value {
+            let source_slot = lower_expr_to_temp(builder, value);
+            Some(Place::Local(source_slot))
+        } else {
+            None
+        };
+        lower_pattern_bindings_from_place_opt(
+            builder,
+            &let_expr.pattern,
+            source_place.as_ref(),
             span,
         );
     }
@@ -990,16 +1184,7 @@ fn lower_for_expr(builder: &mut MirBuilder, for_expr: &ast::ForExpr, temp: SlotI
     builder.push_scope();
 
     let iter_slot = lower_expr_to_temp(builder, &for_expr.iterable);
-    let elem_slot = match &for_expr.pattern {
-        ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
-            Some(builder.alloc_local(name.clone(), LocalTypeInfo::Unknown))
-        }
-        ast::Pattern::Wildcard => Some(builder.alloc_temp(LocalTypeInfo::Unknown)),
-        _ => {
-            builder.mark_fallback();
-            None
-        }
-    };
+    let elem_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
     let header = builder.new_block();
     let body_block = builder.new_block();
     let after = builder.new_block();
@@ -1024,15 +1209,19 @@ fn lower_for_expr(builder: &mut MirBuilder, for_expr: &ast::ForExpr, temp: SlotI
     );
 
     builder.start_block(body_block);
-    if let Some(elem_slot) = elem_slot {
-        builder.push_stmt(
-            StatementKind::Assign(
-                Place::Local(elem_slot),
-                Rvalue::Use(Operand::Constant(MirConstant::None)),
-            ),
-            span,
-        );
-    }
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(elem_slot),
+            Rvalue::Use(Operand::Constant(MirConstant::None)),
+        ),
+        span,
+    );
+    lower_pattern_bindings_from_place(
+        builder,
+        &for_expr.pattern,
+        &Place::Local(elem_slot),
+        span,
+    );
     builder.push_loop(after, header, Some(temp));
     let body_slot = lower_expr_to_temp(builder, &for_expr.body);
     builder.push_stmt(
@@ -1337,15 +1526,7 @@ fn lower_for_loop(
             builder.push_scope();
 
             let iter_slot = lower_expr_to_temp(builder, iter);
-            let pattern_slot = match pattern {
-                ast::DestructurePattern::Identifier(name, _) => {
-                    Some(builder.alloc_local(name.clone(), LocalTypeInfo::Unknown))
-                }
-                _ => {
-                    builder.mark_fallback();
-                    None
-                }
-            };
+            let pattern_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
             let header = builder.new_block();
             let body_block = builder.new_block();
             let after = builder.new_block();
@@ -1363,15 +1544,19 @@ fn lower_for_loop(
             );
 
             builder.start_block(body_block);
-            if let Some(pattern_slot) = pattern_slot {
-                builder.push_stmt(
-                    StatementKind::Assign(
-                        Place::Local(pattern_slot),
-                        Rvalue::Use(Operand::Constant(MirConstant::None)),
-                    ),
-                    span,
-                );
-            }
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(pattern_slot),
+                    Rvalue::Use(Operand::Constant(MirConstant::None)),
+                ),
+                span,
+            );
+            lower_destructure_bindings_from_place(
+                builder,
+                pattern,
+                &Place::Local(pattern_slot),
+                span,
+            );
             builder.push_loop(after, header, None);
             builder.push_scope();
             lower_statements(builder, &for_loop.body, exit_block);
@@ -2076,14 +2261,151 @@ mod tests {
     }
 
     #[test]
-    fn test_lower_destructure_var_decl_marks_fallback() {
+    fn test_lowered_destructure_var_decl_write_while_borrowed_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test(pair) {
+                    let [left, right] = pair
+                    let shared = &left
+                    left = 2
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "array destructuring declarations should stay supported"
+        );
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected destructuring declaration write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_destructure_param_write_while_borrowed_is_visible_to_solver() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test([left, right]) {
+                    let shared = &left
+                    left = 2
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "array destructuring parameters should stay supported"
+        );
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected destructured-parameter write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_destructure_assignment_stays_supported() {
+        let pair_param = ast::FunctionParameter {
+            pattern: DestructurePattern::Identifier("pair".to_string(), span()),
+            is_const: false,
+            is_reference: false,
+            is_mut_reference: false,
+            is_out: false,
+            type_annotation: None,
+            default_value: None,
+        };
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("left".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("right".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(2), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Array(vec![
+                        DestructurePattern::Identifier("left".to_string(), span()),
+                        DestructurePattern::Identifier("right".to_string(), span()),
+                    ]),
+                    value: Expr::Identifier("pair".to_string(), span()),
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::Identifier("left".to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("left".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(3), span()),
+                },
+                span(),
+            ),
+        ];
+        let lowering = lower_function_detailed("test", &[pair_param], &body, span());
+        assert!(
+            !lowering.had_fallbacks,
+            "destructuring assignments should stay supported"
+        );
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected destructuring assignment write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lower_destructure_rest_pattern_marks_fallback() {
         let body = vec![Statement::VariableDecl(
             ast::VariableDecl {
                 kind: VarKind::Let,
                 is_mut: false,
                 pattern: DestructurePattern::Array(vec![
-                    DestructurePattern::Identifier("left".to_string(), span()),
-                    DestructurePattern::Identifier("right".to_string(), span()),
+                    DestructurePattern::Identifier("head".to_string(), span()),
+                    DestructurePattern::Rest(Box::new(DestructurePattern::Identifier(
+                        "tail".to_string(),
+                        span(),
+                    ))),
                 ]),
                 type_annotation: None,
                 value: Some(Expr::Literal(
@@ -2097,7 +2419,7 @@ mod tests {
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(
             lowering.had_fallbacks,
-            "destructuring declarations should keep MIR in fallback mode"
+            "rest destructuring should remain in fallback mode for now"
         );
     }
 

@@ -4973,6 +4973,138 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_function_records_mir_destructure_decl_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function destructure_decl_conflict(pair) {
+                    let [left, right] = pair
+                    let shared = &left
+                    left = 2
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler.compile_function(func).expect_err(
+            "MIR destructuring declaration write conflict should surface as a compile error",
+        );
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("destructure_decl_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR destructuring-declaration write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_destructure_param_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function destructure_param_conflict([left, right]) {
+                    let shared = &left
+                    left = 2
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler.compile_function(func).expect_err(
+            "MIR destructured-parameter write conflict should surface as a compile error",
+        );
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("destructure_param_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR destructured-parameter write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_destructure_for_loop_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function destructure_for_conflict(items) {
+                    for [left, right] in items {
+                        let shared = &left
+                        left = 2
+                    }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler.compile_function(func).expect_err(
+            "MIR destructuring for-loop write conflict should surface as a compile error",
+        );
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("destructure_for_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR destructuring for-loop write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
     fn test_compile_function_records_mir_match_expression_write_conflict() {
         let program = shape_ast::parser::parse_program(
             r#"
