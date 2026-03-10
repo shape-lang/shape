@@ -630,6 +630,130 @@ impl BytecodeCompiler {
         });
     }
 
+    fn binding_semantics_for_slot(
+        &self,
+        slot: u16,
+        is_local: bool,
+    ) -> Option<BindingSemantics> {
+        if is_local {
+            self.type_tracker.get_local_binding_semantics(slot).copied()
+        } else {
+            self.type_tracker.get_binding_semantics(slot).copied()
+        }
+    }
+
+    pub(super) fn binding_semantics_for_name(
+        &self,
+        name: &str,
+    ) -> Option<(u16, bool, BindingSemantics)> {
+        if let Some(local_idx) = self.resolve_local(name)
+            && let Some(semantics) = self.binding_semantics_for_slot(local_idx, true)
+        {
+            return Some((local_idx, true, semantics));
+        }
+
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        self.module_bindings
+            .get(&scoped_name)
+            .copied()
+            .and_then(|binding_idx| {
+                self.binding_semantics_for_slot(binding_idx, false)
+                    .map(|semantics| (binding_idx, false, semantics))
+            })
+    }
+
+    pub(super) fn finalize_flexible_binding_storage_for_slot(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+    ) {
+        let Some(semantics) = self.binding_semantics_for_slot(slot, is_local) else {
+            return;
+        };
+        if semantics.ownership_class != BindingOwnershipClass::Flexible
+            || semantics.storage_class != BindingStorageClass::Deferred
+        {
+            return;
+        }
+        self.set_binding_storage_class(slot, is_local, BindingStorageClass::Direct);
+    }
+
+    pub(super) fn plan_flexible_binding_storage_from_expr(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        expr: &Expr,
+    ) {
+        let Some(semantics) = self.binding_semantics_for_slot(slot, is_local) else {
+            return;
+        };
+        if semantics.ownership_class != BindingOwnershipClass::Flexible
+            || semantics.storage_class == BindingStorageClass::Reference
+        {
+            return;
+        }
+
+        if let Expr::Identifier(name, _) = expr
+            && let Some((source_slot, source_is_local, source_semantics)) =
+                self.binding_semantics_for_name(name)
+            && source_semantics.ownership_class == BindingOwnershipClass::Flexible
+        {
+            self.set_binding_storage_class(source_slot, source_is_local, BindingStorageClass::SharedCow);
+            self.set_binding_storage_class(slot, is_local, BindingStorageClass::SharedCow);
+            return;
+        }
+
+        self.finalize_flexible_binding_storage_for_slot(slot, is_local);
+    }
+
+    pub(super) fn plan_flexible_binding_storage_for_pattern_initializer(
+        &mut self,
+        pattern: &DestructurePattern,
+        is_local: bool,
+        initializer: Option<&Expr>,
+    ) {
+        let bindings = pattern.get_bindings();
+        if bindings.is_empty() {
+            return;
+        }
+
+        if bindings.len() == 1
+            && let Some(initializer) = initializer
+        {
+            let binding_name = &bindings[0].0;
+            if is_local {
+                if let Some(local_idx) = self.resolve_local(binding_name) {
+                    self.plan_flexible_binding_storage_from_expr(local_idx, true, initializer);
+                }
+            } else {
+                let scoped_name = self
+                    .resolve_scoped_module_binding_name(binding_name)
+                    .unwrap_or_else(|| binding_name.clone());
+                if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                    self.plan_flexible_binding_storage_from_expr(binding_idx, false, initializer);
+                }
+            }
+            return;
+        }
+
+        for (binding_name, _) in bindings {
+            if is_local {
+                if let Some(local_idx) = self.resolve_local(&binding_name) {
+                    self.finalize_flexible_binding_storage_for_slot(local_idx, true);
+                }
+            } else {
+                let scoped_name = self
+                    .resolve_scoped_module_binding_name(&binding_name)
+                    .unwrap_or(binding_name);
+                if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                    self.finalize_flexible_binding_storage_for_slot(binding_idx, false);
+                }
+            }
+        }
+    }
+
     pub(super) fn set_binding_storage_class(
         &mut self,
         slot: u16,

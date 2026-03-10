@@ -113,6 +113,11 @@ impl BytecodeCompiler {
                             true,
                             Self::binding_semantics_for_var_decl(var_decl),
                         );
+                        self.plan_flexible_binding_storage_for_pattern_initializer(
+                            &var_decl.pattern,
+                            true,
+                            Some(init_expr),
+                        );
 
                         // For simple identifier patterns, track type and drop info
                         if let shape_ast::ast::DestructurePattern::Identifier(name, _) =
@@ -184,6 +189,11 @@ impl BytecodeCompiler {
                                                     OpCode::ArrayPushLocal,
                                                     Some(Operand::Local(local_idx)),
                                                 ));
+                                                self.plan_flexible_binding_storage_from_expr(
+                                                    local_idx,
+                                                    true,
+                                                    &assignment.value,
+                                                );
                                                 break 'block_assign Ok::<(), ShapeError>(());
                                             }
                                         } else if let Some(&binding_idx) =
@@ -194,6 +204,11 @@ impl BytecodeCompiler {
                                                 OpCode::ArrayPushLocal,
                                                 Some(Operand::ModuleBinding(binding_idx)),
                                             ));
+                                            self.plan_flexible_binding_storage_from_expr(
+                                                binding_idx,
+                                                false,
+                                                &assignment.value,
+                                            );
                                             break 'block_assign Ok::<(), ShapeError>(());
                                         }
                                     }
@@ -216,6 +231,11 @@ impl BytecodeCompiler {
                                     ref_borrow,
                                 );
                             }
+                            self.plan_flexible_binding_storage_from_expr(
+                                local_idx,
+                                true,
+                                &assignment.value,
+                            );
                         } else if let Some(scoped_name) =
                             self.resolve_scoped_module_binding_name(name)
                             && let Some(&binding_idx) = self.module_bindings.get(&scoped_name)
@@ -226,6 +246,11 @@ impl BytecodeCompiler {
                                 name,
                                 &assignment.value,
                                 ref_borrow,
+                            );
+                            self.plan_flexible_binding_storage_from_expr(
+                                binding_idx,
+                                false,
+                                &assignment.value,
                             );
                         }
                     }

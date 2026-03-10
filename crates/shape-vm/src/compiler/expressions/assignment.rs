@@ -99,6 +99,11 @@ impl BytecodeCompiler {
                                                 numeric_type,
                                             );
                                         }
+                                        self.plan_flexible_binding_storage_from_expr(
+                                            local_idx,
+                                            true,
+                                            assign_expr.value.as_ref(),
+                                        );
                                         // Push expression result (the updated array)
                                         self.emit(Instruction::new(
                                             OpCode::LoadLocal,
@@ -123,6 +128,11 @@ impl BytecodeCompiler {
                                             numeric_type,
                                         );
                                     }
+                                    self.plan_flexible_binding_storage_from_expr(
+                                        binding_idx,
+                                        false,
+                                        assign_expr.value.as_ref(),
+                                    );
                                     // Push expression result (the updated array)
                                     self.emit(Instruction::new(
                                         OpCode::LoadModuleBinding,
@@ -189,6 +199,11 @@ impl BytecodeCompiler {
                             ref_borrow,
                         );
                     }
+                    self.plan_flexible_binding_storage_from_expr(
+                        local_idx,
+                        true,
+                        &assign_expr.value,
+                    );
                 } else {
                     let source_loc = self.span_to_source_location(*id_span);
                     self.check_named_binding_write_allowed(name, Some(source_loc))?;
@@ -221,6 +236,11 @@ impl BytecodeCompiler {
                         name,
                         &assign_expr.value,
                         ref_borrow,
+                    );
+                    self.plan_flexible_binding_storage_from_expr(
+                        binding_idx,
+                        false,
+                        &assign_expr.value,
                     );
                 }
                 self.propagate_assignment_type_to_identifier(name);

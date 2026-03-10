@@ -1,7 +1,7 @@
 //! Closure (function expression) compilation
 
 use crate::bytecode::{Function, Instruction, OpCode, Operand};
-use crate::type_tracking::BindingStorageClass;
+use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 use shape_ast::ast::{Expr, FunctionDef, Span};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
@@ -139,6 +139,13 @@ impl BytecodeCompiler {
         self.mutable_closure_captures = saved_mutable_captures;
 
         for (i, captured) in captured_vars.iter().enumerate() {
+            if matches!(
+                self.binding_semantics_for_name(captured),
+                Some((_, _, semantics))
+                    if semantics.ownership_class == BindingOwnershipClass::Flexible
+            ) {
+                self.set_binding_storage_class_for_name(captured, BindingStorageClass::SharedCow);
+            }
             if mutable_flags.get(i).copied().unwrap_or(false) {
                 // Mutable capture: emit BoxLocal/BoxModuleBinding to convert the
                 // variable to a SharedCell and push the cell onto the stack.
@@ -211,6 +218,50 @@ mod tests {
         let counter_idx = compiler.get_or_create_module_binding("counter");
         let counter_decl = VariableDecl {
             kind: VarKind::Let,
+            is_mut: false,
+            pattern: shape_ast::ast::DestructurePattern::Identifier(
+                "counter".to_string(),
+                Span::DUMMY,
+            ),
+            type_annotation: None,
+            value: None,
+            ownership: Default::default(),
+        };
+        compiler.apply_binding_semantics_to_pattern_bindings(
+            &counter_decl.pattern,
+            false,
+            BytecodeCompiler::binding_semantics_for_var_decl(&counter_decl),
+        );
+
+        compiler
+            .compile_expr_closure(params, body)
+            .expect("closure should compile");
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_binding_semantics(counter_idx)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::SharedCow)
+        );
+    }
+
+    #[test]
+    fn test_flexible_closure_capture_marks_binding_as_shared_storage() {
+        let program = parse_program("let read = || counter").expect("parse failed");
+        let var_decl = match &program.items[0] {
+            Item::VariableDecl(var_decl, _) => var_decl,
+            Item::Statement(Statement::VariableDecl(var_decl, _), _) => var_decl,
+            _ => panic!("expected variable declaration"),
+        };
+        let Some(Expr::FunctionExpr { params, body, .. }) = var_decl.value.as_ref() else {
+            panic!("expected closure initializer");
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        let counter_idx = compiler.get_or_create_module_binding("counter");
+        let counter_decl = VariableDecl {
+            kind: VarKind::Var,
             is_mut: false,
             pattern: shape_ast::ast::DestructurePattern::Identifier(
                 "counter".to_string(),
