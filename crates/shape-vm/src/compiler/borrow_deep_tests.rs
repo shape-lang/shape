@@ -573,6 +573,60 @@ fn test_reference_param_can_be_returned_through_direct_callable_expr() {
 }
 
 #[test]
+fn test_returned_reference_binding_supports_additional_reference_params() {
+    let code = r#"
+        function pick_first(&x, &mut y) {
+            y = y + 1
+            x
+        }
+
+        function test() {
+            var x = 41
+            var y = 1
+            let r = pick_first(x, y)
+            return r + y
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(43));
+}
+
+#[test]
+fn test_returned_reference_binding_supports_additional_reference_params_on_local_callable() {
+    let code = r#"
+        function test() {
+            let pick_first = function(&x, &mut y) {
+                y = y + 1
+                x
+            }
+            var x = 41
+            var y = 1
+            let r = pick_first(x, y)
+            return r + y
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(43));
+}
+
+#[test]
+fn test_returned_reference_binding_supports_additional_reference_params_on_callable_expr() {
+    let code = r#"
+        function test() {
+            var x = 41
+            var y = 1
+            let r = (function(&a, &mut b) {
+                b = b + 1
+                a
+            })(x, y)
+            return r + y
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(43));
+}
+
+#[test]
 fn test_reference_param_can_be_returned_through_module_callable_alias() {
     let code = r#"
         function borrow_id(&x) {
@@ -659,6 +713,27 @@ fn test_returned_reference_binding_keeps_owner_borrowed_through_local_callable_v
             let r = borrow_id(x)
             x = 2
             return r
+        }
+        "#,
+        "B0002",
+    );
+}
+
+#[test]
+fn test_returned_reference_binding_keeps_owner_borrowed_with_additional_reference_params() {
+    assert_compile_error(
+        r#"
+        function pick_first(&x, &mut y) {
+            y = y + 1
+            x
+        }
+
+        function test() {
+            var x = 1
+            var y = 1
+            let r = pick_first(x, y)
+            x = 2
+            return r + y
         }
         "#,
         "B0002",

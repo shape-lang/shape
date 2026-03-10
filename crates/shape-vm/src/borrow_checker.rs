@@ -295,6 +295,17 @@ impl BorrowChecker {
         before != self.active_borrows.len()
     }
 
+    /// Move an existing borrow into a different lexical region.
+    pub fn rebind_borrow_region(&mut self, borrow_id: BorrowId, region: RegionId) {
+        if let Some(borrow) = self
+            .active_borrows
+            .iter_mut()
+            .find(|borrow| borrow.borrow_id == borrow_id)
+        {
+            borrow.borrow_region = region;
+        }
+    }
+
     /// Return the borrowed place currently owned by `ref_slot`, if any.
     pub fn borrow_place_for_ref_slot(&self, ref_slot: u16) -> Option<BorrowPlace> {
         self.active_borrows
@@ -539,6 +550,19 @@ mod tests {
         assert!(bc.check_write_allowed(0, None).is_err());
         assert!(bc.release_borrow_by_id(borrow_id));
         assert!(bc.check_write_allowed(0, None).is_ok());
+    }
+
+    #[test]
+    fn test_rebind_borrow_region_keeps_borrow_alive_across_inner_scope_exit() {
+        let mut bc = BorrowChecker::new();
+        let outer = bc.current_region();
+        bc.enter_region();
+        let borrow_id = bc
+            .create_borrow(0, 0, BorrowMode::Exclusive, span(), None)
+            .unwrap();
+        bc.rebind_borrow_region(borrow_id, outer);
+        bc.exit_region();
+        assert!(bc.check_write_allowed(0, None).is_err());
     }
 
     #[test]

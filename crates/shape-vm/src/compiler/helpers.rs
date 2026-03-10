@@ -1395,6 +1395,128 @@ impl BytecodeCompiler {
         Ok(Some((borrow_id, is_exclusive)))
     }
 
+    fn compile_reference_return_call_args(
+        &mut self,
+        args: &[shape_ast::ast::Expr],
+        pass_modes: &[ParamPassMode],
+        return_param_index: usize,
+    ) -> Result<(Option<(BorrowId, bool)>, Vec<(u16, u16)>)> {
+        let saved = self.in_call_args;
+        let saved_mode = self.current_call_arg_borrow_mode;
+        let parent_region = self.borrow_checker.current_region();
+        self.in_call_args = true;
+        self.borrow_checker.enter_region();
+        self.call_arg_module_binding_ref_writebacks.push(Vec::new());
+
+        let mut first_error: Option<ShapeError> = None;
+        let mut returned_borrow = None;
+
+        for (idx, arg) in args.iter().enumerate() {
+            let pass_mode = pass_modes
+                .get(idx)
+                .copied()
+                .unwrap_or(ParamPassMode::ByValue);
+            self.current_call_arg_borrow_mode = match pass_mode {
+                ParamPassMode::ByRefExclusive => Some(BorrowMode::Exclusive),
+                ParamPassMode::ByRefShared => Some(BorrowMode::Shared),
+                ParamPassMode::ByValue => None,
+            };
+
+            let arg_result = if idx == return_param_index {
+                let borrow_mode = if pass_mode.is_exclusive() {
+                    BorrowMode::Exclusive
+                } else {
+                    BorrowMode::Shared
+                };
+                self.compile_persistent_reference_call_arg(arg, borrow_mode)
+                    .map(Some)
+            } else {
+                match pass_mode {
+                    ParamPassMode::ByValue => {
+                        self.plan_flexible_binding_escape_from_expr(arg);
+                        self.compile_expr(arg).map(|_| None)
+                    }
+                    ParamPassMode::ByRefShared | ParamPassMode::ByRefExclusive => {
+                        let borrow_mode = if pass_mode.is_exclusive() {
+                            BorrowMode::Exclusive
+                        } else {
+                            BorrowMode::Shared
+                        };
+                        if matches!(arg, shape_ast::ast::Expr::Reference { .. }) {
+                            self.compile_expr(arg).map(|_| None)
+                        } else {
+                            self.compile_implicit_reference_arg(arg, borrow_mode)
+                                .map(|_| None)
+                        }
+                    }
+                }
+            };
+
+            match arg_result {
+                Ok(Some(borrow)) => returned_borrow = Some(borrow),
+                Ok(None) => {}
+                Err(err) => {
+                    if self.should_recover_compile_diagnostics() {
+                        self.errors.push(err);
+                        self.emit(Instruction::simple(OpCode::PushNull));
+                        continue;
+                    }
+                    first_error = Some(err);
+                    break;
+                }
+            }
+        }
+
+        self.current_call_arg_borrow_mode = saved_mode;
+        if let Some((borrow_id, _)) = returned_borrow {
+            self.borrow_checker
+                .rebind_borrow_region(borrow_id, parent_region);
+        }
+        self.borrow_checker.exit_region();
+        self.in_call_args = saved;
+        let writebacks = self
+            .call_arg_module_binding_ref_writebacks
+            .pop()
+            .unwrap_or_default();
+
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok((returned_borrow, writebacks))
+        }
+    }
+
+    fn restore_raw_reference_result_after_writebacks(
+        &mut self,
+        writebacks: Vec<(u16, u16)>,
+        temp_name: &str,
+    ) -> Result<()> {
+        if writebacks.is_empty() {
+            return Ok(());
+        }
+
+        let result_local = self.declare_temp_local(temp_name)?;
+        self.emit(Instruction::new(
+            OpCode::StoreLocal,
+            Some(Operand::Local(result_local)),
+        ));
+        for (shadow_local, binding_idx) in writebacks {
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(shadow_local)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::StoreModuleBinding,
+                Some(Operand::ModuleBinding(binding_idx)),
+            ));
+        }
+        self.emit(Instruction::new(
+            OpCode::LoadLocal,
+            Some(Operand::Local(result_local)),
+        ));
+        Ok(())
+    }
+
     pub(super) fn compile_callable_name_call_for_reference_binding(
         &mut self,
         name: &str,
@@ -1435,34 +1557,11 @@ impl BytecodeCompiler {
             .unwrap_or_else(|| vec![ParamPassMode::ByValue; args.len()]);
 
         self.compile_expr(callee_expr)?;
-
-        let mut returned_borrow = None;
-        for (idx, arg) in args.iter().enumerate() {
-            let pass_mode = pass_modes
-                .get(idx)
-                .copied()
-                .unwrap_or(ParamPassMode::ByValue);
-            if idx == return_contract.param_index {
-                let borrow_mode = if pass_mode.is_exclusive() {
-                    BorrowMode::Exclusive
-                } else {
-                    BorrowMode::Shared
-                };
-                returned_borrow =
-                    Some(self.compile_persistent_reference_call_arg(arg, borrow_mode)?);
-                continue;
-            }
-
-            match pass_mode {
-                ParamPassMode::ByValue => self.compile_expr(arg)?,
-                ParamPassMode::ByRefShared | ParamPassMode::ByRefExclusive => {
-                    return Err(ShapeError::SemanticError {
-                        message: "binding a returned reference from call sites with additional reference parameters is not supported yet".to_string(),
-                        location: Some(self.span_to_source_location(arg.span())),
-                    });
-                }
-            }
-        }
+        let (returned_borrow, writebacks) = self.compile_reference_return_call_args(
+            args,
+            &pass_modes,
+            return_contract.param_index,
+        )?;
 
         let arg_count = self
             .program
@@ -1472,6 +1571,7 @@ impl BytecodeCompiler {
             Some(Operand::Const(arg_count)),
         ));
         self.emit(Instruction::simple(OpCode::CallValue));
+        self.restore_raw_reference_result_after_writebacks(writebacks, "__callable_expr_ret_ref_")?;
 
         Ok(returned_borrow)
     }
@@ -1508,33 +1608,11 @@ impl BytecodeCompiler {
         }
 
         let pass_modes = Self::pass_modes_from_ref_flags(&func.ref_params, &func.ref_mutates);
-        let mut returned_borrow = None;
-        for (idx, arg) in args.iter().enumerate() {
-            let pass_mode = pass_modes
-                .get(idx)
-                .copied()
-                .unwrap_or(ParamPassMode::ByValue);
-            if idx == return_contract.param_index {
-                let borrow_mode = if pass_mode.is_exclusive() {
-                    BorrowMode::Exclusive
-                } else {
-                    BorrowMode::Shared
-                };
-                returned_borrow =
-                    Some(self.compile_persistent_reference_call_arg(arg, borrow_mode)?);
-                continue;
-            }
-
-            match pass_mode {
-                ParamPassMode::ByValue => self.compile_expr(arg)?,
-                ParamPassMode::ByRefShared | ParamPassMode::ByRefExclusive => {
-                    return Err(ShapeError::SemanticError {
-                        message: "binding a returned reference from call sites with additional reference parameters is not supported yet".to_string(),
-                        location: Some(self.span_to_source_location(arg.span())),
-                    });
-                }
-            }
-        }
+        let (returned_borrow, writebacks) = self.compile_reference_return_call_args(
+            args,
+            &pass_modes,
+            return_contract.param_index,
+        )?;
 
         let arg_count = self
             .program
@@ -1550,6 +1628,7 @@ impl BytecodeCompiler {
         if let Some(ref mut blob) = self.current_blob_builder {
             blob.record_call(name);
         }
+        self.restore_raw_reference_result_after_writebacks(writebacks, "__call_ret_ref_")?;
 
         Ok(returned_borrow)
     }
@@ -1581,34 +1660,11 @@ impl BytecodeCompiler {
             .unwrap_or_else(|| vec![ParamPassMode::ByValue; args.len()]);
 
         self.compile_expr_identifier(name, span)?;
-
-        let mut returned_borrow = None;
-        for (idx, arg) in args.iter().enumerate() {
-            let pass_mode = pass_modes
-                .get(idx)
-                .copied()
-                .unwrap_or(ParamPassMode::ByValue);
-            if idx == return_contract.param_index {
-                let borrow_mode = if pass_mode.is_exclusive() {
-                    BorrowMode::Exclusive
-                } else {
-                    BorrowMode::Shared
-                };
-                returned_borrow =
-                    Some(self.compile_persistent_reference_call_arg(arg, borrow_mode)?);
-                continue;
-            }
-
-            match pass_mode {
-                ParamPassMode::ByValue => self.compile_expr(arg)?,
-                ParamPassMode::ByRefShared | ParamPassMode::ByRefExclusive => {
-                    return Err(ShapeError::SemanticError {
-                        message: "binding a returned reference from call sites with additional reference parameters is not supported yet".to_string(),
-                        location: Some(self.span_to_source_location(arg.span())),
-                    });
-                }
-            }
-        }
+        let (returned_borrow, writebacks) = self.compile_reference_return_call_args(
+            args,
+            &pass_modes,
+            return_contract.param_index,
+        )?;
 
         let arg_count = self
             .program
@@ -1618,6 +1674,10 @@ impl BytecodeCompiler {
             Some(Operand::Const(arg_count)),
         ));
         self.emit(Instruction::simple(OpCode::CallValue));
+        self.restore_raw_reference_result_after_writebacks(
+            writebacks,
+            "__callable_value_ret_ref_",
+        )?;
 
         Ok(returned_borrow)
     }
