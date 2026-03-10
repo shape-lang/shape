@@ -467,6 +467,7 @@ mod tests {
             }],
             num_locals: 3,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::NonCopy,
                 LocalTypeInfo::NonCopy,
@@ -503,6 +504,7 @@ mod tests {
             blocks: vec![],
             num_locals: 0,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
         };
@@ -528,6 +530,7 @@ mod tests {
             blocks: vec![],
             num_locals: 0,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
         };
@@ -555,6 +558,7 @@ mod tests {
             blocks: vec![],
             num_locals: 0,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
         };

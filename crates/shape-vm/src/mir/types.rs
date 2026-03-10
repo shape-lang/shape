@@ -345,6 +345,8 @@ pub struct MirFunction {
     pub num_locals: u16,
     /// Which locals are function parameters.
     pub param_slots: Vec<SlotId>,
+    /// Per-parameter reference kind, aligned with `param_slots`.
+    pub param_reference_kinds: Vec<Option<BorrowKind>>,
     /// Type information for locals (for Copy/Clone inference).
     pub local_types: Vec<LocalTypeInfo>,
     /// Source span of the function.

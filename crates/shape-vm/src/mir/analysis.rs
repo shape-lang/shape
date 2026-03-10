@@ -12,6 +12,12 @@ use super::types::*;
 use shape_ast::ast::Span;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReferenceReturnContract {
+    pub param_index: usize,
+    pub kind: BorrowKind,
+}
+
 /// The complete borrow analysis for a single function.
 /// Produced by the Datafrog solver + liveness analysis.
 /// Consumed (read-only) by compiler, LSP, and diagnostics.
@@ -29,6 +35,9 @@ pub struct BorrowAnalysis {
     pub ownership_decisions: HashMap<Point, OwnershipDecision>,
     /// Immutability violations (writing to immutable bindings).
     pub mutability_errors: Vec<MutabilityError>,
+    /// If this function safely returns one reference parameter unchanged,
+    /// records which parameter flows out and whether it is shared/exclusive.
+    pub return_reference_contract: Option<ReferenceReturnContract>,
 }
 
 /// Information about a single loan (borrow).
@@ -86,6 +95,8 @@ pub enum BorrowErrorKind {
     UseAfterMove,
     /// Cannot share exclusive reference across task boundary.
     ExclusiveRefAcrossTaskBoundary,
+    /// Reference returns must consistently return the same parameter with the same borrow kind.
+    InconsistentReferenceReturn,
 }
 
 /// A repair candidate (fix suggestion) verified by re-running the solver.
@@ -158,6 +169,7 @@ impl BorrowAnalysis {
             errors: Vec::new(),
             ownership_decisions: HashMap::new(),
             mutability_errors: Vec::new(),
+            return_reference_contract: None,
         }
     }
 

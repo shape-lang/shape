@@ -527,6 +527,131 @@ fn test_borrow_param_ref_not_allowed_in_return() {
 }
 
 #[test]
+fn test_reference_param_can_be_returned() {
+    let code = r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function test() {
+            var x = 41
+            let r = borrow_id(x)
+            return r + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_reference_param_can_be_returned_through_local_callable_value() {
+    let code = r#"
+        function test() {
+            let borrow_id = function(&x) {
+                x
+            }
+            var x = 41
+            return borrow_id(x) + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_reference_param_can_be_returned_through_module_callable_alias() {
+    let code = r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        let alias = borrow_id
+
+        function test() {
+            var x = 41
+            return alias(x) + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_returned_reference_binding_keeps_owner_borrowed() {
+    assert_compile_error(
+        r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function test() {
+            var x = 1
+            let r = borrow_id(x)
+            x = 2
+            return r
+        }
+        "#,
+        "B0002",
+    );
+}
+
+#[test]
+fn test_returned_reference_binding_can_move_existing_reference_value() {
+    let code = r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function test() {
+            var x = 41
+            let r1 = borrow_id(x)
+            let r2 = borrow_id(r1)
+            return r2 + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_returned_reference_binding_rejects_reused_source_reference_value() {
+    assert_compile_error(
+        r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function test() {
+            var x = 1
+            let r1 = borrow_id(x)
+            let r2 = borrow_id(r1)
+            print(r1)
+            return r2
+        }
+        "#,
+        "source reference is no longer used",
+    );
+}
+
+#[test]
+fn test_returned_reference_binding_keeps_owner_borrowed_through_local_callable_value() {
+    assert_compile_error(
+        r#"
+        function test() {
+            let borrow_id = function(&x) {
+                x
+            }
+            var x = 1
+            let r = borrow_id(x)
+            x = 2
+            return r
+        }
+        "#,
+        "B0002",
+    );
+}
+
+#[test]
 fn test_borrow_param_ref_not_allowed_in_array() {
     assert_compile_error(
         r#"

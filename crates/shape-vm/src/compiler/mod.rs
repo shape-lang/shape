@@ -96,6 +96,30 @@ impl ParamPassMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FunctionReferenceReturnContract {
+    pub param_index: usize,
+    pub mode: BorrowMode,
+}
+
+impl FunctionReferenceReturnContract {
+    pub const fn is_exclusive(self) -> bool {
+        matches!(self.mode, BorrowMode::Exclusive)
+    }
+}
+
+impl From<crate::mir::analysis::ReferenceReturnContract> for FunctionReferenceReturnContract {
+    fn from(value: crate::mir::analysis::ReferenceReturnContract) -> Self {
+        Self {
+            param_index: value.param_index,
+            mode: match value.kind {
+                crate::mir::types::BorrowKind::Shared => BorrowMode::Shared,
+                crate::mir::types::BorrowKind::Exclusive => BorrowMode::Exclusive,
+            },
+        }
+    }
+}
+
 /// Per-function blob builder for content-addressed compilation.
 ///
 /// Uses a **snapshot** strategy: records the global instruction/constant/string
@@ -424,8 +448,23 @@ pub struct BytecodeCompiler {
     /// Known pass modes for local callable bindings (closures / function aliases).
     pub(crate) local_callable_pass_modes: HashMap<u16, Vec<ParamPassMode>>,
 
+    /// Known safe reference-return contracts for local callable bindings.
+    pub(crate) local_callable_return_reference_contracts:
+        HashMap<u16, FunctionReferenceReturnContract>,
+
     /// Known pass modes for module-binding callable values.
     pub(crate) module_binding_callable_pass_modes: HashMap<u16, Vec<ParamPassMode>>,
+
+    /// Known safe reference-return contracts for module-binding callable values.
+    pub(crate) module_binding_callable_return_reference_contracts:
+        HashMap<u16, FunctionReferenceReturnContract>,
+
+    /// Named functions that safely return one reference parameter unchanged.
+    pub(crate) function_return_reference_contracts:
+        HashMap<String, FunctionReferenceReturnContract>,
+
+    /// The reference-return contract of the function currently being compiled, if any.
+    pub(crate) current_function_return_reference_contract: Option<FunctionReferenceReturnContract>,
 
     /// Type inference engine for match exhaustiveness and type checking
     pub(crate) type_inference: shape_runtime::type_system::inference::TypeInferenceEngine,

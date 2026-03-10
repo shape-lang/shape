@@ -61,6 +61,10 @@ pub struct BorrowFacts {
     pub object_assignment_loans: Vec<(u32, shape_ast::ast::Span)>,
     /// Loans written through index assignments into aggregate places.
     pub array_assignment_loans: Vec<(u32, shape_ast::ast::Span)>,
+    /// Reference-return contracts flowing into the return slot.
+    pub return_reference_candidates: Vec<(ReferenceReturnContract, shape_ast::ast::Span)>,
+    /// Return-slot writes that produce a plain owned value.
+    pub non_reference_return_spans: Vec<shape_ast::ast::Span>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
@@ -68,6 +72,19 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
     let mut facts = BorrowFacts::default();
     let mut next_loan = 0u32;
     let mut slot_loans: HashMap<SlotId, Vec<u32>> = HashMap::new();
+    let param_reference_contracts: HashMap<SlotId, ReferenceReturnContract> = mir
+        .param_slots
+        .iter()
+        .enumerate()
+        .filter_map(|(param_index, slot)| {
+            mir.param_reference_kinds
+                .get(param_index)
+                .copied()
+                .flatten()
+                .map(|kind| (*slot, ReferenceReturnContract { param_index, kind }))
+        })
+        .collect();
+    let mut slot_reference_contracts = param_reference_contracts.clone();
 
     // Extract CFG edges from the block structure
     for block in &mir.blocks {
@@ -101,6 +118,15 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                     facts.loan_issued_at.push((loan_id, stmt.point.0));
                     if let Place::Local(slot) = dest {
                         slot_loans.insert(*slot, vec![loan_id]);
+                        if let Some(contract) = safe_reference_contract_for_borrow(
+                            *kind,
+                            place,
+                            &param_reference_contracts,
+                        ) {
+                            slot_reference_contracts.insert(*slot, contract);
+                        } else {
+                            slot_reference_contracts.remove(slot);
+                        }
                     }
                     facts.loan_info.insert(
                         loan_id,
@@ -116,9 +142,38 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                 StatementKind::Assign(place, rvalue) => {
                     if let Place::Local(dest_slot) = place {
                         update_slot_loan_aliases(&mut slot_loans, *dest_slot, rvalue);
+                        update_slot_reference_contracts(
+                            &mut slot_reference_contracts,
+                            *dest_slot,
+                            rvalue,
+                        );
                         if *dest_slot == SlotId(0) {
+                            let mut found_reference_return = false;
+                            if let Some(contract) =
+                                reference_contract_from_rvalue(&slot_reference_contracts, rvalue)
+                            {
+                                facts
+                                    .return_reference_candidates
+                                    .push((contract, stmt.span));
+                                found_reference_return = true;
+                            }
                             for loan_id in local_loans_from_rvalue(&slot_loans, rvalue) {
-                                facts.escaped_loans.push((loan_id, stmt.span));
+                                let info = &facts.loan_info[&loan_id];
+                                if let Some(contract) = safe_reference_contract_for_borrow(
+                                    info.kind,
+                                    &info.borrowed_place,
+                                    &param_reference_contracts,
+                                ) {
+                                    facts
+                                        .return_reference_candidates
+                                        .push((contract, stmt.span));
+                                    found_reference_return = true;
+                                } else {
+                                    facts.escaped_loans.push((loan_id, stmt.span));
+                                }
+                            }
+                            if !found_reference_return {
+                                facts.non_reference_return_spans.push(stmt.span);
                             }
                         }
                     }
@@ -355,6 +410,129 @@ fn local_loans_from_rvalue(slot_loans: &HashMap<SlotId, Vec<u32>>, rvalue: &Rval
         }
         _ => Vec::new(),
     }
+}
+
+fn update_slot_reference_contracts(
+    slot_reference_contracts: &mut HashMap<SlotId, ReferenceReturnContract>,
+    dest_slot: SlotId,
+    rvalue: &Rvalue,
+) {
+    match rvalue {
+        Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
+            if let Some(contract) = slot_reference_contracts.get(src_slot).copied() {
+                slot_reference_contracts.insert(dest_slot, contract);
+            } else {
+                slot_reference_contracts.remove(&dest_slot);
+            }
+        }
+        _ => {
+            slot_reference_contracts.remove(&dest_slot);
+        }
+    }
+}
+
+fn reference_contract_from_rvalue(
+    slot_reference_contracts: &HashMap<SlotId, ReferenceReturnContract>,
+    rvalue: &Rvalue,
+) -> Option<ReferenceReturnContract> {
+    match rvalue {
+        Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
+            slot_reference_contracts.get(src_slot).copied()
+        }
+        _ => None,
+    }
+}
+
+fn safe_reference_contract_for_borrow(
+    borrow_kind: BorrowKind,
+    borrowed_place: &Place,
+    param_reference_contracts: &HashMap<SlotId, ReferenceReturnContract>,
+) -> Option<ReferenceReturnContract> {
+    let param_contract = param_reference_contracts.get(&borrowed_place.root_local())?;
+    Some(ReferenceReturnContract {
+        param_index: param_contract.param_index,
+        kind: borrow_kind,
+    })
+}
+
+fn resolve_return_reference_contract(
+    errors: &mut Vec<BorrowError>,
+    facts: &BorrowFacts,
+    loans_at_point: &HashMap<Point, Vec<LoanId>>,
+) -> Option<ReferenceReturnContract> {
+    let mut unique_candidates = Vec::new();
+    for (candidate, _) in &facts.return_reference_candidates {
+        if !unique_candidates.contains(candidate) {
+            unique_candidates.push(*candidate);
+        }
+    }
+
+    if unique_candidates.is_empty() {
+        return None;
+    }
+
+    let error_span = if unique_candidates.len() > 1 {
+        facts
+            .return_reference_candidates
+            .get(1)
+            .map(|(_, span)| *span)
+    } else {
+        facts.non_reference_return_spans.first().copied()
+    };
+
+    if let Some(span) = error_span {
+        let (conflicting_loan, loan_span, last_use_span) = facts
+            .return_reference_candidates
+            .first()
+            .and_then(|(candidate, candidate_span)| {
+                find_matching_loan_for_return_candidate(
+                    candidate,
+                    *candidate_span,
+                    facts,
+                    loans_at_point,
+                )
+            })
+            .unwrap_or((LoanId(0), span, None));
+        errors.push(BorrowError {
+            kind: BorrowErrorKind::InconsistentReferenceReturn,
+            span,
+            conflicting_loan,
+            loan_span,
+            last_use_span,
+            repairs: Vec::new(),
+        });
+        return None;
+    }
+
+    unique_candidates.into_iter().next()
+}
+
+fn find_matching_loan_for_return_candidate(
+    candidate: &ReferenceReturnContract,
+    candidate_span: shape_ast::ast::Span,
+    facts: &BorrowFacts,
+    loans_at_point: &HashMap<Point, Vec<LoanId>>,
+) -> Option<(LoanId, shape_ast::ast::Span, Option<shape_ast::ast::Span>)> {
+    let point = facts
+        .point_spans
+        .iter()
+        .find_map(|(point, span)| (*span == candidate_span).then_some(Point(*point)))?;
+    let loans = loans_at_point.get(&point)?;
+    for loan in loans {
+        let info = facts.loan_info.get(&loan.0)?;
+        if info.kind == candidate.kind {
+            return Some((*loan, info.span, last_use_span_for_loan(facts, loan.0)));
+        }
+    }
+    None
 }
 
 /// Run the Datafrog solver to compute loan liveness and detect errors.
@@ -645,10 +823,14 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         });
     }
 
+    let return_reference_contract =
+        resolve_return_reference_contract(&mut errors, facts, &loans_at_point);
+
     SolverResult {
         loans_at_point,
         errors,
         loan_info: facts.loan_info.clone(),
+        return_reference_contract,
     }
 }
 
@@ -658,6 +840,7 @@ pub struct SolverResult {
     pub loans_at_point: HashMap<Point, Vec<LoanId>>,
     pub errors: Vec<BorrowError>,
     pub loan_info: HashMap<u32, LoanInfo>,
+    pub return_reference_contract: Option<ReferenceReturnContract>,
 }
 
 /// Run the complete borrow analysis pipeline for a MIR function.
@@ -695,6 +878,7 @@ pub fn analyze(mir: &MirFunction) -> BorrowAnalysis {
         errors,
         ownership_decisions,
         mutability_errors: Vec::new(), // filled by binding resolver (Phase 1)
+        return_reference_contract: solver_result.return_reference_contract,
     }
 }
 
@@ -1008,6 +1192,7 @@ mod tests {
             }],
             num_locals: 2,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy],
             span: span(),
         };
@@ -1052,6 +1237,7 @@ mod tests {
             }],
             num_locals: 3,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::NonCopy,
                 LocalTypeInfo::NonCopy,
@@ -1112,6 +1298,7 @@ mod tests {
             }],
             num_locals: 3,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::NonCopy,
                 LocalTypeInfo::NonCopy,
@@ -1161,6 +1348,7 @@ mod tests {
             }],
             num_locals: 3,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::NonCopy,
                 LocalTypeInfo::NonCopy,
@@ -1220,6 +1408,7 @@ mod tests {
             }],
             num_locals: 4,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::NonCopy,
                 LocalTypeInfo::NonCopy,
@@ -1273,6 +1462,7 @@ mod tests {
             }],
             num_locals: 3,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::NonCopy,
                 LocalTypeInfo::NonCopy,
@@ -1320,6 +1510,7 @@ mod tests {
             }],
             num_locals: 2,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy],
             span: span(),
         };
@@ -1387,6 +1578,7 @@ mod tests {
             ],
             num_locals: 4,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::NonCopy,
                 LocalTypeInfo::NonCopy,
@@ -1442,6 +1634,7 @@ mod tests {
             }],
             num_locals: 3,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::NonCopy,
                 LocalTypeInfo::NonCopy,
@@ -1493,6 +1686,7 @@ mod tests {
             }],
             num_locals: 2,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::Copy, LocalTypeInfo::Copy],
             span: span(),
         };

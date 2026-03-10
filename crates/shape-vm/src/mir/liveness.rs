@@ -251,6 +251,7 @@ mod tests {
             }],
             num_locals: 2,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::Copy, LocalTypeInfo::Copy],
             span: span(),
         };
@@ -312,6 +313,7 @@ mod tests {
             ],
             num_locals: 3,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![
                 LocalTypeInfo::Copy,
                 LocalTypeInfo::Copy,

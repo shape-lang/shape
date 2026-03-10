@@ -15,7 +15,10 @@ use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::{BytecodeCompiler, DropKind, ParamPassMode, TrackedReferenceBorrow};
+use super::{
+    BytecodeCompiler, DropKind, FunctionReferenceReturnContract, ParamPassMode,
+    TrackedReferenceBorrow,
+};
 
 pub(super) struct TypedFieldPlace {
     pub root_name: String,
@@ -1178,10 +1181,360 @@ impl BytecodeCompiler {
             } else {
                 Ok(Some((borrow_id, *is_mutable)))
             }
+        } else if let shape_ast::ast::Expr::FunctionCall {
+            name,
+            args,
+            named_args,
+            span,
+        } = expr
+        {
+            if named_args.is_empty()
+                && self
+                    .function_reference_return_contract_for_name(name)
+                    .is_some()
+            {
+                self.compile_callable_name_call_for_reference_binding(name, args, *span)
+            } else {
+                self.compile_expr(expr)?;
+                Ok(None)
+            }
         } else {
             self.compile_expr(expr)?;
             Ok(None)
         }
+    }
+
+    fn compile_persistent_reference_call_arg(
+        &mut self,
+        arg: &shape_ast::ast::Expr,
+        mode: BorrowMode,
+    ) -> Result<(BorrowId, bool)> {
+        use shape_ast::ast::Expr;
+
+        let borrow_id = match arg {
+            Expr::Reference {
+                expr: inner,
+                is_mutable,
+                span,
+            } => {
+                let explicit_mode = if *is_mutable {
+                    BorrowMode::Exclusive
+                } else {
+                    BorrowMode::Shared
+                };
+                let borrow_id = self.compile_reference_expr(inner, *span, explicit_mode)?;
+                if borrow_id == BorrowId::MAX {
+                    return Err(ShapeError::SemanticError {
+                        message: "binding a returned reference from an existing reference value is not supported yet".to_string(),
+                        location: Some(self.span_to_source_location(*span)),
+                    });
+                }
+                return Ok((borrow_id, *is_mutable));
+            }
+            Expr::Identifier(name, span) => {
+                if let Some(moved_borrow) =
+                    self.compile_moved_reference_call_arg(name, *span, mode)?
+                {
+                    return Ok(moved_borrow);
+                }
+                self.compile_reference_identifier(name, *span, mode)?
+            }
+            Expr::PropertyAccess {
+                object,
+                property,
+                optional: false,
+                span,
+            } => self.compile_reference_property_access(object, property, *span, mode)?,
+            _ if mode == BorrowMode::Exclusive => {
+                return Err(ShapeError::SemanticError {
+                    message: "[B0004] mutable reference arguments must be simple variables"
+                        .to_string(),
+                    location: Some(self.span_to_source_location(arg.span())),
+                });
+            }
+            _ => {
+                self.compile_expr(arg)?;
+                let temp = self.declare_temp_local("__ret_ref_arg_")?;
+                self.emit(Instruction::new(
+                    OpCode::StoreLocal,
+                    Some(Operand::Local(temp)),
+                ));
+                let borrow_id = self.borrow_checker.create_borrow(
+                    Self::borrow_key_for_local(temp),
+                    temp,
+                    mode,
+                    arg.span(),
+                    Some(self.span_to_source_location(arg.span())),
+                )?;
+                self.emit(Instruction::new(
+                    OpCode::MakeRef,
+                    Some(Operand::Local(temp)),
+                ));
+                borrow_id
+            }
+        };
+
+        if borrow_id == BorrowId::MAX {
+            return Err(ShapeError::SemanticError {
+                message: "binding a returned reference from an existing reference value is not supported yet".to_string(),
+                location: Some(self.span_to_source_location(arg.span())),
+            });
+        }
+
+        Ok((borrow_id, mode == BorrowMode::Exclusive))
+    }
+
+    fn compile_moved_reference_call_arg(
+        &mut self,
+        name: &str,
+        span: shape_ast::ast::Span,
+        mode: BorrowMode,
+    ) -> Result<Option<(BorrowId, bool)>> {
+        let (slot, is_local, is_exclusive, borrow_id) =
+            if let Some(local_idx) = self.resolve_local(name) {
+                let Some(tracked) = self
+                    .tracked_reference_borrow_locals
+                    .get(&local_idx)
+                    .cloned()
+                else {
+                    return Ok(None);
+                };
+                (
+                    local_idx,
+                    true,
+                    self.exclusive_reference_value_locals.contains(&local_idx),
+                    tracked.borrow_id,
+                )
+            } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+                let Some(&binding_idx) = self.module_bindings.get(&scoped_name) else {
+                    return Ok(None);
+                };
+                let Some(tracked) = self
+                    .tracked_reference_borrow_module_bindings
+                    .get(&binding_idx)
+                    .cloned()
+                else {
+                    return Ok(None);
+                };
+                (
+                    binding_idx,
+                    false,
+                    self.exclusive_reference_value_module_bindings
+                        .contains(&binding_idx),
+                    tracked.borrow_id,
+                )
+            } else {
+                return Ok(None);
+            };
+
+        if mode == BorrowMode::Exclusive && !is_exclusive {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot pass shared reference variable '{}' as an exclusive reference",
+                    name
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+
+        if self
+            .future_reference_use_names
+            .last()
+            .is_some_and(|names| names.contains(name))
+        {
+            return Err(ShapeError::SemanticError {
+                message:
+                    "binding a returned reference from an existing reference value is only supported when the source reference is no longer used".to_string(),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+
+        let temp = self.declare_temp_local("__moved_ref_arg_")?;
+        self.compile_identifier_as_raw_reference(name, span)?;
+        self.emit(Instruction::new(
+            OpCode::StoreLocal,
+            Some(Operand::Local(temp)),
+        ));
+        self.emit_unit();
+        if is_local {
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(slot)),
+            ));
+        } else {
+            self.emit(Instruction::new(
+                OpCode::StoreModuleBinding,
+                Some(Operand::ModuleBinding(slot)),
+            ));
+        }
+        self.emit(Instruction::new(
+            OpCode::LoadLocal,
+            Some(Operand::Local(temp)),
+        ));
+        self.take_reference_binding_without_release(slot, is_local);
+
+        Ok(Some((borrow_id, is_exclusive)))
+    }
+
+    pub(super) fn compile_callable_name_call_for_reference_binding(
+        &mut self,
+        name: &str,
+        args: &[shape_ast::ast::Expr],
+        span: shape_ast::ast::Span,
+    ) -> Result<Option<(BorrowId, bool)>> {
+        if self.resolve_local(name).is_some()
+            || self.resolve_scoped_module_binding_name(name).is_some()
+        {
+            self.compile_callable_value_name_for_reference_binding(name, args, span)
+        } else {
+            self.compile_named_function_call_for_reference_binding(name, args, span)
+        }
+    }
+
+    pub(super) fn compile_named_function_call_for_reference_binding(
+        &mut self,
+        name: &str,
+        args: &[shape_ast::ast::Expr],
+        span: shape_ast::ast::Span,
+    ) -> Result<Option<(BorrowId, bool)>> {
+        let return_contract = self
+            .function_reference_return_contract_for_name(name)
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: format!("function '{}' does not return a reference", name),
+                location: Some(self.span_to_source_location(span)),
+            })?;
+        let func_idx = self
+            .find_function(name)
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!("Undefined function: {}", name),
+                location: Some(self.span_to_source_location(span)),
+            })?;
+        let func = &self.program.functions[func_idx];
+        if args.len() != func.arity as usize {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Function '{}' expects {} arguments, got {}",
+                    name,
+                    func.arity,
+                    args.len()
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+
+        let pass_modes = Self::pass_modes_from_ref_flags(&func.ref_params, &func.ref_mutates);
+        let mut returned_borrow = None;
+        for (idx, arg) in args.iter().enumerate() {
+            let pass_mode = pass_modes
+                .get(idx)
+                .copied()
+                .unwrap_or(ParamPassMode::ByValue);
+            if idx == return_contract.param_index {
+                let borrow_mode = if pass_mode.is_exclusive() {
+                    BorrowMode::Exclusive
+                } else {
+                    BorrowMode::Shared
+                };
+                returned_borrow =
+                    Some(self.compile_persistent_reference_call_arg(arg, borrow_mode)?);
+                continue;
+            }
+
+            match pass_mode {
+                ParamPassMode::ByValue => self.compile_expr(arg)?,
+                ParamPassMode::ByRefShared | ParamPassMode::ByRefExclusive => {
+                    return Err(ShapeError::SemanticError {
+                        message: "binding a returned reference from call sites with additional reference parameters is not supported yet".to_string(),
+                        location: Some(self.span_to_source_location(arg.span())),
+                    });
+                }
+            }
+        }
+
+        let arg_count = self
+            .program
+            .add_constant(Constant::Number(args.len() as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(arg_count)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::Call,
+            Some(Operand::Function(shape_value::FunctionId(func_idx as u16))),
+        ));
+        if let Some(ref mut blob) = self.current_blob_builder {
+            blob.record_call(name);
+        }
+
+        Ok(returned_borrow)
+    }
+
+    fn compile_callable_value_name_for_reference_binding(
+        &mut self,
+        name: &str,
+        args: &[shape_ast::ast::Expr],
+        span: shape_ast::ast::Span,
+    ) -> Result<Option<(BorrowId, bool)>> {
+        let return_contract = self
+            .function_reference_return_contract_for_name(name)
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: format!("callable '{}' does not return a reference", name),
+                location: Some(self.span_to_source_location(span)),
+            })?;
+        if return_contract.param_index >= args.len() {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "callable '{}' did not receive the reference parameter it returns",
+                    name
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+
+        let pass_modes = self
+            .callable_pass_modes_for_name(name)
+            .unwrap_or_else(|| vec![ParamPassMode::ByValue; args.len()]);
+
+        self.compile_expr_identifier(name, span)?;
+
+        let mut returned_borrow = None;
+        for (idx, arg) in args.iter().enumerate() {
+            let pass_mode = pass_modes
+                .get(idx)
+                .copied()
+                .unwrap_or(ParamPassMode::ByValue);
+            if idx == return_contract.param_index {
+                let borrow_mode = if pass_mode.is_exclusive() {
+                    BorrowMode::Exclusive
+                } else {
+                    BorrowMode::Shared
+                };
+                returned_borrow =
+                    Some(self.compile_persistent_reference_call_arg(arg, borrow_mode)?);
+                continue;
+            }
+
+            match pass_mode {
+                ParamPassMode::ByValue => self.compile_expr(arg)?,
+                ParamPassMode::ByRefShared | ParamPassMode::ByRefExclusive => {
+                    return Err(ShapeError::SemanticError {
+                        message: "binding a returned reference from call sites with additional reference parameters is not supported yet".to_string(),
+                        location: Some(self.span_to_source_location(arg.span())),
+                    });
+                }
+            }
+        }
+
+        let arg_count = self
+            .program
+            .add_constant(Constant::Number(args.len() as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(arg_count)),
+        ));
+        self.emit(Instruction::simple(OpCode::CallValue));
+
+        Ok(returned_borrow)
     }
 
     fn track_reference_binding_slot(&mut self, slot: u16, is_local: bool) {
@@ -1235,6 +1588,28 @@ impl BytecodeCompiler {
         }
     }
 
+    fn take_reference_binding_without_release(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+    ) -> Option<TrackedReferenceBorrow> {
+        let tracked = if is_local {
+            self.tracked_reference_borrow_locals.remove(&slot)
+        } else {
+            self.tracked_reference_borrow_module_bindings.remove(&slot)
+        };
+        if is_local {
+            self.reference_value_locals.remove(&slot);
+            self.exclusive_reference_value_locals.remove(&slot);
+        } else {
+            self.reference_value_module_bindings.remove(&slot);
+            self.exclusive_reference_value_module_bindings.remove(&slot);
+        }
+        let fallback_storage = self.default_binding_storage_class_for_slot(slot, is_local);
+        self.set_binding_storage_class(slot, is_local, fallback_storage);
+        tracked
+    }
+
     pub(super) fn clear_reference_binding(&mut self, slot: u16, is_local: bool) {
         self.release_tracked_reference_borrow(slot, is_local);
         if is_local {
@@ -1281,11 +1656,55 @@ impl BytecodeCompiler {
         expr: &shape_ast::ast::Expr,
     ) -> Option<Vec<ParamPassMode>> {
         match expr {
-            shape_ast::ast::Expr::FunctionExpr { params, body, .. } => Some(
-                self.effective_function_like_pass_modes(None, params, Some(body)),
-            ),
+            shape_ast::ast::Expr::FunctionExpr { params, body, .. } => {
+                Some(self.effective_function_like_pass_modes(None, params, Some(body)))
+            }
             shape_ast::ast::Expr::Identifier(name, _)
             | shape_ast::ast::Expr::PatternRef(name, _) => self.callable_pass_modes_for_name(name),
+            _ => None,
+        }
+    }
+
+    fn callable_reference_return_contract_from_function_expr(
+        &self,
+        params: &[shape_ast::ast::FunctionParameter],
+        body: &[Statement],
+        span: shape_ast::ast::Span,
+    ) -> Option<FunctionReferenceReturnContract> {
+        let mut effective_params = params.to_vec();
+        let pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
+        for (param, pass_mode) in effective_params.iter_mut().zip(pass_modes) {
+            param.is_reference = pass_mode.is_reference();
+            param.is_mut_reference = pass_mode.is_exclusive();
+        }
+
+        let lowering = crate::mir::lowering::lower_function_detailed(
+            "__callable_expr__",
+            &effective_params,
+            body,
+            span,
+        );
+        if lowering.had_fallbacks {
+            return None;
+        }
+
+        crate::mir::solver::analyze(&lowering.mir)
+            .return_reference_contract
+            .map(Into::into)
+    }
+
+    pub(super) fn callable_reference_return_contract_from_expr(
+        &self,
+        expr: &shape_ast::ast::Expr,
+    ) -> Option<FunctionReferenceReturnContract> {
+        match expr {
+            shape_ast::ast::Expr::FunctionExpr {
+                params, body, span, ..
+            } => self.callable_reference_return_contract_from_function_expr(params, body, *span),
+            shape_ast::ast::Expr::Identifier(name, _)
+            | shape_ast::ast::Expr::PatternRef(name, _) => {
+                self.function_reference_return_contract_for_name(name)
+            }
             _ => None,
         }
     }
@@ -1309,6 +1728,67 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn function_reference_return_contract_for_name(
+        &self,
+        name: &str,
+    ) -> Option<FunctionReferenceReturnContract> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            self.local_callable_return_reference_contracts
+                .get(&local_idx)
+                .copied()
+        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+            let binding_idx = *self.module_bindings.get(&scoped_name)?;
+            self.module_binding_callable_return_reference_contracts
+                .get(&binding_idx)
+                .copied()
+        } else {
+            self.function_return_reference_contracts.get(name).copied()
+        }
+    }
+
+    pub(super) fn compile_expr_for_reference_return(&mut self, expr: &Expr) -> Result<()> {
+        let Some(expected_contract) = self.current_function_return_reference_contract else {
+            return Err(ShapeError::SemanticError {
+                message: "internal compiler error: missing reference return contract".to_string(),
+                location: Some(self.span_to_source_location(expr.span())),
+            });
+        };
+
+        let is_exclusive = match expr {
+            Expr::Identifier(name, span) | Expr::PatternRef(name, span) => {
+                self.compile_identifier_as_raw_reference(name, *span)?
+            }
+            Expr::Reference {
+                expr: inner,
+                is_mutable,
+                span,
+            } => {
+                let mode = if *is_mutable {
+                    BorrowMode::Exclusive
+                } else {
+                    BorrowMode::Shared
+                };
+                self.compile_reference_expr(inner, *span, mode)?;
+                *is_mutable
+            }
+            other => {
+                return Err(ShapeError::SemanticError {
+                    message: "reference-returning functions must return a reference parameter or a direct `&` / `&mut` borrow".to_string(),
+                    location: Some(self.span_to_source_location(other.span())),
+                });
+            }
+        };
+
+        if is_exclusive != expected_contract.is_exclusive() {
+            return Err(ShapeError::SemanticError {
+                message: "reference-returning functions must use the same `&` / `&mut` return contract on every path".to_string(),
+                location: Some(self.span_to_source_location(expr.span())),
+            });
+        }
+
+        Ok(())
+    }
+
     pub(super) fn update_callable_binding_from_expr(
         &mut self,
         slot: u16,
@@ -1316,25 +1796,44 @@ impl BytecodeCompiler {
         expr: &shape_ast::ast::Expr,
     ) {
         let pass_modes = self.callable_pass_modes_from_expr(expr);
+        let return_contract = self.callable_reference_return_contract_from_expr(expr);
         if is_local {
             if let Some(pass_modes) = pass_modes {
                 self.local_callable_pass_modes.insert(slot, pass_modes);
             } else {
                 self.local_callable_pass_modes.remove(&slot);
             }
+            if let Some(return_contract) = return_contract {
+                self.local_callable_return_reference_contracts
+                    .insert(slot, return_contract);
+            } else {
+                self.local_callable_return_reference_contracts.remove(&slot);
+            }
         } else if let Some(pass_modes) = pass_modes {
             self.module_binding_callable_pass_modes
                 .insert(slot, pass_modes);
+            if let Some(return_contract) = return_contract {
+                self.module_binding_callable_return_reference_contracts
+                    .insert(slot, return_contract);
+            } else {
+                self.module_binding_callable_return_reference_contracts
+                    .remove(&slot);
+            }
         } else {
             self.module_binding_callable_pass_modes.remove(&slot);
+            self.module_binding_callable_return_reference_contracts
+                .remove(&slot);
         }
     }
 
     pub(super) fn clear_callable_binding(&mut self, slot: u16, is_local: bool) {
         if is_local {
             self.local_callable_pass_modes.remove(&slot);
+            self.local_callable_return_reference_contracts.remove(&slot);
         } else {
             self.module_binding_callable_pass_modes.remove(&slot);
+            self.module_binding_callable_return_reference_contracts
+                .remove(&slot);
         }
     }
 

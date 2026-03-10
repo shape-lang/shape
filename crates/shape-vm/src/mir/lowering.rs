@@ -53,6 +53,8 @@ pub struct MirBuilder {
     next_field_idx: u16,
     /// Parameter slots.
     param_slots: Vec<SlotId>,
+    /// Per-parameter reference kind, aligned with `param_slots`.
+    param_reference_kinds: Vec<Option<BorrowKind>>,
     /// Named-local shadowing stack for lexical scopes.
     scope_bindings: Vec<Vec<(String, Option<SlotId>)>>,
     /// Active loop control-flow targets.
@@ -96,6 +98,7 @@ impl MirBuilder {
             field_indices: HashMap::new(),
             next_field_idx: 0,
             param_slots: Vec::new(),
+            param_reference_kinds: Vec::new(),
             scope_bindings: vec![Vec::new()],
             loop_contexts: Vec::new(),
             task_boundary_capture_scopes: Vec::new(),
@@ -125,9 +128,15 @@ impl MirBuilder {
     }
 
     /// Register a parameter slot.
-    pub fn add_param(&mut self, name: String, type_info: LocalTypeInfo) -> SlotId {
+    pub fn add_param(
+        &mut self,
+        name: String,
+        type_info: LocalTypeInfo,
+        reference_kind: Option<BorrowKind>,
+    ) -> SlotId {
         let slot = self.alloc_local(name, type_info);
         self.param_slots.push(slot);
+        self.param_reference_kinds.push(reference_kind);
         slot
     }
 
@@ -320,6 +329,7 @@ impl MirBuilder {
                 blocks: self.blocks,
                 num_locals: self.next_local,
                 param_slots: self.param_slots,
+                param_reference_kinds: self.param_reference_kinds,
                 local_types,
                 span: self.span,
             },
@@ -344,11 +354,18 @@ pub fn lower_function_detailed(
         } else {
             LocalTypeInfo::Unknown // will be resolved during analysis
         };
+        let reference_kind = if param.is_mut_reference {
+            Some(BorrowKind::Exclusive)
+        } else if param.is_reference {
+            Some(BorrowKind::Shared)
+        } else {
+            None
+        };
         if let Some(param_name) = param.simple_name() {
-            builder.add_param(param_name.to_string(), type_info);
+            builder.add_param(param_name.to_string(), type_info, reference_kind);
         } else {
             let fallback_name = format!("__mir_param{}", builder.param_slots.len());
-            let slot = builder.add_param(fallback_name, type_info);
+            let slot = builder.add_param(fallback_name, type_info, reference_kind);
             lower_destructure_bindings_from_place(
                 &mut builder,
                 &param.pattern,
@@ -389,13 +406,18 @@ pub fn lower_function(
 
 /// Lower a slice of statements into the current block.
 fn lower_statements(builder: &mut MirBuilder, stmts: &[Statement], exit_block: BasicBlockId) {
-    for stmt in stmts {
-        lower_statement(builder, stmt, exit_block);
+    for (idx, stmt) in stmts.iter().enumerate() {
+        lower_statement(builder, stmt, exit_block, idx + 1 == stmts.len());
     }
 }
 
 /// Lower a single statement.
-fn lower_statement(builder: &mut MirBuilder, stmt: &Statement, exit_block: BasicBlockId) {
+fn lower_statement(
+    builder: &mut MirBuilder,
+    stmt: &Statement,
+    exit_block: BasicBlockId,
+    is_last: bool,
+) {
     match stmt {
         Statement::VariableDecl(decl, span) => {
             lower_var_decl(builder, decl, *span);
@@ -407,9 +429,13 @@ fn lower_statement(builder: &mut MirBuilder, stmt: &Statement, exit_block: Basic
             lower_return_control_flow(builder, value.as_ref(), *span);
         }
         Statement::Expression(expr, span) => {
-            // Expression statement — evaluate for side effects
-            let _slot = lower_expr_to_temp(builder, expr);
-            let _ = span; // span captured in sub-lowering
+            if is_last {
+                lower_return_control_flow(builder, Some(expr), *span);
+            } else {
+                // Expression statement — evaluate for side effects
+                let _slot = lower_expr_to_temp(builder, expr);
+                let _ = span; // span captured in sub-lowering
+            }
         }
         Statement::Break(span) => {
             lower_break_control_flow(builder, None, *span);
@@ -1299,12 +1325,7 @@ fn lower_from_query_expr(
     builder.pop_scope();
 }
 
-fn lower_comptime_expr(
-    builder: &mut MirBuilder,
-    stmts: &[Statement],
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_comptime_expr(builder: &mut MirBuilder, stmts: &[Statement], temp: SlotId, span: Span) {
     builder.push_scope();
     let exit_block = builder.exit_block();
     lower_statements(builder, stmts, exit_block);
@@ -1891,7 +1912,7 @@ fn lower_block_expr(builder: &mut MirBuilder, block: &ast::BlockExpr, temp: Slot
                 }
             }
             ast::BlockItem::Statement(stmt) => {
-                lower_statement(builder, stmt, builder.exit_block());
+                lower_statement(builder, stmt, builder.exit_block(), false);
                 if is_last {
                     builder.push_stmt(
                         StatementKind::Assign(
@@ -2353,7 +2374,7 @@ fn lower_for_loop(
             update,
         } => {
             builder.push_scope();
-            lower_statement(builder, init, exit_block);
+            lower_statement(builder, init, exit_block, false);
 
             let header = builder.new_block();
             let body_block = builder.new_block();

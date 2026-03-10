@@ -215,6 +215,13 @@ impl BytecodeCompiler {
         } else {
             mir_analysis.errors.first().cloned()
         };
+        if let Some(contract) = mir_analysis.return_reference_contract {
+            self.function_return_reference_contracts
+                .insert(effective_def.name.clone(), contract.into());
+        } else {
+            self.function_return_reference_contracts
+                .remove(&effective_def.name);
+        }
         self.mir_functions
             .insert(effective_def.name.clone(), mir_lowering.mir);
         self.mir_borrow_analyses
@@ -310,6 +317,10 @@ impl BytecodeCompiler {
                 "cannot move an exclusive reference across a task boundary",
                 "keep the mutable reference within the current task or pass an owned value instead",
             ),
+            crate::mir::analysis::BorrowErrorKind::InconsistentReferenceReturn => (
+                "reference-returning functions must consistently return the same reference parameter",
+                "return the same `&` or `&mut` parameter on every return path, or return owned values instead",
+            ),
         }
     }
 
@@ -331,6 +342,9 @@ impl BytecodeCompiler {
             crate::mir::analysis::BorrowErrorKind::UseAfterMove => "value was moved here",
             crate::mir::analysis::BorrowErrorKind::ExclusiveRefAcrossTaskBoundary => {
                 "reference originates here"
+            }
+            crate::mir::analysis::BorrowErrorKind::InconsistentReferenceReturn => {
+                "reference return contract originates here"
             }
         }
     }
@@ -3022,6 +3036,8 @@ impl BytecodeCompiler {
         let saved_exclusive_ref_locals = std::mem::take(&mut self.exclusive_ref_locals);
         let saved_inferred_ref_locals = std::mem::take(&mut self.inferred_ref_locals);
         let saved_local_callable_pass_modes = std::mem::take(&mut self.local_callable_pass_modes);
+        let saved_local_callable_return_reference_contracts =
+            std::mem::take(&mut self.local_callable_return_reference_contracts);
         let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
         let saved_exclusive_reference_value_locals =
             std::mem::take(&mut self.exclusive_reference_value_locals);
@@ -3049,10 +3065,16 @@ impl BytecodeCompiler {
         let saved_param_locals = std::mem::take(&mut self.param_locals);
         let saved_function_params =
             std::mem::replace(&mut self.current_function_params, func_def.params.clone());
+        let saved_current_function_return_reference_contract =
+            self.current_function_return_reference_contract;
 
         // Set up isolated locals for function compilation
         self.current_function = Some(func_idx);
         self.current_function_is_async = func_def.is_async;
+        self.current_function_return_reference_contract = self
+            .function_return_reference_contracts
+            .get(&func_def.name)
+            .copied();
 
         // If this is a `comptime fn`, mark the compilation context as comptime
         // so that calls to other `comptime fn` functions within the body are allowed.
@@ -3066,6 +3088,7 @@ impl BytecodeCompiler {
         self.exclusive_ref_locals.clear();
         self.inferred_ref_locals.clear();
         self.local_callable_pass_modes.clear();
+        self.local_callable_return_reference_contracts.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
         self.tracked_reference_borrow_locals.clear();
@@ -3266,8 +3289,12 @@ impl BytecodeCompiler {
             if is_last {
                 match stmt {
                     Statement::Expression(expr, _) => {
-                        // Compile expression and keep value on stack for implicit return
-                        self.compile_expr(expr)?;
+                        // Compile expression and keep value on stack for implicit return.
+                        if self.current_function_return_reference_contract.is_some() {
+                            self.compile_expr_for_reference_return(expr)?;
+                        } else {
+                            self.compile_expr(expr)?;
+                        }
                         // Emit drops for function-level locals before returning
                         let total_scopes = self.drop_locals.len();
                         if total_scopes > 0 {
@@ -3295,6 +3322,8 @@ impl BytecodeCompiler {
                         self.exclusive_ref_locals = saved_exclusive_ref_locals.clone();
                         self.inferred_ref_locals = saved_inferred_ref_locals.clone();
                         self.local_callable_pass_modes = saved_local_callable_pass_modes.clone();
+                        self.local_callable_return_reference_contracts =
+                            saved_local_callable_return_reference_contracts.clone();
                         self.reference_value_locals = saved_reference_value_locals;
                         self.exclusive_reference_value_locals =
                             saved_exclusive_reference_value_locals;
@@ -3317,6 +3346,8 @@ impl BytecodeCompiler {
                         self.scoped_reference_value_module_bindings =
                             saved_scoped_reference_value_module_bindings;
                         self.comptime_mode = saved_comptime_mode;
+                        self.current_function_return_reference_contract =
+                            saved_current_function_return_reference_contract;
                         // Patch the jump-over instruction if we emitted one
                         if let Some(jump_addr) = jump_over {
                             self.patch_jump(jump_addr);
@@ -3395,6 +3426,8 @@ impl BytecodeCompiler {
         self.exclusive_ref_locals = saved_exclusive_ref_locals;
         self.inferred_ref_locals = saved_inferred_ref_locals;
         self.local_callable_pass_modes = saved_local_callable_pass_modes;
+        self.local_callable_return_reference_contracts =
+            saved_local_callable_return_reference_contracts;
         self.reference_value_locals = saved_reference_value_locals;
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
         self.tracked_reference_borrow_locals = saved_tracked_reference_borrow_locals;
@@ -3412,6 +3445,8 @@ impl BytecodeCompiler {
             saved_tracked_reference_borrow_module_bindings;
         self.scoped_reference_value_module_bindings = saved_scoped_reference_value_module_bindings;
         self.comptime_mode = saved_comptime_mode;
+        self.current_function_return_reference_contract =
+            saved_current_function_return_reference_contract;
 
         // Patch the jump-over instruction if we emitted one
         if let Some(jump_addr) = jump_over {
@@ -4650,6 +4685,87 @@ mod tests {
             .expect("borrow analysis should be recorded");
         assert_eq!(analysis.loans.len(), 0);
         assert!(analysis.errors.is_empty(), "analysis should be clean");
+    }
+
+    #[test]
+    fn test_compile_function_records_reference_return_contract() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function borrow_id(&x) {
+                    x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        compiler
+            .compile_function(func)
+            .expect("reference-returning function should compile");
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("borrow_id")
+            .expect("borrow analysis should be recorded");
+        assert_eq!(
+            analysis.return_reference_contract,
+            Some(crate::mir::analysis::ReferenceReturnContract {
+                param_index: 0,
+                kind: crate::mir::types::BorrowKind::Shared,
+            })
+        );
+    }
+
+    #[test]
+    fn test_compile_function_rejects_inconsistent_reference_return_contract() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function borrow_id(flag, &x) {
+                    if flag {
+                        return x
+                    }
+                    return 1
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("mixed ref/value returns should be rejected");
+        assert!(
+            format!("{}", err).contains("consistently return the same reference parameter"),
+            "expected inconsistent-ref-return error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("borrow_id")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::InconsistentReferenceReturn),
+            "expected inconsistent reference return error, got {:?}",
+            analysis.errors
+        );
     }
 
     #[test]
@@ -6421,9 +6537,9 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler.compile_function(func).expect_err(
-            "MIR list-comprehension write conflict should surface as a compile error",
-        );
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR list-comprehension write conflict should surface as a compile error");
         assert!(
             format!("{}", err).contains("B0002"),
             "expected B0002-style error, got {}",

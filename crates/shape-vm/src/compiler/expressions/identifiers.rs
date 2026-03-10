@@ -43,7 +43,11 @@ impl BytecodeCompiler {
     }
 
     /// Compile an identifier (variable or function reference)
-    pub(super) fn compile_expr_identifier(&mut self, name: &str, span: Span) -> Result<()> {
+    pub(in crate::compiler) fn compile_expr_identifier(
+        &mut self,
+        name: &str,
+        span: Span,
+    ) -> Result<()> {
         if name == "__comptime__" && !self.allow_internal_comptime_namespace {
             return Err(ShapeError::SemanticError {
                 message: "`__comptime__` is an internal compiler namespace and is not accessible from source code".to_string(),
@@ -230,6 +234,53 @@ impl BytecodeCompiler {
             });
         }
         Ok(())
+    }
+
+    pub(in crate::compiler) fn compile_identifier_as_raw_reference(
+        &mut self,
+        name: &str,
+        span: Span,
+    ) -> Result<bool> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            if self.ref_locals.contains(&local_idx) {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(local_idx)),
+                ));
+                return Ok(self.exclusive_ref_locals.contains(&local_idx));
+            }
+            if self.reference_value_locals.contains(&local_idx) {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(local_idx)),
+                ));
+                return Ok(self.exclusive_reference_value_locals.contains(&local_idx));
+            }
+        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+            let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
+                ShapeError::RuntimeError {
+                    message: format!("Undefined variable: {}", name),
+                    location: Some(self.span_to_source_location(span)),
+                }
+            })?;
+            if self.reference_value_module_bindings.contains(&binding_idx) {
+                self.emit(Instruction::new(
+                    OpCode::LoadModuleBinding,
+                    Some(Operand::ModuleBinding(binding_idx)),
+                ));
+                return Ok(self
+                    .exclusive_reference_value_module_bindings
+                    .contains(&binding_idx));
+            }
+        }
+
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "expected '{}' to be a reference value on this return path",
+                name
+            ),
+            location: Some(self.span_to_source_location(span)),
+        })
     }
 
     /// Collect all available variable and function names for suggestions

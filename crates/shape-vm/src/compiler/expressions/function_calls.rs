@@ -528,6 +528,7 @@ impl BytecodeCompiler {
             } else {
                 None
             };
+            let return_reference_contract = self.function_reference_return_contract_for_name(name);
             // Use compile_expr_identifier to correctly load the callee value,
             // handling ref_locals (DerefLoad), mutable closure captures (LoadClosure), etc.
             self.compile_expr_identifier(name, span)?;
@@ -557,8 +558,25 @@ impl BytecodeCompiler {
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
                 }
+                if return_reference_contract.is_some() {
+                    self.emit(Instruction::new(
+                        OpCode::DerefLoad,
+                        Some(Operand::Local(result_local)),
+                    ));
+                } else {
+                    self.emit(Instruction::new(
+                        OpCode::LoadLocal,
+                        Some(Operand::Local(result_local)),
+                    ));
+                }
+            } else if return_reference_contract.is_some() {
+                let result_local = self.declare_temp_local("__call_value_ref_result_")?;
                 self.emit(Instruction::new(
-                    OpCode::LoadLocal,
+                    OpCode::StoreLocal,
+                    Some(Operand::Local(result_local)),
+                ));
+                self.emit(Instruction::new(
+                    OpCode::DerefLoad,
                     Some(Operand::Local(result_local)),
                 ));
             }
@@ -636,6 +654,8 @@ impl BytecodeCompiler {
             let ref_params = self.program.functions[call_func_idx].ref_params.clone();
             let ref_mutates = self.program.functions[call_func_idx].ref_mutates.clone();
             let pass_modes = Self::pass_modes_from_ref_flags(&ref_params, &ref_mutates);
+            let return_reference_contract =
+                self.function_reference_return_contract_for_name(&call_name);
             let writebacks = self.compile_call_args(args, Some(&pass_modes))?;
 
             // Compile default expressions for missing arguments
@@ -709,8 +729,25 @@ impl BytecodeCompiler {
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
                 }
+                if return_reference_contract.is_some() {
+                    self.emit(Instruction::new(
+                        OpCode::DerefLoad,
+                        Some(Operand::Local(result_local)),
+                    ));
+                } else {
+                    self.emit(Instruction::new(
+                        OpCode::LoadLocal,
+                        Some(Operand::Local(result_local)),
+                    ));
+                }
+            } else if return_reference_contract.is_some() {
+                let result_local = self.declare_temp_local("__call_ref_result_")?;
                 self.emit(Instruction::new(
-                    OpCode::LoadLocal,
+                    OpCode::StoreLocal,
+                    Some(Operand::Local(result_local)),
+                ));
+                self.emit(Instruction::new(
+                    OpCode::DerefLoad,
                     Some(Operand::Local(result_local)),
                 ));
             }

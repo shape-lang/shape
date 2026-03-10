@@ -3118,21 +3118,29 @@ impl BytecodeCompiler {
     pub(super) fn compile_statement(&mut self, stmt: &Statement) -> Result<()> {
         match stmt {
             Statement::Return(expr_opt, _span) => {
-                // Prevent returning references — refs are scoped borrows
-                // that cannot escape the function (would create dangling refs).
                 if let Some(expr) = expr_opt {
-                    if let Expr::Reference { span: ref_span, .. } = expr {
+                    self.plan_flexible_binding_escape_from_expr(expr);
+                    if self.current_function_return_reference_contract.is_some() {
+                        self.compile_expr_for_reference_return(expr)?;
+                    } else {
+                        if let Expr::Reference { span: ref_span, .. } = expr {
+                            return Err(ShapeError::SemanticError {
+                                message: "cannot return a reference — references are scoped borrows that cannot escape the function. Return an owned value instead".to_string(),
+                                location: Some(self.span_to_source_location(*ref_span)),
+                            });
+                        }
+                        // Note: returning a ref_local identifier is allowed — compile_expr
+                        // emits DerefLoad which returns the dereferenced *value*, not the
+                        // reference itself. Only returning `&x` (Expr::Reference) is blocked.
+                        self.compile_expr(expr)?;
+                    }
+                } else {
+                    if self.current_function_return_reference_contract.is_some() {
                         return Err(ShapeError::SemanticError {
-                            message: "cannot return a reference — references are scoped borrows that cannot escape the function. Return an owned value instead".to_string(),
-                            location: Some(self.span_to_source_location(*ref_span)),
+                            message: "reference-returning functions must return a reference on every path".to_string(),
+                            location: None,
                         });
                     }
-                    self.plan_flexible_binding_escape_from_expr(expr);
-                    // Note: returning a ref_local identifier is allowed — compile_expr
-                    // emits DerefLoad which returns the dereferenced *value*, not the
-                    // reference itself. Only returning `&x` (Expr::Reference) is blocked.
-                    self.compile_expr(expr)?;
-                } else {
                     self.emit(Instruction::simple(OpCode::PushNull));
                 }
                 // Emit drops for all active drop scopes before returning

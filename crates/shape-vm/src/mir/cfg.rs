@@ -193,6 +193,7 @@ mod tests {
             ],
             num_locals: 0,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
         };
@@ -233,6 +234,7 @@ mod tests {
             ],
             num_locals: 0,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
         };
@@ -274,6 +276,7 @@ mod tests {
             ],
             num_locals: 0,
             param_slots: vec![],
+            param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
         };
