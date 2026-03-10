@@ -145,6 +145,8 @@ pub enum Operand {
     Copy(Place),
     /// Move the value from a place (invalidates the source).
     Move(Place),
+    /// Explicit source-level move (`move x`) that must not be rewritten into a clone.
+    MoveExplicit(Place),
     /// A constant value.
     Constant(MirConstant),
 }
@@ -154,6 +156,7 @@ impl fmt::Display for Operand {
         match self {
             Operand::Copy(p) => write!(f, "copy {}", p),
             Operand::Move(p) => write!(f, "move {}", p),
+            Operand::MoveExplicit(p) => write!(f, "move! {}", p),
             Operand::Constant(c) => write!(f, "{}", c),
         }
     }

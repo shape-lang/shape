@@ -156,7 +156,7 @@ fn add_rvalue_uses(live: &mut HashSet<SlotId>, rvalue: &Rvalue) {
 /// Add uses from an operand to the live set.
 fn add_operand_uses(live: &mut HashSet<SlotId>, op: &Operand) {
     match op {
-        Operand::Copy(place) | Operand::Move(place) => {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
             live.insert(place.root_local());
         }
         Operand::Constant(_) => {}

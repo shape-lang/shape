@@ -22,7 +22,7 @@ use super::cfg::ControlFlowGraph;
 use super::liveness::{self, LivenessResult};
 use super::types::*;
 use datafrog::{Iteration, Relation, RelationLeaper};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Input facts extracted from MIR for the Datafrog solver.
 #[derive(Debug, Default)]
@@ -165,7 +165,7 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
 
 fn operand_read_places<'a>(operand: &'a Operand, reads: &mut Vec<Place>) {
     match operand {
-        Operand::Copy(place) | Operand::Move(place) => {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
             reads.push(place.clone());
             place_nested_read_places(place, reads);
         }
@@ -220,6 +220,7 @@ fn update_slot_loan_aliases(
         Rvalue::Borrow(_, _) => {}
         Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
         | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
             if let Some(loans) = slot_loans.get(src_slot).cloned() {
@@ -238,6 +239,7 @@ fn local_loans_from_rvalue(slot_loans: &HashMap<SlotId, Vec<u32>>, rvalue: &Rval
     match rvalue {
         Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
         | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
             slot_loans.get(src_slot).cloned().unwrap_or_default()
@@ -456,6 +458,7 @@ pub fn analyze(mir: &MirFunction) -> BorrowAnalysis {
 
     // 4. Compute ownership decisions (move/clone) based on liveness
     let ownership_decisions = compute_ownership_decisions(mir, &liveness);
+    let mut move_errors = compute_use_after_move_errors(mir, &cfg, &ownership_decisions);
 
     // 5. Combine into BorrowAnalysis
     let loans = solver_result
@@ -463,12 +466,14 @@ pub fn analyze(mir: &MirFunction) -> BorrowAnalysis {
         .into_iter()
         .map(|(id, info)| (LoanId(id), info))
         .collect();
+    let mut errors = solver_result.errors;
+    errors.append(&mut move_errors);
 
     BorrowAnalysis {
         liveness,
         loans_at_point: solver_result.loans_at_point,
         loans,
-        errors: solver_result.errors,
+        errors,
         ownership_decisions,
         mutability_errors: Vec::new(), // filled by binding resolver (Phase 1)
     }
@@ -519,6 +524,194 @@ fn compute_ownership_decisions(
     }
 
     decisions
+}
+
+fn compute_use_after_move_errors(
+    mir: &MirFunction,
+    cfg: &ControlFlowGraph,
+    ownership_decisions: &HashMap<Point, OwnershipDecision>,
+) -> Vec<BorrowError> {
+    let mut in_states: HashMap<BasicBlockId, HashMap<Place, shape_ast::ast::Span>> = HashMap::new();
+    let mut out_states: HashMap<BasicBlockId, HashMap<Place, shape_ast::ast::Span>> =
+        HashMap::new();
+
+    for block in mir.iter_blocks() {
+        in_states.insert(block.id, HashMap::new());
+        out_states.insert(block.id, HashMap::new());
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &block_id in &cfg.reverse_postorder() {
+            let mut block_in = HashMap::new();
+            for &pred in cfg.predecessors(block_id) {
+                if let Some(pred_out) = out_states.get(&pred) {
+                    merge_moved_places(&mut block_in, pred_out);
+                }
+            }
+
+            let mut block_out = block_in.clone();
+            let block = mir.block(block_id);
+            for stmt in &block.statements {
+                apply_move_transfer(&mut block_out, stmt, mir, ownership_decisions);
+            }
+
+            if in_states.get(&block_id) != Some(&block_in) {
+                in_states.insert(block_id, block_in);
+                changed = true;
+            }
+            if out_states.get(&block_id) != Some(&block_out) {
+                out_states.insert(block_id, block_out);
+                changed = true;
+            }
+        }
+    }
+
+    let mut errors = Vec::new();
+    let mut seen = HashSet::new();
+    for block in mir.iter_blocks() {
+        let mut moved_places = in_states.get(&block.id).cloned().unwrap_or_default();
+        for stmt in &block.statements {
+            for read_place in statement_read_places(&stmt.kind) {
+                if let Some((moved_place, move_span)) =
+                    find_moved_place_conflict(&moved_places, &read_place)
+                {
+                    let key = (stmt.point.0, format!("{}", moved_place));
+                    if seen.insert(key) {
+                        errors.push(BorrowError {
+                            kind: BorrowErrorKind::UseAfterMove,
+                            span: stmt.span,
+                            conflicting_loan: LoanId(0),
+                            loan_span: move_span,
+                            last_use_span: None,
+                            repairs: Vec::new(),
+                        });
+                    }
+                    break;
+                }
+            }
+
+            if let Some(borrowed_place) = statement_borrow_place(&stmt.kind)
+                && let Some((moved_place, move_span)) =
+                    find_moved_place_conflict(&moved_places, borrowed_place)
+            {
+                let key = (stmt.point.0, format!("{}", moved_place));
+                if seen.insert(key) {
+                    errors.push(BorrowError {
+                        kind: BorrowErrorKind::UseAfterMove,
+                        span: stmt.span,
+                        conflicting_loan: LoanId(0),
+                        loan_span: move_span,
+                        last_use_span: None,
+                        repairs: Vec::new(),
+                    });
+                }
+            }
+
+            if let Some(dest_place) = statement_dest_place(&stmt.kind)
+                && let Some((moved_place, move_span)) = moved_places
+                    .iter()
+                    .find(|(moved_place, _)| {
+                        dest_place.conflicts_with(moved_place)
+                            && !reinitializes_moved_place(dest_place, moved_place)
+                    })
+                    .map(|(place, span)| (place.clone(), *span))
+            {
+                let key = (stmt.point.0, format!("{}", moved_place));
+                if seen.insert(key) {
+                    errors.push(BorrowError {
+                        kind: BorrowErrorKind::UseAfterMove,
+                        span: stmt.span,
+                        conflicting_loan: LoanId(0),
+                        loan_span: move_span,
+                        last_use_span: None,
+                        repairs: Vec::new(),
+                    });
+                }
+            }
+
+            apply_move_transfer(&mut moved_places, stmt, mir, ownership_decisions);
+        }
+    }
+
+    errors
+}
+
+fn merge_moved_places(
+    dest: &mut HashMap<Place, shape_ast::ast::Span>,
+    incoming: &HashMap<Place, shape_ast::ast::Span>,
+) {
+    for (place, span) in incoming {
+        dest.entry(place.clone()).or_insert(*span);
+    }
+}
+
+fn apply_move_transfer(
+    moved_places: &mut HashMap<Place, shape_ast::ast::Span>,
+    stmt: &MirStatement,
+    mir: &MirFunction,
+    ownership_decisions: &HashMap<Point, OwnershipDecision>,
+) {
+    if let Some(dest_place) = statement_dest_place(&stmt.kind) {
+        moved_places.retain(|moved_place, _| !reinitializes_moved_place(dest_place, moved_place));
+    }
+
+    for moved_place in actual_move_places(stmt, mir, ownership_decisions) {
+        moved_places.insert(moved_place, stmt.span);
+    }
+}
+
+fn statement_borrow_place(kind: &StatementKind) -> Option<&Place> {
+    match kind {
+        StatementKind::Assign(_, Rvalue::Borrow(_, place)) => Some(place),
+        _ => None,
+    }
+}
+
+fn statement_dest_place(kind: &StatementKind) -> Option<&Place> {
+    match kind {
+        StatementKind::Assign(place, _) | StatementKind::Drop(place) => Some(place),
+        StatementKind::Nop => None,
+    }
+}
+
+fn actual_move_places(
+    stmt: &MirStatement,
+    mir: &MirFunction,
+    ownership_decisions: &HashMap<Point, OwnershipDecision>,
+) -> Vec<Place> {
+    match &stmt.kind {
+        StatementKind::Assign(_, Rvalue::Use(Operand::Move(place)))
+            if ownership_decisions.get(&stmt.point) == Some(&OwnershipDecision::Move) =>
+        {
+            vec![place.clone()]
+        }
+        StatementKind::Assign(_, Rvalue::Use(Operand::MoveExplicit(place)))
+            if place_root_local_type(place, mir) != Some(LocalTypeInfo::Copy) =>
+        {
+            vec![place.clone()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn place_root_local_type(place: &Place, mir: &MirFunction) -> Option<LocalTypeInfo> {
+    mir.local_types.get(place.root_local().0 as usize).cloned()
+}
+
+fn reinitializes_moved_place(dest_place: &Place, moved_place: &Place) -> bool {
+    dest_place.is_prefix_of(moved_place)
+}
+
+fn find_moved_place_conflict(
+    moved_places: &HashMap<Place, shape_ast::ast::Span>,
+    accessed_place: &Place,
+) -> Option<(Place, shape_ast::ast::Span)> {
+    moved_places
+        .iter()
+        .find(|(moved_place, _)| accessed_place.conflicts_with(moved_place))
+        .map(|(place, span)| (place.clone(), *span))
 }
 
 fn last_use_span_for_loan(facts: &BorrowFacts, loan_id: u32) -> Option<shape_ast::ast::Span> {
@@ -807,6 +1000,58 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
             "expected reference-escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_use_after_explicit_move_error() {
+        let mir = MirFunction {
+            name: "test".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(42))),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::MoveExplicit(Place::Local(SlotId(0)))),
+                        ),
+                        1,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(0)))),
+                        ),
+                        2,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals: 3,
+            param_slots: vec![],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+        };
+
+        let analysis = analyze(&mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::UseAfterMove),
+            "expected use-after-move error, got {:?}",
             analysis.errors
         );
     }

@@ -299,13 +299,17 @@ fn lower_statement(builder: &mut MirBuilder, stmt: &Statement, exit_block: Basic
 /// Lower a variable declaration.
 fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span) {
     let name = decl.pattern.as_identifier().unwrap_or("_").to_string();
-    let type_info = LocalTypeInfo::Unknown; // resolved during analysis
+    let type_info = decl
+        .value
+        .as_ref()
+        .map(infer_local_type_from_expr)
+        .unwrap_or(LocalTypeInfo::Unknown);
     let slot = builder.alloc_local(name, type_info);
 
     if let Some(init_expr) = &decl.value {
         // Determine operand based on ownership modifier
         let operand = match decl.ownership {
-            ast::OwnershipModifier::Move => lower_expr_to_operand(builder, init_expr, true),
+            ast::OwnershipModifier::Move => lower_expr_to_explicit_move_operand(builder, init_expr),
             ast::OwnershipModifier::Clone => lower_expr_to_operand(builder, init_expr, false),
             ast::OwnershipModifier::Inferred => {
                 // For `var`: decision deferred to liveness analysis
@@ -318,6 +322,37 @@ fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span
             _ => Rvalue::Use(operand),
         };
         builder.push_stmt(StatementKind::Assign(Place::Local(slot), rvalue), span);
+    }
+}
+
+fn lower_expr_to_explicit_move_operand(builder: &mut MirBuilder, expr: &Expr) -> Operand {
+    if let Some(place) = lower_expr_to_place(builder, expr) {
+        Operand::MoveExplicit(place)
+    } else {
+        let slot = lower_expr_to_temp(builder, expr);
+        Operand::MoveExplicit(Place::Local(slot))
+    }
+}
+
+fn infer_local_type_from_expr(expr: &Expr) -> LocalTypeInfo {
+    match expr {
+        Expr::Literal(literal, _) => match literal {
+            ast::Literal::Int(_)
+            | ast::Literal::UInt(_)
+            | ast::Literal::TypedInt(_, _)
+            | ast::Literal::Number(_)
+            | ast::Literal::Decimal(_)
+            | ast::Literal::Bool(_)
+            | ast::Literal::Char(_)
+            | ast::Literal::None
+            | ast::Literal::Unit
+            | ast::Literal::Timeframe(_) => LocalTypeInfo::Copy,
+            ast::Literal::String(_)
+            | ast::Literal::FormattedString { .. }
+            | ast::Literal::ContentString { .. } => LocalTypeInfo::NonCopy,
+        },
+        Expr::Reference { .. } => LocalTypeInfo::NonCopy,
+        _ => LocalTypeInfo::Unknown,
     }
 }
 
@@ -655,7 +690,10 @@ mod tests {
                     is_mut: false,
                     pattern: DestructurePattern::Identifier("x".to_string(), span()),
                     type_annotation: None,
-                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    value: Some(Expr::Literal(
+                        ast::Literal::String("hi".to_string()),
+                        span(),
+                    )),
                     ownership: OwnershipModifier::Inferred,
                 },
                 span(),
@@ -687,7 +725,10 @@ mod tests {
                     is_mut: false,
                     pattern: DestructurePattern::Identifier("x".to_string(), span()),
                     type_annotation: None,
-                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    value: Some(Expr::Literal(
+                        ast::Literal::String("hi".to_string()),
+                        span(),
+                    )),
                     ownership: OwnershipModifier::Inferred,
                 },
                 span(),
@@ -994,6 +1035,58 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
             "expected reference-escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_use_after_explicit_move_is_visible_to_solver() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(
+                        ast::Literal::String("hi".to_string()),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("y".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Identifier("x".to_string(), span())),
+                    ownership: OwnershipModifier::Move,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("z".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Identifier("x".to_string(), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test", &[], &body, span());
+        let analysis = solver::analyze(&mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::UseAfterMove),
+            "expected use-after-move error, got {:?}",
             analysis.errors
         );
     }

@@ -167,6 +167,22 @@ impl BytecodeCompiler {
         }
     }
 
+    fn mir_borrow_origin_note(&self, kind: crate::mir::analysis::BorrowErrorKind) -> &'static str {
+        match kind {
+            crate::mir::analysis::BorrowErrorKind::ConflictSharedExclusive
+            | crate::mir::analysis::BorrowErrorKind::ConflictExclusiveExclusive
+            | crate::mir::analysis::BorrowErrorKind::ReadWhileExclusivelyBorrowed
+            | crate::mir::analysis::BorrowErrorKind::WriteWhileBorrowed => {
+                "conflicting borrow originates here"
+            }
+            crate::mir::analysis::BorrowErrorKind::ReferenceEscape => "reference originates here",
+            crate::mir::analysis::BorrowErrorKind::UseAfterMove => "value was moved here",
+            crate::mir::analysis::BorrowErrorKind::ExclusiveRefAcrossTaskBoundary => {
+                "reference originates here"
+            }
+        }
+    }
+
     fn mir_borrow_error(&self, error: &crate::mir::analysis::BorrowError) -> ShapeError {
         let (message, default_hint) = self.mir_borrow_error_message(error.kind.clone());
         let mut location = self.span_to_source_location(error.span);
@@ -175,7 +191,7 @@ impl BytecodeCompiler {
             location.hints.push(repair.description.clone());
         }
         location.notes.push(ErrorNote {
-            message: "conflicting borrow originates here".to_string(),
+            message: self.mir_borrow_origin_note(error.kind.clone()).to_string(),
             location: Some(self.span_to_source_location(error.loan_span)),
         });
         if let Some(last_use_span) = error.last_use_span {
@@ -4653,6 +4669,50 @@ mod tests {
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
             "expected MIR reference-escape error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_use_after_explicit_move() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function moved_then_read() {
+                    let x = "hi"
+                    let y = move x
+                    let z = x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR use-after-move should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("after it was moved"),
+            "expected use-after-move error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("moved_then_read")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::UseAfterMove),
+            "expected MIR use-after-move error, got {:?}",
             analysis.errors
         );
     }
