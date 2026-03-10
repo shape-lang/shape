@@ -4820,9 +4820,9 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler.compile_function(func).expect_err(
-            "MIR while-expression write conflict should surface as a compile error",
-        );
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR while-expression write conflict should surface as a compile error");
         assert!(
             format!("{}", err).contains("B0002"),
             "expected B0002-style error, got {}",
@@ -4866,9 +4866,9 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler.compile_function(func).expect_err(
-            "MIR for-expression write conflict should surface as a compile error",
-        );
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR for-expression write conflict should surface as a compile error");
         assert!(
             format!("{}", err).contains("B0002"),
             "expected B0002-style error, got {}",
@@ -5130,9 +5130,9 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler.compile_function(func).expect_err(
-            "MIR match-expression write conflict should surface as a compile error",
-        );
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR match-expression write conflict should surface as a compile error");
         assert!(
             format!("{}", err).contains("B0002"),
             "expected B0002-style error, got {}",
@@ -5186,6 +5186,192 @@ mod tests {
         assert!(
             analysis.errors.is_empty(),
             "guarded match analysis should stay clean, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_match_expression_array_pattern_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function array_match_conflict(pair) {
+                    let mut x = 1
+                    let y = match pair {
+                        [left, right] => {
+                            let shared = &x
+                            x = 2
+                        }
+                        _ => 0
+                    }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR array-pattern match write conflict should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("array_match_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR array-pattern match write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_match_expression_constructor_pattern_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function constructor_match_conflict(opt) {
+                    let mut x = 1
+                    let y = match opt {
+                        Some(v) => {
+                            let shared = &x
+                            x = 2
+                        }
+                        None => 0
+                    }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler.compile_function(func).expect_err(
+            "MIR constructor-pattern match write conflict should surface as a compile error",
+        );
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("constructor_match_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR constructor-pattern match write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_rest_destructure_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function rest_destructure_conflict(items) {
+                    let [head, ...tail] = items
+                    let shared = &tail
+                    tail = items
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR rest-destructure write conflict should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("rest_destructure_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR rest-destructure write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_decomposition_write_conflict() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function decomposition_conflict(merged) {
+                    let (left: {x}, right: {y}) = merged
+                    let shared = &left
+                    left = merged
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler.compile_function(func).expect_err(
+            "MIR decomposition-pattern write conflict should surface as a compile error",
+        );
+        assert!(
+            format!("{}", err).contains("B0002"),
+            "expected B0002-style error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("decomposition_conflict")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected MIR decomposition-pattern write-while-borrowed error, got {:?}",
             analysis.errors
         );
     }
