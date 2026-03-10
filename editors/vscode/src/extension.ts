@@ -17,6 +17,78 @@ function isCommandAvailable(command: string): boolean {
     }
 }
 
+function getInstalledVersion(): string | null {
+    try {
+        const output = execSync('shape-lsp --version', { encoding: 'utf-8' }).trim();
+        // Expect output like "shape-lsp 0.1.3" or just "0.1.3"
+        const match = output.match(/(\d+\.\d+\.\d+)/);
+        return match ? match[1] : null;
+    } catch {
+        return null;
+    }
+}
+
+async function getLatestCratesVersion(): Promise<string | null> {
+    try {
+        const https = await import('https');
+        return new Promise((resolve) => {
+            const req = https.get(
+                'https://crates.io/api/v1/crates/shape-lsp',
+                { headers: { 'User-Agent': 'shape-lang-vscode-extension' } },
+                (res) => {
+                    let data = '';
+                    res.on('data', (chunk: string) => (data += chunk));
+                    res.on('end', () => {
+                        try {
+                            const json = JSON.parse(data);
+                            resolve(json.crate?.newest_version ?? null);
+                        } catch {
+                            resolve(null);
+                        }
+                    });
+                }
+            );
+            req.on('error', () => resolve(null));
+            req.setTimeout(5000, () => { req.destroy(); resolve(null); });
+        });
+    } catch {
+        return null;
+    }
+}
+
+function isNewerVersion(latest: string, installed: string): boolean {
+    const l = latest.split('.').map(Number);
+    const i = installed.split('.').map(Number);
+    for (let k = 0; k < 3; k++) {
+        if ((l[k] ?? 0) > (i[k] ?? 0)) return true;
+        if ((l[k] ?? 0) < (i[k] ?? 0)) return false;
+    }
+    return false;
+}
+
+async function checkForUpdate(): Promise<void> {
+    const installed = getInstalledVersion();
+    if (!installed) return;
+
+    const latest = await getLatestCratesVersion();
+    if (!latest || !isNewerVersion(latest, installed)) return;
+
+    const choice = await window.showInformationMessage(
+        `shape-lsp ${latest} is available (you have ${installed}). Update?`,
+        'Update via cargo',
+        'Not now'
+    );
+
+    if (choice === 'Update via cargo') {
+        const success = await installShapeLsp();
+        if (success) {
+            window.showInformationMessage(`shape-lsp updated to ${latest}. Restart the LSP to use the new version.`);
+        } else {
+            window.showErrorMessage('Failed to update shape-lsp. Try manually: cargo install shape-lsp');
+        }
+    }
+}
+
 function startLspClient() {
     const serverOptions: ServerOptions = {
         command: 'shape-lsp',
@@ -73,6 +145,8 @@ async function installShapeLsp(): Promise<boolean> {
 export async function activate(context: ExtensionContext) {
     if (isCommandAvailable('shape-lsp')) {
         startLspClient();
+        // Check for updates in the background (non-blocking)
+        checkForUpdate();
         return;
     }
 
