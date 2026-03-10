@@ -216,6 +216,34 @@ impl RegistryClient {
             .map_err(|e| format!("failed to read index body: {}", e))
     }
 
+    /// Validate token: GET /v1/api/auth/validate (requires auth)
+    ///
+    /// Makes a lightweight request to verify the token is valid.
+    /// Returns Ok(()) if the token is accepted, Err otherwise.
+    pub async fn validate_token(&self) -> Result<(), String> {
+        let token = self.auth_header()?;
+        let url = format!("{}/v1/api/auth/validate", self.registry_url);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| format!("token validation request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "token validation failed with status {}: {}",
+                resp.status(),
+                resp.text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".to_string())
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Publish bundle: POST /v1/api/packages/new (requires auth)
     pub async fn publish(&self, bundle_bytes: Vec<u8>) -> Result<String, String> {
         let token = self.auth_header()?;
@@ -223,7 +251,7 @@ impl RegistryClient {
         let resp = self
             .client
             .post(&url)
-            .header("Authorization", &token)
+            .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/octet-stream")
             .body(bundle_bytes)
             .send()
@@ -283,7 +311,7 @@ impl RegistryClient {
         let resp = self
             .client
             .put(&url)
-            .header("Authorization", &token)
+            .header("Authorization", format!("Bearer {}", token))
             .send()
             .await
             .map_err(|e| format!("unyank request failed: {}", e))?;
@@ -299,5 +327,68 @@ impl RegistryClient {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auth_header_no_token() {
+        let client = RegistryClient::new(None);
+        let result = client.auth_header();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not authenticated"));
+    }
+
+    #[test]
+    fn test_auth_header_with_token() {
+        let client = RegistryClient::new(None).with_token("test-token-12345678".to_string());
+        let result = client.auth_header();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "test-token-12345678");
+    }
+
+    #[test]
+    fn test_default_registry_url() {
+        let client = RegistryClient::new(None);
+        assert_eq!(client.registry_url, "https://pkg.shape-lang.dev");
+    }
+
+    #[test]
+    fn test_custom_registry_url() {
+        let client = RegistryClient::new(Some("https://custom.registry.io".to_string()));
+        assert_eq!(client.registry_url, "https://custom.registry.io");
+    }
+
+    #[test]
+    fn test_publish_requires_auth() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let client = RegistryClient::new(None); // no token
+        let result = rt.block_on(client.publish(vec![1, 2, 3]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not authenticated"));
+    }
+
+    #[test]
+    fn test_validate_token_requires_auth() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let client = RegistryClient::new(None); // no token
+        let result = rt.block_on(client.validate_token());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not authenticated"));
+    }
+
+    #[test]
+    fn test_credentials_serialization() {
+        let creds = Credentials {
+            registry: "https://test.example.com".to_string(),
+            token: "test-token-abcdefgh".to_string(),
+        };
+        let json = serde_json::to_string(&creds).unwrap();
+        let deserialized: Credentials = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.registry, creds.registry);
+        assert_eq!(deserialized.token, creds.token);
     }
 }

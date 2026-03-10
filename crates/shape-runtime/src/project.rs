@@ -850,20 +850,51 @@ pub fn parse_shape_project_toml(content: &str) -> Result<ShapeProject, toml::de:
 
 /// Walk up from `start_dir` looking for a `shape.toml` file.
 /// Returns `Some(ProjectRoot)` if found, `None` otherwise.
+///
+/// If a `shape.toml` file is found but contains syntax errors, an error
+/// message is printed to stderr and `None` is returned.  Use
+/// [`try_find_project_root`] when you need the error as a `Result`.
 pub fn find_project_root(start_dir: &Path) -> Option<ProjectRoot> {
+    match try_find_project_root(start_dir) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("Error: {}", err);
+            None
+        }
+    }
+}
+
+/// Walk up from `start_dir` looking for a `shape.toml` file.
+///
+/// Like [`find_project_root`], but returns a structured `Result` so the
+/// caller can decide how to report errors.
+///
+/// Returns:
+/// - `Ok(Some(root))` — found and parsed successfully.
+/// - `Ok(None)` — no `shape.toml` file anywhere up the directory tree.
+/// - `Err(msg)` — a `shape.toml` was found but could not be read or parsed.
+pub fn try_find_project_root(start_dir: &Path) -> Result<Option<ProjectRoot>, String> {
     let mut current = start_dir.to_path_buf();
     loop {
         let candidate = current.join("shape.toml");
         if candidate.is_file() {
-            let content = std::fs::read_to_string(&candidate).ok()?;
-            let config = parse_shape_project_toml(&content).ok()?;
-            return Some(ProjectRoot {
+            let content = std::fs::read_to_string(&candidate).map_err(|e| {
+                format!("Failed to read {}: {}", candidate.display(), e)
+            })?;
+            let config = parse_shape_project_toml(&content).map_err(|e| {
+                format!(
+                    "Malformed shape.toml at {}: {}",
+                    candidate.display(),
+                    e
+                )
+            })?;
+            return Ok(Some(ProjectRoot {
                 root_path: current,
                 config,
-            });
+            }));
         }
         if !current.pop() {
-            return None;
+            return Ok(None);
         }
     }
 }
@@ -1892,5 +1923,72 @@ virtual_fs = false
         assert!(config.sandbox.is_some());
         let errors = config.validate();
         assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
+    }
+
+    // --- MED-22: Malformed shape.toml error reporting ---
+
+    #[test]
+    fn test_try_find_project_root_returns_error_for_malformed_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("shape.toml"),
+            "this is not valid toml {{{",
+        )
+        .unwrap();
+
+        let result = try_find_project_root(tmp.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Malformed shape.toml"),
+            "Expected 'Malformed shape.toml' in error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_try_find_project_root_returns_ok_none_when_no_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("empty_dir");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let result = try_find_project_root(&nested);
+        // Should return Ok(None) — not an error, just no project found.
+        // (May find a shape.toml above tempdir, so we just verify no panic/error.)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_try_find_project_root_parses_valid_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut f = std::fs::File::create(tmp.path().join("shape.toml")).unwrap();
+        writeln!(
+            f,
+            r#"
+[project]
+name = "try-test"
+version = "1.0.0"
+"#
+        )
+        .unwrap();
+
+        let result = try_find_project_root(tmp.path());
+        assert!(result.is_ok());
+        let root = result.unwrap().unwrap();
+        assert_eq!(root.config.project.name, "try-test");
+    }
+
+    #[test]
+    fn test_find_project_root_returns_none_for_malformed_toml() {
+        // find_project_root should return None (not panic) for malformed TOML
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("shape.toml"),
+            "[invalid\nbroken toml",
+        )
+        .unwrap();
+
+        let result = find_project_root(tmp.path());
+        assert!(result.is_none());
     }
 }

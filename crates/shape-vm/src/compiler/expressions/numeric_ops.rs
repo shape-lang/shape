@@ -131,7 +131,19 @@ pub(super) fn plan_coercion(
         (Some(NumericType::IntWidth(a)), Some(NumericType::IntWidth(b))) => {
             match shape_ast::IntWidth::join(a, b) {
                 Ok(joined) => Some(CoercionPlan::NoCoercion(NumericType::IntWidth(joined))),
-                Err(()) => Some(CoercionPlan::IncompatibleWidths(a, b)),
+                Err(()) => {
+                    // Only u64 + signed is truly incompatible (u64 can't fit in i64).
+                    // Other mismatches (e.g. u32 + i8) safely promote to default int (i64).
+                    let either_u64 =
+                        a == shape_ast::IntWidth::U64 || b == shape_ast::IntWidth::U64;
+                    let mixed_sign = a.is_signed() != b.is_signed();
+                    if either_u64 && mixed_sign {
+                        Some(CoercionPlan::IncompatibleWidths(a, b))
+                    } else {
+                        // Promote to default int (i64) — both values fit
+                        Some(CoercionPlan::NoCoercion(NumericType::Int))
+                    }
+                }
             }
         }
         _ => None,
@@ -369,6 +381,272 @@ mod tests {
         assert_eq!(
             inferred_type_to_numeric(&float_ref),
             Some(NumericType::Number)
+        );
+    }
+
+    #[test]
+    fn coercion_u64_plus_signed_is_incompatible() {
+        use shape_ast::IntWidth;
+        // u64 + i8 should be IncompatibleWidths (compile error)
+        let plan = plan_coercion(
+            Some(NumericType::IntWidth(IntWidth::U64)),
+            Some(NumericType::IntWidth(IntWidth::I8)),
+        );
+        assert!(
+            matches!(plan, Some(CoercionPlan::IncompatibleWidths(_, _))),
+            "u64 + i8 should be IncompatibleWidths, got {:?}",
+            plan
+        );
+
+        // i32 + u64 should also be IncompatibleWidths
+        let plan = plan_coercion(
+            Some(NumericType::IntWidth(IntWidth::I32)),
+            Some(NumericType::IntWidth(IntWidth::U64)),
+        );
+        assert!(
+            matches!(plan, Some(CoercionPlan::IncompatibleWidths(_, _))),
+            "i32 + u64 should be IncompatibleWidths, got {:?}",
+            plan
+        );
+    }
+
+    #[test]
+    fn coercion_u32_plus_signed_promotes_to_int() {
+        use shape_ast::IntWidth;
+        // u32 + i8 should promote to default Int (i64), not IncompatibleWidths
+        let plan = plan_coercion(
+            Some(NumericType::IntWidth(IntWidth::U32)),
+            Some(NumericType::IntWidth(IntWidth::I8)),
+        );
+        assert!(
+            matches!(plan, Some(CoercionPlan::NoCoercion(NumericType::Int))),
+            "u32 + i8 should promote to Int (i64), got {:?}",
+            plan
+        );
+
+        // i8 + u32 should also promote to default Int (i64)
+        let plan = plan_coercion(
+            Some(NumericType::IntWidth(IntWidth::I8)),
+            Some(NumericType::IntWidth(IntWidth::U32)),
+        );
+        assert!(
+            matches!(plan, Some(CoercionPlan::NoCoercion(NumericType::Int))),
+            "i8 + u32 should promote to Int (i64), got {:?}",
+            plan
+        );
+    }
+
+    #[test]
+    fn coercion_same_width_types_no_coercion() {
+        use shape_ast::IntWidth;
+        // u8 + u8 should be NoCoercion(IntWidth(U8))
+        let plan = plan_coercion(
+            Some(NumericType::IntWidth(IntWidth::U8)),
+            Some(NumericType::IntWidth(IntWidth::U8)),
+        );
+        assert!(
+            matches!(
+                plan,
+                Some(CoercionPlan::NoCoercion(NumericType::IntWidth(IntWidth::U8)))
+            ),
+            "u8 + u8 should be NoCoercion(U8), got {:?}",
+            plan
+        );
+    }
+
+    // --- End-to-end tests: compile and execute Shape code ---
+
+    fn eval_fn(code: &str, fn_name: &str) -> shape_value::ValueWord {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = super::super::super::BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        let mut vm = crate::executor::VirtualMachine::new(crate::executor::VMConfig::default());
+        vm.load_program(bytecode);
+        vm.execute_function_by_name(fn_name, vec![], None)
+            .expect("execution failed")
+            .clone()
+    }
+
+    fn compile_should_fail(code: &str) -> bool {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = super::super::super::BytecodeCompiler::new();
+        compiler.compile(&program).is_err()
+    }
+
+    // HIGH-1: Width-typed variable addition should wrap on overflow
+    #[test]
+    fn u8_variable_add_wraps_on_overflow() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: u8 = 200
+                let b: u8 = 100
+                return a + b
+            }
+            "#,
+            "test",
+        );
+        // 200 + 100 = 300, truncated to u8 = 300 & 0xFF = 44
+        assert_eq!(
+            result.as_i64(),
+            Some(44),
+            "u8 variable addition 200 + 100 should wrap to 44"
+        );
+    }
+
+    #[test]
+    fn i8_variable_add_wraps_on_overflow() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: i8 = 100
+                let b: i8 = 100
+                return a + b
+            }
+            "#,
+            "test",
+        );
+        // 100 + 100 = 200, truncated to i8 = -56
+        assert_eq!(
+            result.as_i64(),
+            Some(-56),
+            "i8 variable addition 100 + 100 should wrap to -56"
+        );
+    }
+
+    #[test]
+    fn u16_variable_add_wraps_on_overflow() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: u16 = 60000
+                let b: u16 = 10000
+                return a + b
+            }
+            "#,
+            "test",
+        );
+        // 60000 + 10000 = 70000, truncated to u16 = 70000 & 0xFFFF = 4464
+        assert_eq!(
+            result.as_i64(),
+            Some(4464),
+            "u16 variable addition 60000 + 10000 should wrap to 4464"
+        );
+    }
+
+    // MED-2: Reassignment to width-typed variable should truncate
+    #[test]
+    fn u8_reassignment_truncates() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                var x: u8 = 200
+                x = 300
+                return x
+            }
+            "#,
+            "test",
+        );
+        // 300 truncated to u8 = 300 & 0xFF = 44
+        assert_eq!(
+            result.as_i64(),
+            Some(44),
+            "u8 reassignment of 300 should truncate to 44"
+        );
+    }
+
+    // MED-3: Width-type comparisons return booleans
+    #[test]
+    fn u8_comparison_returns_bool() {
+        let result = eval_fn(
+            r#"
+            function test() -> bool {
+                let a: u8 = 10
+                let b: u8 = 20
+                return a < b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(
+            result.as_bool(),
+            Some(true),
+            "u8 comparison a < b should return true (boolean)"
+        );
+    }
+
+    #[test]
+    fn i16_comparison_returns_bool() {
+        let result = eval_fn(
+            r#"
+            function test() -> bool {
+                let a: i16 = 100
+                let b: i16 = 50
+                return a > b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(
+            result.as_bool(),
+            Some(true),
+            "i16 comparison a > b should return true (boolean)"
+        );
+    }
+
+    #[test]
+    fn u32_equality_returns_bool() {
+        let result = eval_fn(
+            r#"
+            function test() -> bool {
+                let a: u32 = 42
+                let b: u32 = 42
+                return a == b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(
+            result.as_bool(),
+            Some(true),
+            "u32 equality should return true (boolean)"
+        );
+    }
+
+    // MED-4: u64 + signed types should be a compile error
+    #[test]
+    fn u64_plus_signed_is_compile_error() {
+        assert!(
+            compile_should_fail(
+                r#"
+                function test() -> int {
+                    let a: u64 = 100
+                    let b: i8 = 10
+                    return a + b
+                }
+                "#
+            ),
+            "u64 + i8 should be a compile error"
+        );
+    }
+
+    // MED-4: u32 + signed types should NOT be a compile error (promotes to i64)
+    #[test]
+    fn u32_plus_signed_promotes_to_i64() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: u32 = 100
+                let b: i8 = 10
+                return a + b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(
+            result.as_i64(),
+            Some(110),
+            "u32 + i8 should promote to i64 and give 110"
         );
     }
 }

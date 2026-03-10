@@ -184,7 +184,16 @@ fn test_transport_connect_refused() {
         ],
         &ctx,
     );
-    assert!(result.is_err());
+    // Connection refused now returns Ok(Err(...)) instead of Err(...)
+    // so users can handle it with ? or pattern matching
+    assert!(result.is_ok(), "transport_connect should return Ok even on connection failure");
+    let val = result.unwrap();
+    match val.as_heap_ref() {
+        Some(shape_value::heap_value::HeapValue::Err(_)) => {
+            // Expected: Result::Err with error message
+        }
+        other => panic!("expected Result::Err, got: {:?}", other),
+    }
 }
 
 #[test]
@@ -329,6 +338,32 @@ fn test_memoized_send_caches_results() {
     assert_eq!(arr[0].as_i64().unwrap(), 1); // cache_hits
     assert_eq!(arr[1].as_i64().unwrap(), 1); // cache_misses
     assert_eq!(arr[3].as_i64().unwrap(), 2); // total_requests
+}
+
+#[test]
+fn test_transport_send_error_returns_result_err() {
+    let ctx = test_ctx();
+    let transport = transport_tcp(&[], &ctx).unwrap();
+    let payload = bytes_to_nanboxed_array(b"data");
+
+    // Send to a port that won't be listening
+    let result = transport_send(
+        &[
+            transport,
+            ValueWord::from_string(Arc::new("127.0.0.1:1".to_string())),
+            payload,
+        ],
+        &ctx,
+    );
+    // Should return Ok(Err(...)) not a runtime error
+    assert!(result.is_ok(), "transport_send should return Ok even on network failure");
+    let val = result.unwrap();
+    match val.as_heap_ref() {
+        Some(shape_value::heap_value::HeapValue::Err(_)) => {
+            // Expected: transport error wrapped in Result::Err
+        }
+        other => panic!("expected Result::Err, got: {:?}", other),
+    }
 }
 
 #[test]

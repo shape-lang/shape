@@ -372,11 +372,12 @@ fn transport_send(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, 
         .ok_or_else(|| "transport.send(): third argument (payload) is required".to_string())?;
     let payload_bytes = nanboxed_array_to_bytes(payload_nb)?;
     let transport = extract_transport_handle(handle, "send")?;
-    let response = transport
-        .send(destination, &payload_bytes)
-        .map_err(|e| format!("transport.send(): {}", e))?;
-
-    Ok(ValueWord::from_ok(bytes_to_nanboxed_array(&response)))
+    match transport.send(destination, &payload_bytes) {
+        Ok(response) => Ok(ValueWord::from_ok(bytes_to_nanboxed_array(&response))),
+        Err(e) => Ok(ValueWord::from_err(ValueWord::from_string(Arc::new(
+            format!("transport.send(): {}", e),
+        )))),
+    }
 }
 
 /// transport.connect(transport, destination) -> Result<Connection, string>
@@ -394,14 +395,18 @@ fn transport_connect(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWor
         "transport.connect(): second argument must be a destination string (host:port)".to_string()
     })?;
     let transport = extract_transport_handle(transport_handle, "connect")?;
-    let conn = transport
-        .connect(destination)
-        .map_err(|e| format!("transport.connect(): {}", e))?;
-    let handle = IoHandleData::new_custom(
-        Box::new(BoxedConnection(std::sync::Mutex::new(conn))),
-        format!("transport:conn:{}", destination),
-    );
-    Ok(ValueWord::from_ok(ValueWord::from_io_handle(handle)))
+    match transport.connect(destination) {
+        Ok(conn) => {
+            let handle = IoHandleData::new_custom(
+                Box::new(BoxedConnection(std::sync::Mutex::new(conn))),
+                format!("transport:conn:{}", destination),
+            );
+            Ok(ValueWord::from_ok(ValueWord::from_io_handle(handle)))
+        }
+        Err(e) => Ok(ValueWord::from_err(ValueWord::from_string(Arc::new(
+            format!("transport.connect(): {}", e),
+        )))),
+    }
 }
 
 /// transport.connection_send(conn, payload) -> Result<(), string>
@@ -443,9 +448,12 @@ fn connection_send_fn(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWo
         .0
         .lock()
         .map_err(|_| "transport.connection_send(): lock poisoned".to_string())?;
-    conn.send(&payload_bytes)
-        .map_err(|e| format!("transport.connection_send(): {}", e))?;
-    Ok(ValueWord::from_ok(ValueWord::unit()))
+    match conn.send(&payload_bytes) {
+        Ok(()) => Ok(ValueWord::from_ok(ValueWord::unit())),
+        Err(e) => Ok(ValueWord::from_err(ValueWord::from_string(Arc::new(
+            format!("transport.connection_send(): {}", e),
+        )))),
+    }
 }
 
 /// transport.connection_recv(conn, timeout?) -> Result<Array<int>, string>
@@ -492,10 +500,12 @@ fn connection_recv_fn(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWo
         .0
         .lock()
         .map_err(|_| "transport.connection_recv(): lock poisoned".to_string())?;
-    let data = conn
-        .recv(timeout)
-        .map_err(|e| format!("transport.connection_recv(): {}", e))?;
-    Ok(ValueWord::from_ok(bytes_to_nanboxed_array(&data)))
+    match conn.recv(timeout) {
+        Ok(data) => Ok(ValueWord::from_ok(bytes_to_nanboxed_array(&data))),
+        Err(e) => Ok(ValueWord::from_err(ValueWord::from_string(Arc::new(
+            format!("transport.connection_recv(): {}", e),
+        )))),
+    }
 }
 
 /// transport.connection_close(conn) -> Result<(), string>
@@ -533,8 +543,11 @@ fn connection_close_fn(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueW
             .0
             .lock()
             .map_err(|_| "transport.connection_close(): lock poisoned".to_string())?;
-        conn.close()
-            .map_err(|e| format!("transport.connection_close(): {}", e))?;
+        if let Err(e) = conn.close() {
+            return Ok(ValueWord::from_err(ValueWord::from_string(Arc::new(
+                format!("transport.connection_close(): {}", e),
+            ))));
+        }
     }
     handle.close();
     Ok(ValueWord::from_ok(ValueWord::unit()))

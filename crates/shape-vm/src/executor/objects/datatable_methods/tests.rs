@@ -826,3 +826,57 @@ fn test_columns_ref_typed_table_preserves_schema_id() {
         assert_eq!(sid, schema_id);
     }
 }
+
+// =========================================================================
+// MED-6: select() with string columns
+// =========================================================================
+
+#[test]
+fn test_select_string_columns() {
+    let mut vm = make_vm();
+    let dt = sample_dt();
+    let args = vec![
+        ValueWord::from_datatable(dt),
+        ValueWord::from_string(Arc::new("price".to_string())),
+        ValueWord::from_string(Arc::new("symbol".to_string())),
+    ];
+    handle_select(&mut vm, to_nb_args(args), None).unwrap();
+    let result = vm.pop().unwrap();
+    let dt = result.as_datatable().expect("Expected DataTable");
+    assert_eq!(dt.column_count(), 2);
+    assert_eq!(dt.row_count(), 4);
+}
+
+#[test]
+fn test_select_rejects_non_string_non_callable() {
+    let mut vm = make_vm();
+    let dt = sample_dt();
+    // Passing a number (not a string and not a function)
+    let args = vec![ValueWord::from_datatable(dt), ValueWord::from_f64(42.0)];
+    let result = handle_select(&mut vm, to_nb_args(args), None);
+    assert!(result.is_err());
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(
+        err.contains("select()"),
+        "Error should mention select(): {}",
+        err
+    );
+}
+
+// =========================================================================
+// MED-7: build_datatable_from_objects_nb scalar result
+// =========================================================================
+
+#[test]
+fn test_build_datatable_from_scalar_rows() {
+    // When build_datatable_from_objects_nb receives scalar rows,
+    // it should build a single-column "value" table instead of erroring.
+    let mut vm = make_vm();
+    let rows = vec![ValueWord::from_i64(42), ValueWord::from_i64(99)];
+    let result = common::build_datatable_from_objects_nb(&mut vm, &rows);
+    assert!(result.is_ok(), "scalar rows should produce a table");
+    let top = vm.pop_vw().unwrap();
+    let dt = top.as_datatable().expect("result should be a datatable");
+    assert_eq!(dt.row_count(), 2);
+    assert_eq!(dt.column_names(), vec!["value"]);
+}

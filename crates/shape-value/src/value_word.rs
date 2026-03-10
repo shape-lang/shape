@@ -2587,6 +2587,40 @@ impl ValueWord {
                 "layout": v.layout.name,
                 "ptr": v.ptr,
             }),
+            // Typed arrays — serialize as JSON arrays of their element values
+            Some(HeapValue::IntArray(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::FloatArray(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::BoolArray(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v != 0)).collect())
+            }
+            Some(HeapValue::I8Array(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::I16Array(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::I32Array(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::U8Array(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::U16Array(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::U32Array(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::U64Array(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
+            Some(HeapValue::F32Array(buf)) => {
+                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
+            }
             _ => serde_json::json!(format!("<{}>", self.type_name())),
         }
     }
@@ -2681,7 +2715,7 @@ impl std::fmt::Display for ValueWord {
         if self.is_f64() {
             let n = unsafe { self.as_f64_unchecked() };
             if n == n.trunc() && n.abs() < 1e15 {
-                write!(f, "{}", n as i64)
+                write!(f, "{}.0", n as i64)
             } else {
                 write!(f, "{}", n)
             }
@@ -2799,7 +2833,34 @@ impl std::fmt::Display for ValueWord {
                     }
                     std::fmt::Result::Ok(())
                 }
-                HeapValue::Enum(e) => write!(f, "{}.{}", e.enum_name, e.variant),
+                HeapValue::Enum(e) => {
+                    write!(f, "{}", e.variant)?;
+                    match &e.payload {
+                        crate::enums::EnumPayload::Unit => Ok(()),
+                        crate::enums::EnumPayload::Tuple(values) => {
+                            write!(f, "(")?;
+                            for (i, v) in values.iter().enumerate() {
+                                if i > 0 {
+                                    write!(f, ", ")?;
+                                }
+                                write!(f, "{}", v)?;
+                            }
+                            write!(f, ")")
+                        }
+                        crate::enums::EnumPayload::Struct(fields) => {
+                            let mut pairs: Vec<_> = fields.iter().collect();
+                            pairs.sort_by_key(|(k, _)| k.clone());
+                            write!(f, " {{ ")?;
+                            for (i, (k, v)) in pairs.iter().enumerate() {
+                                if i > 0 {
+                                    write!(f, ", ")?;
+                                }
+                                write!(f, "{}: {}", k, v)?;
+                            }
+                            write!(f, " }}")
+                        }
+                    }
+                }
                 HeapValue::Some(v) => write!(f, "some({})", v),
                 HeapValue::Ok(v) => write!(f, "ok({})", v),
                 HeapValue::Err(v) => write!(f, "err({})", v),
@@ -3816,5 +3877,67 @@ mod tests {
         let bool_nb = ValueWord::from_bool_array(Arc::new(Vec::<u8>::new().into()));
         assert!(bool_nb.as_int_array().is_none());
         assert!(bool_nb.as_float_array().is_none());
+    }
+
+    // ===== to_json_value for typed arrays =====
+
+    #[test]
+    fn test_to_json_value_int_array() {
+        let buf = crate::typed_buffer::TypedBuffer { data: vec![1i64, 2, 3], validity: None };
+        let v = ValueWord::from_int_array(Arc::new(buf));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_to_json_value_float_array() {
+        use crate::aligned_vec::AlignedVec;
+        let mut av = AlignedVec::new();
+        av.push(1.5);
+        av.push(2.5);
+        let buf = crate::typed_buffer::AlignedTypedBuffer { data: av, validity: None };
+        let v = ValueWord::from_float_array(Arc::new(buf));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([1.5, 2.5]));
+    }
+
+    #[test]
+    fn test_to_json_value_bool_array() {
+        let buf = crate::typed_buffer::TypedBuffer { data: vec![1u8, 0, 1], validity: None };
+        let v = ValueWord::from_bool_array(Arc::new(buf));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([true, false, true]));
+    }
+
+    #[test]
+    fn test_to_json_value_empty_int_array() {
+        let buf = crate::typed_buffer::TypedBuffer::<i64> { data: vec![], validity: None };
+        let v = ValueWord::from_int_array(Arc::new(buf));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_to_json_value_i32_array() {
+        let buf = crate::typed_buffer::TypedBuffer { data: vec![10i32, 20, 30], validity: None };
+        let v = ValueWord::heap_box(HeapValue::I32Array(Arc::new(buf)));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([10, 20, 30]));
+    }
+
+    #[test]
+    fn test_to_json_value_u64_array() {
+        let buf = crate::typed_buffer::TypedBuffer { data: vec![100u64, 200], validity: None };
+        let v = ValueWord::heap_box(HeapValue::U64Array(Arc::new(buf)));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([100, 200]));
+    }
+
+    #[test]
+    fn test_to_json_value_f32_array() {
+        let buf = crate::typed_buffer::TypedBuffer { data: vec![1.0f32, 2.0], validity: None };
+        let v = ValueWord::heap_box(HeapValue::F32Array(Arc::new(buf)));
+        let json = v.to_json_value();
+        assert_eq!(json, serde_json::json!([1.0, 2.0]));
     }
 }

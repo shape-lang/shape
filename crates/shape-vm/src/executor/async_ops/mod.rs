@@ -234,6 +234,8 @@ impl VirtualMachine {
         }
     }
 
+    /// Await with a timeout.
+    ///
     /// Spawn a task from a closure/function on the stack
     ///
     /// Pops a closure or function reference from the stack and creates a new async task.
@@ -559,4 +561,5 @@ mod tests {
             _ => panic!("Expected TaskGroup"),
         }
     }
+
 }

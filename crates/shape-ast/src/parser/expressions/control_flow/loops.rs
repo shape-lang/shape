@@ -153,7 +153,10 @@ pub fn parse_let_expr(pair: Pair<Rule>) -> Result<Expr> {
 /// Parse break expression
 pub fn parse_break_expr(pair: Pair<Rule>) -> Result<Expr> {
     let span = pair_span(&pair);
-    let mut inner = pair.into_inner();
+    // Skip the break_keyword child pair — only look for an optional expression.
+    let mut inner = pair
+        .into_inner()
+        .filter(|p| p.as_rule() != Rule::break_keyword);
     let value = if let Some(expr) = inner.next() {
         Some(Box::new(super::super::parse_expression(expr)?))
     } else {
@@ -167,7 +170,10 @@ pub fn parse_return_expr(pair: Pair<Rule>) -> Result<Expr> {
     let span = pair_span(&pair);
     // The "return" keyword starts at the beginning of this pair.
     let keyword_line = pair.as_span().start_pos().line_col().0;
-    let mut inner = pair.into_inner();
+    // Skip the return_keyword child pair — only look for an optional expression.
+    let mut inner = pair
+        .into_inner()
+        .filter(|p| p.as_rule() != Rule::return_keyword);
     let value = if let Some(expr) = inner.next() {
         // Only treat as `return <expr>` if the expression starts on the same
         // line as `return`. The grammar greedily consumes the next expression
@@ -186,11 +192,20 @@ pub fn parse_return_expr(pair: Pair<Rule>) -> Result<Expr> {
 }
 
 /// Parse block expression
+///
+/// The PEG grammar uses `(block_statement ~ ";"?)* ~ block_item?` where `";"?`
+/// is silent/optional. To implement semicolon-suppresses-return semantics
+/// (`{ 1; }` yields `()` while `{ 1 }` yields `1`), we inspect the raw source
+/// text after each `block_statement` span to detect whether a semicolon was
+/// actually present.
 pub fn parse_block_expr(pair: Pair<Rule>) -> Result<Expr> {
     let span = pair_span(&pair);
     let mut items = Vec::new();
+    let mut had_semi = Vec::new();
 
     if let Some(block_items) = pair.into_inner().next() {
+        let source = block_items.as_str();
+        let block_start = block_items.as_span().start();
         // Collect all inner pairs to analyze them
         let inner_pairs: Vec<_> = block_items.into_inner().collect();
 
@@ -198,9 +213,23 @@ pub fn parse_block_expr(pair: Pair<Rule>) -> Result<Expr> {
         for item_pair in inner_pairs {
             match item_pair.as_rule() {
                 Rule::block_statement => {
-                    // This is a statement with a semicolon - parse it
+                    // Detect if a semicolon follows this block_statement in the source
+                    let stmt_end = item_pair.as_span().end();
+                    let offset = stmt_end - block_start;
+                    let has_semicolon = source[offset..].starts_with(';')
+                        || source[offset..].trim_start().starts_with(';');
+
                     let inner = item_pair.into_inner().next().unwrap();
+                    let inner_span = pair_span(&inner);
                     let block_item = parse_block_entry(inner)?;
+                    // If a semicolon follows, ensure expressions become statements
+                    // so they don't produce a value on the stack
+                    let block_item = if has_semicolon {
+                        expr_to_statement(block_item, inner_span)
+                    } else {
+                        block_item
+                    };
+                    had_semi.push(has_semicolon);
                     items.push(block_item);
                 }
                 Rule::block_item => {
@@ -210,6 +239,7 @@ pub fn parse_block_expr(pair: Pair<Rule>) -> Result<Expr> {
                     // Convert tail-position if-statement to a conditional expression
                     // so the block evaluates to the if's value.
                     let block_item = if_stmt_to_tail_expr(block_item);
+                    had_semi.push(false);
                     items.push(block_item);
                 }
                 _ => {} // Skip other tokens
@@ -222,18 +252,29 @@ pub fn parse_block_expr(pair: Pair<Rule>) -> Result<Expr> {
         return Ok(Expr::Unit(span));
     }
 
-    // Promote the last item to a tail expression when it is a statement
-    // that can produce a value (e.g. an if-statement).  The PEG grammar
-    // `(block_statement ~ ";"?)* ~ block_item?` may consume a trailing
-    // if-statement as a `block_statement` (with the optional semicolon
-    // matching nothing), so the `block_item` -> `if_stmt_to_tail_expr`
-    // path is never reached.  Fix: apply the same promotion to the last
-    // collected item regardless of how the grammar matched it.
-    if let Some(last) = items.pop() {
-        items.push(if_stmt_to_tail_expr(last));
+    // Only promote the last item to a tail expression if it did NOT have a
+    // trailing semicolon. When it did, the expression was already wrapped as
+    // a Statement by expr_to_statement above, and the compiler's
+    // compile_expr_block will emit unit for the missing tail value.
+    if let Some(&last_had_semi) = had_semi.last() {
+        if !last_had_semi {
+            if let Some(last) = items.pop() {
+                items.push(if_stmt_to_tail_expr(last));
+            }
+        }
     }
 
     Ok(Expr::Block(BlockExpr { items }, span))
+}
+
+/// Convert a `BlockItem::Expression` to a `BlockItem::Statement` so the
+/// compiler treats it as a side-effect (pops the value) rather than keeping
+/// it as the block's return value.
+fn expr_to_statement(item: BlockItem, span: Span) -> BlockItem {
+    match item {
+        BlockItem::Expression(expr) => BlockItem::Statement(Statement::Expression(expr, span)),
+        other => other,
+    }
 }
 
 /// Convert a tail-position `if` statement into a conditional expression so the

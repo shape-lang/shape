@@ -1873,9 +1873,36 @@ impl BytecodeCompiler {
                     )
                 })
                 .collect();
+            // Collect field annotations (e.g. @alias) so that JSON
+            // deserialization can map wire names to field names.
+            let field_annotations: Vec<Vec<FieldAnnotation>> = struct_def
+                .fields
+                .iter()
+                .filter(|f| !f.is_comptime)
+                .map(|f| {
+                    f.annotations
+                        .iter()
+                        .map(|ann| FieldAnnotation {
+                            name: ann.name.clone(),
+                            args: ann
+                                .args
+                                .iter()
+                                .filter_map(|arg| match arg {
+                                    Expr::Literal(Literal::String(s), _) => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
+                        })
+                        .collect()
+                })
+                .collect();
             self.type_tracker
                 .schema_registry_mut()
-                .register_type(struct_def.name.clone(), runtime_fields);
+                .register_type_with_annotations(
+                    struct_def.name.clone(),
+                    runtime_fields,
+                    field_annotations,
+                );
         }
 
         // Execute comptime annotation handlers before registration so
@@ -3254,6 +3281,35 @@ impl BytecodeCompiler {
                             Err(e) => {
                                 self.emit(Instruction::simple(OpCode::PushNull));
                                 Some(e)
+                            }
+                        }
+                    } else if let Expr::Array(items, arr_span) = init_expr {
+                        // Single-row table literal: `let t: Table<T> = [a, b, c]`
+                        // When the annotation is Table<T>, treat the array as a single row.
+                        let is_table_annotated = matches!(
+                            &var_decl.type_annotation,
+                            Some(shape_ast::ast::TypeAnnotation::Generic { name, args })
+                                if name == "Table" && args.len() == 1
+                        );
+                        if is_table_annotated {
+                            let single_row = vec![items.clone()];
+                            match self.compile_table_rows(&single_row, &var_decl.type_annotation, *arr_span) {
+                                Ok(()) => None,
+                                Err(e) => {
+                                    self.emit(Instruction::simple(OpCode::PushNull));
+                                    Some(e)
+                                }
+                            }
+                        } else {
+                            match self.compile_expr_for_reference_binding(init_expr) {
+                                Ok(tracked_borrow) => {
+                                    ref_borrow = tracked_borrow;
+                                    None
+                                }
+                                Err(e) => {
+                                    self.emit(Instruction::simple(OpCode::PushNull));
+                                    Some(e)
+                                }
                             }
                         }
                     } else {

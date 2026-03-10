@@ -105,6 +105,9 @@ pub struct ExecutionContext {
     type_alias_registry: HashMap<String, TypeAliasRuntimeEntry>,
     /// Enum definition registry for sum type support
     enum_registry: EnumRegistry,
+    /// Struct type definition registry for REPL persistence
+    /// Maps struct name -> StructTypeDef so type definitions survive across REPL sessions
+    struct_type_registry: HashMap<String, shape_ast::ast::StructTypeDef>,
     /// Progress registry for monitoring load operations
     progress_registry: Option<Arc<super::progress::ProgressRegistry>>,
     /// Optional JIT kernel compiler for high-performance simulation.
@@ -233,6 +236,7 @@ impl ExecutionContext {
             output_adapter: Box::new(crate::output_adapter::StdoutAdapter),
             type_alias_registry: HashMap::new(),
             enum_registry: EnumRegistry::new(),
+            struct_type_registry: HashMap::new(),
             progress_registry: None,
             kernel_compiler: None,
         }
@@ -275,6 +279,7 @@ impl ExecutionContext {
             output_adapter: Box::new(crate::output_adapter::StdoutAdapter),
             type_alias_registry: HashMap::new(),
             enum_registry: EnumRegistry::new(),
+            struct_type_registry: HashMap::new(),
             progress_registry: None,
             kernel_compiler: None,
         }
@@ -320,6 +325,7 @@ impl ExecutionContext {
             output_adapter: Box::new(crate::output_adapter::StdoutAdapter),
             type_alias_registry: HashMap::new(),
             enum_registry: EnumRegistry::new(),
+            struct_type_registry: HashMap::new(),
             progress_registry: None,
             kernel_compiler: None,
         }
@@ -369,6 +375,7 @@ impl ExecutionContext {
             output_adapter: Box::new(crate::output_adapter::StdoutAdapter),
             type_alias_registry: HashMap::new(),
             enum_registry: EnumRegistry::new(),
+            struct_type_registry: HashMap::new(),
             progress_registry: None,
             kernel_compiler: None,
         }
@@ -542,6 +549,7 @@ impl ExecutionContext {
             range_active: self.range_active,
             type_alias_registry: alias_registry,
             enum_registry,
+            struct_type_registry: self.struct_type_registry.clone(),
             suspension_state,
         })
     }
@@ -635,6 +643,8 @@ impl ExecutionContext {
         for (_name, def) in snapshot.enum_registry.into_iter() {
             self.enum_registry.register(def);
         }
+
+        self.struct_type_registry = snapshot.struct_type_registry;
 
         if let Some(state) = snapshot.suspension_state {
             let mut locals = Vec::new();

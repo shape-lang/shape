@@ -4,9 +4,13 @@ use shape_runtime::project::parse_shape_project_toml;
 /// Run the `shape remove` command: remove a dependency from the current project.
 pub async fn run_remove(name: String) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let project = shape_runtime::project::find_project_root(&cwd).ok_or_else(|| {
-        anyhow::anyhow!("No shape.toml found. Run `shape remove` from within a Shape project.")
-    })?;
+    let project = shape_runtime::project::try_find_project_root(&cwd)
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No shape.toml found. Run `shape remove` from within a Shape project."
+            )
+        })?;
 
     let toml_path = project.root_path.join("shape.toml");
     let toml_text = std::fs::read_to_string(&toml_path)

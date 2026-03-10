@@ -77,3 +77,194 @@ impl BytecodeCompiler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::compiler::BytecodeCompiler;
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::ValueWord;
+
+    fn eval(code: &str) -> ValueWord {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.execute(None).expect("execution failed").clone()
+    }
+
+    // === MED-11: @"..." DateTime literals ===
+
+    #[test]
+    fn test_datetime_literal_iso8601() {
+        let result = eval(r#"@"2024-06-15T14:30:00+00:00""#);
+        let dt = result.as_datetime().expect("expected DateTime value");
+        // 2024-06-15T14:30:00 UTC
+        assert_eq!(dt.timestamp(), 1718461800);
+    }
+
+    #[test]
+    fn test_datetime_literal_date_only() {
+        let result = eval(r#"@"2024-01-15""#);
+        let dt = result.as_datetime().expect("expected DateTime value");
+        // 2024-01-15 at midnight UTC
+        assert_eq!(dt.timestamp(), 1705276800);
+    }
+
+    #[test]
+    fn test_datetime_literal_datetime_no_tz() {
+        let result = eval(r#"@"2024-06-15T14:30:00""#);
+        let dt = result.as_datetime().expect("expected DateTime value");
+        // Assumed UTC: 2024-06-15T14:30:00 UTC
+        assert_eq!(dt.timestamp(), 1718461800);
+    }
+
+    #[test]
+    fn test_datetime_literal_in_fn() {
+        // Use a function to test variable binding
+        let result = eval(
+            r#"
+            fn get_dt() {
+                @"2024-01-15"
+            }
+            get_dt()
+            "#,
+        );
+        let dt = result.as_datetime().expect("expected DateTime value");
+        assert_eq!(dt.timestamp(), 1705276800);
+    }
+
+    #[test]
+    fn test_datetime_named_now() {
+        let result = eval("@now");
+        let dt = result.as_datetime().expect("expected DateTime value");
+        // Just check it's a reasonable timestamp (after 2024-01-01)
+        assert!(dt.timestamp() > 1704067200);
+    }
+
+    #[test]
+    fn test_datetime_named_today() {
+        let result = eval("@today");
+        let dt = result.as_datetime().expect("expected DateTime value");
+        // Should be midnight today, timestamp > 2024-01-01
+        assert!(dt.timestamp() > 1704067200);
+        // Verify it's at midnight (seconds within the day should be 0)
+        use chrono::Timelike;
+        assert_eq!(dt.hour(), 0);
+        assert_eq!(dt.minute(), 0);
+        assert_eq!(dt.second(), 0);
+    }
+
+    // === MED-12: Duration suffix arithmetic ===
+
+    #[test]
+    fn test_duration_value_exists() {
+        // Duration should produce a TimeSpan value (not crash)
+        let result = eval("3d");
+        // Should be a TimeSpan (chrono::Duration)
+        let ts = result.as_timespan().expect("expected TimeSpan value");
+        // 3 days = 259200 seconds
+        assert_eq!(ts.num_seconds(), 259200);
+    }
+
+    #[test]
+    fn test_datetime_plus_duration_days() {
+        let result = eval(
+            r#"
+            fn test() {
+                let dt = @"2024-01-15"
+                let dur = 3d
+                dt + dur
+            }
+            test()
+            "#,
+        );
+        let dt = result.as_datetime().expect("expected DateTime value");
+        // 2024-01-15 + 3 days = 2024-01-18 at midnight UTC
+        // 1705276800 + 259200 = 1705536000
+        assert_eq!(dt.timestamp(), 1705536000);
+    }
+
+    #[test]
+    fn test_datetime_plus_duration_hours() {
+        let result = eval(
+            r#"
+            fn test() {
+                let dt = @"2024-01-15"
+                let dur = 2h
+                dt + dur
+            }
+            test()
+            "#,
+        );
+        let dt = result.as_datetime().expect("expected DateTime value");
+        // 2024-01-15 midnight + 2 hours = 1705276800 + 7200
+        assert_eq!(dt.timestamp(), 1705284000);
+    }
+
+    #[test]
+    fn test_datetime_minus_duration() {
+        let result = eval(
+            r#"
+            fn test() {
+                let dt = @"2024-01-15"
+                let dur = 1d
+                dt - dur
+            }
+            test()
+            "#,
+        );
+        let dt = result.as_datetime().expect("expected DateTime value");
+        // 2024-01-15 - 1 day = 2024-01-14
+        assert_eq!(dt.timestamp(), 1705190400);
+    }
+
+    #[test]
+    fn test_datetime_subtraction_yields_timespan() {
+        // Two datetime values subtracted should yield a TimeSpan
+        let result = eval(
+            r#"
+            fn make_dt1() { @"2024-01-15" }
+            fn make_dt2() { @"2024-01-10" }
+            fn test() {
+                make_dt1() - make_dt2()
+            }
+            test()
+            "#,
+        );
+        let ts = result.as_timespan().expect("expected TimeSpan value");
+        // 5 days = 432000 seconds
+        assert_eq!(ts.num_seconds(), 432000);
+    }
+
+    #[test]
+    fn test_duration_seconds() {
+        let result = eval("10s");
+        let ts = result.as_timespan().expect("expected TimeSpan value");
+        assert_eq!(ts.num_seconds(), 10);
+    }
+
+    #[test]
+    fn test_duration_minutes() {
+        let result = eval("30m");
+        let ts = result.as_timespan().expect("expected TimeSpan value");
+        assert_eq!(ts.num_seconds(), 1800);
+    }
+
+    #[test]
+    fn test_duration_addition() {
+        let result = eval(
+            r#"
+            fn test() {
+                let a = 3d
+                let b = 2d
+                a + b
+            }
+            test()
+            "#,
+        );
+        let ts = result.as_timespan().expect("expected TimeSpan value");
+        // 5 days = 432000 seconds
+        assert_eq!(ts.num_seconds(), 432000);
+    }
+}

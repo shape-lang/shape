@@ -44,6 +44,29 @@ impl TypeSchemaRegistry {
         id
     }
 
+    /// Register a type with field definitions and per-field annotations.
+    ///
+    /// Each entry in `field_annotations` corresponds to the field at the same
+    /// index in `fields`. Annotations such as `@alias("wire_name")` are stored
+    /// on the resulting `FieldDef` so that serialization and deserialization
+    /// boundaries can use `wire_name()` instead of the field name.
+    pub fn register_type_with_annotations(
+        &mut self,
+        name: impl Into<String>,
+        fields: Vec<(String, FieldType)>,
+        field_annotations: Vec<Vec<FieldAnnotation>>,
+    ) -> SchemaId {
+        let mut schema = TypeSchema::new(name, fields);
+        for (i, annotations) in field_annotations.into_iter().enumerate() {
+            if i < schema.fields.len() && !annotations.is_empty() {
+                schema.fields[i].annotations = annotations;
+            }
+        }
+        let id = schema.id;
+        self.register(schema);
+        id
+    }
+
     /// Get schema by name
     pub fn get(&self, name: &str) -> Option<&TypeSchema> {
         self.by_name.get(name)

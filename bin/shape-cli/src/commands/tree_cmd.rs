@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 
 pub async fn run_tree(show_native: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let project = shape_runtime::project::find_project_root(&cwd).ok_or_else(|| {
-        anyhow::anyhow!("No shape.toml found. Run `shape tree` from within a Shape project.")
-    })?;
+    let project = shape_runtime::project::try_find_project_root(&cwd)
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("No shape.toml found. Run `shape tree` from within a Shape project.")
+        })?;
 
     let root_name = if project.config.project.name.trim().is_empty() {
         project

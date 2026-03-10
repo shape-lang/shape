@@ -156,6 +156,25 @@ impl VirtualMachine {
             })
             .collect();
 
+        // Compute relocatable top-level IP from the current call frame.
+        // The top-level `ip` corresponds to the innermost frame's function.
+        let (ip_blob_hash, ip_local_offset, ip_function_id) =
+            if let Some(frame) = self.call_stack.last() {
+                let fid = frame.function_id;
+                let blob_hash = fid.and_then(|id| self.blob_hash_for_function(id));
+                let entry_point = fid
+                    .and_then(|id| self.function_entry_points.get(id as usize).copied())
+                    .unwrap_or(0);
+                let local_offset = self.ip.saturating_sub(entry_point);
+                (
+                    blob_hash.map(|h| h.0),
+                    Some(local_offset),
+                    fid,
+                )
+            } else {
+                (None, None, None)
+            };
+
         Ok(VmSnapshot {
             ip: self.ip,
             stack,
@@ -165,6 +184,9 @@ impl VirtualMachine {
             loop_stack,
             timeframe_stack: self.timeframe_stack.clone(),
             exception_handlers,
+            ip_blob_hash,
+            ip_local_offset,
+            ip_function_id,
         })
     }
 
@@ -176,7 +198,41 @@ impl VirtualMachine {
     ) -> Result<Self, VMError> {
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
-        vm.ip = snapshot.ip;
+
+        // Relocate the top-level IP using content-addressed identity when
+        // available. This handles the case where the program was recompiled
+        // and instruction positions changed.
+        vm.ip = if let (Some(hash_bytes), Some(local_offset)) =
+            (&snapshot.ip_blob_hash, snapshot.ip_local_offset)
+        {
+            let hash = FunctionHash(*hash_bytes);
+            // Look up the function by blob hash in the new program
+            let func_id = resolve_function_identity(
+                &vm.function_id_by_hash,
+                &vm.program.functions,
+                Some(hash),
+                snapshot.ip_function_id,
+                None,
+            )?;
+            let entry_point = vm
+                .function_entry_points
+                .get(func_id as usize)
+                .copied()
+                .unwrap_or(0);
+            entry_point + local_offset
+        } else if let Some(fid) = snapshot.ip_function_id {
+            // Fallback: use function_id to relocate (same program, stable IDs)
+            let entry_point = vm
+                .function_entry_points
+                .get(fid as usize)
+                .copied()
+                .unwrap_or(0);
+            let local_offset = snapshot.ip_local_offset.unwrap_or(0);
+            entry_point + local_offset
+        } else {
+            // Legacy snapshots without relocation info: use absolute IP
+            snapshot.ip
+        };
 
         let restored_stack: Vec<ValueWord> = snapshot
             .stack
@@ -444,5 +500,94 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("no hash, id, or name"), "got: {}", msg);
+    }
+
+    // --- VmSnapshot IP relocation tests ---
+
+    #[test]
+    fn test_snapshot_ip_relocation_fields_present() {
+        // Verify that VmSnapshot has the new relocation fields
+        let snapshot = VmSnapshot {
+            ip: 42,
+            stack: vec![],
+            locals: vec![],
+            module_bindings: vec![],
+            call_stack: vec![],
+            loop_stack: vec![],
+            timeframe_stack: vec![],
+            exception_handlers: vec![],
+            ip_blob_hash: Some([0xAB; 32]),
+            ip_local_offset: Some(10),
+            ip_function_id: Some(1),
+        };
+        assert_eq!(snapshot.ip, 42);
+        assert_eq!(snapshot.ip_blob_hash, Some([0xAB; 32]));
+        assert_eq!(snapshot.ip_local_offset, Some(10));
+        assert_eq!(snapshot.ip_function_id, Some(1));
+    }
+
+    #[test]
+    fn test_snapshot_legacy_without_relocation_fields() {
+        // Legacy snapshots that don't have the new fields should still deserialize
+        // (serde default kicks in)
+        let snapshot = VmSnapshot {
+            ip: 100,
+            stack: vec![],
+            locals: vec![],
+            module_bindings: vec![],
+            call_stack: vec![],
+            loop_stack: vec![],
+            timeframe_stack: vec![],
+            exception_handlers: vec![],
+            ip_blob_hash: None,
+            ip_local_offset: None,
+            ip_function_id: None,
+        };
+        // Without relocation info, from_snapshot should fall back to absolute IP
+        assert!(snapshot.ip_blob_hash.is_none());
+        assert!(snapshot.ip_local_offset.is_none());
+        assert!(snapshot.ip_function_id.is_none());
+    }
+
+    #[test]
+    fn test_snapshot_serialization_roundtrip_with_relocation() {
+        let snapshot = VmSnapshot {
+            ip: 42,
+            stack: vec![],
+            locals: vec![],
+            module_bindings: vec![],
+            call_stack: vec![],
+            loop_stack: vec![],
+            timeframe_stack: vec![],
+            exception_handlers: vec![],
+            ip_blob_hash: Some([0xCD; 32]),
+            ip_local_offset: Some(7),
+            ip_function_id: Some(2),
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored: VmSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.ip_blob_hash, Some([0xCD; 32]));
+        assert_eq!(restored.ip_local_offset, Some(7));
+        assert_eq!(restored.ip_function_id, Some(2));
+    }
+
+    #[test]
+    fn test_snapshot_deserialization_without_relocation_fields() {
+        // Simulate a JSON snapshot from before the relocation fields were added
+        let json = r#"{
+            "ip": 50,
+            "stack": [],
+            "locals": [],
+            "module_bindings": [],
+            "call_stack": [],
+            "loop_stack": [],
+            "timeframe_stack": [],
+            "exception_handlers": []
+        }"#;
+        let snapshot: VmSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snapshot.ip, 50);
+        assert!(snapshot.ip_blob_hash.is_none());
+        assert!(snapshot.ip_local_offset.is_none());
+        assert!(snapshot.ip_function_id.is_none());
     }
 }

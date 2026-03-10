@@ -20,6 +20,22 @@ use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_f
 use shape_value::ValueWord;
 use std::sync::Arc;
 
+/// Check if a type string looks like `Option<T>` or `T?`.
+fn is_option_type(type_str: &str) -> bool {
+    type_str.starts_with("Option<") || type_str.ends_with('?')
+}
+
+/// Unwrap `Option<T>` -> `T` or `T?` -> `T` in a type string.
+fn unwrap_option_type(type_str: &str) -> String {
+    if type_str.starts_with("Option<") && type_str.ends_with('>') {
+        type_str[7..type_str.len() - 1].to_string()
+    } else if type_str.ends_with('?') {
+        type_str[..type_str.len() - 1].to_string()
+    } else {
+        type_str.to_string()
+    }
+}
+
 /// Per-field annotation: (annotation_name, Vec<stringified_args>).
 pub(crate) type FieldAnnotation = (String, Vec<String>);
 
@@ -163,6 +179,7 @@ impl ComptimeTarget {
 
         ensure_schema(&["name", "type"]);
         ensure_schema(&["name", "type", "annotations"]);
+        ensure_schema(&["name", "type", "annotations", "optional"]);
         ensure_schema(&["name", "type", "const"]);
         ensure_schema(&["name", "args"]);
         ensure_schema(&[
@@ -186,7 +203,7 @@ impl ComptimeTarget {
             AnnotationTargetKind::Binding => "binding",
         };
 
-        // fields: array of {name, type, annotations} TypedObjects
+        // fields: array of {name, type, annotations, optional} TypedObjects
         let fields_arr: Vec<ValueWord> = self
             .fields
             .iter()
@@ -203,10 +220,18 @@ impl ComptimeTarget {
                         ])
                     })
                     .collect();
+                // Detect Option<T> types and expose an `optional` flag + unwrapped inner type
+                let is_optional = is_option_type(ftype);
+                let effective_type = if is_optional {
+                    unwrap_option_type(ftype)
+                } else {
+                    ftype.clone()
+                };
                 typed_object_from_nb_pairs(&[
                     ("name", nb_string(fname.clone())),
-                    ("type", nb_string(ftype.clone())),
+                    ("type", nb_string(effective_type)),
                     ("annotations", ValueWord::from_array(Arc::new(anns_arr))),
+                    ("optional", ValueWord::from_bool(is_optional)),
                 ])
             })
             .collect();
@@ -609,5 +634,134 @@ mod tests {
         let value = target.to_nanboxed();
         // Now returns TypedObject
         assert_eq!(value.type_name(), "object");
+    }
+
+    #[test]
+    fn test_target_from_type_with_option_fields() {
+        // Fields with Option<T> type should have `optional: true` and unwrapped inner type.
+        let fields = vec![
+            (
+                "name".to_string(),
+                Some(TypeAnnotation::Basic("string".to_string())),
+                Vec::new(),
+            ),
+            (
+                "nickname".to_string(),
+                Some(TypeAnnotation::option(TypeAnnotation::Basic(
+                    "string".to_string(),
+                ))),
+                Vec::new(),
+            ),
+            (
+                "age".to_string(),
+                Some(TypeAnnotation::option(TypeAnnotation::Basic(
+                    "number".to_string(),
+                ))),
+                Vec::new(),
+            ),
+        ];
+
+        let target = ComptimeTarget::from_type("Person", &fields);
+        assert_eq!(target.name, "Person");
+        assert_eq!(target.fields.len(), 3);
+
+        // First field: "name" with type "string" — NOT optional
+        assert_eq!(target.fields[0].0, "name");
+        assert_eq!(target.fields[0].1, "string");
+
+        // Second field: "nickname" with type "Option<string>" — IS optional
+        assert_eq!(target.fields[1].0, "nickname");
+        assert_eq!(target.fields[1].1, "Option<string>");
+
+        // Third field: "age" with type "Option<number>" — IS optional
+        assert_eq!(target.fields[2].0, "age");
+        assert_eq!(target.fields[2].1, "Option<number>");
+
+        // Verify the nanboxed representation includes optional flags
+        let value = target.to_nanboxed();
+        assert_eq!(value.type_name(), "object");
+
+        // Extract fields array from the target TypedObject
+        if let Some(fields_map) =
+            shape_runtime::type_schema::typed_object_to_hashmap_nb(&value)
+        {
+            let fields_arr = fields_map.get("fields").expect("should have fields");
+            if let Some(view) = fields_arr.as_any_array() {
+                let arr = view.to_generic();
+                assert_eq!(arr.len(), 3);
+
+                // Check first field is NOT optional
+                if let Some(f0) =
+                    shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[0])
+                {
+                    let opt = f0.get("optional").expect("should have optional field");
+                    assert_eq!(
+                        opt.as_bool(),
+                        Some(false),
+                        "non-option field should be optional=false"
+                    );
+                    let type_str = f0.get("type").expect("should have type");
+                    assert_eq!(
+                        type_str.as_str(),
+                        Some("string"),
+                        "non-option field type should be 'string'"
+                    );
+                }
+
+                // Check second field IS optional with unwrapped type
+                if let Some(f1) =
+                    shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[1])
+                {
+                    let opt = f1.get("optional").expect("should have optional field");
+                    assert_eq!(
+                        opt.as_bool(),
+                        Some(true),
+                        "Option<string> field should be optional=true"
+                    );
+                    let type_str = f1.get("type").expect("should have type");
+                    assert_eq!(
+                        type_str.as_str(),
+                        Some("string"),
+                        "Option<string> field type should be unwrapped to 'string'"
+                    );
+                }
+
+                // Check third field IS optional with unwrapped type
+                if let Some(f2) =
+                    shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[2])
+                {
+                    let opt = f2.get("optional").expect("should have optional field");
+                    assert_eq!(
+                        opt.as_bool(),
+                        Some(true),
+                        "Option<number> field should be optional=true"
+                    );
+                    let type_str = f2.get("type").expect("should have type");
+                    assert_eq!(
+                        type_str.as_str(),
+                        Some("number"),
+                        "Option<number> field type should be unwrapped to 'number'"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_is_option_type_detection() {
+        assert!(is_option_type("Option<string>"));
+        assert!(is_option_type("Option<number>"));
+        assert!(is_option_type("Option<Array<int>>"));
+        assert!(!is_option_type("string"));
+        assert!(!is_option_type("number"));
+        assert!(!is_option_type("Array<Option<int>>"));
+    }
+
+    #[test]
+    fn test_unwrap_option_type() {
+        assert_eq!(unwrap_option_type("Option<string>"), "string");
+        assert_eq!(unwrap_option_type("Option<number>"), "number");
+        assert_eq!(unwrap_option_type("string"), "string");
+        assert_eq!(unwrap_option_type("number"), "number");
     }
 }

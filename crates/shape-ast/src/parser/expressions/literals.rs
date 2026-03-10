@@ -549,16 +549,24 @@ fn try_parse_suffixed_int(
             })?;
 
             if !width.in_range_i64(value) {
-                return Err(ShapeError::ParseError {
-                    message: format!(
-                        "Value {} out of range for {}: [{}, {}]",
-                        value,
-                        width.type_name(),
-                        width.min_value(),
-                        width.max_value(),
-                    ),
-                    location: Some(loc.clone()),
-                });
+                // Allow the absolute value of the signed minimum (e.g. 128i8) so that
+                // unary negation can fold it into the valid minimum (-128i8).
+                // This value is only reachable from `-128i8` in source, where the
+                // parser splits `-` as a unary op and `128i8` as the literal.
+                let is_pending_negation =
+                    width.is_signed() && value > 0 && value == -(width.min_value());
+                if !is_pending_negation {
+                    return Err(ShapeError::ParseError {
+                        message: format!(
+                            "Value {} out of range for {}: [{}, {}]",
+                            value,
+                            width.type_name(),
+                            width.min_value(),
+                            width.max_value(),
+                        ),
+                        location: Some(loc.clone()),
+                    });
+                }
             }
 
             return Ok(Some(Literal::TypedInt(value, width)));

@@ -102,6 +102,9 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodFn> = phf_map! {
     "intersect" => crate::executor::objects::array_sets::handle_intersect,
     "except" => crate::executor::objects::array_sets::handle_except,
 
+    // Clone
+    "clone" => crate::executor::objects::array_basic::handle_clone,
+
     // Iterator
     "iter" => crate::executor::objects::iterator_methods::handle_array_iter,
 };

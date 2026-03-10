@@ -305,19 +305,51 @@ pub(crate) fn handle_last(
     }
 }
 
-/// `dt.select(col1, col2, ...)` — project to subset of columns.
+/// `dt.select(col1, col2, ...)` — project to subset of columns (string path).
+/// `dt.select(|row| { id: row.id })` — project via closure returning objects (closure path).
 pub(crate) fn handle_select(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<(), VMError> {
     let dt = extract_dt_nb(&args[0])?;
+
+    // Closure path: dt.select(|row| { id: row.id, name: row.name })
+    if let Some(func_nb) = args.get(1) {
+        if super::common::is_callable_nb(func_nb) {
+            let dt = dt.clone();
+            let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
+            let dt_arc = Arc::new(dt.as_ref().clone());
+            let row_count = dt_arc.row_count();
+
+            if row_count == 0 {
+                return vm.push_vw(super::common::wrap_result_table_nb(
+                    &args[0],
+                    shape_value::datatable::DataTable::new(
+                        arrow_array::RecordBatch::new_empty(dt_arc.inner().schema()),
+                    ),
+                ));
+            }
+
+            let mut rows: Vec<ValueWord> = Vec::with_capacity(row_count);
+            for row_idx in 0..row_count {
+                let row_view = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx);
+                let result =
+                    vm.call_value_immediate_nb(func_nb, &[row_view], ctx.as_deref_mut())?;
+                rows.push(result);
+            }
+
+            return super::common::build_datatable_from_objects_nb(vm, &rows);
+        }
+    }
+
+    // String path: dt.select("col1", "col2", ...)
     let batch = dt.inner();
 
     let mut indices = Vec::new();
     for nb in &args[1..] {
         let name = nb.as_str().ok_or_else(|| {
-            VMError::RuntimeError("select() requires string column names".to_string())
+            VMError::RuntimeError("select() requires string column names or a function".to_string())
         })?;
         let idx = batch
             .schema()

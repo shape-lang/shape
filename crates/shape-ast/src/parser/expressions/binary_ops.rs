@@ -12,7 +12,7 @@
 
 use super::super::pair_span;
 use crate::ast::operators::{FuzzyOp, FuzzyTolerance};
-use crate::ast::{AssignExpr, BinaryOp, Expr, IfExpr, RangeKind, Span, UnaryOp};
+use crate::ast::{AssignExpr, BinaryOp, Expr, IfExpr, Literal, RangeKind, Span, UnaryOp};
 use crate::error::{Result, ShapeError};
 use crate::parser::{Rule, pair_location};
 use pest::iterators::Pair;
@@ -89,10 +89,44 @@ fn parse_ternary_branch(pair: Pair<Rule>) -> Result<Expr> {
                     message: "expected expression in ternary branch".to_string(),
                     location: Some(pair_loc),
                 })?;
-            parse_assignment_expr_no_range(inner)
+            parse_ternary_expr_no_range(inner)
         }
+        Rule::ternary_expr_no_range => parse_ternary_expr_no_range(pair),
         Rule::assignment_expr_no_range => parse_assignment_expr_no_range(pair),
         _ => super::primary::parse_expression(pair),
+    }
+}
+
+/// Parse ternary expression in no-range context (used inside ternary branches
+/// for right-associative nesting: `a ? b : c ? d : e`).
+fn parse_ternary_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
+    let span = pair_span(&pair);
+    let pair_loc = pair_location(&pair);
+    let mut inner = pair.into_inner();
+    let condition_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+        message: "expected condition expression in ternary".to_string(),
+        location: Some(pair_loc.clone()),
+    })?;
+    let condition_expr = parse_null_coalesce_expr_no_range(condition_pair)?;
+
+    if let Some(then_pair) = inner.next() {
+        let then_expr = parse_ternary_branch(then_pair)?;
+        let else_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+            message: "expected else expression after ':' in ternary".to_string(),
+            location: Some(pair_loc),
+        })?;
+        let else_expr = parse_ternary_branch(else_pair)?;
+
+        Ok(Expr::If(
+            Box::new(IfExpr {
+                condition: Box::new(condition_expr),
+                then_branch: Box::new(then_expr),
+                else_branch: Some(Box::new(else_expr)),
+            }),
+            span,
+        ))
+    } else {
+        Ok(condition_expr)
     }
 }
 
@@ -1183,9 +1217,28 @@ pub fn parse_unary_expr(pair: Pair<Rule>) -> Result<Expr> {
             span,
         })
     } else if pair_str.starts_with('-') {
+        let operand = parse_unary_expr(first)?;
+        // Fold negation into typed integer literals so that `-128i8` parses
+        // as a single `TypedInt(-128, I8)` instead of `Neg(TypedInt(128, I8))`.
+        // Without this, 128i8 would be out of range and rejected at parse time.
+        match &operand {
+            Expr::Literal(Literal::TypedInt(value, width), lit_span) => {
+                let neg = value.wrapping_neg();
+                if width.in_range_i64(neg) {
+                    return Ok(Expr::Literal(Literal::TypedInt(neg, *width), *lit_span));
+                }
+            }
+            Expr::Literal(Literal::Int(value), lit_span) => {
+                return Ok(Expr::Literal(Literal::Int(-value), *lit_span));
+            }
+            Expr::Literal(Literal::Number(value), lit_span) => {
+                return Ok(Expr::Literal(Literal::Number(-value), *lit_span));
+            }
+            _ => {}
+        }
         Ok(Expr::UnaryOp {
             op: UnaryOp::Neg,
-            operand: Box::new(parse_unary_expr(first)?),
+            operand: Box::new(operand),
             span,
         })
     } else {

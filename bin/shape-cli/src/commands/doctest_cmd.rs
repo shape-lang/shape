@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use shape_runtime::engine::ShapeEngine;
+use shape_runtime::output_adapter::SharedCaptureAdapter;
 use shape_vm::BytecodeExecutor;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -22,6 +23,8 @@ struct DocTest {
     code: String,
     should_fail: bool,
     ignore: bool,
+    /// Expected output lines parsed from `// Output:` comments
+    expected_output: Option<String>,
 }
 
 /// Extract code blocks from a markdown file
@@ -39,13 +42,15 @@ fn extract_code_blocks(path: &Path, content: &str) -> Vec<DocTest> {
             if in_code_block {
                 // End of code block
                 if !current_code.is_empty() {
+                    let (code, expected_output) = extract_expected_output(&current_code);
                     tests.push(DocTest {
                         file: path.to_path_buf(),
                         line: block_start_line + 1, // 1-indexed
                         language: current_lang.clone(),
-                        code: current_code.clone(),
+                        code,
                         should_fail,
                         ignore,
+                        expected_output,
                     });
                 }
                 in_code_block = false;
@@ -75,6 +80,43 @@ fn extract_code_blocks(path: &Path, content: &str) -> Vec<DocTest> {
     }
 
     tests
+}
+
+/// Extract expected output from `// Output:` comments in doctest code.
+///
+/// Lines starting with `// Output:` mark expected output. The text after
+/// `// Output:` is the expected line. Multiple consecutive `// Output:` lines
+/// are joined with newlines. The `// Output:` comments are stripped from
+/// the returned code so they don't affect execution.
+///
+/// Example:
+/// ```text
+/// print("hello")
+/// // Output: hello
+/// print("world")
+/// // Output: world
+/// ```
+/// Returns ("print(\"hello\")\nprint(\"world\")", Some("hello\nworld"))
+fn extract_expected_output(code: &str) -> (String, Option<String>) {
+    let mut code_lines = Vec::new();
+    let mut output_lines = Vec::new();
+
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("// Output:") {
+            output_lines.push(rest.trim_start_matches(' ').to_string());
+        } else {
+            code_lines.push(line.to_string());
+        }
+    }
+
+    let expected = if output_lines.is_empty() {
+        None
+    } else {
+        Some(output_lines.join("\n"))
+    };
+
+    (code_lines.join("\n"), expected)
 }
 
 /// Run doctests on markdown files
@@ -141,6 +183,12 @@ async fn run_doctests(path: &Path, verbose: bool) -> Result<()> {
             let mut test_engine = ShapeEngine::new()?;
             test_engine.load_stdlib()?;
 
+            // Set up output capture adapter for output validation
+            let capture_adapter = SharedCaptureAdapter::new();
+            if let Some(ctx) = test_engine.get_runtime_mut().persistent_context_mut() {
+                ctx.set_output_adapter(Box::new(capture_adapter.clone()));
+            }
+
             let result = {
                 let mut executor = BytecodeExecutor::new();
                 let context_file = test
@@ -158,7 +206,20 @@ async fn run_doctests(path: &Path, verbose: bool) -> Result<()> {
             };
 
             let test_passed = match (&result, test.should_fail) {
-                (Ok(_), false) => true,   // Expected success, got success
+                (Ok(_), false) => {
+                    // Check output validation if expected output is specified
+                    if let Some(ref expected) = test.expected_output {
+                        let actual_lines = capture_adapter.output();
+                        let actual = actual_lines.join("\n");
+                        if actual.trim() == expected.trim() {
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    }
+                }
                 (Err(_), true) => true,   // Expected failure, got failure
                 (Ok(_), true) => false,   // Expected failure, got success
                 (Err(_), false) => false, // Expected success, got failure
@@ -171,8 +232,22 @@ async fn run_doctests(path: &Path, verbose: bool) -> Result<()> {
                 }
             } else {
                 failed += 1;
-                let error_msg = match result {
-                    Ok(_) => "expected failure but test passed".to_string(),
+                let error_msg = match &result {
+                    Ok(_) => {
+                        if test.should_fail {
+                            "expected failure but test passed".to_string()
+                        } else if let Some(ref expected) = test.expected_output {
+                            let actual_lines = capture_adapter.output();
+                            let actual = actual_lines.join("\n");
+                            format!(
+                                "output mismatch:\n  expected: {}\n  actual:   {}",
+                                expected.trim(),
+                                actual.trim()
+                            )
+                        } else {
+                            "unexpected error".to_string()
+                        }
+                    }
                     Err(e) => e.to_string(),
                 };
                 failures.push((test, error_msg));
@@ -232,4 +307,124 @@ async fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_extract_expected_output_no_output_comments() {
+        let code = "let x = 1\nlet y = 2";
+        let (cleaned, expected) = extract_expected_output(code);
+        assert_eq!(cleaned, "let x = 1\nlet y = 2");
+        assert!(expected.is_none());
+    }
+
+    #[test]
+    fn test_extract_expected_output_single_line() {
+        let code = "print(\"hello\")\n// Output: hello";
+        let (cleaned, expected) = extract_expected_output(code);
+        assert_eq!(cleaned, "print(\"hello\")");
+        assert_eq!(expected.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_extract_expected_output_multiple_lines() {
+        let code = "print(\"hello\")\n// Output: hello\nprint(\"world\")\n// Output: world";
+        let (cleaned, expected) = extract_expected_output(code);
+        assert_eq!(cleaned, "print(\"hello\")\nprint(\"world\")");
+        assert_eq!(expected.as_deref(), Some("hello\nworld"));
+    }
+
+    #[test]
+    fn test_extract_expected_output_preserves_empty_output() {
+        let code = "print(\"\")\n// Output: ";
+        let (cleaned, expected) = extract_expected_output(code);
+        assert_eq!(cleaned, "print(\"\")");
+        assert_eq!(expected.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_extract_expected_output_ignores_regular_comments() {
+        let code = "// This is a comment\nlet x = 1\n// Output: 1";
+        let (cleaned, expected) = extract_expected_output(code);
+        assert_eq!(cleaned, "// This is a comment\nlet x = 1");
+        assert_eq!(expected.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn test_extract_code_blocks_with_expected_output() {
+        let md = r#"# Test
+
+```shape
+print("hello")
+// Output: hello
+```
+"#;
+        let tests = extract_code_blocks(Path::new("test.md"), md);
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].code, "print(\"hello\")");
+        assert_eq!(tests[0].expected_output.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn test_extract_code_blocks_without_output() {
+        let md = r#"# Test
+
+```shape
+let x = 1
+```
+"#;
+        let tests = extract_code_blocks(Path::new("test.md"), md);
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].code, "let x = 1");
+        assert!(tests[0].expected_output.is_none());
+    }
+
+    #[test]
+    fn test_extract_code_blocks_should_fail() {
+        let md = r#"# Test
+
+```shape,should_fail
+undefined_variable
+```
+"#;
+        let tests = extract_code_blocks(Path::new("test.md"), md);
+        assert_eq!(tests.len(), 1);
+        assert!(tests[0].should_fail);
+    }
+
+    #[test]
+    fn test_extract_code_blocks_ignore() {
+        let md = r#"# Test
+
+```shape,ignore
+// not run
+```
+"#;
+        let tests = extract_code_blocks(Path::new("test.md"), md);
+        assert_eq!(tests.len(), 1);
+        assert!(tests[0].ignore);
+    }
+
+    #[test]
+    fn test_extract_code_blocks_non_shape_filtered() {
+        let md = r#"# Test
+
+```javascript
+console.log("hi")
+```
+
+```shape
+let x = 1
+```
+"#;
+        let tests = extract_code_blocks(Path::new("test.md"), md);
+        // Both are extracted, filtering happens later
+        assert_eq!(tests.len(), 2);
+        assert_eq!(tests[0].language, "javascript");
+        assert_eq!(tests[1].language, "shape");
+    }
 }

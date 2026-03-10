@@ -401,3 +401,99 @@ pub fn parse_duration(pair: Pair<Rule>) -> Result<Expr> {
 
     Ok(Expr::Duration(Duration { value, unit }, span))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ast::{DateTimeExpr, DurationUnit, Expr};
+
+    fn parse_expr(code: &str) -> Expr {
+        let program = crate::parser::parse_program(code).expect("parse failed");
+        // The last expression-statement's expr
+        match &program.items[0] {
+            crate::ast::Item::Expression(expr, _) => expr.clone(),
+            crate::ast::Item::Statement(crate::ast::Statement::Expression(expr, _), _) => {
+                expr.clone()
+            }
+            other => panic!("expected expression statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_datetime_literal_iso8601() {
+        let expr = parse_expr(r#"@"2024-06-15T14:30:00""#);
+        match expr {
+            Expr::DateTime(DateTimeExpr::Literal(s), _) => {
+                assert_eq!(s, "2024-06-15T14:30:00");
+            }
+            other => panic!("expected DateTime literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_datetime_literal_date_only() {
+        let expr = parse_expr(r#"@"2024-01-15""#);
+        match expr {
+            Expr::DateTime(DateTimeExpr::Literal(s), _) => {
+                assert_eq!(s, "2024-01-15");
+            }
+            other => panic!("expected DateTime literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_datetime_named_now() {
+        let expr = parse_expr("@now");
+        match expr {
+            Expr::DateTime(DateTimeExpr::Named(crate::ast::NamedTime::Now), _) => {}
+            other => panic!("expected DateTime Named(Now), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_duration_days() {
+        let expr = parse_expr("3d");
+        match expr {
+            Expr::Duration(dur, _) => {
+                assert_eq!(dur.value, 3.0);
+                assert_eq!(dur.unit, DurationUnit::Days);
+            }
+            other => panic!("expected Duration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        let expr = parse_expr("2h");
+        match expr {
+            Expr::Duration(dur, _) => {
+                assert_eq!(dur.value, 2.0);
+                assert_eq!(dur.unit, DurationUnit::Hours);
+            }
+            other => panic!("expected Duration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        let expr = parse_expr("30m");
+        match expr {
+            Expr::Duration(dur, _) => {
+                assert_eq!(dur.value, 30.0);
+                assert_eq!(dur.unit, DurationUnit::Minutes);
+            }
+            other => panic!("expected Duration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        let expr = parse_expr("10s");
+        match expr {
+            Expr::Duration(dur, _) => {
+                assert_eq!(dur.value, 10.0);
+                assert_eq!(dur.unit, DurationUnit::Seconds);
+            }
+            other => panic!("expected Duration, got {:?}", other),
+        }
+    }
+}

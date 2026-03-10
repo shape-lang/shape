@@ -460,12 +460,12 @@ impl BytecodeCompiler {
                     let lhs_confirmed = Self::is_expr_confirmed_numeric(left)
                         || self
                             .storage_hint_for_expr(left)
-                            .is_some_and(|h| h.is_default_int_family() || h.is_float_family())
+                            .is_some_and(|h| h.is_numeric_family())
                         || (!matches!(left, Expr::Identifier(..)) && left_numeric.is_some());
                     let rhs_confirmed = Self::is_expr_confirmed_numeric(right)
                         || self
                             .storage_hint_for_expr(right)
-                            .is_some_and(|h| h.is_default_int_family() || h.is_float_family())
+                            .is_some_and(|h| h.is_numeric_family())
                         || (!matches!(right, Expr::Identifier(..)) && right_numeric.is_some());
 
                     let primary = if lhs_confirmed && rhs_confirmed {

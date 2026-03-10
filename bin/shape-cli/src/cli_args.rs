@@ -161,6 +161,16 @@ pub enum Commands {
         action: KeysAction,
     },
 
+    /// Authenticate with the package registry
+    Login {
+        /// API token from the registry
+        #[arg(long)]
+        token: String,
+        /// Registry URL (defaults to https://pkg.shape-lang.dev)
+        #[arg(long)]
+        registry: Option<String>,
+    },
+
     /// Publish the current package to the registry
     Publish {
         /// Registry URL (defaults to https://pkg.shape-lang.dev)

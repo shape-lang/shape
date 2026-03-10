@@ -156,6 +156,17 @@ impl BytecodeCompiler {
         // Validate annotation target kinds before compilation
         self.validate_annotation_targets(func_def)?;
 
+        // In non-comptime mode (i.e., the outer/runtime compiler), `comptime fn`
+        // helpers are only needed as AST in `function_defs` (for
+        // collect_comptime_helpers). Skip compiling their bodies into the runtime
+        // bytecode — doing so wastes space and leaks comptime-only code into the
+        // runtime program where it can collide with runtime names.
+        // In comptime mode (inside the mini-VM compiler), we DO compile them
+        // because the mini-VM actually needs to execute them.
+        if func_def.is_comptime && !self.comptime_mode {
+            return Ok(());
+        }
+
         let mut effective_def = func_def.clone();
         let effective_pass_modes = self.effective_function_like_pass_modes(
             Some(&effective_def.name),
@@ -189,6 +200,10 @@ impl BytecodeCompiler {
         if !(has_const_template_params && !has_specialization_bindings)
             && self.execute_comptime_handlers(&mut effective_def)?
         {
+            // Track removed functions so call sites produce a clear error
+            // instead of jumping to an invalid entry point (stack overflow).
+            self.removed_functions
+                .insert(effective_def.name.clone());
             self.function_defs.remove(&effective_def.name);
             return Ok(());
         }
@@ -6632,6 +6647,69 @@ mod tests {
                 .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
             "expected MIR from-query write-while-borrowed error, got {:?}",
             analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_removed_function_produces_error_not_stack_overflow() {
+        // When a comptime annotation handler removes a function via `remove target`,
+        // calling that function should produce a clear compile error, not a stack overflow.
+        let code = r#"
+            annotation remove_me() {
+                targets: [function]
+                comptime post(target, ctx) {
+                    remove target
+                }
+            }
+
+            @remove_me()
+            fn doomed() {
+                42
+            }
+
+            doomed()
+        "#;
+        let result = compiles(code);
+        assert!(
+            result.is_err(),
+            "Calling a removed function should produce a compile error"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("removed"),
+            "Error should mention function was removed: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_removed_function_ref_produces_error() {
+        // Referencing a removed function (not calling it) should also error.
+        let code = r#"
+            annotation remove_me() {
+                targets: [function]
+                comptime post(target, ctx) {
+                    remove target
+                }
+            }
+
+            @remove_me()
+            fn doomed() {
+                42
+            }
+
+            let f = doomed
+        "#;
+        let result = compiles(code);
+        assert!(
+            result.is_err(),
+            "Referencing a removed function should produce a compile error"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("removed"),
+            "Error should mention function was removed: {}",
+            err_msg
         );
     }
 }

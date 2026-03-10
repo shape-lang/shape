@@ -100,7 +100,10 @@ impl VirtualMachine {
             let heap_val = match constant {
                 crate::bytecode::Constant::Timeframe(tf) => HeapValue::Timeframe(*tf),
                 crate::bytecode::Constant::Duration(duration) => {
-                    HeapValue::Duration(duration.clone())
+                    // Convert AST Duration to chrono::Duration (TimeSpan) so it
+                    // participates in DateTime arithmetic (Time +/- TimeSpan).
+                    let chrono_dur = crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(duration);
+                    HeapValue::TimeSpan(chrono_dur)
                 }
                 crate::bytecode::Constant::TimeReference(time_ref) => {
                     HeapValue::TimeReference(Box::new(time_ref.clone()))

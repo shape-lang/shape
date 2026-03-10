@@ -224,7 +224,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             OpCode::AwaitBar | OpCode::AwaitTick | OpCode::Await => {
                 self.compile_opcode_via_generic_ffi(instr.opcode, 1, true)
             }
-
             // Event emission — fire-and-forget FFI calls.
             // EmitAlert: pops 1 (alert value), pushes 0
             OpCode::EmitAlert => self.compile_opcode_via_generic_ffi(instr.opcode, 1, false),
@@ -325,6 +324,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // Width cast — truncate to target integer width
             OpCode::CastWidth => self.compile_cast_width(instr),
+
+            // Field reference — pops 1 (object), pushes 1 (field ref) via FFI
+            OpCode::MakeFieldRef => self.compile_opcode_via_generic_ffi(instr.opcode, 1, true),
         }
     }
 }

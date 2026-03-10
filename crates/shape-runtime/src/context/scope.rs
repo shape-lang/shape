@@ -72,6 +72,7 @@ impl super::ExecutionContext {
             output_adapter: self.output_adapter.clone(),
             type_alias_registry: self.type_alias_registry.clone(),
             enum_registry: self.enum_registry.clone(),
+            struct_type_registry: self.struct_type_registry.clone(),
             progress_registry: self.progress_registry.clone(),
             kernel_compiler: self.kernel_compiler.clone(),
         }

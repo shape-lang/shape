@@ -70,6 +70,76 @@ pub(crate) fn collect_function_names_from_items(
     names
 }
 
+/// Collect all importable names from a list of AST items (functions, types,
+/// exports, variables). Used by MED-9 validation to check that named import
+/// targets actually exist in the source module.
+pub(crate) fn collect_available_names_from_items(
+    items: &[Item],
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for item in items {
+        match item {
+            Item::Function(func_def, _) => {
+                names.insert(func_def.name.clone());
+            }
+            Item::Export(export, _) => match &export.item {
+                ExportItem::Function(f) => {
+                    names.insert(f.name.clone());
+                }
+                ExportItem::ForeignFunction(f) => {
+                    names.insert(f.name.clone());
+                }
+                ExportItem::Enum(e) => {
+                    names.insert(e.name.clone());
+                }
+                ExportItem::Struct(s) => {
+                    names.insert(s.name.clone());
+                }
+                ExportItem::Trait(t) => {
+                    names.insert(t.name.clone());
+                }
+                ExportItem::TypeAlias(a) => {
+                    names.insert(a.name.clone());
+                }
+                ExportItem::Interface(i) => {
+                    names.insert(i.name.clone());
+                }
+                ExportItem::Named(specs) => {
+                    for s in specs {
+                        let export_name = s.alias.as_ref().unwrap_or(&s.name);
+                        names.insert(export_name.clone());
+                    }
+                }
+            },
+            Item::StructType(def, _) => {
+                names.insert(def.name.clone());
+            }
+            Item::Enum(def, _) => {
+                names.insert(def.name.clone());
+            }
+            Item::Trait(def, _) => {
+                names.insert(def.name.clone());
+            }
+            Item::TypeAlias(def, _) => {
+                names.insert(def.name.clone());
+            }
+            Item::Interface(def, _) => {
+                names.insert(def.name.clone());
+            }
+            Item::ForeignFunction(def, _) => {
+                names.insert(def.name.clone());
+            }
+            Item::VariableDecl(decl, _) => {
+                if let DestructurePattern::Identifier(name, _) = &decl.pattern {
+                    names.insert(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 /// Attach declaring package provenance to `extern C` items in a program.
 pub(crate) fn annotate_program_native_abi_package_key(
     program: &mut Program,
@@ -473,6 +543,27 @@ impl BytecodeExecutor {
                     if is_std {
                         stdlib_names.extend(collect_function_names_from_items(&items));
                     }
+                    // MED-9: Validate that all requested import names exist in the module.
+                    if let Some(names) = merged_filter {
+                        let available = collect_available_names_from_items(&items);
+                        let missing: Vec<&String> = names
+                            .iter()
+                            .filter(|n| !available.contains(n.as_str()))
+                            .collect();
+                        if !missing.is_empty() {
+                            let mut missing_sorted: Vec<&str> =
+                                missing.iter().map(|s| s.as_str()).collect();
+                            missing_sorted.sort();
+                            return Err(shape_ast::error::ShapeError::ModuleError {
+                                message: format!(
+                                    "Module '{}' does not export: {}",
+                                    module_path,
+                                    missing_sorted.join(", ")
+                                ),
+                                module_path: None,
+                            });
+                        }
+                    }
                     if let Some(names) = merged_filter {
                         let names_ref: std::collections::HashSet<&str> =
                             names.iter().map(|s| s.as_str()).collect();
@@ -641,5 +732,109 @@ mod tests {
             has_fn_defs,
             "prelude should inject function/statement definitions from stdlib modules"
         );
+    }
+
+    #[test]
+    fn test_nonexistent_import_produces_error() {
+        // MED-9: Importing a name that doesn't exist should produce a compile error.
+        let source = r#"
+from std::core::math use { nonexistent_fn }
+let x = 1
+x
+"#;
+        let mut executor = crate::configuration::BytecodeExecutor::new();
+        executor.set_module_loader(shape_runtime::module_loader::ModuleLoader::new());
+        let mut program = shape_ast::parser::parse_program(source).expect("parse");
+        let stdlib_names = prepend_prelude_items(&mut program);
+        let _ = stdlib_names;
+        let result = executor.append_imported_module_items(&mut program);
+        assert!(
+            result.is_err(),
+            "importing a nonexistent name should produce an error"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("does not export"),
+            "error should mention 'does not export', got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("nonexistent_fn"),
+            "error should mention the missing name, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_valid_named_import_succeeds() {
+        // A valid named import from std::core::math should succeed without error.
+        let source = r#"
+from std::core::math use { sum }
+let x = 1
+x
+"#;
+        let mut executor = crate::configuration::BytecodeExecutor::new();
+        executor.set_module_loader(shape_runtime::module_loader::ModuleLoader::new());
+        let mut program = shape_ast::parser::parse_program(source).expect("parse");
+        let stdlib_names = prepend_prelude_items(&mut program);
+        let _ = stdlib_names;
+        let result = executor.append_imported_module_items(&mut program);
+        assert!(
+            result.is_ok(),
+            "importing a valid name should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_dependency_multiple_functions_all_importable() {
+        // MED-23: Multiple functions from a file-based dependency should all be importable.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mod_dir = tmp.path().join("mymod");
+        std::fs::create_dir_all(&mod_dir).expect("create mymod dir");
+        std::fs::write(
+            mod_dir.join("index.shape"),
+            r#"
+pub fn alpha() -> int { 1 }
+pub fn beta() -> int { 2 }
+pub fn gamma() -> int { 3 }
+"#,
+        )
+        .expect("write index.shape");
+
+        let source = r#"
+from mymod use { alpha, beta, gamma }
+alpha() + beta() + gamma()
+"#;
+        let mut executor = crate::configuration::BytecodeExecutor::new();
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        loader.add_module_path(tmp.path().to_path_buf());
+        executor.set_module_loader(loader);
+        let mut program = shape_ast::parser::parse_program(source).expect("parse");
+        let stdlib_names = prepend_prelude_items(&mut program);
+        let _ = stdlib_names;
+        let result = executor.append_imported_module_items(&mut program);
+        assert!(
+            result.is_ok(),
+            "importing multiple functions should succeed, got: {:?}",
+            result.err()
+        );
+        // Verify all three functions are in the inlined AST (may be bare
+        // Function items or wrapped inside Export items depending on `pub`).
+        let fn_names: Vec<String> = program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(f, _) => Some(f.name.clone()),
+                Item::Export(export, _) => match &export.item {
+                    ExportItem::Function(f) => Some(f.name.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert!(fn_names.contains(&"alpha".to_string()), "alpha should be inlined, got: {:?}", fn_names);
+        assert!(fn_names.contains(&"beta".to_string()), "beta should be inlined, got: {:?}", fn_names);
+        assert!(fn_names.contains(&"gamma".to_string()), "gamma should be inlined, got: {:?}", fn_names);
     }
 }

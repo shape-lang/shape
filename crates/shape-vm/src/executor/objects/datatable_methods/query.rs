@@ -8,25 +8,13 @@ use arrow_select::filter::filter_record_batch;
 use arrow_select::take::take;
 use shape_runtime::type_schema::FieldType;
 use shape_value::datatable::DataTable;
-use shape_value::{HeapKind, NanTag, VMError, ValueWord};
+use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
 
 use super::common::{
     apply_comparison_nb, array_values_equal, build_datatable_from_objects_nb, cmp_nb_values,
-    extract_array_value_nb, extract_dt_nb, wrap_result_table_nb,
+    extract_array_value_nb, extract_dt_nb, is_callable_nb, wrap_result_table_nb,
 };
-
-/// Check if a ValueWord value is callable (Function, ModuleFunction, Closure, HostClosure).
-fn is_callable_nb(nb: &ValueWord) -> bool {
-    match nb.tag() {
-        NanTag::Function | NanTag::ModuleFunction => true,
-        NanTag::Heap => matches!(
-            nb.heap_kind(),
-            Some(HeapKind::Closure | HeapKind::HostClosure)
-        ),
-        _ => false,
-    }
-}
 
 /// `dt.filter("col", "op", value)` — filter rows using Arrow compute kernels (string path).
 /// `dt.filter(row => bool)` — filter rows using closure (closure path).

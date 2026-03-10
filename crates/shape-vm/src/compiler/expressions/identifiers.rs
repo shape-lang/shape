@@ -36,6 +36,9 @@ impl BytecodeCompiler {
             StorageHint::UInt32 | StorageHint::NullableUInt32 => {
                 Some(NumericType::IntWidth(IntWidth::U32))
             }
+            StorageHint::UInt64 | StorageHint::NullableUInt64 => {
+                Some(NumericType::IntWidth(IntWidth::U64))
+            }
             _ if hint.is_default_int_family() => Some(NumericType::Int),
             _ if hint.is_float_family() => Some(NumericType::Number),
             _ => None,
@@ -195,6 +198,20 @@ impl BytecodeCompiler {
                 .and_then(|info| Self::storage_hint_to_numeric_type(info.storage_hint));
         } else if let Some(func_idx) = self.find_function(name) {
             let resolved_name = self.program.functions[func_idx].name.clone();
+
+            // Check if removed by comptime annotation handler.
+            if self.removed_functions.contains(&resolved_name)
+                || self.removed_functions.contains(name)
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "function '{}' was removed by a comptime annotation handler and cannot be referenced",
+                        name
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+
             let is_comptime_fn = self
                 .function_defs
                 .get(&resolved_name)

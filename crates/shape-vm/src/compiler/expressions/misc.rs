@@ -293,9 +293,9 @@ impl BytecodeCompiler {
             );
         }
 
-        // If no value, push null
+        // If no value expression, the block evaluates to unit
         if !has_value {
-            self.emit(Instruction::simple(OpCode::PushNull));
+            self.emit_unit();
         }
 
         self.pop_drop_scope()?;
@@ -926,5 +926,51 @@ mod comptime_for_tests {
         assert!(result.is_err(), "comptime for with non-array should fail");
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("array"), "Error should mention array: {}", err);
+    }
+}
+
+#[cfg(test)]
+mod block_expr_tests {
+    use crate::compiler::BytecodeCompiler;
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::ValueWord;
+
+    fn eval(code: &str) -> ValueWord {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.execute(None).expect("execution failed").clone()
+    }
+
+    // ===== MED-1: Trailing semicolon suppresses return value =====
+
+    #[test]
+    fn test_block_trailing_semicolon_suppresses_value() {
+        // { 1; } should yield unit, not 1
+        let result = eval("{ 1; }");
+        assert_eq!(result, ValueWord::unit(), "block with trailing semicolon should yield ()");
+    }
+
+    #[test]
+    fn test_block_no_trailing_semicolon_returns_value() {
+        // { 1 } should yield 1
+        let result = eval("{ 1 }");
+        assert_eq!(result, ValueWord::from_i64(1), "block without trailing semicolon should yield the value");
+    }
+
+    #[test]
+    fn test_block_multi_stmt_trailing_semicolon() {
+        // { let x = 1; x; } should yield unit
+        let result = eval("{ let x = 1; x; }");
+        assert_eq!(result, ValueWord::unit(), "block with trailing semicolon after expr should yield ()");
+    }
+
+    #[test]
+    fn test_block_multi_stmt_no_trailing_semicolon() {
+        // { let x = 42; x } should yield 42
+        let result = eval("{ let x = 42; x }");
+        assert_eq!(result, ValueWord::from_i64(42), "block with tail expr should yield the value");
     }
 }

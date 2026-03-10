@@ -566,6 +566,11 @@ pub struct BytecodeCompiler {
     /// Whether this compiler instance is compiling code for comptime execution.
     /// Enables comptime-only builtins and comptime-specific statement semantics.
     pub(crate) comptime_mode: bool,
+    /// Functions removed by comptime annotation handlers (`remove target`).
+    /// These are still present in `program.functions` (registered in the first pass)
+    /// but must produce a clear compile-time error when called instead of jumping
+    /// to an invalid entry point.
+    pub(crate) removed_functions: HashSet<String>,
     /// Internal guard for compiler-synthesized `__comptime__` helper calls.
     /// User source must never access `__comptime__` directly.
     pub(crate) allow_internal_comptime_namespace: bool,

@@ -1129,3 +1129,110 @@ type C Vec2 {
     assert_eq!(def.name, "Vec2");
     assert_eq!(def.fields.len(), 2);
 }
+
+// =========================================================================
+// MED-5: Negative boundary literals with width suffix (-128i8)
+// =========================================================================
+
+#[test]
+fn test_negative_i8_boundary_literal() {
+    let input = "let x = -128i8;";
+    let items = parse_items(input).expect("-128i8 should parse as valid i8 literal");
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_negative_i16_boundary_literal() {
+    let input = "let x = -32768i16;";
+    let items = parse_items(input).expect("-32768i16 should parse as valid i16 literal");
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_negative_i32_boundary_literal() {
+    let input = "let x = -2147483648i32;";
+    let items = parse_items(input).expect("-2147483648i32 should parse as valid i32 literal");
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_negative_i8_in_range_literal() {
+    let input = "let x = -100i8;";
+    let items = parse_items(input).expect("-100i8 should parse");
+    assert_eq!(items.len(), 1);
+}
+
+// =========================================================================
+// LOW-3: Nested ternary without parens (right-associative)
+// =========================================================================
+
+#[test]
+fn test_nested_ternary_without_parens() {
+    let input = r#"let x = a ? b : c ? d : e;"#;
+    let items = parse_items(input).expect("nested ternary without parens should parse");
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_triple_nested_ternary() {
+    let input = r#"let x = a ? b : c ? d : e ? f : g;"#;
+    let items = parse_items(input).expect("triple nested ternary should parse");
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_nested_ternary_in_then_branch() {
+    let input = r#"let x = a ? b ? c : d : e;"#;
+    let items = parse_items(input).expect("nested ternary in then branch should parse");
+    assert_eq!(items.len(), 1);
+}
+
+// =========================================================================
+// LOW-6: Multiline array literals of enum values
+// =========================================================================
+
+#[test]
+fn test_multiline_array_enum_values() {
+    let input = "let arr = [\n  Status::Active,\n  Status::Inactive\n];";
+    let items = parse_items(input).expect("multiline array of enum values should parse");
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_multiline_array_enum_with_trailing_comma() {
+    let input = "let arr = [\n  Status::Active,\n  Status::Inactive,\n];";
+    let items = parse_items(input).expect("multiline array with trailing comma should parse");
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_multiline_array_enum_values_via_program() {
+    let input = "let arr = [\n  Status::Active,\n  Status::Inactive\n]";
+    let program = parse_program(input).expect("multiline enum array should parse via program");
+    assert_eq!(program.items.len(), 1);
+}
+
+// =========================================================================
+// LOW-8: Ok(literal)? parse error
+// =========================================================================
+
+#[test]
+fn test_ok_literal_try_operator() {
+    let input = "let x = Ok(42)?;";
+    let items = parse_items(input).expect("Ok(42)? should parse");
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_err_literal_try_operator() {
+    let input = r#"let x = Err("oops")?;"#;
+    let items = parse_items(input).expect(r#"Err("oops")? should parse"#);
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn test_ok_literal_try_in_function_body() {
+    let input = "fn f() { Ok(42)? }";
+    let items = parse_items(input).expect("Ok(42)? in function body should parse");
+    assert_eq!(items.len(), 1);
+}

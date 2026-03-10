@@ -566,3 +566,137 @@ c"{data: chart(bar), x(month), y(revenue, profit)}"
         _ => panic!("expected Chart variant, got {:?}", content),
     }
 }
+
+#[test]
+fn test_table_row_literal_single_row() {
+    // MED-8: Single-row table literal should create a table, not an array
+    let source = r#"
+type Record { id: int, value: int, name: string }
+let t: Table<Record> = [1, 100, "alpha"]
+t.count()
+"#;
+    let result = compile_and_execute(source).expect("should compile and run");
+    assert_eq!(
+        result.as_i64().or(result.as_f64().map(|f| f as i64)),
+        Some(1),
+        "Single-row table literal should create a table with 1 row"
+    );
+}
+
+#[test]
+fn test_table_row_literal_single_row_filter() {
+    // Single-row table should support methods like filter
+    let source = r#"
+type SalesRow { month: int, revenue: int }
+let t: Table<SalesRow> = [1, 42]
+let filtered = t.filter(|row| row.revenue > 30)
+filtered.count()
+"#;
+    let result = compile_and_execute(source).expect("should compile and run");
+    assert_eq!(
+        result.as_i64().or(result.as_f64().map(|f| f as i64)),
+        Some(1)
+    );
+}
+
+// ===== MED-6: select(lambda) on DataTable =====
+
+#[test]
+fn test_table_select_with_lambda() {
+    // MED-6: select(lambda) should work on DataTable, not just string column names
+    let source = r#"
+type Record { id: int, value: int, name: string }
+let t: Table<Record> = [1, 100, "alpha"], [2, 200, "beta"]
+let projected = t.select(|row| { id: row.id })
+projected.count()
+"#;
+    let result = compile_and_execute(source).expect("should compile and run");
+    assert_eq!(
+        result.as_i64().or(result.as_f64().map(|f| f as i64)),
+        Some(2),
+        "select(lambda) should produce a table with same row count"
+    );
+}
+
+#[test]
+fn test_table_select_with_string_still_works() {
+    // Ensure string-based select still works after adding lambda support
+    let source = r#"
+type Record { id: int, value: int, name: string }
+let t: Table<Record> = [1, 100, "alpha"], [2, 200, "beta"]
+let projected = t.select("id", "name")
+projected.columns().length
+"#;
+    let result = compile_and_execute(source).expect("should compile and run");
+    assert_eq!(
+        result.as_i64().or(result.as_f64().map(|f| f as i64)),
+        Some(2),
+        "select(string) should produce a table with 2 columns"
+    );
+}
+
+// ===== MED-7: Improved error message for select returning non-object =====
+
+#[test]
+fn test_table_select_lambda_scalar_builds_value_column() {
+    // MED-7: When select(lambda) returns a scalar (e.g. just a field value),
+    // it should build a single-column "value" table instead of erroring.
+    let source = r#"
+type Record { id: int, value: int, name: string }
+let t: Table<Record> = [1, 100, "alpha"], [2, 200, "beta"]
+let projected = t.select(|row| row.id)
+projected.count()
+"#;
+    let result = compile_and_execute(source);
+    assert!(result.is_ok(), "scalar select should produce a table: {:?}", result.err());
+}
+
+// --- MED-25: .clone() method on arrays ---
+
+#[test]
+fn test_array_clone_method() {
+    // arr.clone() should produce a shallow copy identical to the original
+    let source = r#"
+        let arr = [1, 2, 3]
+        let cloned = arr.clone()
+        cloned.len()
+    "#;
+    let result = compile_and_execute(source).unwrap();
+    assert_eq!(result.as_i64(), Some(3), "cloned array should have length 3");
+}
+
+#[test]
+fn test_array_clone_method_preserves_elements() {
+    let source = r#"
+        let arr = [10, 20, 30]
+        let cloned = arr.clone()
+        cloned.sum()
+    "#;
+    let result = compile_and_execute(source).unwrap();
+    // sum of [10, 20, 30] = 60
+    let val = result.as_i64().or_else(|| result.as_f64().map(|f| f as i64));
+    assert_eq!(val, Some(60), "cloned array sum should be 60");
+}
+
+// --- LOW-4: extend block to_string() should shadow builtin ---
+
+#[test]
+fn test_extend_to_string_shadows_builtin() {
+    // A user-defined to_string in an extend block should take precedence
+    // over the builtin formatting path.
+    let source = r#"
+        type Greeting { name: string }
+
+        extend Greeting {
+            method to_string() -> string {
+                f"Hello, {self.name}!"
+            }
+        }
+
+        let g = Greeting { name: "World" }
+        g.to_string()
+    "#;
+    let result = compile_and_execute(source).unwrap();
+    let s = result.as_str().expect("should return string");
+    assert_eq!(s, "Hello, World!", "extend to_string should shadow builtin");
+}

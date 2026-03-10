@@ -1420,4 +1420,68 @@ mod tests {
             3.0
         );
     }
+
+    #[test]
+    fn test_comptime_fn_not_compiled_into_runtime_bytecode() {
+        // Comptime fn functions should NOT produce bytecode in the runtime program.
+        // They only exist as AST in function_defs for collect_comptime_helpers.
+        let code = r#"
+            comptime fn helper() {
+                42
+            }
+            comptime {
+                helper()
+            }
+            100
+        "#;
+        let program = shape_ast::parser::parse_program(code).expect("parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile");
+
+        // The comptime fn should NOT appear as a compiled function with a valid entry point.
+        // It may still be in the function table (from registration), but its body
+        // should not have been compiled.
+        let helper_func = bytecode.functions.iter().find(|f| f.name == "helper");
+        if let Some(func) = helper_func {
+            // If the function is in the table, it must not have a compiled body
+            // (body_length should be 0, entry_point should still be 0 from registration)
+            assert_eq!(
+                func.body_length, 0,
+                "comptime fn should not have compiled body in runtime bytecode"
+            );
+        }
+
+        // Runtime code should still work
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        let result = vm.execute(None).expect("execute");
+        assert_eq!(
+            result.as_number_coerce().expect("Expected 100"),
+            100.0
+        );
+    }
+
+    #[test]
+    fn test_comptime_fn_not_callable_at_runtime() {
+        // Calling a comptime fn at runtime should produce a clear compile error
+        let code = r#"
+            comptime fn secret() {
+                42
+            }
+            secret()
+        "#;
+        let program = shape_ast::parser::parse_program(code).expect("parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "Calling comptime fn at runtime should fail"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("comptime"),
+            "Error should mention comptime: {}",
+            err_msg
+        );
+    }
 }

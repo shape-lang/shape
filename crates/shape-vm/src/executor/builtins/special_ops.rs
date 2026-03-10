@@ -249,8 +249,18 @@ impl VirtualMachine {
         Ok(Some(rendered.to_string()))
     }
 
-    /// Format a ValueWord value using default formatting (ValueWord-native path)
+    /// Format a ValueWord value using default formatting (ValueWord-native path).
+    /// Transparently dereferences references before formatting.
     pub(in crate::executor) fn format_value_default_nb(&self, value: &ValueWord) -> String {
+        let deref_value;
+        let value = if value.is_ref() {
+            deref_value = self
+                .resolve_ref_value(value)
+                .unwrap_or_else(|| value.clone());
+            &deref_value
+        } else {
+            value
+        };
         let formatter = ValueFormatter::new(&self.program.type_schema_registry);
         formatter.format_nb(value)
     }

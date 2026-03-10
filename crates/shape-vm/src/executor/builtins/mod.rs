@@ -5,7 +5,7 @@
 // Builtin handler modules
 mod array_comprehension;
 mod array_ops;
-mod datetime_builtins;
+pub mod datetime_builtins;
 mod generators;
 pub mod intrinsics;
 mod json_helpers;

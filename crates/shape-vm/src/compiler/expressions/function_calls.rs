@@ -589,6 +589,20 @@ impl BytecodeCompiler {
         // Check for user-defined functions (after locals — function parameters take priority)
         if let Some(func_idx) = self.find_function(name) {
             let resolved_name = self.program.functions[func_idx].name.clone();
+
+            // Check if this function was removed by a comptime annotation handler.
+            if self.removed_functions.contains(&resolved_name)
+                || self.removed_functions.contains(name)
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "function '{}' was removed by a comptime annotation handler and cannot be called",
+                        name
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+
             let is_comptime_fn = self
                 .function_defs
                 .get(&resolved_name)
@@ -1145,7 +1159,15 @@ impl BytecodeCompiler {
         // Universal formatting conversion: `expr.to_string()`.
         // Lower directly to FormatValueWithMeta so it shares exactly the same
         // rendering path as interpolation/print.
-        if method == "to_string" || method == "toString" {
+        //
+        // HOWEVER: if the receiver's type has a user-defined `to_string` method
+        // (via an extend block or impl), we must NOT short-circuit here — the
+        // user method should shadow the builtin.  We check this by looking for
+        // any compiled function whose name ends in `.to_string`, `.toString`,
+        // `::to_string`, or `::toString`.
+        if (method == "to_string" || method == "toString")
+            && !self.has_any_user_defined_method(method)
+        {
             if !args.is_empty() {
                 return Err(ShapeError::SemanticError {
                     message: "to_string() does not take any arguments".to_string(),

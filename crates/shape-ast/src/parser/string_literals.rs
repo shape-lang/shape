@@ -23,10 +23,11 @@ pub fn parse_string_literal(raw: &str) -> Result<String> {
 /// Decode a parsed string literal and report whether it used the `f` or `c` prefix.
 pub fn parse_string_literal_with_kind(raw: &str) -> Result<ParsedStringLiteral> {
     let (interpolation_mode, is_content, unprefixed) = strip_interpolation_prefix(raw);
+    let is_interpolated = interpolation_mode.is_some();
     let value = if is_triple_quoted(unprefixed) {
         parse_triple_quoted(unprefixed)
     } else if is_simple_quoted(unprefixed) {
-        parse_simple_quoted(&unprefixed[1..unprefixed.len() - 1])?
+        parse_simple_quoted(&unprefixed[1..unprefixed.len() - 1], is_interpolated)?
     } else {
         unprefixed.to_string()
     };
@@ -100,7 +101,12 @@ fn parse_triple_quoted(raw: &str) -> String {
         .join("\n")
 }
 
-fn parse_simple_quoted(inner: &str) -> Result<String> {
+/// Decode escape sequences in a simple quoted string.
+///
+/// When `preserve_brace_escapes` is true (for f-strings / c-strings), `\{` and
+/// `\}` are kept as-is so the downstream interpolation parser can treat them as
+/// literal brace escapes rather than interpolation delimiters.
+fn parse_simple_quoted(inner: &str, preserve_brace_escapes: bool) -> Result<String> {
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
 
@@ -123,6 +129,11 @@ fn parse_simple_quoted(inner: &str) -> Result<String> {
             '\\' => out.push('\\'),
             '"' => out.push('"'),
             '\'' => out.push('\''),
+            '{' | '}' | '$' | '#' if preserve_brace_escapes => {
+                // Keep `\{`, `\}`, `\$`, `\#` verbatim for the interpolation parser
+                out.push('\\');
+                out.push(escaped);
+            }
             '{' => out.push('{'),
             '}' => out.push('}'),
             '$' => out.push('$'),
@@ -387,5 +398,26 @@ mod tests {
         let parsed = parse_string_literal_with_kind("\"plain\"").unwrap();
         assert_eq!(parsed.interpolation_mode, None);
         assert!(!parsed.is_content);
+    }
+
+    // --- LOW-2: f-string backslash-escaped braces ---
+
+    #[test]
+    fn fstring_backslash_brace_preserves_literal_brace() {
+        // f"hello \{world\}" should produce value with preserved \{ and \}
+        // so the interpolation parser sees them as literal braces, not interpolation.
+        let parsed = parse_string_literal_with_kind("f\"hello \\{world\\}\"").unwrap();
+        assert_eq!(parsed.interpolation_mode, Some(InterpolationMode::Braces));
+        // The value should contain `\{` and `\}` so the interpolation parser
+        // can distinguish them from real interpolation delimiters.
+        assert_eq!(parsed.value, "hello \\{world\\}");
+    }
+
+    #[test]
+    fn plain_string_backslash_brace_decodes_to_literal() {
+        // In a plain (non-interpolated) string, \{ should still decode to {
+        let parsed = parse_string_literal_with_kind("\"hello \\{world\\}\"").unwrap();
+        assert_eq!(parsed.interpolation_mode, None);
+        assert_eq!(parsed.value, "hello {world}");
     }
 }

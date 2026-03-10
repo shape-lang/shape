@@ -210,6 +210,12 @@ pub fn parse_interpolation_with_mode(
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
+        // Backslash-escaped delimiters: `\{` → `{`, `\}` → `}`, `\$` → `$`, `\#` → `#`
+        if ch == '\\' && matches!(chars.peek(), Some(&'{') | Some(&'}') | Some(&'$') | Some(&'#')) {
+            current_text.push(chars.next().unwrap());
+            continue;
+        }
+
         match mode {
             InterpolationMode::Braces => match ch {
                 '{' => {
@@ -297,6 +303,12 @@ pub fn parse_content_interpolation_with_mode(
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
+        // Backslash-escaped delimiters: `\{` → `{`, `\}` → `}`, `\$` → `$`, `\#` → `#`
+        if ch == '\\' && matches!(chars.peek(), Some(&'{') | Some(&'}') | Some(&'$') | Some(&'#')) {
+            current_text.push(chars.next().unwrap());
+            continue;
+        }
+
         match mode {
             InterpolationMode::Braces => match ch {
                 '{' => {
@@ -380,6 +392,11 @@ pub fn has_interpolation(s: &str) -> bool {
 pub fn has_interpolation_with_mode(s: &str, mode: InterpolationMode) -> bool {
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {
+        // Skip backslash-escaped braces
+        if ch == '\\' && matches!(chars.peek(), Some(&'{') | Some(&'}')) {
+            chars.next();
+            continue;
+        }
         match mode {
             InterpolationMode::Braces => {
                 if ch == '{' {
@@ -1255,5 +1272,51 @@ mod tests {
         } else {
             panic!("expected ContentStyle");
         }
+    }
+
+    // --- LOW-2: backslash-escaped braces in interpolation ---
+
+    #[test]
+    fn backslash_escaped_braces_produce_literal_text() {
+        // `\{` and `\}` should produce literal `{` and `}`, not interpolation.
+        let parts = parse_interpolation("hello \\{world\\}").unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            &parts[0],
+            InterpolationPart::Literal(s) if s == "hello {world}"
+        ));
+    }
+
+    #[test]
+    fn backslash_escaped_braces_not_counted_as_interpolation() {
+        assert!(!has_interpolation("hello \\{world\\}"));
+        assert!(has_interpolation("hello {world}"));
+    }
+
+    #[test]
+    fn backslash_escaped_braces_mixed_with_real_interpolation() {
+        // `\{literal\} and {expr}` → Literal("{literal} and "), Expression("expr")
+        let parts = parse_interpolation("\\{literal\\} and {expr}").unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            InterpolationPart::Literal(s) if s == "{literal} and "
+        ));
+        assert!(matches!(
+            &parts[1],
+            InterpolationPart::Expression { expr, .. } if expr == "expr"
+        ));
+    }
+
+    #[test]
+    fn content_interpolation_backslash_escaped_braces() {
+        let parts =
+            parse_content_interpolation_with_mode("\\{not interp\\}", InterpolationMode::Braces)
+                .unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            &parts[0],
+            InterpolationPart::Literal(s) if s == "{not interp}"
+        ));
     }
 }

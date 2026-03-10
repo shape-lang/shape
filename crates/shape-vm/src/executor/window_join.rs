@@ -9,14 +9,102 @@ use shape_value::{VMError, ValueWord};
 use super::VirtualMachine;
 
 impl VirtualMachine {
-    /// Handle eval datetime expression (stub)
+    /// Handle eval datetime expression.
+    ///
+    /// Pops a `HeapValue::DateTimeExpr` from the stack, evaluates it into a
+    /// `HeapValue::Time` (chrono DateTime), and pushes the result.
     pub(crate) fn handle_eval_datetime_expr(
         &mut self,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        Err(VMError::NotImplemented(
-            "handle_eval_datetime_expr".to_string(),
-        ))
+        let val = self.pop_vw()?;
+        let dt_expr = match val.as_heap_ref() {
+            Some(HeapValue::DateTimeExpr(expr)) => expr.as_ref().clone(),
+            _ => {
+                return Err(VMError::RuntimeError(format!(
+                    "EvalDateTimeExpr expected DateTimeExpr on stack, got {}",
+                    val.type_name()
+                )));
+            }
+        };
+
+        let dt = self.eval_datetime_expr_recursive(&dt_expr)?;
+        self.push_vw(ValueWord::from_time(dt))
+    }
+
+    /// Recursively evaluate a DateTimeExpr into a chrono DateTime.
+    fn eval_datetime_expr_recursive(
+        &self,
+        expr: &shape_ast::ast::DateTimeExpr,
+    ) -> Result<chrono::DateTime<chrono::FixedOffset>, VMError> {
+        use shape_ast::ast::{DateTimeExpr, NamedTime};
+
+        match expr {
+            DateTimeExpr::Literal(s) | DateTimeExpr::Absolute(s) => {
+                crate::executor::builtins::datetime_builtins::parse_datetime_string(s)
+                    .map_err(|e| VMError::RuntimeError(e))
+            }
+            DateTimeExpr::Named(named) => {
+                let now = chrono::Utc::now().fixed_offset();
+                match named {
+                    NamedTime::Now => Ok(now),
+                    NamedTime::Today => {
+                        let date = now.date_naive();
+                        let midnight = date
+                            .and_hms_opt(0, 0, 0)
+                            .expect("midnight should always be valid");
+                        Ok(midnight.and_utc().fixed_offset())
+                    }
+                    NamedTime::Yesterday => {
+                        let yesterday = now
+                            .checked_sub_signed(chrono::Duration::days(1))
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(
+                                    "DateTime overflow computing yesterday".to_string(),
+                                )
+                            })?;
+                        let date = yesterday.date_naive();
+                        let midnight = date
+                            .and_hms_opt(0, 0, 0)
+                            .expect("midnight should always be valid");
+                        Ok(midnight.and_utc().fixed_offset())
+                    }
+                }
+            }
+            DateTimeExpr::Relative { base, offset } => {
+                let base_dt = self.eval_datetime_expr_recursive(base)?;
+                let chrono_dur =
+                    crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(offset);
+                base_dt.checked_add_signed(chrono_dur).ok_or_else(|| {
+                    VMError::RuntimeError("DateTime overflow in relative expression".to_string())
+                })
+            }
+            DateTimeExpr::Arithmetic {
+                base,
+                operator,
+                duration,
+            } => {
+                let base_dt = self.eval_datetime_expr_recursive(base)?;
+                let chrono_dur =
+                    crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(duration);
+                match operator.as_str() {
+                    "+" => base_dt.checked_add_signed(chrono_dur).ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "DateTime overflow in addition".to_string(),
+                        )
+                    }),
+                    "-" => base_dt.checked_sub_signed(chrono_dur).ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "DateTime overflow in subtraction".to_string(),
+                        )
+                    }),
+                    _ => Err(VMError::RuntimeError(format!(
+                        "Invalid datetime arithmetic operator: {}",
+                        operator
+                    ))),
+                }
+            }
+        }
     }
 
     /// Handle window functions.

@@ -565,8 +565,8 @@ impl VirtualMachine {
 
             // Async operations
             Yield | Suspend | Resume | Poll | AwaitBar | AwaitTick | EmitAlert | EmitEvent
-            | Await | SpawnTask | JoinInit | JoinAwait | CancelTask | AsyncScopeEnter
-            | AsyncScopeExit => {
+            | Await | SpawnTask | JoinInit | JoinAwait
+            | CancelTask | AsyncScopeEnter | AsyncScopeExit => {
                 match self.exec_async_op(instruction) {
                     Ok(async_ops::AsyncExecutionResult::Continue) => return Ok(()),
                     Ok(async_ops::AsyncExecutionResult::Yielded) => {

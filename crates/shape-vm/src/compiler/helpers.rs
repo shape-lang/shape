@@ -3854,6 +3854,18 @@ impl BytecodeCompiler {
         )
     }
 
+    /// Check if any compiled function exists whose name indicates a user-defined
+    /// override of the given method name (via extend blocks or impl blocks).
+    ///
+    /// Looks for function names like `Type.method` or `Type::method`.
+    pub(super) fn has_any_user_defined_method(&self, method: &str) -> bool {
+        let dot_suffix = format!(".{}", method);
+        let colon_suffix = format!("::{}", method);
+        self.program.functions.iter().any(|f| {
+            f.name.ends_with(&dot_suffix) || f.name.ends_with(&colon_suffix)
+        })
+    }
+
     /// Check if a method name is a known built-in method on any VM type.
     /// Used by UFCS to determine if `receiver.method(args)` should be dispatched
     /// as a built-in method call or rewritten to `method(receiver, args)`.

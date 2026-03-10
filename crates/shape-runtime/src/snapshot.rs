@@ -183,6 +183,8 @@ pub struct ContextSnapshot {
     pub range_active: bool,
     pub type_alias_registry: HashMap<String, TypeAliasRuntimeEntrySnapshot>,
     pub enum_registry: HashMap<String, EnumDef>,
+    #[serde(default)]
+    pub struct_type_registry: HashMap<String, shape_ast::ast::StructTypeDef>,
     pub suspension_state: Option<SuspensionStateSnapshot>,
 }
 
@@ -220,6 +222,19 @@ pub struct VmSnapshot {
     pub loop_stack: Vec<SerializableLoopContext>,
     pub timeframe_stack: Vec<Option<Timeframe>>,
     pub exception_handlers: Vec<SerializableExceptionHandler>,
+    /// Content hash of the function blob that the top-level IP belongs to.
+    /// Used for relocating the IP after recompilation.
+    #[serde(default)]
+    pub ip_blob_hash: Option<[u8; 32]>,
+    /// Instruction offset within the function blob for the top-level IP.
+    /// Computed as `ip - function_entry_point` when saving; reconstructed
+    /// to absolute IP on restore. Only meaningful when `ip_blob_hash` is `Some`.
+    #[serde(default)]
+    pub ip_local_offset: Option<usize>,
+    /// Function ID that the top-level IP belongs to.
+    /// Used as a fallback when `ip_blob_hash` is not available.
+    #[serde(default)]
+    pub ip_function_id: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1873,6 +1888,9 @@ mod tests {
             loop_stack: vec![],
             timeframe_stack: vec![],
             exception_handlers: vec![],
+            ip_blob_hash: None,
+            ip_local_offset: None,
+            ip_function_id: None,
         };
         let bytes = bincode::serialize(&vm_snap).expect("serialize VmSnapshot");
         let decoded: VmSnapshot = bincode::deserialize(&bytes).expect("deserialize VmSnapshot");
@@ -1909,6 +1927,7 @@ mod tests {
             range_active: false,
             type_alias_registry: HashMap::new(),
             enum_registry: HashMap::new(),
+            struct_type_registry: HashMap::new(),
             suspension_state: None,
         };
         let bytes = bincode::serialize(&ctx_snap).expect("serialize ContextSnapshot");

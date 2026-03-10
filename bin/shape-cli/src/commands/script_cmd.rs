@@ -392,6 +392,11 @@ fn resolve_dependencies_for_root(
         let Some(resolver) =
             shape_runtime::dependency_resolver::DependencyResolver::new(root_path.to_path_buf())
         else {
+            // Home directory unavailable — resolve local path deps directly
+            let path_deps = resolve_local_path_deps_only(root_path, dependencies);
+            if !path_deps.is_empty() {
+                engine.get_runtime_mut().set_dependency_paths(path_deps);
+            }
             return;
         };
 
@@ -497,6 +502,33 @@ fn resolve_dependencies_for_root(
             engine.get_runtime_mut().set_dependency_paths(dep_paths);
         }
     }
+}
+
+/// Fallback resolver for local path dependencies when the full
+/// `DependencyResolver` is unavailable (e.g. home directory missing).
+fn resolve_local_path_deps_only(
+    root_path: &Path,
+    dependencies: &HashMap<String, shape_runtime::project::DependencySpec>,
+) -> HashMap<String, PathBuf> {
+    let mut resolved = HashMap::new();
+    for (name, spec) in dependencies {
+        if let shape_runtime::project::DependencySpec::Detailed(detail) = spec {
+            if let Some(ref path_str) = detail.path {
+                let dep_path = root_path.join(path_str);
+                let canonical = dep_path.canonicalize().unwrap_or(dep_path);
+                if canonical.exists() {
+                    resolved.insert(name.clone(), canonical);
+                } else {
+                    eprintln!(
+                        "Warning: path dependency '{}' at '{}' not found",
+                        name,
+                        canonical.display()
+                    );
+                }
+            }
+        }
+    }
+    resolved
 }
 
 #[cfg(test)]
@@ -1874,5 +1906,99 @@ mid = { path = "../mid.shapec" }
             }
             other => panic!("expected object payload, got {:?}", other),
         }
+    }
+
+    // --- MED-20: Local path dependency resolution ---
+
+    #[test]
+    fn test_resolve_local_path_deps_only_resolves_path_deps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dep_dir = tmp.path().join("mylib");
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        std::fs::write(dep_dir.join("index.shape"), "pub fn hello() { 42 }").unwrap();
+
+        let mut deps = std::collections::HashMap::new();
+        deps.insert(
+            "mylib".to_string(),
+            shape_runtime::project::DependencySpec::Detailed(
+                shape_runtime::project::DetailedDependency {
+                    version: None,
+                    path: Some("mylib".to_string()),
+                    git: None,
+                    tag: None,
+                    branch: None,
+                    rev: None,
+                    permissions: None,
+                },
+            ),
+        );
+
+        let resolved = super::resolve_local_path_deps_only(tmp.path(), &deps);
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved.contains_key("mylib"));
+        let resolved_path = resolved.get("mylib").unwrap();
+        assert!(resolved_path.exists());
+    }
+
+    #[test]
+    fn test_resolve_local_path_deps_only_ignores_version_deps() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut deps = std::collections::HashMap::new();
+        deps.insert(
+            "some-pkg".to_string(),
+            shape_runtime::project::DependencySpec::Version("1.0.0".to_string()),
+        );
+
+        let resolved = super::resolve_local_path_deps_only(tmp.path(), &deps);
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_local_path_deps_only_ignores_git_deps() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut deps = std::collections::HashMap::new();
+        deps.insert(
+            "git-dep".to_string(),
+            shape_runtime::project::DependencySpec::Detailed(
+                shape_runtime::project::DetailedDependency {
+                    version: None,
+                    path: None,
+                    git: Some("https://example.com/repo.git".to_string()),
+                    tag: Some("v1.0".to_string()),
+                    branch: None,
+                    rev: None,
+                    permissions: None,
+                },
+            ),
+        );
+
+        let resolved = super::resolve_local_path_deps_only(tmp.path(), &deps);
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_local_path_deps_only_missing_path_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut deps = std::collections::HashMap::new();
+        deps.insert(
+            "missing".to_string(),
+            shape_runtime::project::DependencySpec::Detailed(
+                shape_runtime::project::DetailedDependency {
+                    version: None,
+                    path: Some("nonexistent".to_string()),
+                    git: None,
+                    tag: None,
+                    branch: None,
+                    rev: None,
+                    permissions: None,
+                },
+            ),
+        );
+
+        let resolved = super::resolve_local_path_deps_only(tmp.path(), &deps);
+        assert!(resolved.is_empty());
     }
 }

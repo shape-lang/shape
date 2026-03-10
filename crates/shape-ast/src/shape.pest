@@ -1006,7 +1006,11 @@ pipe_expr = { ternary_expr ~ ("|>" ~ ternary_expr)* }
 
 ternary_expr = { null_coalesce_expr ~ ("?" ~ ternary_branch ~ ":" ~ ternary_branch)? }
 
-ternary_branch = { assignment_expr_no_range }
+// Ternary branches allow nested ternaries (right-associative): a ? b : c ? d : e
+ternary_branch = { ternary_expr_no_range }
+
+// Ternary inside a branch — uses no_range expressions to avoid ambiguity with range .. operator
+ternary_expr_no_range = { null_coalesce_expr_no_range ~ ("?" ~ ternary_branch ~ ":" ~ ternary_branch)? }
 
 assignment_expr_no_range = { postfix_expr ~ (compound_assign_op | assign_op) ~ assignment_expr_no_range | null_coalesce_expr_no_range }
 
@@ -1115,6 +1119,8 @@ balanced_ternary = _{
         "(" ~ balanced_ternary ~ ")"
         | "[" ~ balanced_ternary ~ "]"
         | "{" ~ balanced_ternary ~ "}"
+        // Handle nested ternary: ? expr : expr counts as a balanced unit
+        | "?" ~ balanced_ternary ~ ":" ~ balanced_ternary
         | !(":" | "(" | "[" | "{" | ")" | "]" | "}" | "?" | ";" | EOI) ~ ANY
     )*
 }
@@ -1270,13 +1276,13 @@ match_scrutinee_ident = { ident ~ &"{" }
 match_arm = { pattern ~ ("where" ~ expression)? ~ "=>" ~ expression }
 
 // ===== Break Expression =====
-break_expr = { "break" ~ expression? }
+break_expr = { break_keyword ~ expression? }
 
 // ===== Continue Expression =====
-continue_expr = { "continue" }
+continue_expr = { continue_keyword }
 
 // ===== Return Expression =====
-return_expr = { "return" ~ expression? }
+return_expr = { return_keyword ~ expression? }
 
 // ===== Pattern definitions for matching =====
 pattern = {
@@ -1362,7 +1368,7 @@ array_literal = {
     list_comprehension
     | "[" ~ array_elements? ~ "]" 
 }
-array_elements = { array_element ~ ("," ~ array_element)* }
+array_elements = { array_element ~ ("," ~ array_element)* ~ ","? }
 array_element = { spread_element | expression }
 spread_element = { "..." ~ expression }
 

@@ -68,9 +68,13 @@ pub async fn run_publish(
 ) -> Result<()> {
     // Step 1: Find project and build
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let project = shape_runtime::project::find_project_root(&cwd).ok_or_else(|| {
-        anyhow::anyhow!("No shape.toml found. Run `shape publish` from within a Shape project.")
-    })?;
+    let project = shape_runtime::project::try_find_project_root(&cwd)
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No shape.toml found. Run `shape publish` from within a Shape project."
+            )
+        })?;
 
     let pkg_name = &project.config.project.name;
     let pkg_version = &project.config.project.version;
@@ -108,10 +112,27 @@ pub async fn run_publish(
         );
     }
 
-    // Step 3: Load credentials
+    // Step 3: Load and validate credentials
     let credentials = RegistryClient::load_credentials().map_err(|e| {
         anyhow::anyhow!(
             "{}\nRun `shape login` to authenticate with the registry.",
+            e
+        )
+    })?;
+
+    if credentials.token.trim().is_empty() {
+        anyhow::bail!(
+            "Registry token is empty.\nRun `shape login` to authenticate with the registry."
+        );
+    }
+
+    let client = RegistryClient::new(registry).with_token(credentials.token);
+
+    // Validate the token before uploading the (potentially large) bundle
+    eprintln!("Authenticating...");
+    client.validate_token().await.map_err(|e| {
+        anyhow::anyhow!(
+            "Authentication failed: {}\nRun `shape login` to re-authenticate.",
             e
         )
     })?;
@@ -123,8 +144,6 @@ pub async fn run_publish(
 
     let bundle_size = bundle_bytes.len();
     eprintln!("Uploading {} ({} bytes)...", pkg_name, bundle_size);
-
-    let client = RegistryClient::new(registry).with_token(credentials.token);
 
     let response = client
         .publish(bundle_bytes)

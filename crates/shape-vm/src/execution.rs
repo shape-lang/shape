@@ -655,6 +655,34 @@ impl ProgramExecutor for BytecodeExecutor {
             // Merge imported functions into the main program
             let mut merged_program = imported_program;
             merged_program.items.extend(root_program.items);
+
+            // Inject persisted struct type definitions from previous REPL sessions
+            // so the compiler can see types defined in earlier commands.
+            if let Some(ctx) = runtime.persistent_context() {
+                let current_struct_names: std::collections::HashSet<String> = merged_program
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        if let shape_ast::ast::Item::StructType(def, _) = item {
+                            Some(def.name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for (name, struct_def) in ctx.struct_type_defs() {
+                    if !current_struct_names.contains(name) {
+                        merged_program.items.insert(
+                            0,
+                            shape_ast::ast::Item::StructType(
+                                struct_def.clone(),
+                                shape_ast::ast::Span::DUMMY,
+                            ),
+                        );
+                    }
+                }
+            }
+
             let mut stdlib_names =
                 crate::module_resolution::prepend_prelude_items(&mut merged_program);
             stdlib_names.extend(self.append_imported_module_items(&mut merged_program)?);

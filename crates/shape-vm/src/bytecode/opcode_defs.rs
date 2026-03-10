@@ -523,6 +523,7 @@ define_opcodes! {
     /// Operand: TypedModuleBinding(u16, NumericWidth) — binding index + width
     /// Pops one value, truncates to declared width, stores to module binding.
     StoreModuleBindingTyped = 0xF8, Variable, pops: 1, pushes: 0;
+
 }
 
 impl OpCode {

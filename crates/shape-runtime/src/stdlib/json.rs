@@ -686,10 +686,11 @@ mod tests {
         assert_eq!(variant, 5, "Object should be variant 5");
     }
 
-    /// Test that __parse_typed uses @alias annotations.
+    /// Test that __parse_typed uses @alias annotations to map JSON keys to fields.
     #[test]
     fn test_parse_typed_with_alias() {
         use crate::type_schema::{FieldAnnotation, TypeSchemaBuilder};
+        use shape_value::heap_value::HeapValue;
 
         let mut registry = crate::type_schema::TypeSchemaRegistry::new();
         let mut schema = TypeSchemaBuilder::new("Trade")
@@ -730,11 +731,156 @@ mod tests {
         let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
 
-        // Verify it's a TypedObject
-        assert!(
-            inner.as_heap_ref().is_some(),
-            "typed parse result should be a heap value"
+        // Verify it's a TypedObject with correct field values
+        if let Some(HeapValue::TypedObject { slots, .. }) = inner.as_heap_ref() {
+            // Field 0 ("close", aliased from "Close Price") should be 100.5
+            let close_val = f64::from_bits(slots[0].raw());
+            assert!(
+                (close_val - 100.5).abs() < f64::EPSILON,
+                "close field should be 100.5, got {}",
+                close_val
+            );
+            // Field 1 ("volume", aliased from "vol.") should be 1000.0
+            let volume_val = f64::from_bits(slots[1].raw());
+            assert!(
+                (volume_val - 1000.0).abs() < f64::EPSILON,
+                "volume field should be 1000.0, got {}",
+                volume_val
+            );
+        } else {
+            panic!("expected TypedObject, got: {:?}", inner.type_name());
+        }
+    }
+
+    /// Test that register_type_with_annotations propagates @alias to schema.
+    #[test]
+    fn test_register_type_with_annotations_alias() {
+        use crate::type_schema::{FieldAnnotation, FieldType};
+
+        let mut registry = crate::type_schema::TypeSchemaRegistry::new();
+        let annotations = vec![
+            vec![FieldAnnotation {
+                name: "alias".to_string(),
+                args: vec!["user_name".to_string()],
+            }],
+            vec![], // age has no annotations
+        ];
+        registry.register_type_with_annotations(
+            "User",
+            vec![
+                ("name".to_string(), FieldType::String),
+                ("age".to_string(), FieldType::I64),
+            ],
+            annotations,
         );
+
+        let schema = registry.get("User").expect("schema should exist");
+        assert_eq!(schema.fields[0].wire_name(), "user_name");
+        assert_eq!(schema.fields[1].wire_name(), "age");
+    }
+
+    /// Test that @alias annotations enable JSON deserialization with wire names.
+    #[test]
+    fn test_parse_typed_alias_string_field() {
+        use crate::type_schema::{FieldAnnotation, FieldType};
+        use shape_value::heap_value::HeapValue;
+
+        let mut registry = crate::type_schema::TypeSchemaRegistry::new();
+        let annotations = vec![
+            vec![FieldAnnotation {
+                name: "alias".to_string(),
+                args: vec!["user_name".to_string()],
+            }],
+            vec![],
+        ];
+        let schema_id = registry.register_type_with_annotations(
+            "User",
+            vec![
+                ("name".to_string(), FieldType::String),
+                ("age".to_string(), FieldType::I64),
+            ],
+            annotations,
+        );
+
+        let module = create_json_module();
+        let parse_typed_fn = module.get_export("__parse_typed").unwrap();
+        let ctx = crate::module_exports::ModuleContext {
+            schemas: &registry,
+            invoke_callable: None,
+            raw_invoker: None,
+            function_hashes: None,
+            vm_state: None,
+            granted_permissions: None,
+            scope_constraints: None,
+            set_pending_resume: None,
+            set_pending_frame_resume: None,
+        };
+
+        // JSON uses the wire name "user_name" instead of the field name "name"
+        let text = ValueWord::from_string(Arc::new(
+            r#"{"user_name": "Bob", "age": 30}"#.to_string(),
+        ));
+        let sid = ValueWord::from_f64(schema_id as f64);
+        let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
+        let inner = result.as_ok_inner().expect("should be Ok");
+
+        // Verify it's a TypedObject and the name field was populated from the aliased key
+        if let Some(HeapValue::TypedObject { slots, .. }) = inner.as_heap_ref() {
+            // Field 0 ("name") should be a heap string "Bob"
+            let name_nb = slots[0].as_heap_nb();
+            assert_eq!(name_nb.as_str(), Some("Bob"), "name field should be 'Bob'");
+            // Field 1 ("age") should be 30
+            let age_val = slots[1].as_i64();
+            assert_eq!(age_val, 30, "age field should be 30");
+        } else {
+            panic!("expected TypedObject, got: {:?}", inner.type_name());
+        }
+    }
+
+    /// Test that without @alias, field name is used as wire name.
+    #[test]
+    fn test_parse_typed_no_alias_uses_field_name() {
+        use crate::type_schema::FieldType;
+        use shape_value::heap_value::HeapValue;
+
+        let mut registry = crate::type_schema::TypeSchemaRegistry::new();
+        let schema_id = registry.register_type(
+            "Simple",
+            vec![
+                ("name".to_string(), FieldType::String),
+                ("value".to_string(), FieldType::F64),
+            ],
+        );
+
+        let module = create_json_module();
+        let parse_typed_fn = module.get_export("__parse_typed").unwrap();
+        let ctx = crate::module_exports::ModuleContext {
+            schemas: &registry,
+            invoke_callable: None,
+            raw_invoker: None,
+            function_hashes: None,
+            vm_state: None,
+            granted_permissions: None,
+            scope_constraints: None,
+            set_pending_resume: None,
+            set_pending_frame_resume: None,
+        };
+
+        let text = ValueWord::from_string(Arc::new(
+            r#"{"name": "test", "value": 42.5}"#.to_string(),
+        ));
+        let sid = ValueWord::from_f64(schema_id as f64);
+        let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
+        let inner = result.as_ok_inner().expect("should be Ok");
+
+        if let Some(HeapValue::TypedObject { slots, .. }) = inner.as_heap_ref() {
+            let name_nb = slots[0].as_heap_nb();
+            assert_eq!(name_nb.as_str(), Some("test"));
+            let value_val = f64::from_bits(slots[1].raw());
+            assert!((value_val - 42.5).abs() < f64::EPSILON);
+        } else {
+            panic!("expected TypedObject");
+        }
     }
 
     /// Extract variant_id from a Json enum TypedObject.

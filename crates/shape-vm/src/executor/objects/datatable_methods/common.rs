@@ -5,10 +5,22 @@
 use crate::executor::objects::object_creation::read_slot_nb;
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use shape_value::datatable::DataTable;
-use shape_value::{VMError, ValueWord};
+use shape_value::{HeapKind, NanTag, VMError, ValueWord};
 use std::sync::Arc;
 
 use crate::executor::VirtualMachine;
+
+/// Check if a ValueWord value is callable (Function, ModuleFunction, Closure, HostClosure).
+pub(crate) fn is_callable_nb(nb: &ValueWord) -> bool {
+    match nb.tag() {
+        NanTag::Function | NanTag::ModuleFunction => true,
+        NanTag::Heap => matches!(
+            nb.heap_kind(),
+            Some(HeapKind::Closure | HeapKind::HostClosure)
+        ),
+        _ => false,
+    }
+}
 
 /// Extract DataTable reference from a ValueWord value.
 /// Handles DataTable, TypedTable, and IndexedTable HeapValue variants.
@@ -317,12 +329,71 @@ pub(crate) fn build_datatable_from_objects_nb(
         return vm.push_vw(ValueWord::from_datatable(Arc::new(DataTable::new(batch))));
     }
 
-    let (schema_id, _slots, _heap_mask) = rows[0].as_typed_object().ok_or_else(|| {
-        VMError::RuntimeError(format!(
-            "join result selector must return an object, got {}",
-            rows[0].type_name()
-        ))
-    })?;
+    // Scalar results: if the first row is not a typed object, build a single-column table
+    // with column name "value".
+    if rows[0].as_typed_object().is_none() {
+        let row_count = rows.len();
+        let mut f64_vals: Vec<Option<f64>> = Vec::new();
+        let mut i64_vals: Vec<Option<i64>> = Vec::new();
+        let mut str_vals: Vec<Option<String>> = Vec::new();
+        let mut bool_vals: Vec<Option<bool>> = Vec::new();
+        let mut is_f64 = false;
+        let mut is_i64 = false;
+        let mut is_str = false;
+        let mut is_bool = false;
+
+        for row in rows {
+            if let Some(i) = row.as_i64() {
+                is_i64 = true;
+                i64_vals.push(Some(i));
+                f64_vals.push(Some(i as f64));
+                str_vals.push(None);
+                bool_vals.push(None);
+            } else if let Some(n) = row.as_f64() {
+                is_f64 = true;
+                f64_vals.push(Some(n));
+                i64_vals.push(None);
+                str_vals.push(None);
+                bool_vals.push(None);
+            } else if let Some(b) = row.as_bool() {
+                is_bool = true;
+                bool_vals.push(Some(b));
+                f64_vals.push(None);
+                i64_vals.push(None);
+                str_vals.push(None);
+            } else {
+                is_str = true;
+                str_vals.push(Some(format!("{}", row)));
+                f64_vals.push(None);
+                i64_vals.push(None);
+                bool_vals.push(None);
+            }
+        }
+
+        let col: Arc<dyn Array> = if is_str {
+            Arc::new(arrow_array::StringArray::from(str_vals))
+        } else if is_f64 {
+            Arc::new(arrow_array::Float64Array::from(f64_vals))
+        } else if is_i64 {
+            Arc::new(arrow_array::Int64Array::from(i64_vals))
+        } else if is_bool {
+            Arc::new(arrow_array::BooleanArray::from(bool_vals))
+        } else {
+            Arc::new(arrow_array::StringArray::from(
+                (0..row_count)
+                    .map(|i| Some(format!("{}", rows[i])))
+                    .collect::<Vec<_>>(),
+            ))
+        };
+
+        let field = arrow_schema::Field::new("value", col.data_type().clone(), true);
+        let schema = Arc::new(arrow_schema::Schema::new(vec![field]));
+        let batch = arrow_array::RecordBatch::try_new(schema, vec![col])
+            .map_err(|e| VMError::RuntimeError(format!("Failed to build scalar table: {}", e)))?;
+        return vm.push_vw(ValueWord::from_datatable(Arc::new(DataTable::new(batch))));
+    }
+
+    let (schema_id, _slots, _heap_mask) = rows[0].as_typed_object().unwrap();
     let sid = schema_id as u32;
     let field_names: Vec<String> = if let Some(schema) = vm.lookup_schema(sid) {
         schema.fields.iter().map(|f| f.name.clone()).collect()

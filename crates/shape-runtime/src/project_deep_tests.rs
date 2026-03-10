@@ -918,11 +918,21 @@ absolute = { path = "/usr/local/lib/shape-lib" }
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("shape.toml"), "this is not valid toml {{{").unwrap();
 
+        // find_project_root prints to stderr and returns None
         let result = find_project_root(tmp.path());
-        // parse_shape_project_toml will fail, find_project_root uses .ok()? so returns None
         assert!(
             result.is_none(),
             "Invalid TOML should cause find_project_root to return None"
+        );
+
+        // try_find_project_root returns a structured error
+        let result = try_find_project_root(tmp.path());
+        assert!(result.is_err(), "try_find_project_root should return Err for invalid TOML");
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("Malformed shape.toml"),
+            "Error should mention 'Malformed shape.toml', got: {}",
+            err_msg
         );
     }
 
@@ -940,14 +950,16 @@ absolute = { path = "/usr/local/lib/shape-lib" }
         std::fs::create_dir_all(&child).unwrap();
         std::fs::write(child.join("shape.toml"), "invalid toml {{{").unwrap();
 
+        // find_project_root stops at the invalid child shape.toml and returns None
         let result = find_project_root(&child);
-        // BUG: find_project_root finds shape.toml in child, fails to parse, returns None.
-        // It does NOT walk further up to find the parent's valid shape.toml.
         assert!(
             result.is_none(),
-            "Current implementation returns None when nearest shape.toml is invalid"
+            "find_project_root returns None when nearest shape.toml is invalid"
         );
-        // NOTE: This could be considered a bug — should it skip invalid and walk up?
+
+        // try_find_project_root returns an error for the invalid TOML
+        let result = try_find_project_root(&child);
+        assert!(result.is_err(), "try_find_project_root should return Err for invalid child TOML");
     }
 
     #[test]

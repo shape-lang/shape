@@ -69,6 +69,7 @@ impl BytecodeCompiler {
             type_diagnostic_mode: TypeDiagnosticMode::ReliableOnly,
             compile_diagnostic_mode: CompileDiagnosticMode::FailFast,
             comptime_mode: false,
+            removed_functions: HashSet::new(),
             allow_internal_comptime_namespace: false,
             method_table: MethodTable::new(),
             borrow_checker: crate::borrow_checker::BorrowChecker::new(),

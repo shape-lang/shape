@@ -280,31 +280,77 @@ fn resolve_and_inline_imports(
     loader: &mut shape_runtime::module_loader::ModuleLoader,
 ) -> std::collections::HashSet<String> {
     use shape_ast::ast::{ImportItems, Item};
-    let mut seen_paths = std::collections::HashSet::new();
+    // MED-24 fix: Use per-module inlined-name tracking (matching
+    // `append_imported_module_items`) so the same module can be imported
+    // with different named filters across multiple import statements,
+    // including transitive imports from inlined modules.
+    let mut inlined_names: HashMap<String, Option<HashSet<String>>> = HashMap::new();
     let mut stdlib_names = std::collections::HashSet::new();
 
     loop {
         let mut module_items = Vec::new();
         let mut found_new = false;
 
-        for item in &ast.items {
+        // Merge named filters per module path for this iteration.
+        let mut merged: HashMap<String, Option<HashSet<String>>> = HashMap::new();
+
+        for item in ast.items.iter() {
             let Item::Import(import_stmt, _) = item else {
                 continue;
             };
             let module_path = import_stmt.from.as_str();
-            if module_path.is_empty() || !seen_paths.insert(module_path.to_string()) {
+            if module_path.is_empty() {
                 continue;
             }
+            // If we already inlined everything (wildcard) from this module, skip.
+            if matches!(inlined_names.get(module_path), Some(None)) {
+                continue;
+            }
+
+            let named_filter: Option<HashSet<String>> = match &import_stmt.items {
+                ImportItems::Named(specs) => Some(specs.iter().map(|s| s.name.clone()).collect()),
+                ImportItems::Namespace { .. } => None,
+            };
+
+            let new_filter = match &named_filter {
+                None => {
+                    if matches!(inlined_names.get(module_path), Some(None)) {
+                        continue;
+                    }
+                    None
+                }
+                Some(names) => {
+                    let mut new_names = names.clone();
+                    if let Some(Some(already)) = inlined_names.get(module_path) {
+                        new_names.retain(|n| !already.contains(n));
+                    }
+                    if new_names.is_empty() {
+                        continue;
+                    }
+                    Some(new_names)
+                }
+            };
+
+            let entry = merged
+                .entry(module_path.to_string())
+                .or_insert_with(|| Some(HashSet::new()));
+            match new_filter {
+                None => {
+                    *entry = None;
+                }
+                Some(ref new) => {
+                    if let Some(existing) = entry {
+                        existing.extend(new.iter().cloned());
+                    }
+                }
+            }
+        }
+
+        for (module_path, merged_filter) in &merged {
             found_new = true;
             let is_std = module_path.starts_with("std::");
 
-            // Load module (errors are non-fatal — module might resolve at runtime)
             let _ = loader.load_module(module_path);
-
-            let named_filter: Option<std::collections::HashSet<&str>> = match &import_stmt.items {
-                ImportItems::Named(specs) => Some(specs.iter().map(|s| s.name.as_str()).collect()),
-                ImportItems::Namespace { .. } => None,
-            };
 
             if let Some(module) = loader.get_module(module_path) {
                 let items = module.ast.items.clone();
@@ -313,15 +359,25 @@ fn resolve_and_inline_imports(
                         crate::module_resolution::collect_function_names_from_items(&items),
                     );
                 }
-                if let Some(ref names) = named_filter {
+                if let Some(names) = merged_filter {
+                    let names_ref: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
                     for ast_item in items {
-                        if should_include_item(&ast_item, names) {
+                        if should_include_item(&ast_item, &names_ref) {
                             module_items.push(ast_item);
                         }
                     }
+                    let entry = inlined_names
+                        .entry(module_path.clone())
+                        .or_insert_with(|| Some(HashSet::new()));
+                    if let Some(existing) = entry {
+                        existing.extend(names.iter().cloned());
+                    }
                 } else {
                     module_items.extend(items);
+                    inlined_names.insert(module_path.clone(), None);
                 }
+            } else {
+                inlined_names.insert(module_path.clone(), None);
             }
         }
 
@@ -845,6 +901,183 @@ leaf = { path = "../leaf.shapec" }
                 .any(|scope| scope.package_key == "leaf@1.2.3"
                     && scope.dependencies.contains_key("duckdb")),
             "mid bundle should preserve transitive native scopes from leaf.shapec"
+        );
+    }
+
+    #[test]
+    fn test_bundle_submodule_imports() {
+        // MED-24: Verify that bundling resolves submodule imports correctly.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
+
+        std::fs::write(
+            root.join("shape.toml"),
+            r#"
+[project]
+name = "test-submod-imports"
+version = "0.1.0"
+"#,
+        )
+        .expect("write shape.toml");
+
+        std::fs::create_dir_all(root.join("utils")).expect("create utils dir");
+        std::fs::write(
+            root.join("utils/helpers.shape"),
+            "pub fn helper_val() -> int { 42 }",
+        )
+        .expect("write helpers");
+
+        std::fs::write(
+            root.join("main.shape"),
+            r#"
+from utils::helpers use { helper_val }
+
+pub fn run() -> int {
+    helper_val()
+}
+"#,
+        )
+        .expect("write main");
+
+        let project =
+            shape_runtime::project::find_project_root(root).expect("should find project root");
+        let bundle =
+            BundleCompiler::compile(&project).expect("bundle with submodule imports should compile");
+        assert!(
+            bundle.modules.iter().any(|m| m.module_path == "main"),
+            "should have main module"
+        );
+    }
+
+    #[test]
+    fn test_bundle_chained_submodule_imports() {
+        // MED-24: Chained imports (main -> utils::math -> utils::constants).
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
+
+        std::fs::write(
+            root.join("shape.toml"),
+            r#"
+[project]
+name = "test-chained-imports"
+version = "0.1.0"
+"#,
+        )
+        .expect("write shape.toml");
+
+        std::fs::create_dir_all(root.join("utils")).expect("create utils dir");
+        std::fs::write(
+            root.join("utils/constants.shape"),
+            "pub fn pi() -> number { 3.14159 }",
+        )
+        .expect("write constants");
+
+        std::fs::write(
+            root.join("utils/math.shape"),
+            r#"
+from utils::constants use { pi }
+
+pub fn circle_area(r: number) -> number {
+    pi() * r * r
+}
+"#,
+        )
+        .expect("write math");
+
+        std::fs::write(
+            root.join("main.shape"),
+            r#"
+from utils::math use { circle_area }
+
+pub fn run() -> number {
+    circle_area(2.0)
+}
+"#,
+        )
+        .expect("write main");
+
+        let project =
+            shape_runtime::project::find_project_root(root).expect("should find project root");
+        let bundle =
+            BundleCompiler::compile(&project).expect("bundle with chained imports should compile");
+        assert!(
+            bundle.modules.iter().any(|m| m.module_path == "main"),
+            "should have main module"
+        );
+    }
+
+    #[test]
+    fn test_bundle_submodule_imports_with_shared_dependency() {
+        // MED-24: Two submodules import different names from the same module.
+        // Before the fix, the second import was silently skipped because
+        // `seen_paths` prevented re-processing the shared dependency.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
+
+        std::fs::write(
+            root.join("shape.toml"),
+            r#"
+[project]
+name = "test-shared-dep"
+version = "0.1.0"
+"#,
+        )
+        .expect("write shape.toml");
+
+        std::fs::create_dir_all(root.join("lib")).expect("create lib dir");
+        std::fs::write(
+            root.join("lib/constants.shape"),
+            r#"
+pub fn pi() -> number { 3.14159 }
+pub fn e() -> number { 2.71828 }
+"#,
+        )
+        .expect("write constants");
+
+        std::fs::write(
+            root.join("lib/math.shape"),
+            r#"
+from lib::constants use { pi }
+
+pub fn circle_area(r: number) -> number {
+    pi() * r * r
+}
+"#,
+        )
+        .expect("write math");
+
+        std::fs::write(
+            root.join("lib/format.shape"),
+            r#"
+from lib::constants use { e }
+
+pub fn euler() -> number {
+    e()
+}
+"#,
+        )
+        .expect("write format");
+
+        std::fs::write(
+            root.join("main.shape"),
+            r#"
+from lib::math use { circle_area }
+from lib::format use { euler }
+
+pub fn run() -> number {
+    circle_area(1.0) + euler()
+}
+"#,
+        )
+        .expect("write main");
+
+        let project =
+            shape_runtime::project::find_project_root(root).expect("should find project root");
+        let bundle = BundleCompiler::compile(&project)
+            .expect("bundle with shared dependency should compile");
+        assert!(
+            bundle.modules.iter().any(|m| m.module_path == "main"),
+            "should have main module"
         );
     }
 }

@@ -64,12 +64,18 @@ impl VirtualMachine {
     }
 
     /// Coerce a ValueWord to i64 for typed int opcodes.
-    /// Accepts true i48 ints and f64 values that are exact whole numbers
-    /// (handles compiler producing f64 constants for integer-looking literals).
+    /// Accepts true i48 ints, native u64/i64 scalars, and f64 values that are
+    /// exact whole numbers (handles compiler producing f64 constants for
+    /// integer-looking literals).
     #[inline(always)]
     pub(in crate::executor) fn int_operand(nb: &ValueWord) -> Option<i64> {
         if let Some(i) = nb.as_i64() {
             return Some(i);
+        }
+        // Native u64 scalars (e.g. u64::MAX): reinterpret bits as i64 for
+        // truncation to work correctly (all-ones pattern → -1 as i8).
+        if let Some(u) = nb.as_u64() {
+            return Some(u as i64);
         }
         // f64 whole-number coercion (e.g. array elements compiled as Number(1.0))
         if let Some(f) = nb.as_f64() {
@@ -3559,5 +3565,40 @@ mod tests {
         // i64 StoreLocalTyped: no truncation
         let result = run_store_local_typed(42, 0, NumericWidth::I64);
         assert_eq!(result.as_i64(), Some(42));
+    }
+
+    // -- LOW-7: u64 max as i8 should give -1 --
+
+    #[test]
+    fn test_cast_width_u64_max_to_i8() {
+        // u64::MAX (all ones) cast to i8 should give -1.
+        // Use Constant::UInt to push a native u64 value.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::UInt(u64::MAX));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::new(OpCode::CastWidth, Some(Operand::Width(NumericWidth::I8))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap();
+        assert_eq!(result.as_i64(), Some(-1), "u64::MAX truncated to i8 should be -1");
+    }
+
+    #[test]
+    fn test_cast_width_u64_max_to_u8() {
+        // u64::MAX cast to u8 should give 255 (0xFF).
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::UInt(u64::MAX));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::new(OpCode::CastWidth, Some(Operand::Width(NumericWidth::U8))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap();
+        assert_eq!(result.as_i64(), Some(255), "u64::MAX truncated to u8 should be 255");
     }
 }

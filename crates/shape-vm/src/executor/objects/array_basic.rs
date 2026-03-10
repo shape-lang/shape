@@ -1,6 +1,6 @@
 //! Basic array operations
 //!
-//! Handles: len, length, first, last, push, pop, get, set, reverse
+//! Handles: len, length, first, last, push, pop, get, set, reverse, clone
 
 use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::require_any_array_arg;
@@ -118,5 +118,17 @@ pub(crate) fn handle_zip(
     }
 
     vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
+    Ok(())
+}
+
+/// Clone an array — produces a shallow copy with a distinct Arc allocation.
+pub(crate) fn handle_clone(
+    vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<(), VMError> {
+    let arr = require_any_array_arg(&args)?.to_generic();
+    let cloned = arr.to_vec();
+    vm.push_vw(ValueWord::from_array(Arc::new(cloned)))?;
     Ok(())
 }

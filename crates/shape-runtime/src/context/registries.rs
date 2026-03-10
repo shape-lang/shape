@@ -130,6 +130,28 @@ impl super::ExecutionContext {
     pub fn enum_registry(&self) -> &super::EnumRegistry {
         &self.enum_registry
     }
+
+    // =========================================================================
+    // Struct Type Registry Methods (for REPL persistence)
+    // =========================================================================
+
+    /// Register a struct type definition for REPL persistence
+    ///
+    /// This stores the full StructTypeDef so that type definitions survive across
+    /// REPL sessions. When a new REPL command is compiled, previously registered
+    /// struct types are injected into the program so the compiler can see them.
+    pub fn register_struct_type(&mut self, struct_def: shape_ast::ast::StructTypeDef) {
+        self.struct_type_registry
+            .insert(struct_def.name.clone(), struct_def);
+    }
+
+    /// Get all registered struct type definitions
+    ///
+    /// Returns an iterator over all struct type definitions registered in previous
+    /// REPL sessions. Used to inject them into the program before compilation.
+    pub fn struct_type_defs(&self) -> &std::collections::HashMap<String, shape_ast::ast::StructTypeDef> {
+        &self.struct_type_registry
+    }
 }
 
 #[cfg(test)]

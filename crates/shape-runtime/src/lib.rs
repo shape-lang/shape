@@ -507,9 +507,13 @@ impl Runtime {
 
                             ctx.register_type_alias(&alias_def.name, &base_type, Some(overrides));
                         }
-                        shape_ast::ast::ExportItem::Enum(_)
-                        | shape_ast::ast::ExportItem::Struct(_)
-                        | shape_ast::ast::ExportItem::Interface(_)
+                        shape_ast::ast::ExportItem::Enum(enum_def) => {
+                            ctx.register_enum(enum_def.clone());
+                        }
+                        shape_ast::ast::ExportItem::Struct(struct_def) => {
+                            ctx.register_struct_type(struct_def.clone());
+                        }
+                        shape_ast::ast::ExportItem::Interface(_)
                         | shape_ast::ast::ExportItem::Trait(_) => {
                             // Type definitions handled at compile time
                         }
@@ -542,6 +546,9 @@ impl Runtime {
                 shape_ast::ast::Item::Impl(_, _) => {}
                 shape_ast::ast::Item::Enum(enum_def, _) => {
                     ctx.register_enum(enum_def.clone());
+                }
+                shape_ast::ast::Item::StructType(struct_def, _) => {
+                    ctx.register_struct_type(struct_def.clone());
                 }
                 shape_ast::ast::Item::Extend(extend_stmt, _) => {
                     let registry = ctx.type_method_registry();

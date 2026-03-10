@@ -81,7 +81,7 @@ impl<'a> ValueFormatter<'a> {
                 return "[Function]".to_string();
             }
             NanTag::ModuleFunction => return "[ModuleFunction]".to_string(),
-            NanTag::Ref => return "&ref".to_string(),
+            NanTag::Ref => return "<ref>".to_string(),
             NanTag::Heap => {}
         }
 
@@ -89,7 +89,7 @@ impl<'a> ValueFormatter<'a> {
         match value.as_heap_ref() {
             Some(HeapValue::String(s)) => s.as_ref().clone(),
             Some(HeapValue::Array(arr)) => self.format_nanboxed_array(arr.as_ref(), depth),
-            Some(HeapValue::ProjectedRef(_)) => "&ref".to_string(),
+            Some(HeapValue::ProjectedRef(_)) => "<ref>".to_string(),
             Some(HeapValue::TypedObject {
                 schema_id,
                 slots,
@@ -151,7 +151,29 @@ impl<'a> ValueFormatter<'a> {
                 let op = if *inclusive { "..=" } else { ".." };
                 format!("{}{}{}", start_str, op, end_str)
             }
-            Some(HeapValue::Enum(e)) => format!("{:?}", e),
+            Some(HeapValue::Enum(e)) => {
+                use shape_value::enums::EnumPayload;
+                match &e.payload {
+                    EnumPayload::Unit => e.variant.clone(),
+                    EnumPayload::Tuple(values) => {
+                        let parts: Vec<String> = values
+                            .iter()
+                            .map(|v| self.format_nb_with_depth(v, depth + 1))
+                            .collect();
+                        format!("{}({})", e.variant, parts.join(", "))
+                    }
+                    EnumPayload::Struct(fields) => {
+                        let mut parts: Vec<String> = fields
+                            .iter()
+                            .map(|(k, v)| {
+                                format!("{}: {}", k, self.format_nb_with_depth(v, depth + 1))
+                            })
+                            .collect();
+                        parts.sort();
+                        format!("{} {{ {} }}", e.variant, parts.join(", "))
+                    }
+                }
+            }
             Some(HeapValue::Some(inner)) => {
                 format!("Some({})", self.format_nb_with_depth(inner, depth + 1))
             }
@@ -252,7 +274,7 @@ impl<'a> ValueFormatter<'a> {
                     .iter()
                     .map(|v| {
                         if *v == v.trunc() && v.abs() < 1e15 {
-                            format!("{}", *v as i64)
+                            format!("{}.0", *v as i64)
                         } else {
                             format!("{}", v)
                         }
@@ -301,7 +323,7 @@ impl<'a> ValueFormatter<'a> {
                     .iter()
                     .map(|v| {
                         if *v == v.trunc() && v.abs() < 1e15 {
-                            format!("{}", *v as i64)
+                            format!("{}.0", *v as i64)
                         } else {
                             format!("{}", v)
                         }
@@ -418,10 +440,11 @@ impl<'a> ValueFormatter<'a> {
         }
     }
 
-    /// Format an enum value using its variant info
+    /// Format an enum value using its variant info.
+    /// Shows only the variant name (not the full `Enum::Variant` path).
     fn format_enum(
         &self,
-        enum_name: &str,
+        _enum_name: &str,
         enum_info: &shape_runtime::type_schema::EnumInfo,
         slots: &[shape_value::ValueSlot],
         heap_mask: u64,
@@ -429,7 +452,7 @@ impl<'a> ValueFormatter<'a> {
     ) -> String {
         // Read variant ID from slot 0
         if slots.is_empty() {
-            return format!("{}::?", enum_name);
+            return "?".to_string();
         }
 
         let variant_id = slots[0].as_i64() as u16;
@@ -437,12 +460,12 @@ impl<'a> ValueFormatter<'a> {
         // Look up variant by ID
         let variant = match enum_info.variant_by_id(variant_id) {
             Some(v) => v,
-            None => return format!("{}::?[{}]", enum_name, variant_id),
+            None => return format!("?[{}]", variant_id),
         };
 
         // Unit variant (no payload)
         if variant.payload_fields == 0 {
-            return format!("{}::{}", enum_name, variant.name);
+            return variant.name.clone();
         }
 
         // Variant with payload - read payload values from slots 1+
@@ -461,15 +484,14 @@ impl<'a> ValueFormatter<'a> {
         }
 
         if payload_values.is_empty() {
-            format!("{}::{}", enum_name, variant.name)
+            variant.name.clone()
         } else if payload_values.len() == 1 {
             // Single payload - use parentheses style
-            format!("{}::{}({})", enum_name, variant.name, payload_values[0])
+            format!("{}({})", variant.name, payload_values[0])
         } else {
             // Multiple payloads - use tuple style with variant name
             format!(
-                "{}::{}({})",
-                enum_name,
+                "{}({})",
                 variant.name,
                 payload_values.join(", ")
             )
@@ -523,8 +545,8 @@ fn format_number(n: f64) -> String {
             "-Infinity".to_string()
         }
     } else if n.fract() == 0.0 && n.abs() < 1e15 {
-        // Integer-like numbers: show without decimal
-        format!("{}", n as i64)
+        // Integer-like floats: always show .0 to distinguish from int
+        format!("{}.0", n as i64)
     } else {
         // Use default formatting
         n.to_string()
@@ -551,7 +573,7 @@ mod tests {
         let schema_reg = create_test_registry();
         let formatter = VMValueFormatter::new(&schema_reg);
 
-        assert_eq!(formatter.format(&ValueWord::from_f64(42.0)), "42");
+        assert_eq!(formatter.format(&ValueWord::from_f64(42.0)), "42.0");
         assert_eq!(formatter.format(&ValueWord::from_f64(3.14)), "3.14");
         assert_eq!(
             formatter.format(&ValueWord::from_string(Arc::new("hello".to_string()))),
@@ -572,7 +594,7 @@ mod tests {
             ValueWord::from_f64(2.0),
             ValueWord::from_f64(3.0),
         ]));
-        assert_eq!(formatter.format(&arr), "[1, 2, 3]");
+        assert_eq!(formatter.format(&arr), "[1.0, 2.0, 3.0]");
     }
 
     #[test]
@@ -587,15 +609,15 @@ mod tests {
 
         let formatted = formatter.format(&value);
         // TypedObject fields come from schema order
-        assert!(formatted.contains("x: 1"));
-        assert!(formatted.contains("y: 2"));
+        assert!(formatted.contains("x: 1.0"));
+        assert!(formatted.contains("y: 2.0"));
     }
 
     #[test]
     fn test_format_number_integers() {
-        assert_eq!(format_number(42.0), "42");
-        assert_eq!(format_number(-100.0), "-100");
-        assert_eq!(format_number(0.0), "0");
+        assert_eq!(format_number(42.0), "42.0");
+        assert_eq!(format_number(-100.0), "-100.0");
+        assert_eq!(format_number(0.0), "0.0");
     }
 
     #[test]
@@ -640,7 +662,7 @@ mod tests {
         let schema_reg = create_test_registry();
         let formatter = VMValueFormatter::new(&schema_reg);
 
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(42.0)), "42");
+        assert_eq!(formatter.format_nb(&ValueWord::from_f64(42.0)), "42.0");
         assert_eq!(formatter.format_nb(&ValueWord::from_f64(3.14)), "3.14");
         assert_eq!(
             formatter.format_nb(&ValueWord::from_string(Arc::new("hello".to_string()))),
@@ -687,7 +709,7 @@ mod tests {
             ValueWord::from_f64(2.0),
             ValueWord::from_f64(3.0),
         ]));
-        assert_eq!(formatter.format_nb(&arr), "[1, 2, 3]");
+        assert_eq!(formatter.format_nb(&arr), "[1.0, 2.0, 3.0]");
     }
 
     #[test]
@@ -715,8 +737,8 @@ mod tests {
         let nb = value;
 
         let formatted = formatter.format_nb(&nb);
-        assert!(formatted.contains("x: 1"));
-        assert!(formatted.contains("y: 2"));
+        assert!(formatted.contains("x: 1.0"));
+        assert!(formatted.contains("y: 2.0"));
     }
 
     #[test]
@@ -762,26 +784,83 @@ mod tests {
         let schema_reg = create_test_registry();
         let formatter = VMValueFormatter::new(&schema_reg);
 
-        let test_cases: Vec<(ValueWord, ValueWord)> = vec![
-            (ValueWord::from_f64(42.0), ValueWord::from_f64(42.0)),
-            (ValueWord::from_f64(3.14), ValueWord::from_f64(3.14)),
-            (ValueWord::from_i64(99), ValueWord::from_i64(99)),
-            (ValueWord::from_bool(true), ValueWord::from_bool(true)),
-            (ValueWord::none(), ValueWord::none()),
-            (ValueWord::unit(), ValueWord::unit()),
-            (
-                ValueWord::from_string(Arc::new("test".to_string())),
-                ValueWord::from_string(Arc::new("test".to_string())),
-            ),
+        let test_cases: Vec<ValueWord> = vec![
+            ValueWord::from_f64(42.0),
+            ValueWord::from_f64(3.14),
+            ValueWord::from_i64(99),
+            ValueWord::from_bool(true),
+            ValueWord::none(),
+            ValueWord::unit(),
+            ValueWord::from_string(Arc::new("test".to_string())),
         ];
 
-        for (vmval, nb) in &test_cases {
+        for val in &test_cases {
             assert_eq!(
-                formatter.format(vmval),
-                formatter.format_nb(nb),
+                formatter.format(val),
+                formatter.format_nb(val),
                 "Mismatch for ValueWord: {:?}",
-                vmval
+                val
             );
         }
+    }
+
+    // ===== LOW-1: Float display always shows .0 =====
+
+    #[test]
+    fn test_float_display_shows_decimal_point() {
+        let schema_reg = create_test_registry();
+        let formatter = VMValueFormatter::new(&schema_reg);
+
+        // Integer-like floats must show .0
+        assert_eq!(formatter.format_nb(&ValueWord::from_f64(1.0)), "1.0");
+        assert_eq!(formatter.format_nb(&ValueWord::from_f64(0.0)), "0.0");
+        assert_eq!(formatter.format_nb(&ValueWord::from_f64(-5.0)), "-5.0");
+        assert_eq!(formatter.format_nb(&ValueWord::from_f64(100.0)), "100.0");
+
+        // Non-integer floats show normally
+        assert_eq!(formatter.format_nb(&ValueWord::from_f64(1.5)), "1.5");
+        assert_eq!(formatter.format_nb(&ValueWord::from_f64(0.1)), "0.1");
+
+        // Integers (i48) should NOT show .0
+        assert_eq!(formatter.format_nb(&ValueWord::from_i64(1)), "1");
+        assert_eq!(formatter.format_nb(&ValueWord::from_i64(0)), "0");
+        assert_eq!(formatter.format_nb(&ValueWord::from_i64(-5)), "-5");
+    }
+
+    // ===== LOW-5: Enum display shows variant name only =====
+
+    #[test]
+    fn test_enum_display_variant_only() {
+        let schema_reg = create_test_registry();
+        let formatter = VMValueFormatter::new(&schema_reg);
+
+        // Unit variant
+        let e = ValueWord::from_enum(shape_value::EnumValue {
+            enum_name: "Direction".to_string(),
+            variant: "North".to_string(),
+            payload: shape_value::enums::EnumPayload::Unit,
+        });
+        assert_eq!(formatter.format_nb(&e), "North");
+
+        // Tuple variant
+        let e = ValueWord::from_enum(shape_value::EnumValue {
+            enum_name: "Shape".to_string(),
+            variant: "Circle".to_string(),
+            payload: shape_value::enums::EnumPayload::Tuple(vec![ValueWord::from_f64(5.0)]),
+        });
+        assert_eq!(formatter.format_nb(&e), "Circle(5.0)");
+    }
+
+    // ===== LOW-9: References show <ref> (or dereferenced value via VM) =====
+
+    #[test]
+    fn test_ref_display_no_ampersand_prefix() {
+        let schema_reg = create_test_registry();
+        let formatter = VMValueFormatter::new(&schema_reg);
+
+        // Inline stack ref shows <ref> (cannot resolve without VM stack)
+        let ref_val = ValueWord::from_ref(42);
+        let formatted = formatter.format_nb(&ref_val);
+        assert_eq!(formatted, "<ref>");
     }
 }
