@@ -543,21 +543,6 @@ impl BytecodeCompiler {
         semantics
     }
 
-    pub(super) fn apply_binding_semantics_for_decl(
-        &mut self,
-        slot: u16,
-        is_local: bool,
-        var_decl: &shape_ast::ast::VariableDecl,
-    ) {
-        let semantics = Self::binding_semantics_for_var_decl(var_decl);
-        if is_local {
-            self.type_tracker
-                .set_local_binding_semantics(slot, semantics);
-        } else {
-            self.type_tracker.set_binding_semantics(slot, semantics);
-        }
-    }
-
     pub(super) fn apply_binding_semantics_to_pattern_bindings(
         &mut self,
         pattern: &DestructurePattern,

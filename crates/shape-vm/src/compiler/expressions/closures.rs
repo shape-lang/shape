@@ -209,20 +209,21 @@ mod tests {
 
         let mut compiler = BytecodeCompiler::new();
         let counter_idx = compiler.get_or_create_module_binding("counter");
-        compiler.apply_binding_semantics_for_decl(
-            counter_idx,
+        let counter_decl = VariableDecl {
+            kind: VarKind::Let,
+            is_mut: false,
+            pattern: shape_ast::ast::DestructurePattern::Identifier(
+                "counter".to_string(),
+                Span::DUMMY,
+            ),
+            type_annotation: None,
+            value: None,
+            ownership: Default::default(),
+        };
+        compiler.apply_binding_semantics_to_pattern_bindings(
+            &counter_decl.pattern,
             false,
-            &VariableDecl {
-                kind: VarKind::Let,
-                is_mut: false,
-                pattern: shape_ast::ast::DestructurePattern::Identifier(
-                    "counter".to_string(),
-                    Span::DUMMY,
-                ),
-                type_annotation: None,
-                value: None,
-                ownership: Default::default(),
-            },
+            BytecodeCompiler::binding_semantics_for_var_decl(&counter_decl),
         );
 
         compiler

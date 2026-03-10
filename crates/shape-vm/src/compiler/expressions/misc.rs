@@ -96,13 +96,29 @@ impl BytecodeCompiler {
                         let ref_borrow = self.compile_expr_for_reference_binding(init_expr)?;
                         // Use full destructure pattern support (array, object, identifier)
                         self.compile_destructure_pattern(&var_decl.pattern)?;
+                        for (binding_name, _) in var_decl.pattern.get_bindings() {
+                            if let Some(local_idx) = self.resolve_local(&binding_name) {
+                                if var_decl.kind == shape_ast::ast::VarKind::Const {
+                                    self.const_locals.insert(local_idx);
+                                }
+                                if var_decl.kind == shape_ast::ast::VarKind::Let
+                                    && !var_decl.is_mut
+                                {
+                                    self.immutable_locals.insert(local_idx);
+                                }
+                            }
+                        }
+                        self.apply_binding_semantics_to_pattern_bindings(
+                            &var_decl.pattern,
+                            true,
+                            Self::binding_semantics_for_var_decl(var_decl),
+                        );
 
                         // For simple identifier patterns, track type and drop info
                         if let shape_ast::ast::DestructurePattern::Identifier(name, _) =
                             &var_decl.pattern
                         {
                             if let Some(local_idx) = self.resolve_local(name) {
-                                self.apply_binding_semantics_for_decl(local_idx, true, var_decl);
                                 // Track type annotation (so drop tracking can resolve the type)
                                 if let Some(ref type_ann) = var_decl.type_annotation {
                                     if let Some(type_name) =

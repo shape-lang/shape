@@ -3253,6 +3253,19 @@ mod tests {
     }
 
     #[test]
+    fn test_block_expr_destructured_binding_still_runs() {
+        let code = r#"
+            let value = {
+                let [a, b] = [1, 2]
+                a + b
+            }
+            value
+        "#;
+        let result = eval(code);
+        assert_eq!(result.as_number_coerce().unwrap(), 3.0);
+    }
+
+    #[test]
     fn test_const_param_requires_compile_time_constant_argument() {
         let code = r#"
             function connect(const conn_str: string) {
