@@ -39,6 +39,14 @@ pub struct MirBuilder {
     param_slots: Vec<SlotId>,
     /// Function span.
     span: Span,
+    /// Whether lowering had to fall back to placeholder/Nop handling.
+    had_fallbacks: bool,
+}
+
+#[derive(Debug)]
+pub struct MirLoweringResult {
+    pub mir: MirFunction,
+    pub had_fallbacks: bool,
 }
 
 impl MirBuilder {
@@ -64,6 +72,7 @@ impl MirBuilder {
             next_field_idx: 0,
             param_slots: Vec::new(),
             span,
+            had_fallbacks: false,
         }
     }
 
@@ -113,6 +122,10 @@ impl MirBuilder {
         self.return_slot
     }
 
+    pub fn mark_fallback(&mut self) {
+        self.had_fallbacks = true;
+    }
+
     /// Allocate a new program point.
     pub fn next_point(&mut self) -> Point {
         let p = Point(self.next_point);
@@ -160,26 +173,29 @@ impl MirBuilder {
     }
 
     /// Finalize and produce the MIR function.
-    pub fn build(self) -> MirFunction {
+    pub fn build(self) -> MirLoweringResult {
         let local_types = self.locals.iter().map(|(_, _, t)| t.clone()).collect();
-        MirFunction {
-            name: self.name,
-            blocks: self.blocks,
-            num_locals: self.next_local,
-            param_slots: self.param_slots,
-            local_types,
-            span: self.span,
+        MirLoweringResult {
+            mir: MirFunction {
+                name: self.name,
+                blocks: self.blocks,
+                num_locals: self.next_local,
+                param_slots: self.param_slots,
+                local_types,
+                span: self.span,
+            },
+            had_fallbacks: self.had_fallbacks,
         }
     }
 }
 
 /// Lower a function body (list of statements) into MIR.
-pub fn lower_function(
+pub fn lower_function_detailed(
     name: &str,
     params: &[ast::FunctionParameter],
     body: &[Statement],
     span: Span,
-) -> MirFunction {
+) -> MirLoweringResult {
     let mut builder = MirBuilder::new(name.to_string(), span);
 
     // Register parameters
@@ -209,6 +225,16 @@ pub fn lower_function(
     builder.finish_block(TerminatorKind::Return, span);
 
     builder.build()
+}
+
+/// Lower a function body (list of statements) into MIR.
+pub fn lower_function(
+    name: &str,
+    params: &[ast::FunctionParameter],
+    body: &[Statement],
+    span: Span,
+) -> MirFunction {
+    lower_function_detailed(name, params, body, span).mir
 }
 
 /// Lower a slice of statements into the current block.
@@ -264,6 +290,7 @@ fn lower_statement(builder: &mut MirBuilder, stmt: &Statement, exit_block: Basic
             // Other statement types: emit a Nop for now.
             // Will be expanded as more AST constructs get MIR support.
             let span = stmt.span().unwrap_or(Span::DUMMY);
+            builder.mark_fallback();
             builder.push_stmt(StatementKind::Nop, span);
         }
     }
@@ -297,10 +324,12 @@ fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span
 /// Lower an assignment statement.
 fn lower_assignment(builder: &mut MirBuilder, assign: &ast::Assignment, span: Span) {
     let Some(name) = assign.pattern.as_identifier() else {
+        builder.mark_fallback();
         builder.push_stmt(StatementKind::Nop, span);
         return;
     };
     let Some(slot) = builder.lookup_local(name) else {
+        builder.mark_fallback();
         builder.push_stmt(StatementKind::Nop, span);
         return;
     };
@@ -329,6 +358,7 @@ fn lower_expr_to_place(builder: &mut MirBuilder, expr: &Expr) -> Option<Place> {
             ..
         } => {
             if end_index.is_some() {
+                builder.mark_fallback();
                 return None;
             }
             let base = lower_expr_to_place(builder, object)?;
@@ -392,8 +422,12 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
             } else {
                 BorrowKind::Shared
             };
-            let borrowed_place = lower_expr_to_place(builder, inner)
-                .unwrap_or_else(|| Place::Local(lower_expr_to_temp(builder, inner)));
+            let borrowed_place = if let Some(place) = lower_expr_to_place(builder, inner) {
+                place
+            } else {
+                builder.mark_fallback();
+                Place::Local(lower_expr_to_temp(builder, inner))
+            };
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::Borrow(kind, borrowed_place)),
                 *ref_span,
@@ -423,6 +457,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         }
         _ => {
             // Fallback: emit a Nop + assign from constant
+            builder.mark_fallback();
             builder.push_stmt(
                 StatementKind::Assign(
                     Place::Local(temp),

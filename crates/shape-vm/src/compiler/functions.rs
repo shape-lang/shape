@@ -6,7 +6,7 @@ use shape_ast::ast::{
     DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Statement, VarKind,
     VariableDecl,
 };
-use shape_ast::error::{Result, ShapeError};
+use shape_ast::error::{ErrorNote, Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
 use shape_value::ValueWord;
 use std::collections::{HashMap, HashSet};
@@ -72,17 +72,26 @@ impl BytecodeCompiler {
         // Diagnostics still come from the bytecode compiler paths for now, but
         // this gives real compilations a single analysis artifact we can
         // progressively hook into later.
-        let mir = crate::mir::lowering::lower_function(
+        let mir_lowering = crate::mir::lowering::lower_function_detailed(
             &effective_def.name,
             &effective_def.params,
             &effective_def.body,
             effective_def.name_span,
         );
-        let mut mir_analysis = crate::mir::solver::analyze(&mir);
-        crate::mir::repair::attach_repairs(&mut mir_analysis, &mir);
-        self.mir_functions.insert(effective_def.name.clone(), mir);
+        let mut mir_analysis = crate::mir::solver::analyze(&mir_lowering.mir);
+        crate::mir::repair::attach_repairs(&mut mir_analysis, &mir_lowering.mir);
+        let first_mir_error = if mir_lowering.had_fallbacks {
+            None
+        } else {
+            mir_analysis.errors.first().cloned()
+        };
+        self.mir_functions
+            .insert(effective_def.name.clone(), mir_lowering.mir);
         self.mir_borrow_analyses
             .insert(effective_def.name.clone(), mir_analysis);
+        if let Some(error) = first_mir_error.as_ref() {
+            return Err(self.mir_borrow_error(error));
+        }
 
         // Track whether __original__ alias is active so we can clean it up.
         let has_original_alias = self.function_aliases.contains_key("__original__");
@@ -120,6 +129,65 @@ impl BytecodeCompiler {
         // Runtime lifecycle hooks (`on_define`, `metadata`) are invoked at
         // definition time by emitting top-level calls after function compilation.
         self.emit_annotation_lifecycle_calls(&effective_def)
+    }
+
+    fn mir_borrow_error_message(
+        &self,
+        kind: crate::mir::analysis::BorrowErrorKind,
+    ) -> (&'static str, &'static str) {
+        match kind {
+            crate::mir::analysis::BorrowErrorKind::ConflictSharedExclusive => (
+                "[B0001] cannot mutably borrow this value while shared borrows are active",
+                "move the mutable borrow later, or end the shared borrow sooner",
+            ),
+            crate::mir::analysis::BorrowErrorKind::ConflictExclusiveExclusive => (
+                "[B0001] cannot mutably borrow this value because it is already borrowed",
+                "end the previous mutable borrow before creating another one",
+            ),
+            crate::mir::analysis::BorrowErrorKind::ReadWhileExclusivelyBorrowed => (
+                "[B0001] cannot read this value while it is mutably borrowed",
+                "read through the existing reference, or move the read after the borrow ends",
+            ),
+            crate::mir::analysis::BorrowErrorKind::WriteWhileBorrowed => (
+                "[B0002] cannot write to this value while it is borrowed",
+                "move this write after the borrow ends",
+            ),
+            crate::mir::analysis::BorrowErrorKind::ReferenceEscape => (
+                "cannot return or store a reference that outlives its owner",
+                "return an owned value instead of a reference",
+            ),
+            crate::mir::analysis::BorrowErrorKind::UseAfterMove => (
+                "cannot use this value after it was moved",
+                "clone the value before moving it, or stop using the original after the move",
+            ),
+            crate::mir::analysis::BorrowErrorKind::ExclusiveRefAcrossTaskBoundary => (
+                "cannot move an exclusive reference across a task boundary",
+                "keep the mutable reference within the current task or pass an owned value instead",
+            ),
+        }
+    }
+
+    fn mir_borrow_error(&self, error: &crate::mir::analysis::BorrowError) -> ShapeError {
+        let (message, default_hint) = self.mir_borrow_error_message(error.kind.clone());
+        let mut location = self.span_to_source_location(error.span);
+        location.hints.push(default_hint.to_string());
+        if let Some(repair) = error.repairs.first() {
+            location.hints.push(repair.description.clone());
+        }
+        location.notes.push(ErrorNote {
+            message: "conflicting borrow originates here".to_string(),
+            location: Some(self.span_to_source_location(error.loan_span)),
+        });
+        if let Some(last_use_span) = error.last_use_span {
+            location.notes.push(ErrorNote {
+                message: "borrow is still needed here".to_string(),
+                location: Some(self.span_to_source_location(last_use_span)),
+            });
+        }
+        ShapeError::SemanticError {
+            message: message.to_string(),
+            location: Some(location),
+        }
     }
 
     pub(super) fn compile_foreign_function(
@@ -4433,7 +4501,14 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let _ = compiler.compile_function(func);
+        let err = compiler
+            .compile_function(func)
+            .expect_err("MIR borrow conflict should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("B0001"),
+            "expected B0001-style error, got {}",
+            err
+        );
 
         let analysis = compiler
             .mir_borrow_analyses
