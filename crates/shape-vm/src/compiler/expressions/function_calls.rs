@@ -972,8 +972,11 @@ impl BytecodeCompiler {
         // Chained function calls: `f(a)(b)` is parsed as MethodCall with method "__call__".
         // Compile as: evaluate receiver (which produces a callable), compile args, CallValue.
         if method == "__call__" {
+            let expected_param_modes = self.callable_pass_modes_from_expr(receiver);
+            let return_reference_contract =
+                self.callable_reference_return_contract_from_expr(receiver);
             self.compile_expr(receiver)?;
-            let writebacks = self.compile_call_args(args, None)?;
+            let writebacks = self.compile_call_args(args, expected_param_modes.as_deref())?;
             let arg_count = self
                 .program
                 .add_constant(Constant::Number(args.len() as f64));
@@ -998,8 +1001,25 @@ impl BytecodeCompiler {
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
                 }
+                if return_reference_contract.is_some() {
+                    self.emit(Instruction::new(
+                        OpCode::DerefLoad,
+                        Some(Operand::Local(result_local)),
+                    ));
+                } else {
+                    self.emit(Instruction::new(
+                        OpCode::LoadLocal,
+                        Some(Operand::Local(result_local)),
+                    ));
+                }
+            } else if return_reference_contract.is_some() {
+                let result_local = self.declare_temp_local("__chained_call_ref_result_")?;
                 self.emit(Instruction::new(
-                    OpCode::LoadLocal,
+                    OpCode::StoreLocal,
+                    Some(Operand::Local(result_local)),
+                ));
+                self.emit(Instruction::new(
+                    OpCode::DerefLoad,
                     Some(Operand::Local(result_local)),
                 ));
             }

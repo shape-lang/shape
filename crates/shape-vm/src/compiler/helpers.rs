@@ -1198,6 +1198,25 @@ impl BytecodeCompiler {
                 self.compile_expr(expr)?;
                 Ok(None)
             }
+        } else if let shape_ast::ast::Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            named_args,
+            span,
+        } = expr
+        {
+            if method == "__call__"
+                && named_args.is_empty()
+                && self
+                    .callable_reference_return_contract_from_expr(receiver)
+                    .is_some()
+            {
+                self.compile_callable_expr_call_for_reference_binding(receiver, args, *span)
+            } else {
+                self.compile_expr(expr)?;
+                Ok(None)
+            }
         } else {
             self.compile_expr(expr)?;
             Ok(None)
@@ -1389,6 +1408,72 @@ impl BytecodeCompiler {
         } else {
             self.compile_named_function_call_for_reference_binding(name, args, span)
         }
+    }
+
+    pub(super) fn compile_callable_expr_call_for_reference_binding(
+        &mut self,
+        callee_expr: &shape_ast::ast::Expr,
+        args: &[shape_ast::ast::Expr],
+        span: shape_ast::ast::Span,
+    ) -> Result<Option<(BorrowId, bool)>> {
+        let return_contract = self
+            .callable_reference_return_contract_from_expr(callee_expr)
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: "callable expression does not return a reference".to_string(),
+                location: Some(self.span_to_source_location(span)),
+            })?;
+        if return_contract.param_index >= args.len() {
+            return Err(ShapeError::SemanticError {
+                message: "callable expression did not receive the reference parameter it returns"
+                    .to_string(),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+
+        let pass_modes = self
+            .callable_pass_modes_from_expr(callee_expr)
+            .unwrap_or_else(|| vec![ParamPassMode::ByValue; args.len()]);
+
+        self.compile_expr(callee_expr)?;
+
+        let mut returned_borrow = None;
+        for (idx, arg) in args.iter().enumerate() {
+            let pass_mode = pass_modes
+                .get(idx)
+                .copied()
+                .unwrap_or(ParamPassMode::ByValue);
+            if idx == return_contract.param_index {
+                let borrow_mode = if pass_mode.is_exclusive() {
+                    BorrowMode::Exclusive
+                } else {
+                    BorrowMode::Shared
+                };
+                returned_borrow =
+                    Some(self.compile_persistent_reference_call_arg(arg, borrow_mode)?);
+                continue;
+            }
+
+            match pass_mode {
+                ParamPassMode::ByValue => self.compile_expr(arg)?,
+                ParamPassMode::ByRefShared | ParamPassMode::ByRefExclusive => {
+                    return Err(ShapeError::SemanticError {
+                        message: "binding a returned reference from call sites with additional reference parameters is not supported yet".to_string(),
+                        location: Some(self.span_to_source_location(arg.span())),
+                    });
+                }
+            }
+        }
+
+        let arg_count = self
+            .program
+            .add_constant(Constant::Number(args.len() as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(arg_count)),
+        ));
+        self.emit(Instruction::simple(OpCode::CallValue));
+
+        Ok(returned_borrow)
     }
 
     pub(super) fn compile_named_function_call_for_reference_binding(

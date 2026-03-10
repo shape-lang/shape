@@ -101,7 +101,8 @@ impl BytecodeCompiler {
         };
 
         let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
-        let mut closure_pass_modes = vec![crate::compiler::ParamPassMode::ByValue; captured_vars.len()];
+        let mut closure_pass_modes =
+            vec![crate::compiler::ParamPassMode::ByValue; captured_vars.len()];
         closure_pass_modes.extend(user_pass_modes);
         let ref_params: Vec<_> = closure_pass_modes
             .iter()

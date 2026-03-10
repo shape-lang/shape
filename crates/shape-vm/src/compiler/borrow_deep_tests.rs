@@ -559,6 +559,20 @@ fn test_reference_param_can_be_returned_through_local_callable_value() {
 }
 
 #[test]
+fn test_reference_param_can_be_returned_through_direct_callable_expr() {
+    let code = r#"
+        function test() {
+            var x = 41
+            return (function(&y) {
+                y
+            })(x) + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
 fn test_reference_param_can_be_returned_through_module_callable_alias() {
     let code = r#"
         function borrow_id(&x) {
