@@ -387,6 +387,16 @@ fn lower_assignment(builder: &mut MirBuilder, assign: &ast::Assignment, span: Sp
     );
 }
 
+fn lower_assign_target_place(builder: &mut MirBuilder, target: &Expr) -> Option<Place> {
+    match target {
+        Expr::Identifier(name, _) => builder.lookup_local(name).map(Place::Local),
+        Expr::PropertyAccess { .. } | Expr::IndexAccess { .. } => {
+            lower_expr_to_place(builder, target)
+        }
+        _ => None,
+    }
+}
+
 /// Lower an expression and return the temp slot it was placed in.
 /// This is a simplified version — full expression lowering will be more complex.
 fn lower_expr_to_place(builder: &mut MirBuilder, expr: &Expr) -> Option<Place> {
@@ -478,6 +488,31 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::Borrow(kind, borrowed_place)),
                 *ref_span,
+            );
+        }
+        Expr::Assign(assign, _) => {
+            let Some(target_place) = lower_assign_target_place(builder, &assign.target) else {
+                builder.mark_fallback();
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Use(Operand::Constant(MirConstant::None)),
+                    ),
+                    span,
+                );
+                return temp;
+            };
+            let value_slot = lower_expr_to_temp(builder, &assign.value);
+            builder.push_stmt(
+                StatementKind::Assign(
+                    target_place.clone(),
+                    Rvalue::Use(Operand::Move(Place::Local(value_slot))),
+                ),
+                span,
+            );
+            builder.push_stmt(
+                StatementKind::Assign(Place::Local(temp), Rvalue::Use(Operand::Copy(target_place))),
+                span,
             );
         }
         Expr::BinaryOp { left, right, .. } => {
@@ -1126,6 +1161,138 @@ mod tests {
         assert!(
             lowering.had_fallbacks,
             "destructuring declarations should keep MIR in fallback mode"
+        );
+    }
+
+    #[test]
+    fn test_lowered_assignment_expr_write_while_borrowed_is_visible_to_solver() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("y".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Assign(
+                        Box::new(ast::AssignExpr {
+                            target: Box::new(Expr::Identifier("x".to_string(), span())),
+                            value: Box::new(Expr::Literal(ast::Literal::Int(2), span())),
+                        }),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let lowering = lower_function_detailed("test", &[], &body, span());
+        assert!(
+            !lowering.had_fallbacks,
+            "simple assignment expressions should stay in the supported MIR subset"
+        );
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_property_assignment_expr_preserves_disjoint_places() {
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("pair".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(
+                        ast::Literal::String("pair".to_string()),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("left".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::PropertyAccess {
+                            object: Box::new(Expr::Identifier("pair".to_string(), span())),
+                            property: "left".to_string(),
+                            optional: false,
+                            span: span(),
+                        }),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Expression(
+                Expr::Assign(
+                    Box::new(ast::AssignExpr {
+                        target: Box::new(Expr::PropertyAccess {
+                            object: Box::new(Expr::Identifier("pair".to_string(), span())),
+                            property: "right".to_string(),
+                            optional: false,
+                            span: span(),
+                        }),
+                        value: Box::new(Expr::Literal(
+                            ast::Literal::String("updated".to_string()),
+                            span(),
+                        )),
+                    }),
+                    span(),
+                ),
+                span(),
+            ),
+        ];
+        let lowering = lower_function_detailed("test", &[], &body, span());
+        assert!(
+            !lowering.had_fallbacks,
+            "property assignment expressions should stay in the supported MIR subset"
+        );
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis.errors.is_empty(),
+            "disjoint property assignment should stay borrow-clean, got {:?}",
+            analysis.errors
         );
     }
 }
