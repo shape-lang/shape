@@ -45,6 +45,15 @@ use shape_ast::data::Timeframe;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+const REF_TARGET_MODULE_FLAG: u64 = 1 << 47;
+const REF_TARGET_INDEX_MASK: u64 = REF_TARGET_MODULE_FLAG - 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefTarget {
+    Stack(usize),
+    ModuleBinding(usize),
+}
+
 // --- Bit layout constants (imported from shared tags module) ---
 use crate::tags::{
     CANONICAL_NAN, I48_MAX, I48_MIN, PAYLOAD_MASK, TAG_BOOL, TAG_FUNCTION, TAG_HEAP, TAG_INT,
@@ -552,13 +561,18 @@ impl ValueWord {
     }
 
     /// Create a ValueWord reference to an absolute stack slot.
-    ///
-    /// References are inline (no heap allocation) — Clone is bitwise copy, Drop is no-op.
-    /// Used for pass-by-reference semantics: the payload is the absolute stack index
-    /// of the value being referenced.
     #[inline]
     pub fn from_ref(absolute_slot: usize) -> Self {
         Self(make_tagged(TAG_REF, absolute_slot as u64))
+    }
+
+    /// Create a ValueWord reference to a module binding slot.
+    #[inline]
+    pub fn from_module_binding_ref(binding_idx: usize) -> Self {
+        Self(make_tagged(
+            TAG_REF,
+            REF_TARGET_MODULE_FLAG | (binding_idx as u64 & REF_TARGET_INDEX_MASK),
+        ))
     }
 
     /// Heap-box a HeapValue directly.
@@ -1180,14 +1194,27 @@ impl ValueWord {
         is_tagged(self.0) && get_tag(self.0) == TAG_REF
     }
 
-    /// Extract the absolute stack slot index from a reference.
-    /// Returns None if this is not a reference.
+    /// Extract the reference target.
+    #[inline]
+    pub fn as_ref_target(&self) -> Option<RefTarget> {
+        let payload = get_payload(self.0);
+        if !self.is_ref() {
+            return None;
+        }
+        let idx = (payload & REF_TARGET_INDEX_MASK) as usize;
+        if payload & REF_TARGET_MODULE_FLAG != 0 {
+            Some(RefTarget::ModuleBinding(idx))
+        } else {
+            Some(RefTarget::Stack(idx))
+        }
+    }
+
+    /// Extract the absolute stack slot index from a stack reference.
     #[inline]
     pub fn as_ref_slot(&self) -> Option<usize> {
-        if self.is_ref() {
-            Some(get_payload(self.0) as usize)
-        } else {
-            None
+        match self.as_ref_target() {
+            Some(RefTarget::Stack(slot)) => Some(slot),
+            _ => None,
         }
     }
 

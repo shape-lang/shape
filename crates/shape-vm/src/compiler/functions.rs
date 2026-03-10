@@ -2791,7 +2791,11 @@ impl BytecodeCompiler {
         self.ref_locals.clear();
         self.exclusive_ref_locals.clear();
         self.inferred_ref_locals.clear();
+        self.reference_value_locals.clear();
+        self.exclusive_reference_value_locals.clear();
         self.immutable_locals.clear();
+        self.reference_value_module_bindings.clear();
+        self.exclusive_reference_value_module_bindings.clear();
         self.param_locals.clear();
         self.push_scope();
         self.push_drop_scope();

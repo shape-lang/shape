@@ -2473,6 +2473,101 @@ fn test_first_class_ref_outside_call_args_compiles() {
     assert_compiles_ok(code);
 }
 
+#[test]
+fn test_first_class_ref_arithmetic_autoderef() {
+    let code = r#"
+        function test() {
+            let x = 41
+            let r = &x
+            return r + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_first_class_ref_method_autoderef() {
+    let code = r#"
+        function test() {
+            let nums = [1, 2, 3]
+            let r = &nums
+            return r.len()
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(3));
+}
+
+#[test]
+fn test_first_class_ref_module_binding_autoderef() {
+    let code = r#"
+        let value = 41
+        let r = &value
+        r + 1
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_module_binding_write_while_borrowed_rejected() {
+    assert_compile_error(
+        r#"
+        let mut x = 10
+        let r = &x
+        x = 20
+        print(r)
+        "#,
+        "[B0002]",
+    );
+}
+
+#[test]
+fn test_module_binding_shared_plus_exclusive_rejected() {
+    assert_compile_error(
+        r#"
+        let mut x = 10
+        let r1 = &x
+        let r2 = &x
+        let m = &mut x
+        print(r1)
+        print(r2)
+        print(m)
+        "#,
+        "[B0001]",
+    );
+}
+
+#[test]
+fn test_module_binding_double_exclusive_rejected() {
+    assert_compile_error(
+        r#"
+        let mut x = 10
+        let m1 = &mut x
+        let m2 = &mut x
+        print(m1)
+        print(m2)
+        "#,
+        "[B0001]",
+    );
+}
+
+#[test]
+fn test_module_binding_mut_ref_param_method_mutates_original() {
+    let code = r#"
+        function append_item(&mut arr, value) {
+            arr.push(value)
+        }
+
+        let mut data = [1, 2, 3]
+        append_item(&mut data, 4)
+        data.len()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result, ValueWord::from_i64(4));
+}
+
 // ── Concurrency boundary tests (Phase 6: Three Rules) ──────────────
 
 #[test]

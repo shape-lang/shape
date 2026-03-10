@@ -3,6 +3,7 @@
 //! Handles array manipulation and slicing for arrays, series, and strings.
 
 use crate::executor::VirtualMachine;
+use shape_value::nanboxed::RefTarget;
 use shape_value::{HeapValue, VMError, ValueWord};
 use std::sync::Arc;
 
@@ -80,8 +81,21 @@ impl VirtualMachine {
             Some(Operand::Local(idx)) => {
                 let bp = self.current_locals_base();
                 let slot = bp + idx as usize;
-                // BARRIER: heap write site — appends element to array in local slot (may add heap pointer)
-                Self::push_to_array_slot(&mut self.stack[slot], value_nb)
+                match self.stack[slot].as_ref_target() {
+                    Some(RefTarget::Stack(target)) => {
+                        Self::push_to_array_slot(&mut self.stack[target], value_nb)
+                    }
+                    Some(RefTarget::ModuleBinding(target)) => {
+                        if target >= self.module_bindings.len() {
+                            return Err(VMError::RuntimeError(format!(
+                                "ModuleBinding index {} out of bounds",
+                                target
+                            )));
+                        }
+                        Self::push_to_array_slot(&mut self.module_bindings[target], value_nb)
+                    }
+                    None => Self::push_to_array_slot(&mut self.stack[slot], value_nb),
+                }
             }
             Some(Operand::ModuleBinding(idx)) => {
                 let slot = idx as usize;
@@ -91,8 +105,21 @@ impl VirtualMachine {
                         slot
                     )));
                 }
-                // BARRIER: heap write site — appends element to array in module binding (may add heap pointer)
-                Self::push_to_array_slot(&mut self.module_bindings[slot], value_nb)
+                match self.module_bindings[slot].as_ref_target() {
+                    Some(RefTarget::Stack(target)) => {
+                        Self::push_to_array_slot(&mut self.stack[target], value_nb)
+                    }
+                    Some(RefTarget::ModuleBinding(target)) => {
+                        if target >= self.module_bindings.len() {
+                            return Err(VMError::RuntimeError(format!(
+                                "ModuleBinding index {} out of bounds",
+                                target
+                            )));
+                        }
+                        Self::push_to_array_slot(&mut self.module_bindings[target], value_nb)
+                    }
+                    None => Self::push_to_array_slot(&mut self.module_bindings[slot], value_nb),
+                }
             }
             _ => Err(VMError::RuntimeError(
                 "ArrayPushLocal requires Local or ModuleBinding operand".into(),

@@ -57,6 +57,62 @@ pub(crate) fn strip_error_prefix(e: &ShapeError) -> String {
 }
 
 impl BytecodeCompiler {
+    const MODULE_BINDING_BORROW_FLAG: u16 = 0x8000;
+
+    pub(super) fn borrow_key_for_local(local_idx: u16) -> u16 {
+        local_idx
+    }
+
+    pub(super) fn borrow_key_for_module_binding(binding_idx: u16) -> u16 {
+        Self::MODULE_BINDING_BORROW_FLAG | binding_idx
+    }
+
+    pub(super) fn mark_reference_binding(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        is_exclusive: bool,
+    ) {
+        if is_local {
+            self.reference_value_locals.insert(slot);
+            if is_exclusive {
+                self.exclusive_reference_value_locals.insert(slot);
+            } else {
+                self.exclusive_reference_value_locals.remove(&slot);
+            }
+        } else {
+            self.reference_value_module_bindings.insert(slot);
+            if is_exclusive {
+                self.exclusive_reference_value_module_bindings.insert(slot);
+            } else {
+                self.exclusive_reference_value_module_bindings.remove(&slot);
+            }
+        }
+    }
+
+    pub(super) fn clear_reference_binding(&mut self, slot: u16, is_local: bool) {
+        if is_local {
+            self.reference_value_locals.remove(&slot);
+            self.exclusive_reference_value_locals.remove(&slot);
+        } else {
+            self.reference_value_module_bindings.remove(&slot);
+            self.exclusive_reference_value_module_bindings.remove(&slot);
+        }
+    }
+
+    pub(super) fn update_reference_binding_from_expr(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        expr: &shape_ast::ast::Expr,
+    ) {
+        if let shape_ast::ast::Expr::Reference { is_mutable, .. } = expr {
+            self.mark_reference_binding(slot, is_local, *is_mutable);
+        } else {
+            self.clear_reference_binding(slot, is_local);
+        }
+    }
+
     fn scalar_type_name_from_numeric(numeric_type: NumericType) -> &'static str {
         match numeric_type {
             NumericType::Int | NumericType::IntWidth(_) => "int",
@@ -413,7 +469,7 @@ impl BytecodeCompiler {
                 ));
                 let source_loc = self.span_to_source_location(arg.span());
                 self.borrow_checker.create_borrow(
-                    temp,
+                    Self::borrow_key_for_local(temp),
                     temp,
                     mode,
                     arg.span(),
@@ -453,9 +509,33 @@ impl BytecodeCompiler {
                 ));
                 return Ok(());
             }
+            if self.reference_value_locals.contains(&local_idx) {
+                if mode == BorrowMode::Exclusive
+                    && !self.exclusive_reference_value_locals.contains(&local_idx)
+                {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot pass shared reference variable '{}' as an exclusive reference",
+                            name
+                        ),
+                        location: Some(self.span_to_source_location(span)),
+                    });
+                }
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(local_idx)),
+                ));
+                return Ok(());
+            }
             let source_loc = self.span_to_source_location(span);
             self.borrow_checker
-                .create_borrow(local_idx, local_idx, mode, span, Some(source_loc))
+                .create_borrow(
+                    Self::borrow_key_for_local(local_idx),
+                    local_idx,
+                    mode,
+                    span,
+                    Some(source_loc),
+                )
                 .map_err(|e| match e {
                     ShapeError::SemanticError { message, location } => {
                         let user_msg = message
@@ -492,29 +572,52 @@ impl BytecodeCompiler {
                     location: Some(self.span_to_source_location(span)),
                 });
             }
-            // Borrow module_bindings via a local shadow and write it back after the call.
-            let shadow_local = self.declare_temp_local("__module_binding_ref_shadow_")?;
-            self.emit(Instruction::new(
-                OpCode::LoadModuleBinding,
-                Some(Operand::ModuleBinding(binding_idx)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(shadow_local)),
-            ));
+            if self.reference_value_module_bindings.contains(&binding_idx) {
+                if mode == BorrowMode::Exclusive
+                    && !self
+                        .exclusive_reference_value_module_bindings
+                        .contains(&binding_idx)
+                {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot pass shared reference variable '{}' as an exclusive reference",
+                            name
+                        ),
+                        location: Some(self.span_to_source_location(span)),
+                    });
+                }
+                self.emit(Instruction::new(
+                    OpCode::LoadModuleBinding,
+                    Some(Operand::ModuleBinding(binding_idx)),
+                ));
+                return Ok(());
+            }
             let source_loc = self.span_to_source_location(span);
-            self.borrow_checker.create_borrow(
-                shadow_local,
-                shadow_local,
-                mode,
-                span,
-                Some(source_loc),
-            )?;
+            self.borrow_checker
+                .create_borrow(
+                    Self::borrow_key_for_module_binding(binding_idx),
+                    binding_idx,
+                    mode,
+                    span,
+                    Some(source_loc),
+                )
+                .map_err(|e| match e {
+                    ShapeError::SemanticError { message, location } => {
+                        let user_msg = message.replace(
+                            &format!("(slot {})", Self::borrow_key_for_module_binding(binding_idx)),
+                            &format!("'{}'", name),
+                        );
+                        ShapeError::SemanticError {
+                            message: user_msg,
+                            location,
+                        }
+                    }
+                    other => other,
+                })?;
             self.emit(Instruction::new(
                 OpCode::MakeRef,
-                Some(Operand::Local(shadow_local)),
+                Some(Operand::ModuleBinding(binding_idx)),
             ));
-            self.record_call_arg_module_binding_writeback(shadow_local, binding_idx);
             Ok(())
         } else if let Some(func_idx) = self.find_function(name) {
             // Function name passed as reference argument: create a temporary local
@@ -533,7 +636,13 @@ impl BytecodeCompiler {
             ));
             let source_loc = self.span_to_source_location(span);
             self.borrow_checker
-                .create_borrow(temp, temp, mode, span, Some(source_loc))?;
+                .create_borrow(
+                    Self::borrow_key_for_local(temp),
+                    temp,
+                    mode,
+                    span,
+                    Some(source_loc),
+                )?;
             self.emit(Instruction::new(
                 OpCode::MakeRef,
                 Some(Operand::Local(temp)),

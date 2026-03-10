@@ -210,6 +210,11 @@ impl VirtualMachine {
 
         // Pop receiver (the object/series/array the method is called on)
         let receiver_nb = self.pop_vw()?;
+        let receiver_nb = if receiver_nb.is_ref() {
+            self.resolve_ref_value(&receiver_nb).unwrap_or(receiver_nb)
+        } else {
+            receiver_nb
+        };
 
         // Prepend receiver to args (handler functions expect receiver as first arg)
         args_nb.insert(0, receiver_nb.clone());

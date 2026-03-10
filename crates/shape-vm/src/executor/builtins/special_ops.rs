@@ -94,6 +94,14 @@ impl VirtualMachine {
     ) -> Result<String, VMError> {
         use shape_value::heap_value::HeapValue;
 
+        let deref_value;
+        let value = if value.is_ref() {
+            deref_value = self.resolve_ref_value(value).unwrap_or_else(|| value.clone());
+            &deref_value
+        } else {
+            value
+        };
+
         // Content values render via the TerminalRenderer for full ANSI support
         if let Some(node) = value.as_content() {
             use shape_runtime::content_renderer::ContentRenderer;

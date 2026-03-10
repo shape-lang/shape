@@ -533,6 +533,11 @@ pub struct BytecodeCompiler {
     /// Inferred-ref params are owned values passed by reference for performance;
     /// closures may capture them (the value is dereferenced at capture time).
     pub(crate) inferred_ref_locals: HashSet<u16>,
+    /// Locals whose binding value is itself a first-class reference (`let r = &x`).
+    /// Reads auto-deref; writes still rebind the local.
+    pub(crate) reference_value_locals: HashSet<u16>,
+    /// Subset of reference_value_locals that hold exclusive (`&mut`) references.
+    pub(crate) exclusive_reference_value_locals: HashSet<u16>,
     /// Local variable indices declared as `const` (immutable binding).
     pub(crate) const_locals: HashSet<u16>,
     /// Module binding indices declared as `const` (immutable binding).
@@ -544,6 +549,10 @@ pub struct BytecodeCompiler {
     pub(crate) param_locals: HashSet<u16>,
     /// Module binding indices declared as immutable `let`.
     pub(crate) immutable_module_bindings: HashSet<u16>,
+    /// Module bindings whose value is itself a first-class reference.
+    pub(crate) reference_value_module_bindings: HashSet<u16>,
+    /// Subset of reference_value_module_bindings that hold exclusive (`&mut`) references.
+    pub(crate) exclusive_reference_value_module_bindings: HashSet<u16>,
     /// True while compiling function call arguments (allows `&` references).
     pub(crate) in_call_args: bool,
     /// Borrow mode for the argument currently being compiled.

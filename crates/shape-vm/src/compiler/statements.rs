@@ -3294,6 +3294,11 @@ impl BytecodeCompiler {
                             };
                             self.track_drop_module_binding(binding_idx, is_async);
                         }
+                        if let Some(value) = &var_decl.value {
+                            self.update_reference_binding_from_expr(binding_idx, false, value);
+                        } else {
+                            self.clear_reference_binding(binding_idx, false);
+                        }
                     } else {
                         self.compile_destructure_pattern_global(&var_decl.pattern)?;
                     }
@@ -3399,6 +3404,11 @@ impl BytecodeCompiler {
                                 Some(DropKind::SyncOnly) | None => false,
                             };
                             self.track_drop_local(local_idx, is_async);
+                            if let Some(value) = &var_decl.value {
+                                self.update_reference_binding_from_expr(local_idx, true, value);
+                            } else {
+                                self.clear_reference_binding(local_idx, true);
+                            }
                         }
                     }
                 }
@@ -3428,6 +3438,24 @@ impl BytecodeCompiler {
                                 location: None,
                             });
                         }
+                        self.borrow_checker
+                            .check_write_allowed(
+                                Self::borrow_key_for_local(local_idx),
+                                None,
+                            )
+                            .map_err(|e| match e {
+                                ShapeError::SemanticError { message, location } => {
+                                    let user_msg = message.replace(
+                                        &format!("(slot {})", local_idx),
+                                        &format!("'{}'", name),
+                                    );
+                                    ShapeError::SemanticError {
+                                        message: user_msg,
+                                        location,
+                                    }
+                                }
+                                other => other,
+                            })?;
                     } else {
                         let scoped_name = self
                             .resolve_scoped_module_binding_name(name)
@@ -3449,6 +3477,27 @@ impl BytecodeCompiler {
                                     location: None,
                                 });
                             }
+                            self.borrow_checker
+                                .check_write_allowed(
+                                    Self::borrow_key_for_module_binding(binding_idx),
+                                    None,
+                                )
+                                .map_err(|e| match e {
+                                    ShapeError::SemanticError { message, location } => {
+                                        let user_msg = message.replace(
+                                            &format!(
+                                                "(slot {})",
+                                                Self::borrow_key_for_module_binding(binding_idx)
+                                            ),
+                                            &format!("'{}'", name),
+                                        );
+                                        ShapeError::SemanticError {
+                                            message: user_msg,
+                                            location,
+                                        }
+                                    }
+                                    other => other,
+                                })?;
                         }
                     }
                 }
@@ -3466,22 +3515,20 @@ impl BytecodeCompiler {
                             if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                                 if recv_name == name {
                                     if let Some(local_idx) = self.resolve_local(name) {
-                                        if !self.ref_locals.contains(&local_idx) {
-                                            self.compile_expr(&args[0])?;
-                                            let pushed_numeric = self.last_expr_numeric_type;
-                                            self.emit(Instruction::new(
-                                                OpCode::ArrayPushLocal,
-                                                Some(Operand::Local(local_idx)),
-                                            ));
-                                            if let Some(numeric_type) = pushed_numeric {
-                                                self.mark_slot_as_numeric_array(
-                                                    local_idx,
-                                                    true,
-                                                    numeric_type,
-                                                );
-                                            }
-                                            break 'assign;
+                                        self.compile_expr(&args[0])?;
+                                        let pushed_numeric = self.last_expr_numeric_type;
+                                        self.emit(Instruction::new(
+                                            OpCode::ArrayPushLocal,
+                                            Some(Operand::Local(local_idx)),
+                                        ));
+                                        if let Some(numeric_type) = pushed_numeric {
+                                            self.mark_slot_as_numeric_array(
+                                                local_idx,
+                                                true,
+                                                numeric_type,
+                                            );
                                         }
+                                        break 'assign;
                                     } else {
                                         let binding_idx = self.get_or_create_module_binding(name);
                                         self.compile_expr(&args[0])?;
@@ -3512,6 +3559,21 @@ impl BytecodeCompiler {
                 // Store in variable
                 self.compile_destructure_assignment(&assign.pattern)?;
                 if let Some(name) = assigned_ident.as_deref() {
+                    if let Some(local_idx) = self.resolve_local(name) {
+                        if !self.ref_locals.contains(&local_idx) {
+                            self.update_reference_binding_from_expr(local_idx, true, &assign.value);
+                        }
+                    } else if let Some(scoped_name) =
+                        self.resolve_scoped_module_binding_name(name)
+                    {
+                        if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                            self.update_reference_binding_from_expr(
+                                binding_idx,
+                                false,
+                                &assign.value,
+                            );
+                        }
+                    }
                     self.propagate_assignment_type_to_identifier(name);
                 }
             }
@@ -3529,22 +3591,20 @@ impl BytecodeCompiler {
                     if method == "push" && args.len() == 1 {
                         if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                             if let Some(local_idx) = self.resolve_local(recv_name) {
-                                if !self.ref_locals.contains(&local_idx) {
-                                    self.compile_expr(&args[0])?;
-                                    let pushed_numeric = self.last_expr_numeric_type;
-                                    self.emit(Instruction::new(
-                                        OpCode::ArrayPushLocal,
-                                        Some(Operand::Local(local_idx)),
-                                    ));
-                                    if let Some(numeric_type) = pushed_numeric {
-                                        self.mark_slot_as_numeric_array(
-                                            local_idx,
-                                            true,
-                                            numeric_type,
-                                        );
-                                    }
-                                    return Ok(());
+                                self.compile_expr(&args[0])?;
+                                let pushed_numeric = self.last_expr_numeric_type;
+                                self.emit(Instruction::new(
+                                    OpCode::ArrayPushLocal,
+                                    Some(Operand::Local(local_idx)),
+                                ));
+                                if let Some(numeric_type) = pushed_numeric {
+                                    self.mark_slot_as_numeric_array(
+                                        local_idx,
+                                        true,
+                                        numeric_type,
+                                    );
                                 }
+                                return Ok(());
                             } else if !self
                                 .mutable_closure_captures
                                 .contains_key(recv_name.as_str())

@@ -965,23 +965,30 @@ impl BytecodeCompiler {
         if method == "push" && args.len() == 1 {
             if let Expr::Identifier(recv_name, _) = receiver {
                 if let Some(local_idx) = self.resolve_local(recv_name) {
-                    if !self.ref_locals.contains(&local_idx) {
-                        self.compile_expr(&args[0])?;
-                        let pushed_numeric = self.last_expr_numeric_type;
+                    self.compile_expr(&args[0])?;
+                    let pushed_numeric = self.last_expr_numeric_type;
+                    self.emit(Instruction::new(
+                        OpCode::ArrayPushLocal,
+                        Some(Operand::Local(local_idx)),
+                    ));
+                    if let Some(numeric_type) = pushed_numeric {
+                        self.mark_slot_as_numeric_array(local_idx, true, numeric_type);
+                    }
+                    // Push the mutated array as expression result
+                    if self.ref_locals.contains(&local_idx)
+                        || self.reference_value_locals.contains(&local_idx)
+                    {
                         self.emit(Instruction::new(
-                            OpCode::ArrayPushLocal,
+                            OpCode::DerefLoad,
                             Some(Operand::Local(local_idx)),
                         ));
-                        if let Some(numeric_type) = pushed_numeric {
-                            self.mark_slot_as_numeric_array(local_idx, true, numeric_type);
-                        }
-                        // Push the mutated array as expression result
+                    } else {
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
                             Some(Operand::Local(local_idx)),
                         ));
-                        return Ok(());
                     }
+                    return Ok(());
                 } else if !self
                     .mutable_closure_captures
                     .contains_key(recv_name.as_str())

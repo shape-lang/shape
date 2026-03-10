@@ -7,10 +7,18 @@ use crate::{
     executor::VirtualMachine,
     memory::{record_heap_write, write_barrier_vw},
 };
+use shape_value::nanboxed::RefTarget;
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
 use std::sync::{Arc, RwLock};
 impl VirtualMachine {
+    pub(in crate::executor) fn resolve_ref_value(&self, value: &ValueWord) -> Option<ValueWord> {
+        match value.as_ref_target()? {
+            RefTarget::Stack(slot) => self.stack.get(slot).cloned(),
+            RefTarget::ModuleBinding(slot) => self.module_bindings.get(slot).cloned(),
+        }
+    }
+
     #[inline(always)]
     pub(in crate::executor) fn exec_variables(
         &mut self,
@@ -279,12 +287,18 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let absolute_slot = bp + idx as usize;
-            self.push_vw(ValueWord::from_ref(absolute_slot))?;
-        } else {
-            return Err(VMError::InvalidOperand);
+        match instruction.operand {
+            Some(Operand::Local(idx)) => {
+                let bp = self.current_locals_base();
+                let absolute_slot = bp + idx as usize;
+                self.push_vw(ValueWord::from_ref(absolute_slot))?;
+            }
+            Some(Operand::ModuleBinding(idx)) => {
+                self.push_vw(ValueWord::from_module_binding_ref(idx as usize))?;
+            }
+            _ => {
+                return Err(VMError::InvalidOperand);
+            }
         }
         Ok(())
     }
@@ -301,17 +315,23 @@ impl VirtualMachine {
             let bp = self.current_locals_base();
             let slot = bp + ref_slot as usize;
             let ref_val = &self.stack[slot];
-            let target = ref_val.as_ref_slot().ok_or_else(|| {
+            let target = ref_val.as_ref_target().ok_or_else(|| {
                 VMError::RuntimeError(
                     "internal error: expected a reference value (&) but found a regular value. \
                      This is a compiler bug — please report it"
                         .to_string(),
                 )
             })?;
-            // Clone the value at the target absolute slot
-            let nb = unsafe {
-                let bits = *(self.stack.as_ptr().add(target) as *const u64);
-                ValueWord::clone_from_bits(bits)
+            let nb = match target {
+                RefTarget::Stack(target) => unsafe {
+                    let bits = *(self.stack.as_ptr().add(target) as *const u64);
+                    ValueWord::clone_from_bits(bits)
+                },
+                RefTarget::ModuleBinding(target) => self
+                    .module_bindings
+                    .get(target)
+                    .cloned()
+                    .unwrap_or_else(ValueWord::none),
             };
             self.push_vw(nb)?;
         } else {
@@ -332,7 +352,7 @@ impl VirtualMachine {
             let value = self.pop_vw()?;
             let bp = self.current_locals_base();
             let slot = bp + ref_slot as usize;
-            let target = self.stack[slot].as_ref_slot().ok_or_else(|| {
+            let target = self.stack[slot].as_ref_target().ok_or_else(|| {
                 VMError::RuntimeError(
                     "internal error: expected a reference value (&) but found a regular value. \
                      This is a compiler bug — please report it"
@@ -340,8 +360,19 @@ impl VirtualMachine {
                 )
             })?;
             record_heap_write();
-            write_barrier_vw(&self.stack[target], &value);
-            self.stack[target] = value;
+            match target {
+                RefTarget::Stack(target) => {
+                    write_barrier_vw(&self.stack[target], &value);
+                    self.stack[target] = value;
+                }
+                RefTarget::ModuleBinding(target) => {
+                    if target >= self.module_bindings.len() {
+                        self.module_bindings.resize_with(target + 1, ValueWord::none);
+                    }
+                    write_barrier_vw(&self.module_bindings[target], &value);
+                    self.module_bindings[target] = value;
+                }
+            }
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -365,7 +396,7 @@ impl VirtualMachine {
             let index_nb = self.pop_vw()?;
             let bp = self.current_locals_base();
             let slot = bp + ref_slot as usize;
-            let target = self.stack[slot].as_ref_slot().ok_or_else(|| {
+            let target = self.stack[slot].as_ref_target().ok_or_else(|| {
                 VMError::RuntimeError(
                     "internal error: expected a reference value (&) but found a regular value. \
                      This is a compiler bug — please report it"
@@ -373,13 +404,24 @@ impl VirtualMachine {
                 )
             })?;
 
-            // Take the object out of the target slot, mutate it, put it back
-            // (same pattern as op_set_local_index)
-            let mut object_nb = std::mem::replace(&mut self.stack[target], ValueWord::none());
+            let target_slot = match target {
+                RefTarget::Stack(target) => &mut self.stack[target],
+                RefTarget::ModuleBinding(target) => {
+                    if target >= self.module_bindings.len() {
+                        return Err(VMError::RuntimeError(format!(
+                            "ModuleBinding index {} out of bounds",
+                            target
+                        )));
+                    }
+                    &mut self.module_bindings[target]
+                }
+            };
+
+            let mut object_nb = std::mem::replace(target_slot, ValueWord::none());
             let result = Self::set_array_index_on_object(&mut object_nb, &index_nb, value);
             record_heap_write();
             write_barrier_vw(&ValueWord::none(), &object_nb);
-            self.stack[target] = object_nb;
+            *target_slot = object_nb;
             result
         } else {
             Err(VMError::InvalidOperand)

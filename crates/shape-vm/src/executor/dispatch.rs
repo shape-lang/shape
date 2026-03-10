@@ -351,6 +351,10 @@ impl VirtualMachine {
             }
 
             self.execute_instruction(&instruction, ctx.as_deref_mut())?;
+
+            if matches!(instruction.opcode, OpCode::Halt) {
+                break;
+            }
         }
 
         let tl = self.program.top_level_locals_count as usize;

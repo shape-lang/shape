@@ -66,10 +66,18 @@ impl BytecodeCompiler {
                     OpCode::DerefLoad,
                     Some(Operand::Local(local_idx)),
                 ));
+            } else if self.reference_value_locals.contains(&local_idx) {
+                self.emit(Instruction::new(
+                    OpCode::DerefLoad,
+                    Some(Operand::Local(local_idx)),
+                ));
             } else {
                 let source_loc = self.span_to_source_location(span);
                 self.borrow_checker
-                    .check_read_allowed(local_idx, Some(source_loc))
+                    .check_read_allowed(
+                        Self::borrow_key_for_local(local_idx),
+                        Some(source_loc),
+                    )
                     .map_err(|e| match e {
                         ShapeError::SemanticError { message, location } => {
                             let user_msg = message
@@ -125,10 +133,45 @@ impl BytecodeCompiler {
                     location: Some(self.span_to_source_location(span)),
                 }
             })?;
-            self.emit(Instruction::new(
-                OpCode::LoadModuleBinding,
-                Some(Operand::ModuleBinding(binding_idx)),
-            ));
+            let source_loc = self.span_to_source_location(span);
+            self.borrow_checker
+                .check_read_allowed(
+                    Self::borrow_key_for_module_binding(binding_idx),
+                    Some(source_loc),
+                )
+                .map_err(|e| match e {
+                    ShapeError::SemanticError { message, location } => {
+                        let user_msg = message.replace(
+                            &format!("(slot {})", Self::borrow_key_for_module_binding(binding_idx)),
+                            &format!("'{}'", name),
+                        );
+                        ShapeError::SemanticError {
+                            message: user_msg,
+                            location,
+                        }
+                    }
+                    other => other,
+                })?;
+            if self.reference_value_module_bindings.contains(&binding_idx) {
+                let temp = self.declare_temp_local("__module_binding_ref_read_")?;
+                self.emit(Instruction::new(
+                    OpCode::LoadModuleBinding,
+                    Some(Operand::ModuleBinding(binding_idx)),
+                ));
+                self.emit(Instruction::new(
+                    OpCode::StoreLocal,
+                    Some(Operand::Local(temp)),
+                ));
+                self.emit(Instruction::new(
+                    OpCode::DerefLoad,
+                    Some(Operand::Local(temp)),
+                ));
+            } else {
+                self.emit(Instruction::new(
+                    OpCode::LoadModuleBinding,
+                    Some(Operand::ModuleBinding(binding_idx)),
+                ));
+            }
             // Track schema for typed merge optimization
             let binding_type = self.type_tracker.get_binding_type(binding_idx).cloned();
             self.last_expr_schema = binding_type.as_ref().and_then(|info| {
