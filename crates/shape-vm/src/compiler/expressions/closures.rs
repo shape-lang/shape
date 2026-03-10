@@ -47,9 +47,24 @@ impl BytecodeCompiler {
         // Exception: inferred-ref locals (params passed by reference for performance)
         // are owned values and CAN be captured — the value is dereferenced at capture time.
         for captured in &captured_vars {
-            if let Some(local_idx) = self.resolve_local(captured)
-                && self.ref_locals.contains(&local_idx)
-                && !self.inferred_ref_locals.contains(&local_idx)
+            if let Some(local_idx) = self.resolve_local(captured) {
+                let escapes_direct_borrow = self.ref_locals.contains(&local_idx)
+                    && !self.inferred_ref_locals.contains(&local_idx);
+                let escapes_reference_value = self.reference_value_locals.contains(&local_idx);
+                if escapes_direct_borrow || escapes_reference_value {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "[B0003] reference '{}' cannot escape into a closure; capture a value instead",
+                            captured
+                        ),
+                        location: None,
+                    });
+                }
+            }
+
+            if let Some(scoped_name) = self.resolve_scoped_module_binding_name(captured)
+                && let Some(&binding_idx) = self.module_bindings.get(&scoped_name)
+                && self.reference_value_module_bindings.contains(&binding_idx)
             {
                 return Err(ShapeError::SemanticError {
                     message: format!(

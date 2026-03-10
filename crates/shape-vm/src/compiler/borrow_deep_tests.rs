@@ -682,7 +682,26 @@ fn test_returned_reference_binding_can_move_existing_reference_value() {
 }
 
 #[test]
-fn test_returned_reference_binding_rejects_reused_source_reference_value() {
+fn test_returned_reference_binding_can_alias_existing_reference_value() {
+    let code = r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function test() {
+            var x = 41
+            let r1 = borrow_id(x)
+            let r2 = borrow_id(r1)
+            print(r1)
+            return r2 + 1
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
+}
+
+#[test]
+fn test_returned_reference_binding_alias_keeps_owner_borrowed_after_source_last_use() {
     assert_compile_error(
         r#"
         function borrow_id(&x) {
@@ -693,11 +712,12 @@ fn test_returned_reference_binding_rejects_reused_source_reference_value() {
             var x = 1
             let r1 = borrow_id(x)
             let r2 = borrow_id(r1)
-            print(r1)
+            print(r1) // last use of r1; r2 must keep x frozen
+            x = 2
             return r2
         }
         "#,
-        "source reference is no longer used",
+        "B0002",
     );
 }
 
@@ -717,6 +737,27 @@ fn test_returned_reference_binding_keeps_owner_borrowed_through_local_callable_v
         "#,
         "B0002",
     );
+}
+
+#[test]
+fn test_returned_reference_binding_can_alias_reference_param() {
+    let code = r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        function alias_param(&x) {
+            let r = borrow_id(x)
+            return r + 1
+        }
+
+        function test() {
+            var x = 41
+            return alias_param(x)
+        }
+    "#;
+    let result = compile_and_run_fn(code, "test");
+    assert_eq!(result, ValueWord::from_i64(42));
 }
 
 #[test]
@@ -2818,6 +2859,34 @@ fn test_module_binding_double_exclusive_rejected() {
         print(m2)
         "#,
         "[B0001]",
+    );
+}
+
+#[test]
+fn test_module_binding_reference_cannot_escape_into_closure() {
+    assert_compile_error(
+        r#"
+        let value = 10
+        let r = &value
+        let f = || r
+        "#,
+        "[B0003]",
+    );
+}
+
+#[test]
+fn test_returned_module_binding_reference_cannot_escape_into_closure() {
+    assert_compile_error(
+        r#"
+        function borrow_id(&x) {
+            x
+        }
+
+        let value = 10
+        let r = borrow_id(value)
+        let f = || r
+        "#,
+        "[B0003]",
     );
 }
 

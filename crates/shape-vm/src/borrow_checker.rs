@@ -306,6 +306,14 @@ impl BorrowChecker {
         }
     }
 
+    /// Return the borrowed place for a stable borrow ID, if it is still active.
+    pub fn borrow_place_for_borrow_id(&self, borrow_id: BorrowId) -> Option<BorrowPlace> {
+        self.active_borrows
+            .iter()
+            .find(|borrow| borrow.borrow_id == borrow_id)
+            .map(|borrow| borrow.borrowed_place)
+    }
+
     /// Return the borrowed place currently owned by `ref_slot`, if any.
     pub fn borrow_place_for_ref_slot(&self, ref_slot: u16) -> Option<BorrowPlace> {
         self.active_borrows

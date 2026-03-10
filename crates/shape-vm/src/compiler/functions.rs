@@ -3043,6 +3043,8 @@ impl BytecodeCompiler {
             std::mem::take(&mut self.exclusive_reference_value_locals);
         let saved_tracked_reference_borrow_locals =
             std::mem::take(&mut self.tracked_reference_borrow_locals);
+        let saved_tracked_reference_borrow_holder_counts =
+            std::mem::take(&mut self.tracked_reference_borrow_holder_counts);
         let saved_scoped_reference_value_locals =
             std::mem::take(&mut self.scoped_reference_value_locals);
         let saved_future_reference_use_names = std::mem::take(&mut self.future_reference_use_names);
@@ -3092,6 +3094,7 @@ impl BytecodeCompiler {
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
         self.tracked_reference_borrow_locals.clear();
+        self.tracked_reference_borrow_holder_counts.clear();
         self.scoped_reference_value_locals = vec![HashSet::new()];
         self.future_reference_use_names = vec![HashSet::new()];
         self.repeating_body_reference_local_barriers.clear();
@@ -3329,6 +3332,8 @@ impl BytecodeCompiler {
                             saved_exclusive_reference_value_locals;
                         self.tracked_reference_borrow_locals =
                             saved_tracked_reference_borrow_locals;
+                        self.tracked_reference_borrow_holder_counts =
+                            saved_tracked_reference_borrow_holder_counts;
                         self.scoped_reference_value_locals = saved_scoped_reference_value_locals;
                         self.future_reference_use_names = saved_future_reference_use_names;
                         self.repeating_body_reference_local_barriers =
@@ -3431,6 +3436,7 @@ impl BytecodeCompiler {
         self.reference_value_locals = saved_reference_value_locals;
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
         self.tracked_reference_borrow_locals = saved_tracked_reference_borrow_locals;
+        self.tracked_reference_borrow_holder_counts = saved_tracked_reference_borrow_holder_counts;
         self.scoped_reference_value_locals = saved_scoped_reference_value_locals;
         self.future_reference_use_names = saved_future_reference_use_names;
         self.repeating_body_reference_local_barriers =
@@ -4776,6 +4782,7 @@ mod tests {
                     let mut x = 1
                     let shared = &x
                     let exclusive = &mut x
+                    shared
                 }
             "#,
         )
@@ -4820,6 +4827,7 @@ mod tests {
                     let mut x = 1
                     let shared = &x
                     x = 2
+                    shared
                 }
             "#,
         )
@@ -4864,6 +4872,7 @@ mod tests {
                     let mut x = 1
                     let exclusive = &mut x
                     let copy = x
+                    exclusive
                 }
             "#,
         )
@@ -5865,6 +5874,7 @@ mod tests {
                     let mut x = 1
                     let shared = &x
                     let y = (x = 2)
+                    shared
                 }
             "#,
         )
@@ -5946,6 +5956,8 @@ mod tests {
                     let y = while true {
                         let shared = &x
                         x = 2
+                        shared
+                        0
                     }
                 }
             "#,
@@ -5992,6 +6004,8 @@ mod tests {
                     let y = for item in items {
                         let shared = &x
                         x = 2
+                        shared
+                        0
                     }
                 }
             "#,
@@ -6037,7 +6051,9 @@ mod tests {
                     let mut x = 1
                     let y = loop {
                         let shared = &x
-                        break (x = 2)
+                        x = 2
+                        shared
+                        break 0
                     }
                 }
             "#,
@@ -6117,9 +6133,10 @@ mod tests {
         let program = shape_ast::parser::parse_program(
             r#"
                 function destructure_decl_conflict(pair) {
-                    let [left, right] = pair
+                    var [left, right] = pair
                     let shared = &left
                     left = 2
+                    shared
                 }
             "#,
         )
@@ -6161,8 +6178,10 @@ mod tests {
         let program = shape_ast::parser::parse_program(
             r#"
                 function destructure_param_conflict([left, right]) {
-                    let shared = &left
-                    left = 2
+                    let mut left_copy = left
+                    let shared = &left_copy
+                    left_copy = 2
+                    shared
                 }
             "#,
         )
@@ -6205,8 +6224,10 @@ mod tests {
             r#"
                 function destructure_for_conflict(items) {
                     for [left, right] in items {
-                        let shared = &left
-                        left = 2
+                        let mut left_copy = left
+                        let shared = &left_copy
+                        left_copy = 2
+                        shared
                     }
                 }
             "#,
@@ -6254,6 +6275,8 @@ mod tests {
                         true => {
                             let shared = &x
                             x = 2
+                            shared
+                            0
                         }
                         _ => 0
                     }
@@ -6340,6 +6363,8 @@ mod tests {
                         [left, right] => {
                             let shared = &x
                             x = 2
+                            shared
+                            0
                         }
                         _ => 0
                     }
@@ -6389,6 +6414,8 @@ mod tests {
                         Some(v) => {
                             let shared = &x
                             x = 2
+                            shared
+                            0
                         }
                         None => 0
                     }
@@ -6433,9 +6460,10 @@ mod tests {
         let program = shape_ast::parser::parse_program(
             r#"
                 function rest_destructure_conflict(items) {
-                    let [head, ...tail] = items
+                    var [head, ...tail] = items
                     let shared = &tail
                     tail = items
+                    shared
                 }
             "#,
         )
@@ -6477,9 +6505,10 @@ mod tests {
         let program = shape_ast::parser::parse_program(
             r#"
                 function decomposition_conflict(merged) {
-                    let (left: {x}, right: {y}) = merged
+                    var (left: {x}, right: {y}) = merged
                     let shared = &left
                     left = merged
+                    shared
                 }
             "#,
         )
@@ -6524,6 +6553,7 @@ mod tests {
                     let mut x = 1
                     let shared = &x
                     let xs = [(x = 2) for y in [1]]
+                    shared
                 }
             "#,
         )
@@ -6568,6 +6598,7 @@ mod tests {
                     let mut x = 1
                     let shared = &x
                     let rows = from y in [1] where (x = 2) > 0 select y
+                    shared
                 }
             "#,
         )

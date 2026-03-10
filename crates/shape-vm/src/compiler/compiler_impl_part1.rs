@@ -86,6 +86,7 @@ impl BytecodeCompiler {
             exclusive_reference_value_module_bindings: HashSet::new(),
             tracked_reference_borrow_locals: HashMap::new(),
             tracked_reference_borrow_module_bindings: HashMap::new(),
+            tracked_reference_borrow_holder_counts: HashMap::new(),
             scoped_reference_value_locals: vec![HashSet::new()],
             scoped_reference_value_module_bindings: vec![HashSet::new()],
             future_reference_use_names: vec![HashSet::new()],

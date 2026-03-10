@@ -584,11 +584,18 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
     }
 
     // Collect results and filter out sentinel values
-    let loan_live_at_result: Vec<(u32, u32)> = loan_live_at
+    let forward_live_points: Vec<(u32, u32)> = loan_live_at
         .complete()
         .iter()
         .filter(|&&(p, l)| p != u32::MAX && l != u32::MAX)
         .cloned()
+        .collect();
+    let (nll_live_set, loans_with_reachable_uses) = compute_nll_live_points(facts);
+    let loan_live_at_result: Vec<(u32, u32)> = forward_live_points
+        .into_iter()
+        .filter(|point_loan| {
+            !loans_with_reachable_uses.contains(&point_loan.1) || nll_live_set.contains(point_loan)
+        })
         .collect();
 
     // Build point → active loans map
@@ -832,6 +839,70 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         loan_info: facts.loan_info.clone(),
         return_reference_contract,
     }
+}
+
+fn compute_nll_live_points(facts: &BorrowFacts) -> (HashSet<(u32, u32)>, HashSet<u32>) {
+    let mut predecessors: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (from, to) in &facts.cfg_edge {
+        predecessors.entry(*to).or_default().push(*from);
+    }
+
+    let issue_points: HashMap<u32, u32> = facts
+        .loan_issued_at
+        .iter()
+        .map(|(loan_id, point)| (*loan_id, *point))
+        .collect();
+
+    let mut invalidation_points: HashMap<u32, HashSet<u32>> = HashMap::new();
+    for (point, loan_id) in &facts.invalidates {
+        invalidation_points
+            .entry(*loan_id)
+            .or_default()
+            .insert(*point);
+    }
+
+    let mut use_points: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (loan_id, point) in &facts.use_of_loan {
+        use_points.entry(*loan_id).or_default().push(*point);
+    }
+
+    let mut live_points = HashSet::new();
+    let mut loans_with_reachable_uses = HashSet::new();
+    for (loan_id, issue_point) in issue_points {
+        let mut worklist = use_points.get(&loan_id).cloned().unwrap_or_default();
+        let invalidates = invalidation_points.get(&loan_id);
+        let mut visited = HashSet::new();
+        let mut loan_live_points = HashSet::new();
+        let mut reached_issue = false;
+
+        while let Some(point) = worklist.pop() {
+            if !visited.insert(point) {
+                continue;
+            }
+
+            loan_live_points.insert((point, loan_id));
+
+            if point == issue_point {
+                reached_issue = true;
+                continue;
+            }
+
+            if invalidates.is_some_and(|points| points.contains(&point)) {
+                continue;
+            }
+
+            if let Some(preds) = predecessors.get(&point) {
+                worklist.extend(preds.iter().copied());
+            }
+        }
+
+        if reached_issue {
+            loans_with_reachable_uses.insert(loan_id);
+            live_points.extend(loan_live_points);
+        }
+    }
+
+    (live_points, loans_with_reachable_uses)
 }
 
 /// Raw solver output (before combining with liveness for full BorrowAnalysis).

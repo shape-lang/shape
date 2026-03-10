@@ -1251,10 +1251,10 @@ impl BytecodeCompiler {
                 return Ok((borrow_id, *is_mutable));
             }
             Expr::Identifier(name, span) => {
-                if let Some(moved_borrow) =
-                    self.compile_moved_reference_call_arg(name, *span, mode)?
+                if let Some(existing_borrow) =
+                    self.compile_existing_reference_call_arg(name, *span, mode)?
                 {
-                    return Ok(moved_borrow);
+                    return Ok(existing_borrow);
                 }
                 self.compile_reference_identifier(name, *span, mode)?
             }
@@ -1303,48 +1303,56 @@ impl BytecodeCompiler {
         Ok((borrow_id, mode == BorrowMode::Exclusive))
     }
 
-    fn compile_moved_reference_call_arg(
+    fn compile_existing_reference_call_arg(
         &mut self,
         name: &str,
         span: shape_ast::ast::Span,
         mode: BorrowMode,
     ) -> Result<Option<(BorrowId, bool)>> {
-        let (slot, is_local, is_exclusive, borrow_id) =
-            if let Some(local_idx) = self.resolve_local(name) {
-                let Some(tracked) = self
-                    .tracked_reference_borrow_locals
-                    .get(&local_idx)
-                    .cloned()
-                else {
-                    return Ok(None);
-                };
+        let (borrow_id, is_exclusive) = if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(tracked) = self.tracked_reference_borrow_locals.get(&local_idx) {
                 (
-                    local_idx,
-                    true,
+                    tracked.borrow_id,
                     self.exclusive_reference_value_locals.contains(&local_idx),
-                    tracked.borrow_id,
                 )
-            } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
-                let Some(&binding_idx) = self.module_bindings.get(&scoped_name) else {
-                    return Ok(None);
-                };
-                let Some(tracked) = self
-                    .tracked_reference_borrow_module_bindings
-                    .get(&binding_idx)
-                    .cloned()
-                else {
-                    return Ok(None);
-                };
+            } else if self.ref_locals.contains(&local_idx) {
                 (
-                    binding_idx,
-                    false,
-                    self.exclusive_reference_value_module_bindings
-                        .contains(&binding_idx),
-                    tracked.borrow_id,
+                    BorrowId::MAX,
+                    self.exclusive_ref_locals.contains(&local_idx),
+                )
+            } else if self.reference_value_locals.contains(&local_idx) {
+                (
+                    BorrowId::MAX,
+                    self.exclusive_reference_value_locals.contains(&local_idx),
                 )
             } else {
                 return Ok(None);
+            }
+        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+            let Some(&binding_idx) = self.module_bindings.get(&scoped_name) else {
+                return Ok(None);
             };
+            if let Some(tracked) = self
+                .tracked_reference_borrow_module_bindings
+                .get(&binding_idx)
+            {
+                (
+                    tracked.borrow_id,
+                    self.exclusive_reference_value_module_bindings
+                        .contains(&binding_idx),
+                )
+            } else if self.reference_value_module_bindings.contains(&binding_idx) {
+                (
+                    BorrowId::MAX,
+                    self.exclusive_reference_value_module_bindings
+                        .contains(&binding_idx),
+                )
+            } else {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        };
 
         if mode == BorrowMode::Exclusive && !is_exclusive {
             return Err(ShapeError::SemanticError {
@@ -1356,42 +1364,7 @@ impl BytecodeCompiler {
             });
         }
 
-        if self
-            .future_reference_use_names
-            .last()
-            .is_some_and(|names| names.contains(name))
-        {
-            return Err(ShapeError::SemanticError {
-                message:
-                    "binding a returned reference from an existing reference value is only supported when the source reference is no longer used".to_string(),
-                location: Some(self.span_to_source_location(span)),
-            });
-        }
-
-        let temp = self.declare_temp_local("__moved_ref_arg_")?;
         self.compile_identifier_as_raw_reference(name, span)?;
-        self.emit(Instruction::new(
-            OpCode::StoreLocal,
-            Some(Operand::Local(temp)),
-        ));
-        self.emit_unit();
-        if is_local {
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(slot)),
-            ));
-        } else {
-            self.emit(Instruction::new(
-                OpCode::StoreModuleBinding,
-                Some(Operand::ModuleBinding(slot)),
-            ));
-        }
-        self.emit(Instruction::new(
-            OpCode::LoadLocal,
-            Some(Operand::Local(temp)),
-        ));
-        self.take_reference_binding_without_release(slot, is_local);
-
         Ok(Some((borrow_id, is_exclusive)))
     }
 
@@ -1468,7 +1441,9 @@ impl BytecodeCompiler {
         }
 
         self.current_call_arg_borrow_mode = saved_mode;
-        if let Some((borrow_id, _)) = returned_borrow {
+        if let Some((borrow_id, _)) =
+            returned_borrow.filter(|(borrow_id, _)| *borrow_id != BorrowId::MAX)
+        {
             self.borrow_checker
                 .rebind_borrow_region(borrow_id, parent_region);
         }
@@ -1703,6 +1678,10 @@ impl BytecodeCompiler {
         self.borrow_checker.rebind_borrow_ref_slot(borrow_id, slot);
         self.mark_reference_binding(slot, is_local, is_exclusive);
         self.track_reference_binding_slot(slot, is_local);
+        *self
+            .tracked_reference_borrow_holder_counts
+            .entry(borrow_id)
+            .or_insert(0) += 1;
         if is_local {
             self.type_tracker
                 .set_local_type(slot, VariableTypeInfo::unknown());
@@ -1722,6 +1701,23 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn bind_untracked_reference_value_slot(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        is_exclusive: bool,
+    ) {
+        self.mark_reference_binding(slot, is_local, is_exclusive);
+        self.track_reference_binding_slot(slot, is_local);
+        if is_local {
+            self.type_tracker
+                .set_local_type(slot, VariableTypeInfo::unknown());
+        } else {
+            self.type_tracker
+                .set_binding_type(slot, VariableTypeInfo::unknown());
+        }
+    }
+
     pub(super) fn release_tracked_reference_borrow(&mut self, slot: u16, is_local: bool) {
         let tracked = if is_local {
             self.tracked_reference_borrow_locals.remove(&slot)
@@ -1729,30 +1725,24 @@ impl BytecodeCompiler {
             self.tracked_reference_borrow_module_bindings.remove(&slot)
         };
         if let Some(tracked) = tracked {
-            self.borrow_checker.release_borrow_by_id(tracked.borrow_id);
+            match self
+                .tracked_reference_borrow_holder_counts
+                .entry(tracked.borrow_id)
+            {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let count = entry.get_mut();
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        entry.remove();
+                        self.borrow_checker.release_borrow_by_id(tracked.borrow_id);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(_) => {
+                    self.borrow_checker.release_borrow_by_id(tracked.borrow_id);
+                }
+            }
         }
-    }
-
-    fn take_reference_binding_without_release(
-        &mut self,
-        slot: u16,
-        is_local: bool,
-    ) -> Option<TrackedReferenceBorrow> {
-        let tracked = if is_local {
-            self.tracked_reference_borrow_locals.remove(&slot)
-        } else {
-            self.tracked_reference_borrow_module_bindings.remove(&slot)
-        };
-        if is_local {
-            self.reference_value_locals.remove(&slot);
-            self.exclusive_reference_value_locals.remove(&slot);
-        } else {
-            self.reference_value_module_bindings.remove(&slot);
-            self.exclusive_reference_value_module_bindings.remove(&slot);
-        }
-        let fallback_storage = self.default_binding_storage_class_for_slot(slot, is_local);
-        self.set_binding_storage_class(slot, is_local, fallback_storage);
-        tracked
     }
 
     pub(super) fn clear_reference_binding(&mut self, slot: u16, is_local: bool) {
@@ -1775,7 +1765,8 @@ impl BytecodeCompiler {
         expr: &shape_ast::ast::Expr,
     ) {
         if let shape_ast::ast::Expr::Reference { is_mutable, .. } = expr {
-            self.mark_reference_binding(slot, is_local, *is_mutable);
+            self.clear_reference_binding(slot, is_local);
+            self.bind_untracked_reference_value_slot(slot, is_local, *is_mutable);
         } else {
             self.clear_reference_binding(slot, is_local);
         }
@@ -1790,7 +1781,12 @@ impl BytecodeCompiler {
         ref_borrow: Option<(BorrowId, bool)>,
     ) {
         if let Some((borrow_id, is_exclusive)) = ref_borrow {
-            self.bind_reference_value_slot(slot, is_local, name, is_exclusive, borrow_id);
+            self.clear_reference_binding(slot, is_local);
+            if borrow_id == BorrowId::MAX {
+                self.bind_untracked_reference_value_slot(slot, is_local, is_exclusive);
+            } else {
+                self.bind_reference_value_slot(slot, is_local, name, is_exclusive, borrow_id);
+            }
         } else {
             self.update_reference_binding_from_expr(slot, is_local, expr);
         }
@@ -2099,16 +2095,15 @@ impl BytecodeCompiler {
                 .copied()
                 .collect(),
         );
-        let protected_places = self
+        let active_borrow_ids: std::collections::HashSet<BorrowId> = self
             .tracked_reference_borrow_locals
-            .keys()
-            .copied()
-            .chain(
-                self.tracked_reference_borrow_module_bindings
-                    .keys()
-                    .copied(),
-            )
-            .filter_map(|slot| self.borrow_checker.borrow_place_for_ref_slot(slot))
+            .values()
+            .chain(self.tracked_reference_borrow_module_bindings.values())
+            .map(|tracked| tracked.borrow_id)
+            .collect();
+        let protected_places = active_borrow_ids
+            .into_iter()
+            .filter_map(|borrow_id| self.borrow_checker.borrow_place_for_borrow_id(borrow_id))
             .collect();
         self.repeating_body_protected_places.push(protected_places);
     }

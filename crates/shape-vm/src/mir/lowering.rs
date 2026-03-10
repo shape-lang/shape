@@ -2510,6 +2510,17 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("kept".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Identifier("shared".to_string(), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
         ];
         let mir = lower_function("test", &[], &body, span());
         let cfg = ControlFlowGraph::build(&mir);
@@ -2607,6 +2618,7 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::Return(Some(Expr::Identifier("shared".to_string(), span())), span()),
         ];
         let mir = lower_function("test", &[], &body, span());
         let analysis = solver::analyze(&mir);
@@ -2674,6 +2686,17 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("kept".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Identifier("shared".to_string(), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
         ];
         let mir = lower_function("test", &[], &body, span());
         let analysis = solver::analyze(&mir);
@@ -2720,6 +2743,7 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let mir = lower_function("test", &[], &body, span());
         let analysis = solver::analyze(&mir);
@@ -2773,6 +2797,7 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::Expression(Expr::Identifier("exclusive".to_string(), span()), span()),
         ];
         let mir = lower_function("test", &[], &body, span());
         let analysis = solver::analyze(&mir);
@@ -3166,6 +3191,8 @@ mod tests {
                     let y = while true {
                         let shared = &x
                         x = 2
+                        shared
+                        0
                     }
                 }
             "#,
@@ -3195,6 +3222,8 @@ mod tests {
                     let y = for item in items {
                         let shared = &x
                         x = 2
+                        shared
+                        0
                     }
                 }
             "#,
@@ -3223,7 +3252,9 @@ mod tests {
                     let mut x = 1
                     let y = loop {
                         let shared = &x
-                        break (x = 2)
+                        x = 2
+                        shared
+                        break 0
                     }
                 }
             "#,
@@ -3279,6 +3310,8 @@ mod tests {
                         true => {
                             let shared = &x
                             x = 2
+                            shared
+                            0
                         }
                         _ => 0
                     }
@@ -3336,6 +3369,8 @@ mod tests {
                         [left, right] => {
                             let shared = &x
                             x = 2
+                            shared
+                            0
                         }
                         _ => 0
                     }
@@ -3368,6 +3403,8 @@ mod tests {
                         { left: l, right: r } => {
                             let shared = &x
                             x = 2
+                            shared
+                            0
                         }
                         _ => 0
                     }
@@ -3401,6 +3438,8 @@ mod tests {
                         Some(v) => {
                             let shared = &x
                             x = 2
+                            shared
+                            0
                         }
                         None => 0
                     }
@@ -3428,9 +3467,10 @@ mod tests {
         let lowering = lower_parsed_function(
             r#"
                 function test(pair) {
-                    let [left, right] = pair
+                    var [left, right] = pair
                     let shared = &left
                     left = 2
+                    shared
                 }
             "#,
         );
@@ -3454,8 +3494,10 @@ mod tests {
         let lowering = lower_parsed_function(
             r#"
                 function test([left, right]) {
-                    let shared = &left
-                    left = 2
+                    let mut left_copy = left
+                    let shared = &left_copy
+                    left_copy = 2
+                    shared
                 }
             "#,
         );
@@ -3540,6 +3582,7 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let lowering = lower_function_detailed("test", &[pair_param], &body, span());
         assert!(
@@ -3562,9 +3605,10 @@ mod tests {
         let lowering = lower_parsed_function(
             r#"
                 function test(items) {
-                    let [head, ...tail] = items
+                    var [head, ...tail] = items
                     let shared = &tail
                     tail = items
+                    shared
                 }
             "#,
         );
@@ -3588,9 +3632,10 @@ mod tests {
         let lowering = lower_parsed_function(
             r#"
                 function test(merged) {
-                    let (left: {x}, right: {y}) = merged
+                    var (left: {x}, right: {y}) = merged
                     let shared = &left
                     left = merged
+                    shared
                 }
             "#,
         );
@@ -3967,6 +4012,7 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::Return(Some(Expr::Identifier("shared".to_string(), span())), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(
@@ -4220,6 +4266,7 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(
@@ -4281,6 +4328,7 @@ mod tests {
                 },
                 span(),
             ),
+            Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(
@@ -4567,6 +4615,7 @@ mod tests {
                     let mut x = 1
                     let r = &x
                     let xs = [(x = 2) for y in [1]]
+                    r
                 }
             "#,
         );
@@ -4594,6 +4643,7 @@ mod tests {
                     let mut x = 1
                     let r = &x
                     let rows = from y in [1] where (x = 2) > 0 select y
+                    r
                 }
             "#,
         );

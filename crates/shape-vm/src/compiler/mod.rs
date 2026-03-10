@@ -608,6 +608,9 @@ pub struct BytecodeCompiler {
     pub(crate) tracked_reference_borrow_locals: HashMap<u16, TrackedReferenceBorrow>,
     /// Module first-class reference bindings with active borrow ownership.
     pub(crate) tracked_reference_borrow_module_bindings: HashMap<u16, TrackedReferenceBorrow>,
+    /// Active holder counts per borrow ID for first-class reference aliases.
+    pub(crate) tracked_reference_borrow_holder_counts:
+        HashMap<crate::borrow_checker::BorrowId, usize>,
     /// Local ref-holder slots declared in the current lexical scopes.
     pub(crate) scoped_reference_value_locals: Vec<HashSet<u16>>,
     /// Module ref-holder slots declared in the current module scopes.
