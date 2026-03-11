@@ -161,6 +161,13 @@ pub enum Commands {
         action: KeysAction,
     },
 
+    /// Register a new account on the package registry
+    Register {
+        /// Registry URL (defaults to https://pkg.shape-lang.dev)
+        #[arg(long)]
+        registry: Option<String>,
+    },
+
     /// Authenticate with the package registry
     Login {
         /// API token from the registry
@@ -182,6 +189,12 @@ pub enum Commands {
         /// Skip signing the bundle before publishing
         #[arg(long)]
         no_sign: bool,
+        /// Do not include source code in the published package
+        #[arg(long)]
+        no_source: bool,
+        /// Native library blob: target=path (e.g. linux-x86_64=./lib.tar.gz). Repeatable.
+        #[arg(long = "native", value_name = "TARGET=PATH")]
+        native: Vec<String>,
     },
 
     /// Add a dependency to the current project

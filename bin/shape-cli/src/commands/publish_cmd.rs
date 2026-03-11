@@ -60,20 +60,46 @@ fn sign_bundle(
     Ok(hex::encode(public_key))
 }
 
+/// Collect `.shape` source files into a tar.gz archive.
+fn create_source_tarball(project_root: &std::path::Path) -> Result<Vec<u8>> {
+    let mut archive = Vec::new();
+    {
+        let encoder =
+            flate2::write::GzEncoder::new(&mut archive, flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+
+        let src_dir = project_root.join("src");
+        if src_dir.is_dir() {
+            tar.append_dir_all("src", &src_dir)
+                .context("failed to add src/ to source tarball")?;
+        }
+
+        // Include shape.toml
+        let toml_path = project_root.join("shape.toml");
+        if toml_path.is_file() {
+            tar.append_path_with_name(&toml_path, "shape.toml")
+                .context("failed to add shape.toml to source tarball")?;
+        }
+
+        tar.finish().context("failed to finalize source tarball")?;
+    }
+    Ok(archive)
+}
+
 /// `shape publish` -- build, sign, and publish a package to the registry.
 pub async fn run_publish(
     registry: Option<String>,
     key: Option<PathBuf>,
     no_sign: bool,
+    no_source: bool,
+    native: Vec<String>,
 ) -> Result<()> {
     // Step 1: Find project and build
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     let project = shape_runtime::project::try_find_project_root(&cwd)
         .map_err(|e| anyhow::anyhow!("{}", e))?
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No shape.toml found. Run `shape publish` from within a Shape project."
-            )
+            anyhow::anyhow!("No shape.toml found. Run `shape publish` from within a Shape project.")
         })?;
 
     let pkg_name = &project.config.project.name;
@@ -128,7 +154,7 @@ pub async fn run_publish(
 
     let client = RegistryClient::new(registry).with_token(credentials.token);
 
-    // Validate the token before uploading the (potentially large) bundle
+    // Validate the token before uploading
     eprintln!("Authenticating...");
     client.validate_token().await.map_err(|e| {
         anyhow::anyhow!(
@@ -137,20 +163,43 @@ pub async fn run_publish(
         )
     })?;
 
-    // Step 4: Serialize and upload
+    // Step 4: Serialize bundle
     let bundle_bytes = bundle
         .to_bytes()
         .map_err(|e| anyhow::anyhow!("failed to serialize bundle: {}", e))?;
 
+    // Step 5: Collect source tarball (unless --no-source)
+    let source_bytes = if no_source {
+        None
+    } else {
+        eprintln!("Packaging source...");
+        Some(create_source_tarball(&project.root_path)?)
+    };
+
+    // Step 6: Collect native blobs from --native flags
+    let mut native_blobs: Vec<(String, Vec<u8>)> = Vec::new();
+    for spec in &native {
+        let (target, path) = spec.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid --native format '{}': expected 'target=path' (e.g. 'linux-x86_64=./lib.tar.gz')",
+                spec
+            )
+        })?;
+        let data = std::fs::read(path)
+            .with_context(|| format!("failed to read native blob from '{}'", path))?;
+        native_blobs.push((target.to_string(), data));
+    }
+
+    // Step 7: Upload via multipart
     let bundle_size = bundle_bytes.len();
     eprintln!("Uploading {} ({} bytes)...", pkg_name, bundle_size);
 
     let response = client
-        .publish(bundle_bytes)
+        .publish_multipart(bundle_bytes, source_bytes, native_blobs)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Step 5: Show success
+    // Step 8: Show success
     eprintln!("Published {} v{}", pkg_name, pkg_version);
     if !response.is_empty() {
         eprintln!("{}", response);

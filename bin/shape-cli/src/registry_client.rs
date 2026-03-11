@@ -49,6 +49,12 @@ pub struct VersionInfo {
     pub native_platforms: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RegisterResponse {
+    pub username: String,
+    pub token: String,
+}
+
 pub struct RegistryClient {
     client: reqwest::Client,
     registry_url: String,
@@ -109,6 +115,42 @@ impl RegistryClient {
         self.token
             .clone()
             .ok_or_else(|| "not authenticated: no token set (run `shape login` first)".to_string())
+    }
+
+    /// Register a new account: POST /v1/api/auth/register
+    pub async fn register(
+        &self,
+        username: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<RegisterResponse, String> {
+        let url = format!("{}/v1/api/auth/register", self.registry_url);
+        let body = serde_json::json!({
+            "username": username,
+            "email": email,
+            "password": password,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("register request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registration failed with status {}: {}",
+                resp.status(),
+                resp.text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".to_string())
+            ));
+        }
+
+        resp.json::<RegisterResponse>()
+            .await
+            .map_err(|e| format!("failed to parse register response: {}", e))
     }
 
     /// Search packages: GET /v1/api/packages?q=<query>
@@ -244,7 +286,129 @@ impl RegistryClient {
         Ok(())
     }
 
-    /// Publish bundle: POST /v1/api/packages/new (requires auth)
+    /// Publish via multipart: POST /v1/api/packages/new (requires auth)
+    pub async fn publish_multipart(
+        &self,
+        shapec_bytes: Vec<u8>,
+        source_bytes: Option<Vec<u8>>,
+        native_blobs: Vec<(String, Vec<u8>)>,
+    ) -> Result<String, String> {
+        let token = self.auth_header()?;
+        let url = format!("{}/v1/api/packages/new", self.registry_url);
+
+        let mut form = reqwest::multipart::Form::new().part(
+            "shapec",
+            reqwest::multipart::Part::bytes(shapec_bytes)
+                .mime_str("application/octet-stream")
+                .unwrap(),
+        );
+
+        if let Some(source) = source_bytes {
+            form = form.part(
+                "source",
+                reqwest::multipart::Part::bytes(source)
+                    .mime_str("application/gzip")
+                    .unwrap(),
+            );
+        }
+
+        for (target, data) in native_blobs {
+            form = form.part(
+                format!("native:{target}"),
+                reqwest::multipart::Part::bytes(data)
+                    .mime_str("application/gzip")
+                    .unwrap(),
+            );
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("publish request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "publish failed with status {}: {}",
+                resp.status(),
+                resp.text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".to_string())
+            ));
+        }
+
+        resp.text()
+            .await
+            .map_err(|e| format!("failed to read publish response: {}", e))
+    }
+
+    /// Download source tarball: GET /v1/api/packages/{name}/{version}/download/source
+    pub async fn download_source(&self, name: &str, version: &str) -> Result<Vec<u8>, String> {
+        let url = format!(
+            "{}/v1/api/packages/{}/{}/download/source",
+            self.registry_url, name, version
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("download source request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "download source failed with status {}: {}",
+                resp.status(),
+                resp.text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".to_string())
+            ));
+        }
+
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("failed to read download body: {}", e))
+    }
+
+    /// Download native blob: GET /v1/api/packages/{name}/{version}/download/native/{target}
+    pub async fn download_native(
+        &self,
+        name: &str,
+        version: &str,
+        target: &str,
+    ) -> Result<Vec<u8>, String> {
+        let url = format!(
+            "{}/v1/api/packages/{}/{}/download/native/{}",
+            self.registry_url, name, version, target
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("download native request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "download native failed with status {}: {}",
+                resp.status(),
+                resp.text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".to_string())
+            ));
+        }
+
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("failed to read download body: {}", e))
+    }
+
+    /// Legacy publish bundle: POST /v1/api/packages/new (requires auth)
     pub async fn publish(&self, bundle_bytes: Vec<u8>) -> Result<String, String> {
         let token = self.auth_header()?;
         let url = format!("{}/v1/api/packages/new", self.registry_url);
@@ -283,7 +447,7 @@ impl RegistryClient {
         let resp = self
             .client
             .delete(&url)
-            .header("Authorization", &token)
+            .header("Authorization", format!("Bearer {}", token))
             .send()
             .await
             .map_err(|e| format!("yank request failed: {}", e))?;

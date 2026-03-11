@@ -38,8 +38,10 @@ clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 indicatif = "0.17"
 libloading = "0.8"
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
 tempfile = "3.24"
+flate2 = "1"
+tar = "0.4"
 
 # TUI REPL dependencies
 ratatui = "0.29"

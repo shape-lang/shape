@@ -25,7 +25,7 @@ use cli_args::{Cli, Commands};
 use commands::{
     ProviderOptions, run_add, run_build, run_doctest, run_expand_comptime, run_ext_install,
     run_ext_list, run_ext_remove, run_info, run_jit_parity, run_keys_generate, run_keys_list,
-    run_keys_trust, run_login, run_publish, run_remove, run_repl, run_schema_fetch,
+    run_keys_trust, run_login, run_publish, run_register, run_remove, run_repl, run_schema_fetch,
     run_schema_status, run_script, run_search, run_serve, run_sign, run_snapshot_delete,
     run_snapshot_info, run_snapshot_list, run_tree, run_tui, run_verify, run_wire_serve,
 };
@@ -200,6 +200,9 @@ async fn main() -> Result<()> {
             }
         }
 
+        (Some(Commands::Register { registry }), _) => {
+            run_register(registry).await?;
+        }
         (Some(Commands::Login { token, registry }), _) => {
             run_login(token, registry).await?;
         }
@@ -208,10 +211,12 @@ async fn main() -> Result<()> {
                 registry,
                 key,
                 no_sign,
+                no_source,
+                native,
             }),
             _,
         ) => {
-            run_publish(registry, key, no_sign).await?;
+            run_publish(registry, key, no_sign, no_source, native).await?;
         }
         (Some(Commands::Add { name, version }), _) => {
             run_add(name, version).await?;
