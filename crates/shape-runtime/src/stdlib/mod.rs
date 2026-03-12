@@ -8,6 +8,7 @@
 //! [`capability_tags`] and enforced at compile time via the permission system.
 
 pub mod archive;
+pub mod byte_utils;
 pub mod capability_tags;
 pub mod compress;
 pub mod crypto;
