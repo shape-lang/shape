@@ -997,45 +997,10 @@ fn test_scientific_notation_without_fraction_parses_as_number() {
 }
 
 // =========================================================================
-// test_def
+// test_def grammar rule removed — `test` is no longer a grammar keyword,
+// so `test "..." { ... }` parses as regular statements (identifier, string
+// literal, block expression).  No special rejection needed.
 // =========================================================================
-
-#[test]
-fn test_test_definition() {
-    let input = r#"
-    test "math suite" {
-        it "adds numbers" {
-            let result = 1 + 1;
-        }
-    }
-    "#;
-    let err = parse_items(input).expect_err("embedded test definition should be rejected");
-    let message = format!("{err:?}");
-    assert!(
-        message.contains("Embedded test definitions are no longer supported"),
-        "unexpected parse error: {message}"
-    );
-}
-
-#[test]
-fn test_test_definition_with_setup() {
-    let input = r#"
-    test "suite with setup" {
-        setup {
-            let x = 10;
-        }
-        it "uses setup" {
-            let y = x + 5;
-        }
-    }
-    "#;
-    let err = parse_items(input).expect_err("embedded test definition should be rejected");
-    let message = format!("{err:?}");
-    assert!(
-        message.contains("Embedded test definitions are no longer supported"),
-        "unexpected parse error: {message}"
-    );
-}
 
 // =========================================================================
 // stream_def

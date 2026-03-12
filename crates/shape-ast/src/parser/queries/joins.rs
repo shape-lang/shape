@@ -231,12 +231,14 @@ mod tests {
         assert!(result.is_ok());
         let join = result.unwrap();
         assert!(matches!(join.join_type, JoinType::Left));
+        assert!(
+            matches!(&join.condition, JoinCondition::Using(cols) if cols.len() == 2),
+            "Expected Using condition with 2 columns, got {:?}",
+            join.condition
+        );
         if let JoinCondition::Using(cols) = &join.condition {
-            assert_eq!(cols.len(), 2);
             assert_eq!(cols[0], "symbol");
             assert_eq!(cols[1], "timestamp");
-        } else {
-            panic!("Expected Using condition");
         }
     }
 

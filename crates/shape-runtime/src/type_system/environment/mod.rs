@@ -218,6 +218,7 @@ impl TypeEnvironment {
             name: "Content".to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "render".to_string(),
                 optional: false,
@@ -266,6 +267,7 @@ impl TypeEnvironment {
                 default_type: None,
                 trait_bounds: vec![],
             }]),
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "render".to_string(),
                 optional: false,
@@ -301,6 +303,7 @@ impl TypeEnvironment {
             name: "Drop".to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "drop".to_string(),
                 optional: false,
@@ -343,6 +346,7 @@ impl TypeEnvironment {
                 default_type: None,
                 trait_bounds: vec![],
             }]),
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "into".to_string(),
                 optional: false,
@@ -374,6 +378,7 @@ impl TypeEnvironment {
                 default_type: None,
                 trait_bounds: vec![],
             }]),
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "tryInto".to_string(),
                 optional: false,
@@ -411,6 +416,7 @@ impl TypeEnvironment {
                 default_type: None,
                 trait_bounds: vec![],
             }]),
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "iter".to_string(),
                 optional: false,
@@ -479,6 +485,7 @@ impl TypeEnvironment {
                 name: trait_name.to_string(),
                 doc_comment: None,
                 type_params: None,
+                super_traits: vec![],
                 members: vec![TraitMember::Required(InterfaceMember::Method {
                     name: method_name.to_string(),
                     optional: false,
@@ -498,6 +505,7 @@ impl TypeEnvironment {
             name: "Neg".to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "neg".to_string(),
                 optional: false,
@@ -516,6 +524,7 @@ impl TypeEnvironment {
             name: "Eq".to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "eq".to_string(),
                 optional: false,
@@ -534,6 +543,7 @@ impl TypeEnvironment {
             name: "Ord".to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: vec![TraitMember::Required(InterfaceMember::Method {
                 name: "cmp".to_string(),
                 optional: false,
@@ -1391,6 +1401,7 @@ mod tests {
             name: "Queryable".to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: vec![
                 TraitMember::Required(InterfaceMember::Method {
                     name: "filter".to_string(),
@@ -1435,6 +1446,7 @@ mod tests {
             name: "Queryable".to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: vec![
                 TraitMember::Required(InterfaceMember::Method {
                     name: "filter".to_string(),
@@ -1480,6 +1492,7 @@ mod tests {
             name: "Queryable".to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: vec![
                 TraitMember::Required(InterfaceMember::Method {
                     name: "filter".to_string(),

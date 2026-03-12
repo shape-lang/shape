@@ -48,7 +48,6 @@ item_core = {
     | foreign_function_def  // fn python name(...) { ... } — must be before function_def (two idents)
     | function_def
     | stream_def
-    | test_def
     | query
     | statement
 }
@@ -202,7 +201,8 @@ interface_member = {
 }
 
 // ===== Trait Definitions =====
-trait_def = { annotations? ~ "trait" ~ ident ~ type_params? ~ "{" ~ trait_body ~ "}" }
+trait_def = { annotations? ~ "trait" ~ ident ~ type_params? ~ supertrait_list? ~ "{" ~ trait_body ~ "}" }
+supertrait_list = { ":" ~ optional_type ~ ("+" ~ optional_type)* }
 
 trait_body = {
     trait_member*
@@ -599,77 +599,6 @@ query_decl = {
     "query" ~ ident ~ ":" ~ type_annotation ~ "=" ~ expression ~ ";"?
 }
 
-// ===== Test Definitions =====
-test_def = { "test" ~ string ~ "{" ~ test_body ~ "}" }
-test_body = { 
-    test_setup?
-    ~ test_teardown?
-    ~ test_case+
-}
-
-test_setup = { "setup" ~ "{" ~ statement* ~ "}" }
-test_teardown = { "teardown" ~ "{" ~ statement* ~ "}" }
-
-test_case = { 
-    ("test" | "it") ~ string ~ ("->" ~ test_tags)? ~ "{" ~ test_statements ~ "}"
-}
-
-test_tags = { "[" ~ test_tag ~ ("," ~ test_tag)* ~ ","? ~ "]" }
-test_tag = { ident | string }
-
-test_statements = { (test_statement | statement)* }
-test_statement = {
-    assert_statement
-    | expect_statement
-    | should_statement
-    | test_fixture_statement
-}
-
-assert_statement = { 
-    "assert" ~ expression ~ ("," ~ string)?
-}
-
-expect_statement = {
-    "expect" ~ "(" ~ expression ~ ")" ~ "." ~ expectation_matcher
-}
-
-expectation_matcher = {
-    ("to_be" | "toBe") ~ "(" ~ expression ~ ")"
-    | ("to_equal" | "toEqual") ~ "(" ~ expression ~ ")"
-    | ("to_be_close_to" | "toBeCloseTo") ~ "(" ~ expression ~ ("," ~ number)? ~ ")"
-    | ("to_be_greater_than" | "toBeGreaterThan") ~ "(" ~ expression ~ ")"
-    | ("to_be_less_than" | "toBeLessThan") ~ "(" ~ expression ~ ")"
-    | ("to_contain" | "toContain") ~ "(" ~ expression ~ ")"
-    | ("to_be_truthy" | "toBeTruthy") ~ "(" ~ ")"
-    | ("to_be_falsy" | "toBeFalsy") ~ "(" ~ ")"
-    | ("to_throw" | "toThrow") ~ "(" ~ string? ~ ")"
-    | ("to_match_pattern" | "toMatchPattern") ~ "(" ~ ident ~ ("," ~ test_match_options)? ~ ")"
-}
-
-test_match_options = { "{" ~ test_match_option ~ ("," ~ test_match_option)* ~ ","? ~ "}" }
-test_match_option = {
-    "fuzzy" ~ ":" ~ number
-    | "timeframe" ~ ":" ~ timeframe  
-    | "symbol" ~ ":" ~ string
-}
-
-should_statement = {
-    expression ~ "should" ~ should_matcher
-}
-
-should_matcher = {
-    "be" ~ expression
-    | "equal" ~ expression
-    | "contain" ~ expression
-    | "match" ~ ident
-    | "be_close_to" ~ expression ~ ("within" ~ number)?
-}
-
-test_fixture_statement = {
-    "with_data" ~ "(" ~ expression ~ ")" ~ "{" ~ statement* ~ "}"
-    | "with_mock" ~ "(" ~ ident ~ ("," ~ expression)? ~ ")" ~ "{" ~ statement* ~ "}"
-}
-
 // ===== AI Features (Phase 3) =====
 optimize_statement = {
     "optimize" ~ ident ~ "in" ~ param_range ~ "for" ~ metric_expr
@@ -723,7 +652,6 @@ analysis_target = {
 
 query_where_clause = { "where" ~ expression }
 on_clause = { "on" ~ "(" ~ timeframe ~ ")" }
-group_by_clause = { "group" ~ "by" ~ group_by_list }
 having_clause = { "having" ~ expression }
 order_by_clause = { "order" ~ "by" ~ order_by_list }
 order_by_list = { order_by_item ~ ("," ~ order_by_item)* }
@@ -795,27 +723,6 @@ join_condition = {
     "on" ~ expression
     | "using" ~ "(" ~ ident ~ ("," ~ ident)* ~ ")"
     | "within" ~ duration
-}
-
-group_by_list = { group_by_expr ~ ("," ~ group_by_expr)* }
-group_by_expr = {
-    time_interval
-    | ident
-    | expression
-}
-time_interval = { number ~ time_unit }
-
-calculate_clause = { "calculate" ~ "{" ~ calculate_list ~ "}" }
-calculate_list = { calculate_expr ~ ("," ~ calculate_expr)* ~ ","? }
-calculate_expr = { ident ~ ":" ~ aggregation_expr }
-aggregation_expr = {
-    aggregation_function ~ "(" ~ expression? ~ ")"
-    | aggregation_function
-}
-aggregation_function = {
-    "count" | "sum" | "avg" | "min" | "max" 
-    | "stddev" | "first" | "last" | "percentile"
-    | ident  // Custom aggregation function
 }
 
 // ===== Time Windows =====
@@ -1401,13 +1308,6 @@ object_field_name = { ident | keyword }
 object_typed_field = { object_field_name ~ ":" ~ type_annotation ~ "=" ~ expression }
 object_value_field = { object_field_name ~ ":" ~ expression }
 object_spread = { "..." ~ expression }
-
-// ===== Built-in Functions =====
-builtin_function = {
-    "count" | "sum" | "max" | "min" | "abs" | "sqrt" | "ln" | "stddev" | "slice" | "fold" | "cumsum" |
-    "highest" | "lowest" | "highest_index" | "lowest_index" |
-    "first" | "last" | "range" | "push" | "if" | "length" | "where" | "print" | "series" | "shift" | "resample"
-}
 
 // ===== Literals =====
 literal = {

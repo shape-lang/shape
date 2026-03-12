@@ -64,6 +64,7 @@ impl BytecodeCompiler {
             method: method.to_string(),
             args,
             named_args: Vec::new(),
+            optional: false,
             span,
         };
         let prev = self.allow_internal_comptime_namespace;
