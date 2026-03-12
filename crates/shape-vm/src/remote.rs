@@ -1015,6 +1015,60 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
     stub
 }
 
+/// Perform blob negotiation before sending a call request.
+///
+/// Creates a `BlobNegotiationRequest` with the hashes from the blob set,
+/// checks which blobs the remote already has (via the provided cache as a
+/// local stand-in), and returns the set of known hashes that can be stripped
+/// from the outgoing request.
+///
+/// In a real transport scenario the `BlobNegotiationRequest` would be sent
+/// over the wire and the `BlobNegotiationResponse` received from the remote.
+/// Currently this performs the negotiation locally against the provided cache.
+///
+/// # Example flow
+/// ```text
+/// 1. Caller builds blob set for function
+/// 2. negotiate_blobs() → BlobNegotiationRequest with offered hashes
+/// 3. Remote replies with BlobNegotiationResponse (known_hashes)
+/// 4. Caller strips known blobs from the request
+/// ```
+pub fn negotiate_blobs(
+    blobs: &[(FunctionHash, FunctionBlob)],
+    remote_cache: &RemoteBlobCache,
+) -> BlobNegotiationResponse {
+    let request = BlobNegotiationRequest {
+        offered_hashes: blobs.iter().map(|(h, _)| *h).collect(),
+    };
+    // TODO: Wire this to actual transport — currently performs negotiation
+    // locally against the provided cache. In production, `request` would be
+    // serialized, sent over the wire, and the response deserialized.
+    handle_negotiation(&request, remote_cache)
+}
+
+/// Build a `RemoteCallRequest` for a named function, with blob negotiation.
+///
+/// Performs a negotiation step against the provided `remote_cache` to discover
+/// which blobs the remote already has, then strips those from the request.
+/// If `remote_cache` is `None`, sends all blobs (no negotiation).
+pub fn build_call_request_with_negotiation(
+    program: &BytecodeProgram,
+    function_name: &str,
+    arguments: Vec<SerializableVMValue>,
+    remote_cache: Option<&RemoteBlobCache>,
+) -> RemoteCallRequest {
+    let mut request = build_call_request(program, function_name, arguments);
+
+    if let (Some(cache), Some(blobs)) = (remote_cache, &mut request.function_blobs) {
+        let response = negotiate_blobs(blobs, cache);
+        let known_set: std::collections::HashSet<FunctionHash> =
+            response.known_hashes.into_iter().collect();
+        blobs.retain(|(hash, _)| !known_set.contains(hash));
+    }
+
+    request
+}
+
 /// Build a `RemoteCallRequest` for a named function.
 ///
 /// Convenience function that handles program hashing and type schema extraction.
@@ -1148,6 +1202,229 @@ pub fn handle_negotiation(
 ) -> BlobNegotiationResponse {
     BlobNegotiationResponse {
         known_hashes: cache.filter_known(&request.offered_hashes),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wire message dispatch (V1 + V2 handlers)
+// ---------------------------------------------------------------------------
+
+/// Handle a `WireMessage` by dispatching to the appropriate handler.
+///
+/// V1 messages (BlobNegotiation, Call, CallResponse, Sidecar) are fully handled.
+/// V2 messages (Execute, Validate, Auth, Ping, file/project operations) return
+/// stub error responses until the execution server is implemented.
+pub fn handle_wire_message(
+    msg: WireMessage,
+    store: &SnapshotStore,
+    cache: &mut RemoteBlobCache,
+) -> WireMessage {
+    match msg {
+        WireMessage::BlobNegotiation(req) => {
+            let response = handle_negotiation(&req, cache);
+            WireMessage::BlobNegotiationReply(response)
+        }
+        WireMessage::BlobNegotiationReply(_) => {
+            // Client-side message — server should not receive this.
+            // Return an error wrapped in an ExecuteResponse as a generic error channel.
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id: 0,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some("Unexpected BlobNegotiationReply on server side".to_string()),
+                content_terminal: None,
+                content_html: None,
+                diagnostics: vec![],
+                metrics: None,
+                print_output: None,
+            })
+        }
+        WireMessage::Call(req) => {
+            // Cache any incoming blobs for future negotiation
+            if let Some(ref blobs) = req.function_blobs {
+                cache.insert_blobs(blobs);
+            }
+            let response = execute_remote_call(req, store);
+            WireMessage::CallResponse(response)
+        }
+        WireMessage::CallResponse(_) => {
+            // Client-side message — server should not receive this.
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id: 0,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some("Unexpected CallResponse on server side".to_string()),
+                content_terminal: None,
+                content_html: None,
+                diagnostics: vec![],
+                metrics: None,
+                print_output: None,
+            })
+        }
+        WireMessage::Sidecar(_sidecar) => {
+            // Sidecars are buffered by the transport layer and reassembled
+            // before the Call message is dispatched. If we receive one here,
+            // it means the transport did not buffer it.
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id: 0,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some("Unexpected standalone Sidecar message".to_string()),
+                content_terminal: None,
+                content_html: None,
+                diagnostics: vec![],
+                metrics: None,
+                print_output: None,
+            })
+        }
+
+        // --- V2 message stubs ---
+
+        WireMessage::Execute(req) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: req.request_id,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some("V2 Execute not yet implemented".to_string()),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![WireDiagnostic {
+                severity: "error".to_string(),
+                message: "V2 Execute handler not yet implemented".to_string(),
+                line: None,
+                column: None,
+            }],
+            metrics: None,
+            print_output: None,
+        }),
+        WireMessage::ExecuteResponse(_) => {
+            // Client-side message — should not arrive at server.
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id: 0,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some("Unexpected ExecuteResponse on server side".to_string()),
+                content_terminal: None,
+                content_html: None,
+                diagnostics: vec![],
+                metrics: None,
+                print_output: None,
+            })
+        }
+        WireMessage::Validate(req) => WireMessage::ValidateResponse(ValidateResponse {
+            request_id: req.request_id,
+            success: false,
+            diagnostics: vec![WireDiagnostic {
+                severity: "error".to_string(),
+                message: "V2 Validate handler not yet implemented".to_string(),
+                line: None,
+                column: None,
+            }],
+        }),
+        WireMessage::ValidateResponse(_) => {
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id: 0,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some("Unexpected ValidateResponse on server side".to_string()),
+                content_terminal: None,
+                content_html: None,
+                diagnostics: vec![],
+                metrics: None,
+                print_output: None,
+            })
+        }
+        WireMessage::Auth(_req) => WireMessage::AuthResponse(AuthResponse {
+            authenticated: false,
+            error: Some("V2 Auth handler not yet implemented".to_string()),
+        }),
+        WireMessage::AuthResponse(_) => {
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id: 0,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some("Unexpected AuthResponse on server side".to_string()),
+                content_terminal: None,
+                content_html: None,
+                diagnostics: vec![],
+                metrics: None,
+                print_output: None,
+            })
+        }
+        WireMessage::ExecuteFile(req) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: req.request_id,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some("V2 ExecuteFile handler not yet implemented".to_string()),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![WireDiagnostic {
+                severity: "error".to_string(),
+                message: "V2 ExecuteFile handler not yet implemented".to_string(),
+                line: None,
+                column: None,
+            }],
+            metrics: None,
+            print_output: None,
+        }),
+        WireMessage::ExecuteProject(req) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: req.request_id,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some("V2 ExecuteProject handler not yet implemented".to_string()),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![WireDiagnostic {
+                severity: "error".to_string(),
+                message: "V2 ExecuteProject handler not yet implemented".to_string(),
+                line: None,
+                column: None,
+            }],
+            metrics: None,
+            print_output: None,
+        }),
+        WireMessage::ValidatePath(req) => WireMessage::ValidateResponse(ValidateResponse {
+            request_id: req.request_id,
+            success: false,
+            diagnostics: vec![WireDiagnostic {
+                severity: "error".to_string(),
+                message: "V2 ValidatePath handler not yet implemented".to_string(),
+                line: None,
+                column: None,
+            }],
+        }),
+        WireMessage::Ping(_) => WireMessage::Pong(ServerInfo {
+            shape_version: env!("CARGO_PKG_VERSION").to_string(),
+            wire_protocol: shape_wire::WIRE_PROTOCOL_V2,
+            capabilities: vec![
+                "call".to_string(),
+                "blob-negotiation".to_string(),
+                "sidecar".to_string(),
+            ],
+        }),
+        WireMessage::Pong(_) => {
+            // Client-side message — should not arrive at server.
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id: 0,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some("Unexpected Pong on server side".to_string()),
+                content_terminal: None,
+                content_html: None,
+                diagnostics: vec![],
+                metrics: None,
+                print_output: None,
+            })
+        }
     }
 }
 
@@ -2194,6 +2471,229 @@ mod tests {
                 assert_eq!(sidecar_id, 7);
             }
             _ => panic!("Expected SidecarRef"),
+        }
+    }
+
+    // ---- Blob negotiation integration tests ----
+
+    #[test]
+    fn test_negotiate_blobs_returns_known_hashes() {
+        let h1 = mk_hash(1);
+        let h2 = mk_hash(2);
+        let h3 = mk_hash(3);
+
+        let mut cache = RemoteBlobCache::new(10);
+        cache.insert(h1, mk_blob("f1", h1, vec![]));
+        cache.insert(h3, mk_blob("f3", h3, vec![]));
+
+        let blobs = vec![
+            (h1, mk_blob("f1", h1, vec![])),
+            (h2, mk_blob("f2", h2, vec![])),
+            (h3, mk_blob("f3", h3, vec![])),
+        ];
+        let response = negotiate_blobs(&blobs, &cache);
+        assert_eq!(response.known_hashes.len(), 2);
+        assert!(response.known_hashes.contains(&h1));
+        assert!(response.known_hashes.contains(&h3));
+        assert!(!response.known_hashes.contains(&h2));
+    }
+
+    #[test]
+    fn test_build_call_request_with_negotiation_strips_known() {
+        let h1 = mk_hash(1);
+        let h2 = mk_hash(2);
+        let blob1 = mk_blob("entry", h1, vec![h2]);
+        let blob2 = mk_blob("helper", h2, vec![]);
+
+        let mut function_store = HashMap::new();
+        function_store.insert(h1, blob1.clone());
+        function_store.insert(h2, blob2.clone());
+
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(Program {
+            entry: h1,
+            function_store,
+            top_level_locals_count: 0,
+            top_level_local_storage_hints: Vec::new(),
+            module_binding_names: Vec::new(),
+            module_binding_storage_hints: Vec::new(),
+            function_local_storage_hints: Vec::new(),
+            top_level_frame: None,
+            data_schema: None,
+            type_schema_registry: shape_runtime::type_schema::TypeSchemaRegistry::new(),
+            trait_method_symbols: HashMap::new(),
+            foreign_functions: Vec::new(),
+            native_struct_layouts: Vec::new(),
+            debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
+        });
+        program.functions = vec![crate::bytecode::Function {
+            name: "entry".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 0,
+            entry_point: 0,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: None,
+            osr_entry_points: vec![],
+        }];
+        program.function_blob_hashes = vec![Some(h1)];
+
+        // Cache has h2 -> negotiation should strip it
+        let mut cache = RemoteBlobCache::new(10);
+        cache.insert(h2, blob2.clone());
+
+        let req = build_call_request_with_negotiation(&program, "entry", vec![], Some(&cache));
+        let blobs = req.function_blobs.as_ref().unwrap();
+        assert_eq!(blobs.len(), 1, "should strip known blob h2");
+        assert_eq!(blobs[0].0, h1, "only h1 should remain");
+    }
+
+    #[test]
+    fn test_build_call_request_with_negotiation_no_cache() {
+        let h1 = mk_hash(1);
+        let blob1 = mk_blob("entry", h1, vec![]);
+
+        let mut function_store = HashMap::new();
+        function_store.insert(h1, blob1.clone());
+
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(Program {
+            entry: h1,
+            function_store,
+            top_level_locals_count: 0,
+            top_level_local_storage_hints: Vec::new(),
+            module_binding_names: Vec::new(),
+            module_binding_storage_hints: Vec::new(),
+            function_local_storage_hints: Vec::new(),
+            top_level_frame: None,
+            data_schema: None,
+            type_schema_registry: shape_runtime::type_schema::TypeSchemaRegistry::new(),
+            trait_method_symbols: HashMap::new(),
+            foreign_functions: Vec::new(),
+            native_struct_layouts: Vec::new(),
+            debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
+        });
+        program.functions = vec![crate::bytecode::Function {
+            name: "entry".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 0,
+            entry_point: 0,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: None,
+            osr_entry_points: vec![],
+        }];
+        program.function_blob_hashes = vec![Some(h1)];
+
+        // No cache -> all blobs sent
+        let req = build_call_request_with_negotiation(&program, "entry", vec![], None);
+        let blobs = req.function_blobs.as_ref().unwrap();
+        assert_eq!(blobs.len(), 1, "all blobs should be sent when no cache");
+    }
+
+    // ---- V2 handler stub tests ----
+
+    #[test]
+    fn test_handle_wire_message_ping_returns_pong() {
+        let store = temp_store();
+        let mut cache = RemoteBlobCache::default_cache();
+        let msg = WireMessage::Ping(PingRequest {});
+        let response = handle_wire_message(msg, &store, &mut cache);
+        match response {
+            WireMessage::Pong(info) => {
+                assert_eq!(info.wire_protocol, shape_wire::WIRE_PROTOCOL_V2);
+                assert!(info.capabilities.contains(&"call".to_string()));
+                assert!(info.capabilities.contains(&"blob-negotiation".to_string()));
+            }
+            _ => panic!("Expected Pong response"),
+        }
+    }
+
+    #[test]
+    fn test_handle_wire_message_execute_returns_v2_stub() {
+        let store = temp_store();
+        let mut cache = RemoteBlobCache::default_cache();
+        let msg = WireMessage::Execute(ExecuteRequest {
+            code: "42".to_string(),
+            request_id: 5,
+        });
+        let response = handle_wire_message(msg, &store, &mut cache);
+        match response {
+            WireMessage::ExecuteResponse(resp) => {
+                assert_eq!(resp.request_id, 5);
+                assert!(!resp.success);
+                assert!(resp.error.as_ref().unwrap().contains("not yet implemented"));
+            }
+            _ => panic!("Expected ExecuteResponse"),
+        }
+    }
+
+    #[test]
+    fn test_handle_wire_message_validate_returns_v2_stub() {
+        let store = temp_store();
+        let mut cache = RemoteBlobCache::default_cache();
+        let msg = WireMessage::Validate(ValidateRequest {
+            code: "let x = 1".to_string(),
+            request_id: 10,
+        });
+        let response = handle_wire_message(msg, &store, &mut cache);
+        match response {
+            WireMessage::ValidateResponse(resp) => {
+                assert_eq!(resp.request_id, 10);
+                assert!(!resp.success);
+                assert!(resp.diagnostics[0].message.contains("not yet implemented"));
+            }
+            _ => panic!("Expected ValidateResponse"),
+        }
+    }
+
+    #[test]
+    fn test_handle_wire_message_auth_returns_v2_stub() {
+        let store = temp_store();
+        let mut cache = RemoteBlobCache::default_cache();
+        let msg = WireMessage::Auth(AuthRequest {
+            token: "test".to_string(),
+        });
+        let response = handle_wire_message(msg, &store, &mut cache);
+        match response {
+            WireMessage::AuthResponse(resp) => {
+                assert!(!resp.authenticated);
+                assert!(resp.error.as_ref().unwrap().contains("not yet implemented"));
+            }
+            _ => panic!("Expected AuthResponse"),
+        }
+    }
+
+    #[test]
+    fn test_handle_wire_message_blob_negotiation() {
+        let store = temp_store();
+        let mut cache = RemoteBlobCache::new(10);
+        let h1 = mk_hash(1);
+        let h2 = mk_hash(2);
+        cache.insert(h1, mk_blob("f1", h1, vec![]));
+
+        let msg = WireMessage::BlobNegotiation(BlobNegotiationRequest {
+            offered_hashes: vec![h1, h2],
+        });
+        let response = handle_wire_message(msg, &store, &mut cache);
+        match response {
+            WireMessage::BlobNegotiationReply(resp) => {
+                assert_eq!(resp.known_hashes.len(), 1);
+                assert!(resp.known_hashes.contains(&h1));
+            }
+            _ => panic!("Expected BlobNegotiationReply"),
         }
     }
 }

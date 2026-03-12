@@ -296,6 +296,14 @@ fn diff_recursive(
                 return;
             }
 
+            // Try HashMap diff
+            if let (Some(old_data), Some(new_data)) =
+                (old.as_hashmap_data(), new.as_hashmap_data())
+            {
+                diff_hashmap(old_data, new_data, prefix, schemas, delta);
+                return;
+            }
+
             // Try string diff
             if let (Some(old_s), Some(new_s)) = (old.as_str(), new.as_str()) {
                 if old_s != new_s {
@@ -312,6 +320,77 @@ fn diff_recursive(
             // Primitive types: already checked raw bits above, so they differ
             delta.changed.insert(root_path(prefix), new.clone());
         }
+    }
+}
+
+/// Diff two HashMap values by comparing keys and values.
+///
+/// Detects:
+/// - Keys present in `new` but not in `old` (added entries)
+/// - Keys present in `old` but not in `new` (removed entries)
+/// - Keys present in both but with different values (changed entries)
+///
+/// For changed entries whose values are themselves compound types (arrays,
+/// objects, hashmaps), diffs recursively instead of treating as atomic.
+fn diff_hashmap(
+    old_data: &shape_value::HashMapData,
+    new_data: &shape_value::HashMapData,
+    prefix: &str,
+    schemas: &TypeSchemaRegistry,
+    delta: &mut Delta,
+) {
+    // Build a lookup from old keys for efficient comparison.
+    // For each key in the new map, check if it exists in the old map.
+    for (new_idx, new_key) in new_data.keys.iter().enumerate() {
+        let key_label = format_map_key(new_key);
+        let key_path = make_path(prefix, &key_label);
+
+        match old_data.find_key(new_key) {
+            Some(old_idx) => {
+                // Key exists in both — diff the values recursively
+                diff_recursive(
+                    &old_data.values[old_idx],
+                    &new_data.values[new_idx],
+                    &key_path,
+                    schemas,
+                    delta,
+                );
+            }
+            None => {
+                // Key added in new
+                delta
+                    .changed
+                    .insert(key_path, new_data.values[new_idx].clone());
+            }
+        }
+    }
+
+    // Find keys removed from old (present in old, absent in new)
+    for old_key in &old_data.keys {
+        if new_data.find_key(old_key).is_none() {
+            let key_label = format_map_key(old_key);
+            let key_path = make_path(prefix, &key_label);
+            delta.removed.push(key_path);
+        }
+    }
+}
+
+/// Format a HashMap key as a path component for delta paths.
+///
+/// String keys use their value directly (e.g. `"name"`).
+/// Integer keys use bracket notation (e.g. `{42}`).
+/// Other types use a debug-style representation.
+fn format_map_key(key: &ValueWord) -> String {
+    if let Some(s) = key.as_str() {
+        s.to_string()
+    } else if let Some(i) = key.as_i64() {
+        format!("{{{}}}", i)
+    } else if let Some(f) = key.as_f64() {
+        format!("{{{}}}", f)
+    } else if let Some(b) = key.as_bool() {
+        format!("{{{}}}", b)
+    } else {
+        format!("{{0x{:x}}}", key.raw_bits())
     }
 }
 
@@ -509,6 +588,42 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
         }
 
         return ValueWord::from_array(Arc::new(new_arr));
+    }
+
+    // Try to patch HashMap entries
+    if let Some(data) = base.as_hashmap_data() {
+        let mut new_keys = data.keys.clone();
+        let mut new_values = data.values.clone();
+
+        // Process removals
+        for path in &delta.removed {
+            // Find the key in the map and remove it
+            let remove_idx = new_keys
+                .iter()
+                .position(|k| format_map_key(k) == *path);
+            if let Some(idx) = remove_idx {
+                new_keys.remove(idx);
+                new_values.remove(idx);
+            }
+        }
+
+        // Process changes (add or update)
+        for (path, new_val) in &delta.changed {
+            // Check if this path has nested sub-paths (contains '.')
+            // For simplicity, direct key changes are applied here.
+            let existing_idx = new_keys
+                .iter()
+                .position(|k| format_map_key(k) == *path);
+            if let Some(idx) = existing_idx {
+                new_values[idx] = new_val.clone();
+            } else {
+                // New key — use a string key matching the path label
+                new_keys.push(ValueWord::from_string(Arc::new(path.clone())));
+                new_values.push(new_val.clone());
+            }
+        }
+
+        return ValueWord::from_hashmap_pairs(new_keys, new_values);
     }
 
     // Cannot patch — return base unchanged
@@ -884,6 +999,285 @@ mod tests {
             f64::from_bits(inner_slots[0].raw()),
             77.0,
             "nested.val should be 77.0"
+        );
+    }
+
+    // ---- HashMap diffing tests ----
+
+    #[test]
+    fn test_diff_hashmaps_identical() {
+        let schemas = TypeSchemaRegistry::new();
+        let a = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("x".to_string())),
+                ValueWord::from_string(Arc::new("y".to_string())),
+            ],
+            vec![ValueWord::from_f64(1.0), ValueWord::from_f64(2.0)],
+        );
+        let b = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("x".to_string())),
+                ValueWord::from_string(Arc::new("y".to_string())),
+            ],
+            vec![ValueWord::from_f64(1.0), ValueWord::from_f64(2.0)],
+        );
+        let delta = diff_values(&a, &b, &schemas);
+        assert!(delta.is_empty(), "identical hashmaps should produce empty delta");
+    }
+
+    #[test]
+    fn test_diff_hashmaps_value_changed() {
+        let schemas = TypeSchemaRegistry::new();
+        let a = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("x".to_string())),
+                ValueWord::from_string(Arc::new("y".to_string())),
+            ],
+            vec![ValueWord::from_f64(1.0), ValueWord::from_f64(2.0)],
+        );
+        let b = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("x".to_string())),
+                ValueWord::from_string(Arc::new("y".to_string())),
+            ],
+            vec![ValueWord::from_f64(1.0), ValueWord::from_f64(99.0)],
+        );
+        let delta = diff_values(&a, &b, &schemas);
+        assert_eq!(delta.change_count(), 1);
+        assert!(delta.changed.contains_key("y"));
+    }
+
+    #[test]
+    fn test_diff_hashmaps_key_added() {
+        let schemas = TypeSchemaRegistry::new();
+        let a = ValueWord::from_hashmap_pairs(
+            vec![ValueWord::from_string(Arc::new("x".to_string()))],
+            vec![ValueWord::from_f64(1.0)],
+        );
+        let b = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("x".to_string())),
+                ValueWord::from_string(Arc::new("y".to_string())),
+            ],
+            vec![ValueWord::from_f64(1.0), ValueWord::from_f64(2.0)],
+        );
+        let delta = diff_values(&a, &b, &schemas);
+        assert_eq!(delta.changed.len(), 1);
+        assert!(delta.changed.contains_key("y"));
+        assert!(delta.removed.is_empty());
+    }
+
+    #[test]
+    fn test_diff_hashmaps_key_removed() {
+        let schemas = TypeSchemaRegistry::new();
+        let a = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("x".to_string())),
+                ValueWord::from_string(Arc::new("y".to_string())),
+            ],
+            vec![ValueWord::from_f64(1.0), ValueWord::from_f64(2.0)],
+        );
+        let b = ValueWord::from_hashmap_pairs(
+            vec![ValueWord::from_string(Arc::new("x".to_string()))],
+            vec![ValueWord::from_f64(1.0)],
+        );
+        let delta = diff_values(&a, &b, &schemas);
+        assert!(delta.changed.is_empty());
+        assert_eq!(delta.removed.len(), 1);
+        assert!(delta.removed.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn test_diff_hashmaps_symmetric_difference() {
+        // Tests set-like diffing: keys present in one but not the other
+        let schemas = TypeSchemaRegistry::new();
+        let a = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("a".to_string())),
+                ValueWord::from_string(Arc::new("b".to_string())),
+                ValueWord::from_string(Arc::new("c".to_string())),
+            ],
+            vec![
+                ValueWord::from_f64(1.0),
+                ValueWord::from_f64(2.0),
+                ValueWord::from_f64(3.0),
+            ],
+        );
+        let b = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("b".to_string())),
+                ValueWord::from_string(Arc::new("c".to_string())),
+                ValueWord::from_string(Arc::new("d".to_string())),
+            ],
+            vec![
+                ValueWord::from_f64(2.0),
+                ValueWord::from_f64(3.0),
+                ValueWord::from_f64(4.0),
+            ],
+        );
+        let delta = diff_values(&a, &b, &schemas);
+        // "a" removed, "d" added, "b" and "c" unchanged
+        assert_eq!(delta.removed.len(), 1);
+        assert!(delta.removed.contains(&"a".to_string()));
+        assert_eq!(delta.changed.len(), 1);
+        assert!(delta.changed.contains_key("d"));
+    }
+
+    #[test]
+    fn test_diff_hashmap_with_integer_keys() {
+        let schemas = TypeSchemaRegistry::new();
+        let a = ValueWord::from_hashmap_pairs(
+            vec![ValueWord::from_i64(1), ValueWord::from_i64(2)],
+            vec![
+                ValueWord::from_string(Arc::new("one".to_string())),
+                ValueWord::from_string(Arc::new("two".to_string())),
+            ],
+        );
+        let b = ValueWord::from_hashmap_pairs(
+            vec![ValueWord::from_i64(1), ValueWord::from_i64(2)],
+            vec![
+                ValueWord::from_string(Arc::new("one".to_string())),
+                ValueWord::from_string(Arc::new("TWO".to_string())),
+            ],
+        );
+        let delta = diff_values(&a, &b, &schemas);
+        assert_eq!(delta.change_count(), 1);
+        // Integer key 2 should be formatted as {2}
+        assert!(delta.changed.contains_key("{2}"));
+    }
+
+    #[test]
+    fn test_patch_hashmap_add_entry() {
+        let schemas = TypeSchemaRegistry::new();
+        let base = ValueWord::from_hashmap_pairs(
+            vec![ValueWord::from_string(Arc::new("x".to_string()))],
+            vec![ValueWord::from_f64(1.0)],
+        );
+        let mut delta = Delta::empty();
+        delta
+            .changed
+            .insert("y".to_string(), ValueWord::from_f64(2.0));
+
+        let patched = patch_value(&base, &delta, &schemas);
+        let data = patched.as_hashmap_data().expect("should be hashmap");
+        assert_eq!(data.keys.len(), 2);
+    }
+
+    #[test]
+    fn test_patch_hashmap_remove_entry() {
+        let schemas = TypeSchemaRegistry::new();
+        let base = ValueWord::from_hashmap_pairs(
+            vec![
+                ValueWord::from_string(Arc::new("x".to_string())),
+                ValueWord::from_string(Arc::new("y".to_string())),
+            ],
+            vec![ValueWord::from_f64(1.0), ValueWord::from_f64(2.0)],
+        );
+        let mut delta = Delta::empty();
+        delta.removed.push("y".to_string());
+
+        let patched = patch_value(&base, &delta, &schemas);
+        let data = patched.as_hashmap_data().expect("should be hashmap");
+        assert_eq!(data.keys.len(), 1);
+        assert!(data.find_key(&ValueWord::from_string(Arc::new("x".to_string()))).is_some());
+    }
+
+    // ---- Nested array diffing tests ----
+
+    #[test]
+    fn test_diff_nested_arrays_recursive() {
+        let schemas = TypeSchemaRegistry::new();
+        // Array of arrays: [[1, 2], [3, 4]]
+        let inner1_old = ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_f64(1.0),
+            ValueWord::from_f64(2.0),
+        ]));
+        let inner2 = ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_f64(3.0),
+            ValueWord::from_f64(4.0),
+        ]));
+        let a = ValueWord::from_array(Arc::new(vec![inner1_old, inner2.clone()]));
+
+        // Change inner array [0][1] from 2.0 to 99.0
+        let inner1_new = ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_f64(1.0),
+            ValueWord::from_f64(99.0),
+        ]));
+        let b = ValueWord::from_array(Arc::new(vec![inner1_new, inner2]));
+
+        let delta = diff_values(&a, &b, &schemas);
+        // Should recursively diff and produce [0].[1] as changed
+        assert_eq!(delta.change_count(), 1, "only one element changed");
+        assert!(
+            delta.changed.contains_key("[0].[1]"),
+            "should have path [0].[1], got keys: {:?}",
+            delta.changed.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_diff_nested_array_with_object_elements() {
+        use crate::type_schema::TypeSchemaBuilder;
+        use shape_value::{HeapValue, ValueSlot};
+
+        let mut schemas = TypeSchemaRegistry::new();
+        let point_id = TypeSchemaBuilder::new("Point")
+            .f64_field("x")
+            .f64_field("y")
+            .register(&mut schemas);
+
+        let mk_point = |x: f64, y: f64| {
+            ValueWord::from_heap_value(HeapValue::TypedObject {
+                schema_id: point_id as u64,
+                slots: vec![ValueSlot::from_number(x), ValueSlot::from_number(y)]
+                    .into_boxed_slice(),
+                heap_mask: 0,
+            })
+        };
+
+        let a = ValueWord::from_array(Arc::new(vec![mk_point(1.0, 2.0), mk_point(3.0, 4.0)]));
+        let b = ValueWord::from_array(Arc::new(vec![mk_point(1.0, 2.0), mk_point(3.0, 99.0)]));
+
+        let delta = diff_values(&a, &b, &schemas);
+        // Should recursively diff: [1].y changed
+        assert_eq!(delta.change_count(), 1);
+        assert!(
+            delta.changed.contains_key("[1].y"),
+            "should have path [1].y, got keys: {:?}",
+            delta.changed.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_diff_hashmap_nested_value_recursive() {
+        // HashMap with array values — changes within the array should be
+        // detected recursively.
+        let schemas = TypeSchemaRegistry::new();
+
+        let old_arr = ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_f64(1.0),
+            ValueWord::from_f64(2.0),
+        ]));
+        let new_arr = ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_f64(1.0),
+            ValueWord::from_f64(99.0),
+        ]));
+
+        let a = ValueWord::from_hashmap_pairs(
+            vec![ValueWord::from_string(Arc::new("data".to_string()))],
+            vec![old_arr],
+        );
+        let b = ValueWord::from_hashmap_pairs(
+            vec![ValueWord::from_string(Arc::new("data".to_string()))],
+            vec![new_arr],
+        );
+        let delta = diff_values(&a, &b, &schemas);
+        // Should recursively diff: data.[1] changed
+        assert_eq!(delta.change_count(), 1);
+        assert!(
+            delta.changed.contains_key("data.[1]"),
+            "should have path data.[1], got keys: {:?}",
+            delta.changed.keys().collect::<Vec<_>>()
         );
     }
 }
