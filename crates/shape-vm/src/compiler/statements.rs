@@ -211,6 +211,8 @@ impl BytecodeCompiler {
                 self.known_traits.insert(trait_def.name.clone());
                 self.trait_defs
                     .insert(trait_def.name.clone(), trait_def.clone());
+                // Register in type inference environment so supertrait checking works
+                self.type_inference.env.define_trait(trait_def);
                 Ok(())
             }
             Item::ForeignFunction(def, _) => {
@@ -273,6 +275,8 @@ impl BytecodeCompiler {
                     self.known_traits.insert(trait_def.name.clone());
                     self.trait_defs
                         .insert(trait_def.name.clone(), trait_def.clone());
+                    // Register in type inference environment so supertrait checking works
+                    self.type_inference.env.define_trait(trait_def);
                     Ok(())
                 }
                 ExportItem::Annotation(annotation_def) => {
@@ -443,6 +447,34 @@ impl BytecodeCompiler {
                         type_name,
                         all_method_names,
                     );
+                }
+
+                // C3: Verify supertrait constraints.
+                // If the trait has supertraits (e.g. `trait Foo: Bar + Baz`),
+                // check that the target type also implements each supertrait.
+                if let Some(trait_def) = self.trait_defs.get(trait_name).cloned() {
+                    for super_ann in &trait_def.super_traits {
+                        let super_name = match super_ann {
+                            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
+                                name.clone()
+                            }
+                            TypeAnnotation::Generic { name, .. } => name.clone(),
+                            _ => continue,
+                        };
+                        if !self
+                            .type_inference
+                            .env
+                            .type_implements_trait(type_name, &super_name)
+                        {
+                            return Err(ShapeError::SemanticError {
+                                message: format!(
+                                    "impl {} for {} requires supertrait '{}' to be implemented first",
+                                    trait_name, type_name, super_name
+                                ),
+                                location: None,
+                            });
+                        }
+                    }
                 }
 
                 Ok(())
@@ -2859,6 +2891,13 @@ impl BytecodeCompiler {
                             ));
                         }
                     }
+                    // H4: Include exported annotations as named exports
+                    ExportItem::Annotation(ann_def) => {
+                        exports.push((
+                            ann_def.name.clone(),
+                            Self::qualify_module_symbol(module_path, &ann_def.name),
+                        ));
+                    }
                     _ => {}
                 }
             }
@@ -2909,6 +2948,13 @@ impl BytecodeCompiler {
                     exports.push((
                         module.name.clone(),
                         Self::qualify_module_symbol(module_path, &module.name),
+                    ));
+                }
+                // H4: Include annotation definitions as exported names
+                Item::AnnotationDef(ann_def, _) => {
+                    exports.push((
+                        ann_def.name.clone(),
+                        Self::qualify_module_symbol(module_path, &ann_def.name),
                     ));
                 }
                 _ => {}
@@ -2963,6 +3009,10 @@ impl BytecodeCompiler {
                 Item::Enum(def, _) => fields.push((def.name.clone(), "type".to_string())),
                 Item::TypeAlias(def, _) => fields.push((def.name.clone(), "type".to_string())),
                 Item::Module(def, _) => fields.push((def.name.clone(), "module".to_string())),
+                // H4: Include annotation definitions in module target fields
+                Item::AnnotationDef(def, _) => {
+                    fields.push((def.name.clone(), "annotation".to_string()))
+                }
                 _ => {}
             }
         }

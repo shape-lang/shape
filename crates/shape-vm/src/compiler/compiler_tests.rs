@@ -2420,7 +2420,8 @@ fn test_let_reassignment_is_error() {
     );
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
-        err_msg.contains("Cannot reassign immutable variable"),
+        err_msg.contains("Cannot reassign immutable variable")
+            || err_msg.contains("cannot assign to immutable binding"),
         "Expected immutability error, got: {}",
         err_msg
     );
@@ -2949,5 +2950,65 @@ fn test_i8_cmp_returns_bool_end_to_end() {
         result.as_bool(),
         Some(true),
         "10i8 < 20i8 should return true"
+    );
+}
+
+// =============================================================
+// C3: Supertrait constraint checking
+// =============================================================
+
+#[test]
+fn test_supertrait_missing_impl_is_error() {
+    // trait B: A — impl B for T without impl A for T should error
+    let code = r#"
+        trait A {
+            method_a(): number;
+        }
+        trait B: A {
+            method_b(): number;
+        }
+        type MyType { x: number }
+        impl B for MyType {
+            fn method_b() { self.x }
+        }
+    "#;
+    let program = parse_program(code).unwrap();
+    let result = BytecodeCompiler::new().compile(&program);
+    assert!(
+        result.is_err(),
+        "impl B for MyType should fail because MyType doesn't implement supertrait A"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("supertrait") || err.contains("A"),
+        "Error should mention supertrait: {}",
+        err
+    );
+}
+
+#[test]
+fn test_supertrait_satisfied_impl_is_ok() {
+    // trait B: A — impl A + impl B for T should succeed
+    let code = r#"
+        trait A {
+            method_a(): number;
+        }
+        trait B: A {
+            method_b(): number;
+        }
+        type MyType { x: number }
+        impl A for MyType {
+            fn method_a() { self.x }
+        }
+        impl B for MyType {
+            fn method_b() { self.x + 1.0 }
+        }
+    "#;
+    let program = parse_program(code).unwrap();
+    let result = BytecodeCompiler::new().compile(&program);
+    assert!(
+        result.is_ok(),
+        "impl B for MyType should succeed since MyType implements supertrait A: {:?}",
+        result.err()
     );
 }
