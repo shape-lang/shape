@@ -122,6 +122,7 @@ impl OutputAdapter for MockAdapter {
 #[derive(Debug, Clone, Default)]
 pub struct SharedCaptureAdapter {
     captured: Arc<Mutex<Vec<String>>>,
+    captured_full: Arc<Mutex<Vec<PrintResult>>>,
     content_html: Arc<Mutex<Vec<String>>>,
 }
 
@@ -159,12 +160,23 @@ impl SharedCaptureAdapter {
             .map(|v| v.clone())
             .unwrap_or_default()
     }
+
+    /// Get all captured full PrintResults (with spans).
+    pub fn print_results(&self) -> Vec<PrintResult> {
+        self.captured_full
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl OutputAdapter for SharedCaptureAdapter {
     fn print(&mut self, result: PrintResult) -> ValueWord {
         if let Ok(mut v) = self.captured.lock() {
             v.push(result.rendered.clone());
+        }
+        if let Ok(mut v) = self.captured_full.lock() {
+            v.push(result);
         }
         ValueWord::none()
     }

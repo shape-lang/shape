@@ -579,6 +579,9 @@ impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
         }
         vm.populate_module_objects();
 
+        // Sync inline schemas so wire serialization can resolve TypedObject fields
+        ctx.merge_type_schemas(vm.program.type_schema_registry.clone());
+
         // Load variables from context
         for (idx, name) in module_binding_names.iter().enumerate() {
             if name.is_empty() {
@@ -804,6 +807,9 @@ impl ProgramExecutor for BytecodeExecutor {
 
             // Load existing variables from context and module_binding registry into VM before execution
             if let Some(ctx) = ctx.as_mut() {
+                // Sync inline schemas so wire serialization can resolve TypedObject fields
+                ctx.merge_type_schemas(vm.program.type_schema_registry.clone());
+
                 Self::load_module_bindings_from_context(
                     &mut vm,
                     ctx,

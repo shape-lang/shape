@@ -147,15 +147,27 @@ fn extract_found_token(source: &str, location: &SourceLocation) -> TokenInfo {
     }
 
     let line = lines[location.line - 1];
-    if location.column == 0 || location.column > line.len() {
-        if location.line >= lines.len() && location.column > line.len() {
-            return TokenInfo::end_of_input();
-        }
+    if location.column == 0 {
         return TokenInfo::new("").with_kind(TokenKind::Unknown);
     }
 
+    // Convert char-based column to byte offset (Pest columns count characters, not bytes)
+    let col0 = location.column - 1;
+    let byte_offset = line
+        .char_indices()
+        .nth(col0)
+        .map(|(i, _)| i);
+
+    let Some(byte_offset) = byte_offset else {
+        // Column is past the end of the line
+        if location.line >= lines.len() {
+            return TokenInfo::end_of_input();
+        }
+        return TokenInfo::new("").with_kind(TokenKind::Unknown);
+    };
+
     // Extract a token starting at the position
-    let rest = &line[(location.column - 1)..];
+    let rest = &line[byte_offset..];
     let token_text = extract_token_text(rest);
     let kind = classify_token(&token_text);
 
@@ -758,5 +770,29 @@ mod tests {
                 .map(|s| s.message.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_extract_found_token_with_multibyte_utf8() {
+        // em-dash is 3 bytes in UTF-8 — this used to panic with
+        // "byte index N is not a char boundary"
+        let source = "// comment — rest\nlet x = 1";
+        // Exercise extract_found_token with a location pointing past the em-dash
+        let loc = SourceLocation::new(1, 14); // char position past "— "
+        let token = extract_found_token(source, &loc);
+        // Should not panic, and should extract "rest" or something reasonable
+        assert!(!token.text.is_empty() || token.kind == Some(TokenKind::Unknown));
+    }
+
+    #[test]
+    fn test_extract_found_token_multibyte_at_error_position() {
+        // Trigger a parse error where the error position is on a multi-byte char
+        let source = "let — = 1";
+        let pest_err =
+            ShapeParser::parse(Rule::program, source).expect_err("expected parse error");
+        // Should not panic
+        let structured = convert_pest_error(&pest_err, source);
+        // kind should be set (not a default/empty error)
+        assert!(!matches!(structured.kind, ParseErrorKind::MissingComponent { .. }));
     }
 }

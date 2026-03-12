@@ -233,6 +233,13 @@ pub enum Commands {
         opts: RuntimeCommandOptions,
     },
 
+    /// Check a Shape file or project for errors without executing
+    Check {
+        /// Path to a .shape file or project directory (with shape.toml).
+        /// If omitted, checks the current directory as a project.
+        path: Option<PathBuf>,
+    },
+
     /// Start the Shape execution server (in-process VM, replaces wire-serve)
     Serve {
         /// Address to listen on
