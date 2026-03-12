@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 pub mod add_cmd;
 pub mod build_cmd;
+pub mod check_cmd;
 pub mod doctest_cmd;
 pub mod expand_comptime_cmd;
 pub mod ext_cmd;
@@ -24,6 +25,7 @@ pub mod wire_serve_cmd;
 
 // Re-export command entry points
 pub use add_cmd::run_add;
+pub use check_cmd::run_check;
 pub use build_cmd::run_build;
 pub use doctest_cmd::run_doctest;
 pub use expand_comptime_cmd::run_expand_comptime;

@@ -154,6 +154,12 @@ pub enum WireMessage {
     Auth(AuthRequest),
     /// Response to an Auth request.
     AuthResponse(AuthResponse),
+    /// Execute a Shape file on the server.
+    ExecuteFile(ExecuteFileRequest),
+    /// Execute a Shape project (shape.toml) on the server.
+    ExecuteProject(ExecuteProjectRequest),
+    /// Validate a Shape file or project (parse + type-check) without executing.
+    ValidatePath(ValidatePathRequest),
     /// Ping the server for liveness / capability discovery.
     Ping(PingRequest),
     /// Pong reply with server info.
@@ -244,6 +250,35 @@ pub struct ValidateResponse {
     pub success: bool,
     /// Diagnostics (parse errors, type errors, warnings).
     pub diagnostics: Vec<WireDiagnostic>,
+}
+
+/// Request to execute a Shape file on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteFileRequest {
+    /// Absolute path to the .shape file.
+    pub path: String,
+    /// Optional working directory (defaults to file's parent).
+    pub cwd: Option<String>,
+    /// Client-assigned request ID for correlation.
+    pub request_id: u64,
+}
+
+/// Request to execute a Shape project (shape.toml) on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteProjectRequest {
+    /// Absolute path to the project directory (must contain shape.toml).
+    pub project_dir: String,
+    /// Client-assigned request ID for correlation.
+    pub request_id: u64,
+}
+
+/// Request to validate a Shape file or project without executing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatePathRequest {
+    /// Path to a .shape file or a project directory (containing shape.toml).
+    pub path: String,
+    /// Client-assigned request ID for correlation.
+    pub request_id: u64,
 }
 
 /// Authentication request for non-localhost connections.

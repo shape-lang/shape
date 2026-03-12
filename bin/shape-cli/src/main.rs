@@ -23,9 +23,9 @@ pub mod registry_client;
 
 use cli_args::{Cli, Commands};
 use commands::{
-    ProviderOptions, run_add, run_build, run_doctest, run_expand_comptime, run_ext_install,
-    run_ext_list, run_ext_remove, run_info, run_jit_parity, run_keys_generate, run_keys_list,
-    run_keys_trust, run_login, run_publish, run_register, run_remove, run_repl, run_schema_fetch,
+    ProviderOptions, run_add, run_build, run_check, run_doctest, run_expand_comptime,
+    run_ext_install, run_ext_list, run_ext_remove, run_info, run_jit_parity, run_keys_generate,
+    run_keys_list, run_keys_trust, run_login, run_publish, run_register, run_remove, run_repl, run_schema_fetch,
     run_schema_status, run_script, run_search, run_serve, run_sign, run_snapshot_delete,
     run_snapshot_info, run_snapshot_list, run_tree, run_tui, run_verify, run_wire_serve,
 };
@@ -119,6 +119,9 @@ async fn main() -> Result<()> {
                 extension_dir,
             };
             run_tui(mode, extensions, &provider_opts).await?;
+        }
+        (Some(Commands::Check { path }), _) => {
+            run_check(path).await?;
         }
         (Some(Commands::Doctest { path, verbose }), _) => {
             run_doctest(path, verbose).await?;

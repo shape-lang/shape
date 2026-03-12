@@ -10,9 +10,9 @@ use tokio::sync::Semaphore;
 use shape_runtime::engine::ShapeEngine;
 use shape_vm::BytecodeExecutor;
 use shape_vm::remote::{
-    AuthRequest, AuthResponse, BlobNegotiationRequest, BlobSidecar, ExecuteRequest,
-    ExecuteResponse, ExecutionMetrics, ServerInfo, ValidateRequest, ValidateResponse,
-    WireDiagnostic, WireMessage,
+    AuthRequest, AuthResponse, BlobNegotiationRequest, BlobSidecar, ExecuteFileRequest,
+    ExecuteProjectRequest, ExecuteRequest, ExecuteResponse, ExecutionMetrics, ServerInfo,
+    ValidatePathRequest, ValidateRequest, ValidateResponse, WireDiagnostic, WireMessage,
 };
 use shape_wire::WireValue;
 use shape_wire::transport::framing::{decode_framed, encode_framed};
@@ -285,7 +285,63 @@ async fn handle_connection(
                     Some(handle_call(req, &mut state, language_runtimes))
                 }
             }
-            WireMessage::BlobNegotiation(req) => Some(handle_negotiation(req, &state.blob_cache)),
+            WireMessage::ExecuteFile(req) => {
+                if requires_auth(config) && !state.authenticated {
+                    Some(WireMessage::ExecuteResponse(ExecuteResponse {
+                        request_id: req.request_id,
+                        success: false,
+                        value: WireValue::Null,
+                        stdout: None,
+                        error: Some("Authentication required. Send Auth message first.".to_string()),
+                        content_terminal: None,
+                        content_html: None,
+                        diagnostics: vec![],
+                        metrics: None,
+                    }))
+                } else {
+                    let _permit = semaphore.acquire().await
+                        .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
+                    Some(handle_execute_file(req, config).await)
+                }
+            }
+            WireMessage::ExecuteProject(req) => {
+                if requires_auth(config) && !state.authenticated {
+                    Some(WireMessage::ExecuteResponse(ExecuteResponse {
+                        request_id: req.request_id,
+                        success: false,
+                        value: WireValue::Null,
+                        stdout: None,
+                        error: Some("Authentication required. Send Auth message first.".to_string()),
+                        content_terminal: None,
+                        content_html: None,
+                        diagnostics: vec![],
+                        metrics: None,
+                    }))
+                } else {
+                    let _permit = semaphore.acquire().await
+                        .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
+                    Some(handle_execute_project(req, config).await)
+                }
+            }
+            WireMessage::ValidatePath(req) => {
+                if requires_auth(config) && !state.authenticated {
+                    Some(WireMessage::ValidateResponse(ValidateResponse {
+                        request_id: req.request_id,
+                        success: false,
+                        diagnostics: vec![WireDiagnostic {
+                            severity: "error".to_string(),
+                            message: "Authentication required.".to_string(),
+                            line: None,
+                            column: None,
+                        }],
+                    }))
+                } else {
+                    Some(handle_validate_path(req))
+                }
+            }
+            WireMessage::BlobNegotiation(req) => {
+                Some(handle_negotiation(req, &state.blob_cache))
+            }
             WireMessage::Sidecar(s) => {
                 state.pending_sidecars.insert(s.sidecar_id, s);
                 continue;
@@ -347,7 +403,10 @@ fn handle_ping() -> WireMessage {
         wire_protocol: shape_wire::WIRE_PROTOCOL_V2,
         capabilities: vec![
             "execute".to_string(),
+            "execute-file".to_string(),
+            "execute-project".to_string(),
             "validate".to_string(),
+            "validate-path".to_string(),
             "call".to_string(),
             "blob-negotiation".to_string(),
         ],
@@ -423,6 +482,219 @@ fn handle_validate(req: ValidateRequest) -> WireMessage {
 
     let success = diagnostics.iter().all(|d| d.severity != "error");
 
+    WireMessage::ValidateResponse(ValidateResponse {
+        request_id: req.request_id,
+        success,
+        diagnostics,
+    })
+}
+
+async fn handle_execute_file(req: ExecuteFileRequest, config: &ServeConfig) -> WireMessage {
+    let request_id = req.request_id;
+    let path = req.path.clone();
+    let cwd = req.cwd.clone();
+    let extensions = config.extensions.clone();
+    let provider_opts = config.provider_opts.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        execute_file_in_process(&path, cwd.as_deref(), &extensions, &provider_opts)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(r)) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id,
+            success: true,
+            value: r.value,
+            stdout: r.stdout,
+            error: None,
+            content_terminal: r.content_terminal,
+            content_html: r.content_html,
+            diagnostics: vec![],
+            metrics: Some(ExecutionMetrics {
+                instructions_executed: 0,
+                wall_time_ms: r.wall_time_ms,
+                memory_bytes_peak: 0,
+            }),
+        }),
+        Ok(Err(err)) => {
+            let (message, diagnostics) = format_error(&err);
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some(message),
+                content_terminal: None,
+                content_html: None,
+                diagnostics,
+                metrics: None,
+            })
+        }
+        Err(join_err) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some(format!("Execution panicked: {}", join_err)),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![],
+            metrics: None,
+        }),
+    }
+}
+
+async fn handle_execute_project(req: ExecuteProjectRequest, config: &ServeConfig) -> WireMessage {
+    let request_id = req.request_id;
+    let project_dir = req.project_dir.clone();
+    let extensions = config.extensions.clone();
+    let provider_opts = config.provider_opts.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        execute_project_in_process(&project_dir, &extensions, &provider_opts)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(r)) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id,
+            success: true,
+            value: r.value,
+            stdout: r.stdout,
+            error: None,
+            content_terminal: r.content_terminal,
+            content_html: r.content_html,
+            diagnostics: vec![],
+            metrics: Some(ExecutionMetrics {
+                instructions_executed: 0,
+                wall_time_ms: r.wall_time_ms,
+                memory_bytes_peak: 0,
+            }),
+        }),
+        Ok(Err(err)) => {
+            let (message, diagnostics) = format_error(&err);
+            WireMessage::ExecuteResponse(ExecuteResponse {
+                request_id,
+                success: false,
+                value: WireValue::Null,
+                stdout: None,
+                error: Some(message),
+                content_terminal: None,
+                content_html: None,
+                diagnostics,
+                metrics: None,
+            })
+        }
+        Err(join_err) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some(format!("Execution panicked: {}", join_err)),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![],
+            metrics: None,
+        }),
+    }
+}
+
+fn handle_validate_path(req: ValidatePathRequest) -> WireMessage {
+    let path = std::path::Path::new(&req.path);
+
+    // Determine the source file to validate
+    let (source, context_path) = if path.is_dir() {
+        // Project directory — find entry point from shape.toml
+        match shape_runtime::project::find_project_root(path) {
+            Some(project) => {
+                match &project.config.project.entry {
+                    Some(entry) => {
+                        let entry_path = project.root_path.join(entry);
+                        match std::fs::read_to_string(&entry_path) {
+                            Ok(src) => (src, entry_path),
+                            Err(e) => return WireMessage::ValidateResponse(ValidateResponse {
+                                request_id: req.request_id,
+                                success: false,
+                                diagnostics: vec![WireDiagnostic {
+                                    severity: "error".to_string(),
+                                    message: format!("Failed to read entry file '{}': {}", entry_path.display(), e),
+                                    line: None,
+                                    column: None,
+                                }],
+                            }),
+                        }
+                    }
+                    None => return WireMessage::ValidateResponse(ValidateResponse {
+                        request_id: req.request_id,
+                        success: false,
+                        diagnostics: vec![WireDiagnostic {
+                            severity: "error".to_string(),
+                            message: "shape.toml has no [project].entry field".to_string(),
+                            line: None,
+                            column: None,
+                        }],
+                    }),
+                }
+            }
+            None => return WireMessage::ValidateResponse(ValidateResponse {
+                request_id: req.request_id,
+                success: false,
+                diagnostics: vec![WireDiagnostic {
+                    severity: "error".to_string(),
+                    message: format!("No shape.toml found in '{}'", path.display()),
+                    line: None,
+                    column: None,
+                }],
+            }),
+        }
+    } else {
+        // Single .shape file
+        match std::fs::read_to_string(path) {
+            Ok(src) => (src, path.to_path_buf()),
+            Err(e) => return WireMessage::ValidateResponse(ValidateResponse {
+                request_id: req.request_id,
+                success: false,
+                diagnostics: vec![WireDiagnostic {
+                    severity: "error".to_string(),
+                    message: format!("Failed to read '{}': {}", path.display(), e),
+                    line: None,
+                    column: None,
+                }],
+            }),
+        }
+    };
+
+    // Parse + compile (type-check) without executing
+    let mut diagnostics = Vec::new();
+
+    match shape_ast::parse_program(&source) {
+        Ok(ast) => {
+            // Try bytecode compilation for type checking
+            let compiler = shape_vm::compiler::BytecodeCompiler::new();
+            if let Err(e) = compiler.compile(&ast) {
+                let (line, column) = extract_location(&e);
+                diagnostics.push(WireDiagnostic {
+                    severity: "error".to_string(),
+                    message: e.to_string(),
+                    line,
+                    column,
+                });
+            }
+        }
+        Err(e) => {
+            diagnostics.push(WireDiagnostic {
+                severity: "error".to_string(),
+                message: e.to_string(),
+                line: None,
+                column: None,
+            });
+        }
+    }
+
+    let _ = context_path; // used for future module resolution
+
+    let success = diagnostics.iter().all(|d| d.severity != "error");
     WireMessage::ValidateResponse(ValidateResponse {
         request_id: req.request_id,
         success,
@@ -522,6 +794,91 @@ fn execute_code_in_process(
         content_html: result.content_html,
         wall_time_ms,
     })
+}
+
+/// Execute a Shape file in-process using the full engine pipeline.
+fn execute_file_in_process(
+    path: &str,
+    cwd: Option<&str>,
+    _extensions: &[std::path::PathBuf],
+    _provider_opts: &ProviderOptions,
+) -> Result<InProcessResult> {
+    use std::time::Instant;
+
+    let file_path = std::path::Path::new(path);
+    let source = std::fs::read_to_string(file_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read '{}': {}", path, e))?;
+
+    // Set cwd if specified
+    if let Some(cwd) = cwd {
+        std::env::set_current_dir(cwd)
+            .map_err(|e| anyhow::anyhow!("Failed to set working directory '{}': {}", cwd, e))?;
+    } else if let Some(parent) = file_path.parent() {
+        let _ = std::env::set_current_dir(parent);
+    }
+
+    let start = Instant::now();
+
+    let mut engine = ShapeEngine::new()
+        .map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
+
+    let mut executor = BytecodeExecutor::new();
+
+    extension_loading::register_extension_capability_modules(&mut engine, &mut executor);
+    let module_info = executor.module_schemas();
+    engine.register_extension_modules(&module_info);
+
+    let interrupt = Arc::new(AtomicU8::new(0));
+    executor.set_interrupt(interrupt);
+
+    crate::module_loading::wire_vm_executor_module_loading(
+        &mut engine,
+        &mut executor,
+        Some(file_path),
+        Some(&source),
+    )?;
+
+    let result = engine.execute(&mut executor, &source)?;
+
+    let wall_time_ms = start.elapsed().as_millis() as u64;
+
+    let stdout: String = result.messages.iter()
+        .map(|m| format!("{}\n", m.text)).collect();
+
+    Ok(InProcessResult {
+        value: result.value,
+        stdout: if stdout.is_empty() { None } else { Some(stdout) },
+        content_terminal: result.content_terminal,
+        content_html: result.content_html,
+        wall_time_ms,
+    })
+}
+
+/// Execute a Shape project in-process by finding its entry point.
+fn execute_project_in_process(
+    project_dir: &str,
+    extensions: &[std::path::PathBuf],
+    provider_opts: &ProviderOptions,
+) -> Result<InProcessResult> {
+    let dir = std::path::Path::new(project_dir);
+
+    let project = shape_runtime::project::find_project_root(dir)
+        .ok_or_else(|| anyhow::anyhow!("No shape.toml found in '{}'", project_dir))?;
+
+    let entry = project.config.project.entry.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("shape.toml has no [project].entry field"))?;
+
+    let entry_path = project.root_path.join(entry);
+    if !entry_path.is_file() {
+        bail!("Entry file '{}' not found (resolved to {})", entry, entry_path.display());
+    }
+
+    execute_file_in_process(
+        &entry_path.to_string_lossy(),
+        Some(project_dir),
+        extensions,
+        provider_opts,
+    )
 }
 
 /// Extract error message and diagnostics from an anyhow error.
