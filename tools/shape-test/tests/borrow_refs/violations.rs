@@ -12,19 +12,20 @@ fn violation_ref_on_literal_number() {
         f(&5)
     "#,
     )
-    .expect_run_err_contains("simple variable");
+    .expect_run_err_contains("place expression");
 }
 
 #[test]
-fn violation_ref_on_expression() {
+fn ref_on_index_place_expression_is_allowed() {
     ShapeTest::new(
         r#"
         fn f(&x) { x = 0 }
         let arr = [1, 2, 3]
         f(&arr[0])
+        arr[0]
     "#,
     )
-    .expect_run_err_contains("simple variable");
+    .expect_number(0.0);
 }
 
 #[test]
@@ -35,7 +36,7 @@ fn violation_ref_in_let_binding() {
         let r = &x
     "#,
     )
-    .expect_run_ok();
+    .expect_run_err_contains("B0003");
 }
 
 #[test]
@@ -49,7 +50,7 @@ fn violation_ref_in_return() {
         f()
     "#,
     )
-    .expect_run_err_contains("cannot return a reference");
+    .expect_run_err_contains("cannot return or store a reference");
 }
 
 #[test]
@@ -83,7 +84,7 @@ fn violation_ref_on_string_literal() {
         f(&"hello")
     "#,
     )
-    .expect_run_err_contains("simple variable");
+    .expect_run_err_contains("place expression");
 }
 
 #[test]
@@ -94,7 +95,7 @@ fn violation_ref_on_boolean_literal() {
         f(&true)
     "#,
     )
-    .expect_run_err_contains("simple variable");
+    .expect_run_err_contains("place expression");
 }
 
 #[test]
@@ -105,7 +106,7 @@ fn violation_ref_on_array_literal() {
         f(&[1, 2, 3])
     "#,
     )
-    .expect_run_err_contains("simple variable");
+    .expect_run_err_contains("place expression");
 }
 
 #[test]
@@ -117,7 +118,7 @@ fn violation_ref_on_function_call_result() {
         f(&make())
     "#,
     )
-    .expect_run_err_contains("simple variable");
+    .expect_run_err_contains("place expression");
 }
 
 #[test]
@@ -130,7 +131,7 @@ fn violation_ref_on_binary_expression() {
         f(&(a + b))
     "#,
     )
-    .expect_run_err_contains("simple variable");
+    .expect_run_err_contains("place expression");
 }
 
 #[test]
@@ -158,8 +159,7 @@ fn violation_ref_as_if_condition() {
 
 #[test]
 fn violation_double_exclusive_borrow_in_function() {
-    // BUG: Double exclusive borrow of same var may not be caught at top-level.
-    // Wrapping in a function to ensure compile-time borrow check runs.
+    // Wrapping in a function ensures the call-site alias check runs.
     ShapeTest::new(
         r#"
         fn take2(&a, &b) { a = b }
@@ -170,7 +170,7 @@ fn violation_double_exclusive_borrow_in_function() {
         test()
     "#,
     )
-    .expect_run_err_contains("B0001");
+    .expect_run_err_contains("B0013");
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn violation_three_exclusive_refs_same_var_in_function() {
         test()
     "#,
     )
-    .expect_run_err_contains("B0001");
+    .expect_run_err_contains("B0013");
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn violation_swap_same_var_in_function() {
         test()
     "#,
     )
-    .expect_run_err_contains("B0001");
+    .expect_run_err_contains("B0013");
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn violation_mixed_inferred_mutation_aliasing_in_function() {
         test()
     "#,
     )
-    .expect_run_err_contains("B0001");
+    .expect_run_err_contains("B0013");
 }
 
 #[test]
@@ -241,7 +241,7 @@ fn violation_two_mutating_inferred_params_same_var() {
         test()
     "#,
     )
-    .expect_run_err_contains("B0001");
+    .expect_run_err_contains("B0013");
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn violation_explicit_ref_and_inferred_ref_same_var() {
         test()
     "#,
     )
-    .expect_run_err_contains("B0001");
+    .expect_run_err_contains("B0013");
 }
 
 #[test]

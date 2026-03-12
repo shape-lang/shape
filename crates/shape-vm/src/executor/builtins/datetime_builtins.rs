@@ -206,9 +206,7 @@ pub fn ast_duration_to_chrono(duration: &shape_ast::ast::Duration) -> chrono::Du
 
 /// Parse a datetime string into a chrono DateTime.
 /// Shared logic used by both `builtin_datetime_parse` and `handle_eval_datetime_expr`.
-pub fn parse_datetime_string(
-    s: &str,
-) -> Result<chrono::DateTime<chrono::FixedOffset>, String> {
+pub fn parse_datetime_string(s: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, String> {
     // Try RFC 3339 / ISO 8601 with timezone
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         return Ok(dt);
@@ -380,7 +378,10 @@ mod tests {
     #[test]
     fn test_ast_duration_to_chrono_seconds() {
         use shape_ast::ast::{Duration, DurationUnit};
-        let dur = Duration { value: 10.0, unit: DurationUnit::Seconds };
+        let dur = Duration {
+            value: 10.0,
+            unit: DurationUnit::Seconds,
+        };
         let chrono_dur = super::ast_duration_to_chrono(&dur);
         assert_eq!(chrono_dur.num_seconds(), 10);
     }
@@ -388,7 +389,10 @@ mod tests {
     #[test]
     fn test_ast_duration_to_chrono_days() {
         use shape_ast::ast::{Duration, DurationUnit};
-        let dur = Duration { value: 3.0, unit: DurationUnit::Days };
+        let dur = Duration {
+            value: 3.0,
+            unit: DurationUnit::Days,
+        };
         let chrono_dur = super::ast_duration_to_chrono(&dur);
         assert_eq!(chrono_dur.num_seconds(), 259200);
     }
@@ -396,7 +400,10 @@ mod tests {
     #[test]
     fn test_ast_duration_to_chrono_hours() {
         use shape_ast::ast::{Duration, DurationUnit};
-        let dur = Duration { value: 2.0, unit: DurationUnit::Hours };
+        let dur = Duration {
+            value: 2.0,
+            unit: DurationUnit::Hours,
+        };
         let chrono_dur = super::ast_duration_to_chrono(&dur);
         assert_eq!(chrono_dur.num_seconds(), 7200);
     }

@@ -30,6 +30,16 @@ pub struct Point(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LoanId(pub u32);
 
+/// A normalized step in a place projection chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProjectionStep {
+    Field(FieldIdx),
+    /// Index projections are intentionally summarized without their concrete
+    /// operand. The borrow solver only needs to know that an index boundary
+    /// exists for provenance and diagnostics.
+    Index,
+}
+
 impl fmt::Display for SlotId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "_{}", self.0)
@@ -123,6 +133,28 @@ impl Place {
             _ => self.is_prefix_of(other) || other.is_prefix_of(self),
         }
     }
+
+    /// Return a normalized projection summary from the root local to this place.
+    pub fn projection_steps(&self) -> Vec<ProjectionStep> {
+        let mut steps = Vec::new();
+        self.collect_projection_steps(&mut steps);
+        steps
+    }
+
+    fn collect_projection_steps(&self, steps: &mut Vec<ProjectionStep>) {
+        match self {
+            Place::Local(_) => {}
+            Place::Field(base, field) => {
+                base.collect_projection_steps(steps);
+                steps.push(ProjectionStep::Field(*field));
+            }
+            Place::Index(base, _) => {
+                base.collect_projection_steps(steps);
+                steps.push(ProjectionStep::Index);
+            }
+            Place::Deref(base) => base.collect_projection_steps(steps),
+        }
+    }
 }
 
 impl fmt::Display for Place {
@@ -174,6 +206,8 @@ pub enum MirConstant {
     Float(u64),
     /// Function reference by name
     Function(String),
+    /// Method name for dispatch
+    Method(String),
 }
 
 impl fmt::Display for MirConstant {
@@ -185,6 +219,7 @@ impl fmt::Display for MirConstant {
             MirConstant::StringId(id) => write!(f, "str#{}", id),
             MirConstant::Float(bits) => write!(f, "{}", f64::from_bits(*bits)),
             MirConstant::Function(name) => write!(f, "fn:{}", name),
+            MirConstant::Method(name) => write!(f, "method:{}", name),
         }
     }
 }
@@ -252,6 +287,17 @@ pub enum UnOp {
     Not,
 }
 
+// ── Task Boundary Kind ───────────────────────────────────────────────
+
+/// Distinguishes detached vs structured async task boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskBoundaryKind {
+    /// Detached async task (not joined in declaring scope).
+    Detached,
+    /// Structured child task (joined before parent scope exits).
+    Structured,
+}
+
 // ── Statements ───────────────────────────────────────────────────────
 
 /// A statement within a basic block (doesn't affect control flow).
@@ -272,19 +318,32 @@ pub enum StatementKind {
     Drop(Place),
     /// Cross a task boundary (spawn/join branch capture).
     /// Operands are the values flowing into the spawned task.
-    TaskBoundary(Vec<Operand>),
+    /// The kind distinguishes detached vs structured tasks.
+    TaskBoundary(Vec<Operand>, TaskBoundaryKind),
     /// Capture values into a closure environment.
     /// Operands are the outer values flowing into the closure.
-    ClosureCapture(Vec<Operand>),
+    ClosureCapture {
+        closure_slot: SlotId,
+        operands: Vec<Operand>,
+    },
     /// Store values into an array literal.
     /// Operands are the array elements being stored.
-    ArrayStore(Vec<Operand>),
+    ArrayStore {
+        container_slot: SlotId,
+        operands: Vec<Operand>,
+    },
     /// Store values into an object or struct literal.
     /// Operands are the fields/spreads being stored.
-    ObjectStore(Vec<Operand>),
+    ObjectStore {
+        container_slot: SlotId,
+        operands: Vec<Operand>,
+    },
     /// Store values into an enum payload.
     /// Operands are the tuple/struct payload values being stored.
-    EnumStore(Vec<Operand>),
+    EnumStore {
+        container_slot: SlotId,
+        operands: Vec<Operand>,
+    },
     /// No-op (placeholder, padding).
     Nop,
 }

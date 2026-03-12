@@ -86,14 +86,25 @@ impl BytecodeCompiler {
         let mut has_value = false;
         for (i, item) in block.items.iter().enumerate() {
             let is_last = i == block.items.len() - 1;
-            let future_names =
+            let mut future_names =
                 self.future_reference_use_names_for_remaining_block_items(&block.items[i + 1..]);
+            if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef
+                && i + 1 < block.items.len()
+                && let Some(shape_ast::ast::BlockItem::Expression(expr)) = block.items.last()
+            {
+                self.collect_reference_use_names_from_expr(expr, true, &mut future_names);
+            }
             self.push_future_reference_use_names(future_names);
 
             let compile_result: Result<()> = match item {
                 shape_ast::ast::BlockItem::VariableDecl(var_decl) => {
                     if let Some(init_expr) = &var_decl.value {
-                        let ref_borrow = self.compile_expr_for_reference_binding(init_expr)?;
+                        let saved_pending_variable_name = self.pending_variable_name.clone();
+                        self.pending_variable_name =
+                            var_decl.pattern.as_identifier().map(|name| name.to_string());
+                        let compile_result = self.compile_expr_for_reference_binding(init_expr);
+                        self.pending_variable_name = saved_pending_variable_name;
+                        let ref_borrow = compile_result?;
                         // Use full destructure pattern support (array, object, identifier)
                         self.compile_destructure_pattern(&var_decl.pattern)?;
                         for (binding_name, _) in var_decl.pattern.get_bindings() {
@@ -217,7 +228,12 @@ impl BytecodeCompiler {
                         }
                     }
 
-                    let ref_borrow = self.compile_expr_for_reference_binding(&assignment.value)?;
+                    let saved_pending_variable_name = self.pending_variable_name.clone();
+                    self.pending_variable_name =
+                        assignment.pattern.as_identifier().map(|name| name.to_string());
+                    let compile_result = self.compile_expr_for_reference_binding(&assignment.value);
+                    self.pending_variable_name = saved_pending_variable_name;
+                    let ref_borrow = compile_result?;
                     // Store in local/module_binding/closure variable
                     self.compile_destructure_assignment(&assignment.pattern)?;
                     if let Some(name) = assignment.pattern.as_identifier() {
@@ -272,7 +288,14 @@ impl BytecodeCompiler {
                     Ok::<(), ShapeError>(())
                 }
                 shape_ast::ast::BlockItem::Expression(expr) => {
-                    self.compile_expr(expr)?;
+                    if is_last
+                        && self.current_expr_result_mode()
+                            == crate::compiler::ExprResultMode::PreserveRef
+                    {
+                        self.compile_expr_preserving_refs(expr)?;
+                    } else {
+                        self.compile_expr(expr)?;
+                    }
                     if !is_last {
                         // Pop intermediate values
                         self.emit(Instruction::simple(OpCode::Pop));
@@ -296,6 +319,7 @@ impl BytecodeCompiler {
         // If no value expression, the block evaluates to unit
         if !has_value {
             self.emit_unit();
+            self.clear_last_expr_reference_result();
         }
 
         self.pop_drop_scope()?;
@@ -876,7 +900,7 @@ mod comptime_for_tests {
         // Unroll over a literal array: each iteration yields the element.
         let result = eval(
             r#"
-            let total = 0.0
+            let mut total = 0.0
             comptime for x in [1.0, 2.0, 3.0] {
                 total = total + x
             }
@@ -904,7 +928,7 @@ mod comptime_for_tests {
         // Unroll over string array
         let result = eval(
             r#"
-            let result = ""
+            let mut result = ""
             comptime for name in ["hello", "world"] {
                 result = result + name + " "
             }
@@ -950,27 +974,43 @@ mod block_expr_tests {
     fn test_block_trailing_semicolon_suppresses_value() {
         // { 1; } should yield unit, not 1
         let result = eval("{ 1; }");
-        assert_eq!(result, ValueWord::unit(), "block with trailing semicolon should yield ()");
+        assert_eq!(
+            result,
+            ValueWord::unit(),
+            "block with trailing semicolon should yield ()"
+        );
     }
 
     #[test]
     fn test_block_no_trailing_semicolon_returns_value() {
         // { 1 } should yield 1
         let result = eval("{ 1 }");
-        assert_eq!(result, ValueWord::from_i64(1), "block without trailing semicolon should yield the value");
+        assert_eq!(
+            result,
+            ValueWord::from_i64(1),
+            "block without trailing semicolon should yield the value"
+        );
     }
 
     #[test]
     fn test_block_multi_stmt_trailing_semicolon() {
         // { let x = 1; x; } should yield unit
         let result = eval("{ let x = 1; x; }");
-        assert_eq!(result, ValueWord::unit(), "block with trailing semicolon after expr should yield ()");
+        assert_eq!(
+            result,
+            ValueWord::unit(),
+            "block with trailing semicolon after expr should yield ()"
+        );
     }
 
     #[test]
     fn test_block_multi_stmt_no_trailing_semicolon() {
         // { let x = 42; x } should yield 42
         let result = eval("{ let x = 42; x }");
-        assert_eq!(result, ValueWord::from_i64(42), "block with tail expr should yield the value");
+        assert_eq!(
+            result,
+            ValueWord::from_i64(42),
+            "block with tail expr should yield the value"
+        );
     }
 }

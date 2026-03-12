@@ -3583,7 +3583,11 @@ mod tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap();
-        assert_eq!(result.as_i64(), Some(-1), "u64::MAX truncated to i8 should be -1");
+        assert_eq!(
+            result.as_i64(),
+            Some(-1),
+            "u64::MAX truncated to i8 should be -1"
+        );
     }
 
     #[test]
@@ -3599,6 +3603,10 @@ mod tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(program);
         let result = vm.execute(None).unwrap();
-        assert_eq!(result.as_i64(), Some(255), "u64::MAX truncated to u8 should be 255");
+        assert_eq!(
+            result.as_i64(),
+            Some(255),
+            "u64::MAX truncated to u8 should be 255"
+        );
     }
 }

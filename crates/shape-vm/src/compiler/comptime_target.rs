@@ -682,18 +682,14 @@ mod tests {
         assert_eq!(value.type_name(), "object");
 
         // Extract fields array from the target TypedObject
-        if let Some(fields_map) =
-            shape_runtime::type_schema::typed_object_to_hashmap_nb(&value)
-        {
+        if let Some(fields_map) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&value) {
             let fields_arr = fields_map.get("fields").expect("should have fields");
             if let Some(view) = fields_arr.as_any_array() {
                 let arr = view.to_generic();
                 assert_eq!(arr.len(), 3);
 
                 // Check first field is NOT optional
-                if let Some(f0) =
-                    shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[0])
-                {
+                if let Some(f0) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[0]) {
                     let opt = f0.get("optional").expect("should have optional field");
                     assert_eq!(
                         opt.as_bool(),
@@ -709,9 +705,7 @@ mod tests {
                 }
 
                 // Check second field IS optional with unwrapped type
-                if let Some(f1) =
-                    shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[1])
-                {
+                if let Some(f1) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[1]) {
                     let opt = f1.get("optional").expect("should have optional field");
                     assert_eq!(
                         opt.as_bool(),
@@ -727,9 +721,7 @@ mod tests {
                 }
 
                 // Check third field IS optional with unwrapped type
-                if let Some(f2) =
-                    shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[2])
-                {
+                if let Some(f2) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&arr[2]) {
                     let opt = f2.get("optional").expect("should have optional field");
                     assert_eq!(
                         opt.as_bool(),

@@ -2087,7 +2087,7 @@ fn test_hoisted_field_in_typed_object() {
     // After assignment, a.y should return 2, and 'a' should remain a TypedObject (not Object).
     let result = compile_and_run(
         r#"
-        let a = { x: 1 }
+        let mut a = { x: 1 }
         a.y = 2
         a.y
     "#,
@@ -2113,7 +2113,7 @@ fn test_hoisted_field_stays_typed_object() {
     // Both explicit and hoisted fields accessible.
     let result = compile_and_run(
         r#"
-        let a = { x: 10 }
+        let mut a = { x: 10 }
         a.y = 20
         a.x + a.y
     "#,
@@ -2137,7 +2137,7 @@ fn test_hoisted_field_stays_typed_object() {
 fn test_array_index_assignment_accepts_int_keys() {
     let result = compile_and_run(
         r#"
-        let a = [10, 20, 30]
+        let mut a = [10, 20, 30]
         a[0] = 99
         a[0]
     "#,
@@ -2156,7 +2156,7 @@ fn test_array_index_assignment_accepts_int_keys() {
 fn test_array_index_assignment_preserves_copy_on_write_aliasing() {
     let result = compile_and_run(
         r#"
-        let a = [1, 2]
+        let mut a = [1, 2]
         let b = a
         a[0] = 9
         b[0]
@@ -2176,7 +2176,7 @@ fn test_array_index_assignment_preserves_copy_on_write_aliasing() {
 fn test_array_index_assignment_uses_local_fast_path_opcode() {
     let program = shape_ast::parser::parse_program(
         r#"
-        let a = [1, 2]
+        let mut a = [1, 2]
         a[0] = 9
     "#,
     )

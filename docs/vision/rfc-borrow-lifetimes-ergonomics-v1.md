@@ -1,16 +1,16 @@
 # RFC: Borrow/Lifetime Ergonomics v1 (`let mut`, first-class refs, Polonius-inspired checking)
 
-Status: Draft  
-Date: 2026-02-26  
+Status: Implemented
+Date: 2026-02-26 (updated 2026-03-11)
 Authors: Shape runtime/compiler team
 
 ## Summary
 
 This RFC defines a new ownership/borrowing model that keeps Rust-grade memory safety while feeling lightweight in day-to-day code:
 
-- `let` is immutable by default.
-- `let mut` enables reassignment.
-- `var` is accepted as an alias for `let mut` (onboarding ergonomics).
+- `let` is an owned immutable binding.
+- `let mut` is an owned mutable binding.
+- `var` is a flexible aliasable binding whose storage is chosen by the compiler.
 - Optional `auto_bind` mode allows Python-like `x = ...` to create a binding if none exists.
 - References become first-class values (`let r = &x`, `let r = &mut x`).
 - Borrow/lifetime analysis moves from lexical-slot checks to place-based, non-lexical, Polonius-inspired constraints.
@@ -22,10 +22,10 @@ The model is strict where safety matters and ergonomic everywhere else via infer
 
 Current Shape has useful borrow safety but with important limits:
 
-- `&` references are currently restricted to call-argument contexts.
-- `mut` in variable declarations is parsed but not represented semantically.
+- `&` references are currently restricted to call-argument contexts. **(Resolved: references are now first-class values.)**
+- `mut` in variable declarations is parsed but not represented semantically. **(Resolved: `let mut` is fully semantic.)**
 - assignment to unknown names can create bindings implicitly, which creates ambiguity.
-- borrow inference is heuristic and lexical; it is not yet place-based NLL.
+- ~~borrow inference is heuristic and lexical; it is not yet place-based NLL.~~ **(Resolved: borrow checking now uses MIR-based non-lexical lifetimes (NLL) with a Datafrog constraint solver. The lexical borrow checker has been removed.)**
 
 Users should not have to fight a checker for common code, but they also should not lose static guarantees.
 
@@ -36,7 +36,7 @@ Users should not have to fight a checker for common code, but they also should n
 3. Make references first-class (`let r = &x` must work).
 4. Infer as much as possible (types, mutability, borrow mode, end-of-borrow points).
 5. Provide deterministic, actionable diagnostics and LSP hints.
-6. Allow gradual migration from existing Shape behavior.
+6. Replace the current mixed model with a single source-level ownership split.
 
 ## Non-goals
 
@@ -55,10 +55,10 @@ let x = 1          // immutable binding
 let mut y = 1      // mutable binding
 ```
 
-`var` is accepted as sugar:
+`var` has its own semantics:
 
 ```shape
-var y = 1          // exact alias for: let mut y = 1
+var y = 1          // flexible aliasable value semantics
 ```
 
 `const` remains a stronger immutability form for compile-time constants.
@@ -85,7 +85,7 @@ let mut b = 20
 let rm = &mut b    // exclusive reference
 ```
 
-References can be passed, stored, and returned only when lifetime constraints prove safety.
+References can be passed, stored, and returned only when lifetime constraints prove safety. Disjoint field borrows work (`&mut obj.a` / `&mut obj.b`), including chained property access (`&obj.nested.field`). Index borrowing is supported (`&arr[0]`). References can be stored in local containers (`let arr = [&x]`) when the container never escapes the declaring function and the borrow provably outlives the container — the MIR solver's post-solve relaxation pass validates this. `return &x` for local variables is detected by the MIR solver; reference-returning functions use MIR-derived return-reference summaries, and ref-returning calls stay raw refs until ordinary value contexts implicitly auto-deref them.
 
 ### 4. Function Parameter Reference Syntax
 
@@ -113,7 +113,8 @@ Tooling must always show the effective mode, whether explicit or inferred.
 ### A. Binding Mutability
 
 - `let` bindings cannot be reassigned.
-- `let mut`/`var` bindings can be reassigned.
+- `let mut` bindings can be reassigned while remaining owned.
+- `var` bindings can be reassigned and may be represented with shared/COW storage when aliasing requires it.
 - Mutability of a binding is independent from mutability of a referenced target.
 
 ### B. Borrow Rules
@@ -163,7 +164,8 @@ Rules:
 
 - In `task/shared` effects, static borrow proof is mandatory (no dynamic borrow fallback).
 - Cross-task references require `Send`/`Sync`-like trait constraints (or Shape equivalent).
-- Non-`'static` references may not cross detached task boundaries.
+- All references (shared and exclusive) are rejected across detached task boundaries.
+- Only exclusive references are rejected across structured task boundaries; shared references are allowed because they are truly immutable and scope-bounded.
 
 ## Inference Model
 
@@ -236,30 +238,14 @@ Required quick-fixes:
 4. “Insert explicit borrow mode”.
 5. “Enable/disable auto_bind for this file/module” (if policy allows).
 
-## Compatibility and Migration
+## Compatibility Notes
 
-### Language Flags
+This design is a direct semantic replacement, not an edition-gated `v2` flag.
 
-Introduce edition/config flags:
-
-- `borrow_model = "v1"` (current behavior)
-- `borrow_model = "v2"` (this RFC)
-- `auto_bind = true|false`
-- `var_alias = true|false` (whether `var` parses as alias)
-
-### Breaking Changes in `v2`
-
-- `let` reassignment becomes compile error.
-- unresolved assignment no longer silently creates module/global binding unless `auto_bind = true`.
-- reference expressions are legal outside call args, and their escape safety is checked by region solver.
-
-### Migration Strategy
-
-1. Add warnings under `v1` for behaviors that change in `v2`.
-2. Provide codemod:
-   - rewrite mutable `let` reassignment sites to `let mut`,
-   - rewrite implicit-create assignments to explicit declaration or enable `auto_bind`.
-3. Flip default to `v2` in next language edition.
+- `let` reassignment is a compile error unless written as `let mut`.
+- `var` is not parser sugar for `let mut`.
+- reference expressions are legal outside call args, and their escape safety is checked by the region solver.
+- `auto_bind` remains a separate policy concern and is not the ownership switch.
 
 ## Implementation Plan
 
@@ -267,7 +253,7 @@ Introduce edition/config flags:
 
 - Represent declaration mutability in AST (`VariableDecl.is_mut`).
 - Add `&mut` in expression and parameter grammar.
-- Keep `var` as parser sugar lowering to `let mut`.
+- Represent `var` as a distinct ownership class, not `let mut` sugar.
 
 ### Phase 1: Binding Resolver Rewrite
 
@@ -305,15 +291,15 @@ Introduce edition/config flags:
 ## Open Questions
 
 1. Should `auto_bind` default to `true` in REPL but `false` in files?
-2. Should `var` remain permanently or be onboarding-only sugar?
-3. How aggressive should disjoint-index analysis be in v2 vs later versions?
+2. How aggressive should disjoint-index analysis be initially vs later versions? *(Note: index borrowing is now supported; index disjointness analysis — proving `x[i]` vs `x[j]` do not conflict — is deferred to v2.)*
+3. ~~What send/sync-equivalent constraints should Shape expose for task-boundary references?~~ *(Resolved: three-rule model — all refs rejected across detached tasks, only exclusive across structured tasks.)*
 
 ## Acceptance Criteria
 
-`v2` is accepted when:
+This redesign is accepted when:
 
-1. `let a = &b` and `let a = &mut b` are supported with sound checks.
-2. `let` immutability and `let mut` reassignment rules are enforced.
-3. Place-based non-lexical lifetimes eliminate major false positives from lexical model.
-4. LSP shows type + mutability + reference mode consistently.
-5. Concurrency boundary checks enforce stricter guarantees without unsound fallback.
+1. `let a = &b` and `let a = &mut b` are supported with sound checks. **Done.**
+2. `let`, `let mut`, and `var` follow the new ownership split consistently. **Done.**
+3. Place-based non-lexical lifetimes eliminate major false positives from lexical model. **Done — Datafrog NLL solver implemented.**
+4. LSP shows type + mutability + reference mode consistently. **Done.**
+5. Concurrency boundary checks enforce stricter guarantees without unsound fallback. **Done — three-rule model for task boundaries.**

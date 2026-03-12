@@ -878,16 +878,10 @@ pub fn try_find_project_root(start_dir: &Path) -> Result<Option<ProjectRoot>, St
     loop {
         let candidate = current.join("shape.toml");
         if candidate.is_file() {
-            let content = std::fs::read_to_string(&candidate).map_err(|e| {
-                format!("Failed to read {}: {}", candidate.display(), e)
-            })?;
-            let config = parse_shape_project_toml(&content).map_err(|e| {
-                format!(
-                    "Malformed shape.toml at {}: {}",
-                    candidate.display(),
-                    e
-                )
-            })?;
+            let content = std::fs::read_to_string(&candidate)
+                .map_err(|e| format!("Failed to read {}: {}", candidate.display(), e))?;
+            let config = parse_shape_project_toml(&content)
+                .map_err(|e| format!("Malformed shape.toml at {}: {}", candidate.display(), e))?;
             return Ok(Some(ProjectRoot {
                 root_path: current,
                 config,
@@ -1930,11 +1924,7 @@ virtual_fs = false
     #[test]
     fn test_try_find_project_root_returns_error_for_malformed_toml() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("shape.toml"),
-            "this is not valid toml {{{",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("shape.toml"), "this is not valid toml {{{").unwrap();
 
         let result = try_find_project_root(tmp.path());
         assert!(result.is_err());
@@ -1982,11 +1972,7 @@ version = "1.0.0"
     fn test_find_project_root_returns_none_for_malformed_toml() {
         // find_project_root should return None (not panic) for malformed TOML
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("shape.toml"),
-            "[invalid\nbroken toml",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("shape.toml"), "[invalid\nbroken toml").unwrap();
 
         let result = find_project_root(tmp.path());
         assert!(result.is_none());

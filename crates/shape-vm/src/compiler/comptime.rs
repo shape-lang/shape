@@ -1435,9 +1435,7 @@ mod tests {
             100
         "#;
         let program = shape_ast::parser::parse_program(code).expect("parse");
-        let bytecode = BytecodeCompiler::new()
-            .compile(&program)
-            .expect("compile");
+        let bytecode = BytecodeCompiler::new().compile(&program).expect("compile");
 
         // The comptime fn should NOT appear as a compiled function with a valid entry point.
         // It may still be in the function table (from registration), but its body
@@ -1456,10 +1454,7 @@ mod tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(bytecode);
         let result = vm.execute(None).expect("execute");
-        assert_eq!(
-            result.as_number_coerce().expect("Expected 100"),
-            100.0
-        );
+        assert_eq!(result.as_number_coerce().expect("Expected 100"), 100.0);
     }
 
     #[test]

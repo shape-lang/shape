@@ -2164,7 +2164,7 @@ fn test_inferred_ref_mutating_and_shared_alias_rejected() {
             return touch(xs, xs)
         }
         "#,
-        "[B0001]",
+        "[B0013]",
     );
 }
 
@@ -2220,7 +2220,8 @@ fn test_ref_shared_binding_compiles_and_can_be_passed() {
 
 #[test]
 fn test_ref_cannot_be_returned_from_function() {
-    // References are scoped borrows — returning one would create a dangling ref
+    // References are scoped borrows — returning one would create a dangling ref.
+    // The MIR solver detects this via `escaped_loans` and produces ReferenceEscape.
     assert_compile_error(
         r#"
         function test() {
@@ -2228,7 +2229,7 @@ fn test_ref_cannot_be_returned_from_function() {
             return &x
         }
         "#,
-        "cannot return a reference",
+        "cannot return or store a reference that outlives its owner",
     );
 }
 
@@ -2261,28 +2262,32 @@ fn test_ref_on_top_level_module_bindings() {
 }
 
 #[test]
-fn test_ref_only_on_simple_identifiers() {
-    // &arr[0] is not a simple identifier -- parser rejects this as a complex expression
-    assert_compile_error(
-        r#"
-        function f(&x) { x = 0 }
+fn test_ref_index_borrow_compiles() {
+    // &arr[0] is now supported (index borrowing, RFC item #5)
+    let code = r#"
+        function f(&x) { return x }
         function test() {
             var arr = [1, 2, 3]
-            f(&arr[0])
+            return f(&arr[0])
         }
-        "#,
-        "simple variable name",
-    );
+    "#;
+    let program = parse_program(code).expect("should parse");
+    BytecodeCompiler::new()
+        .compile(&program)
+        .expect("index borrowing should compile");
 }
 
 #[test]
 fn test_ref_double_exclusive_borrow_rejected() {
+    // Two exclusive borrows of the same variable are caught by the
+    // intra-function NLL checker (B0001) before interprocedural alias
+    // checking (B0013) gets a chance. Either error is acceptable.
     assert_compile_error(
         r#"
-        function take2(&a, &b) { a = b }
+        function take2(&mut a, &mut b) { a = b }
         function test() {
             var x = 5
-            take2(&x, &x)
+            take2(&mut x, &mut x)
         }
         "#,
         "[B0001]",

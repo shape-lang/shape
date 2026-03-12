@@ -466,6 +466,36 @@ pub enum BindingOwnershipClass {
     Flexible,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Aliasability {
+    /// Single owner, no aliasing possible.
+    Unique,
+    /// Shared via immutable references only.
+    SharedImmutable,
+    /// Shared with potential mutation (var semantics).
+    SharedMutable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationCapability {
+    /// Cannot be mutated (`let`).
+    Immutable,
+    /// Mutable by single owner (`let mut`).
+    LocalMutable,
+    /// Mutable with shared access (`var` captured/aliased).
+    SharedMutable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EscapeStatus {
+    /// Stays within declaring scope.
+    Local,
+    /// Captured by a closure.
+    Captured,
+    /// Escapes declaring function (returned, stored in module state).
+    Escaped,
+}
+
 /// Planned runtime storage strategy for a binding slot.
 ///
 /// `Deferred` is the initial state for ordinary bindings until a later planner
@@ -484,6 +514,9 @@ pub enum BindingStorageClass {
 pub struct BindingSemantics {
     pub ownership_class: BindingOwnershipClass,
     pub storage_class: BindingStorageClass,
+    pub aliasability: Aliasability,
+    pub mutation_capability: MutationCapability,
+    pub escape_status: EscapeStatus,
 }
 
 impl BindingSemantics {
@@ -491,6 +524,13 @@ impl BindingSemantics {
         Self {
             ownership_class,
             storage_class: BindingStorageClass::Deferred,
+            aliasability: Aliasability::Unique,
+            mutation_capability: match ownership_class {
+                BindingOwnershipClass::OwnedImmutable => MutationCapability::Immutable,
+                BindingOwnershipClass::OwnedMutable => MutationCapability::LocalMutable,
+                BindingOwnershipClass::Flexible => MutationCapability::SharedMutable,
+            },
+            escape_status: EscapeStatus::Local,
         }
     }
 }

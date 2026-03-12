@@ -149,7 +149,9 @@ impl super::ExecutionContext {
     ///
     /// Returns an iterator over all struct type definitions registered in previous
     /// REPL sessions. Used to inject them into the program before compilation.
-    pub fn struct_type_defs(&self) -> &std::collections::HashMap<String, shape_ast::ast::StructTypeDef> {
+    pub fn struct_type_defs(
+        &self,
+    ) -> &std::collections::HashMap<String, shape_ast::ast::StructTypeDef> {
         &self.struct_type_registry
     }
 }

@@ -40,7 +40,7 @@ fn infer_array_read_only_no_mutation() {
     ShapeTest::new(
         r#"
         fn sum_arr(arr) {
-            let total = 0
+            var total = 0
             for v in arr { total = total + v }
             total
         }
@@ -138,7 +138,7 @@ fn infer_array_mutation_in_loop() {
         r#"
         fn double_elem(arr, i) { arr[i] = arr[i] * 2 }
         let xs = [1, 2, 3, 4, 5]
-        let i = 0
+        var i = 0
         while i < 5 {
             double_elem(xs, i)
             i = i + 1
@@ -212,7 +212,7 @@ fn infer_array_mutation_visible_to_caller() {
     ShapeTest::new(
         r#"
         fn fill(arr, val) {
-            let i = 0
+            var i = 0
             while i < len(arr) {
                 arr[i] = val
                 i = i + 1

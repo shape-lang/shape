@@ -67,6 +67,7 @@ impl BytecodeCompiler {
         ));
 
         let mut end_jumps = Vec::new();
+        let mut arm_reference_results = Vec::new();
 
         // Capture scrutinee type info for restoring before each arm's binding.
         // This includes schema_id, numeric type, and full type_info so that
@@ -118,7 +119,12 @@ impl BytecodeCompiler {
                 Some(Operand::Local(scrutinee_local)),
             ));
             self.compile_match_binding(&arm.pattern)?;
-            self.compile_expr(&arm.body)?;
+            if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
+                self.compile_expr_preserving_refs(&arm.body)?;
+            } else {
+                self.compile_expr(&arm.body)?;
+            }
+            arm_reference_results.push(self.capture_last_expr_reference_result());
             self.pop_scope();
 
             let end_jump = self.emit_jump(OpCode::Jump, 0);
@@ -144,6 +150,9 @@ impl BytecodeCompiler {
         for jump in end_jumps {
             self.patch_jump(jump);
         }
+        self.restore_last_expr_reference_result(Self::merge_reference_results(
+            &arm_reference_results,
+        ));
         self.pop_scope();
         Ok(())
     }
@@ -548,7 +557,7 @@ mod tests {
         assert!(result.is_err(), "match binding reassignment should fail");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("immutable variable 'x'"),
+            err_msg.contains("cannot assign to immutable binding 'x'"),
             "unexpected error: {}",
             err_msg
         );
@@ -864,7 +873,7 @@ mod tests {
         assert!(result.is_err(), "async let reassignment should fail");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("immutable variable 'x'"),
+            err_msg.contains("immutable") && err_msg.contains("'x'"),
             "unexpected error: {}",
             err_msg
         );

@@ -833,8 +833,20 @@ alpha() + beta() + gamma()
                 _ => None,
             })
             .collect();
-        assert!(fn_names.contains(&"alpha".to_string()), "alpha should be inlined, got: {:?}", fn_names);
-        assert!(fn_names.contains(&"beta".to_string()), "beta should be inlined, got: {:?}", fn_names);
-        assert!(fn_names.contains(&"gamma".to_string()), "gamma should be inlined, got: {:?}", fn_names);
+        assert!(
+            fn_names.contains(&"alpha".to_string()),
+            "alpha should be inlined, got: {:?}",
+            fn_names
+        );
+        assert!(
+            fn_names.contains(&"beta".to_string()),
+            "beta should be inlined, got: {:?}",
+            fn_names
+        );
+        assert!(
+            fn_names.contains(&"gamma".to_string()),
+            "gamma should be inlined, got: {:?}",
+            fn_names
+        );
     }
 }

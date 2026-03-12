@@ -15,7 +15,6 @@
 //! - `execution` - Compilation pipeline, VM execution loop, snapshot resume
 
 pub mod blob_cache_v2;
-pub mod borrow_checker;
 pub mod bundle_compiler;
 pub mod bytecode;
 pub mod bytecode_cache;

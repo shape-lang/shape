@@ -285,9 +285,26 @@ impl BytecodeCompiler {
         self.inferred_ref_mutates = inferred_ref_mutates;
         self.inferred_param_type_hints = inferred_param_type_hints;
 
-        // Hoisting pre-pass: collect all property assignments (e.g., a.y = 2)
-        // so inline object schemas include future fields from the start.
-        // Uses the existing PropertyAssignmentCollector — no duplication.
+        // Two-phase TypedObject field hoisting:
+        //
+        // Phase 1 (here, AST pre-pass): Collect all property assignments (e.g.,
+        // `a.y = 2`) from the entire program BEFORE any function compilation.
+        // This populates `hoisted_fields` so that `compile_typed_object_literal`
+        // can allocate schema slots for future fields at object-creation time.
+        // Without this pre-pass, the schema would be too small and a later
+        // `a.y = 2` would require a schema migration at runtime.
+        //
+        // Phase 2 (per-function, MIR): During function compilation, MIR field
+        // analysis (`mir::field_analysis::analyze_fields`) runs flow-sensitive
+        // definite-initialization and liveness analysis. This detects:
+        //   - `dead_fields`: fields that are written but never read (wasted slots)
+        //   - `conditionally_initialized`: fields only assigned on some paths
+        //
+        // After MIR analysis, the compiler can cross-reference
+        // `mir_field_analyses[func].dead_fields` to prune unused hoisted fields
+        // from schemas. The dead_fields set uses `(SlotId, FieldIdx)` which must
+        // be mapped to field names via the schema registry — see the integration
+        // note in `compile_typed_object_literal`.
         {
             use shape_runtime::type_system::inference::PropertyAssignmentCollector;
             let assignments = PropertyAssignmentCollector::collect(&program);
@@ -304,6 +321,13 @@ impl BytecodeCompiler {
             self.register_item_functions(item)?;
         }
 
+        // MIR authority for non-function items: run borrow analysis on top-level
+        // code before compilation. Errors in cleanly-lowered regions are emitted;
+        // errors in fallback regions are suppressed (span-granular filtering).
+        if let Err(e) = self.analyze_non_function_items_with_mir("__main__", &program.items) {
+            self.errors.push(e);
+        }
+
         // Start __main__ blob builder for top-level code.
         self.current_blob_builder = Some(FunctionBlobBuilder::new(
             "__main__".to_string(),
@@ -315,6 +339,8 @@ impl BytecodeCompiler {
         // Push a top-level drop scope so that block expressions and
         // statement-level VarDecls can track locals for auto-drop.
         self.push_drop_scope();
+        self.non_function_mir_context_stack
+            .push("__main__".to_string());
 
         // Second pass: compile all items (collect errors instead of early-returning)
         let item_count = program.items.len();
@@ -332,6 +358,7 @@ impl BytecodeCompiler {
                 &program.items[idx + 1..],
             );
         }
+        self.non_function_mir_context_stack.pop();
 
         // Return collected errors before emitting Halt
         if !self.errors.is_empty() {

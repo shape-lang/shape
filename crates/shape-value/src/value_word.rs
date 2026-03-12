@@ -2594,9 +2594,12 @@ impl ValueWord {
             Some(HeapValue::FloatArray(buf)) => {
                 serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
             }
-            Some(HeapValue::BoolArray(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v != 0)).collect())
-            }
+            Some(HeapValue::BoolArray(buf)) => serde_json::Value::Array(
+                buf.data
+                    .iter()
+                    .map(|&v| serde_json::json!(v != 0))
+                    .collect(),
+            ),
             Some(HeapValue::I8Array(buf)) => {
                 serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
             }
@@ -3883,7 +3886,10 @@ mod tests {
 
     #[test]
     fn test_to_json_value_int_array() {
-        let buf = crate::typed_buffer::TypedBuffer { data: vec![1i64, 2, 3], validity: None };
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![1i64, 2, 3],
+            validity: None,
+        };
         let v = ValueWord::from_int_array(Arc::new(buf));
         let json = v.to_json_value();
         assert_eq!(json, serde_json::json!([1, 2, 3]));
@@ -3895,7 +3901,10 @@ mod tests {
         let mut av = AlignedVec::new();
         av.push(1.5);
         av.push(2.5);
-        let buf = crate::typed_buffer::AlignedTypedBuffer { data: av, validity: None };
+        let buf = crate::typed_buffer::AlignedTypedBuffer {
+            data: av,
+            validity: None,
+        };
         let v = ValueWord::from_float_array(Arc::new(buf));
         let json = v.to_json_value();
         assert_eq!(json, serde_json::json!([1.5, 2.5]));
@@ -3903,7 +3912,10 @@ mod tests {
 
     #[test]
     fn test_to_json_value_bool_array() {
-        let buf = crate::typed_buffer::TypedBuffer { data: vec![1u8, 0, 1], validity: None };
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![1u8, 0, 1],
+            validity: None,
+        };
         let v = ValueWord::from_bool_array(Arc::new(buf));
         let json = v.to_json_value();
         assert_eq!(json, serde_json::json!([true, false, true]));
@@ -3911,7 +3923,10 @@ mod tests {
 
     #[test]
     fn test_to_json_value_empty_int_array() {
-        let buf = crate::typed_buffer::TypedBuffer::<i64> { data: vec![], validity: None };
+        let buf = crate::typed_buffer::TypedBuffer::<i64> {
+            data: vec![],
+            validity: None,
+        };
         let v = ValueWord::from_int_array(Arc::new(buf));
         let json = v.to_json_value();
         assert_eq!(json, serde_json::json!([]));
@@ -3919,7 +3934,10 @@ mod tests {
 
     #[test]
     fn test_to_json_value_i32_array() {
-        let buf = crate::typed_buffer::TypedBuffer { data: vec![10i32, 20, 30], validity: None };
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![10i32, 20, 30],
+            validity: None,
+        };
         let v = ValueWord::heap_box(HeapValue::I32Array(Arc::new(buf)));
         let json = v.to_json_value();
         assert_eq!(json, serde_json::json!([10, 20, 30]));
@@ -3927,7 +3945,10 @@ mod tests {
 
     #[test]
     fn test_to_json_value_u64_array() {
-        let buf = crate::typed_buffer::TypedBuffer { data: vec![100u64, 200], validity: None };
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![100u64, 200],
+            validity: None,
+        };
         let v = ValueWord::heap_box(HeapValue::U64Array(Arc::new(buf)));
         let json = v.to_json_value();
         assert_eq!(json, serde_json::json!([100, 200]));
@@ -3935,7 +3956,10 @@ mod tests {
 
     #[test]
     fn test_to_json_value_f32_array() {
-        let buf = crate::typed_buffer::TypedBuffer { data: vec![1.0f32, 2.0], validity: None };
+        let buf = crate::typed_buffer::TypedBuffer {
+            data: vec![1.0f32, 2.0],
+            validity: None,
+        };
         let v = ValueWord::heap_box(HeapValue::F32Array(Arc::new(buf)));
         let json = v.to_json_value();
         assert_eq!(json, serde_json::json!([1.0, 2.0]));

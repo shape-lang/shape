@@ -121,6 +121,11 @@ pub enum RefProjection {
         field_idx: u16,
         field_type_tag: u16,
     },
+    /// Index projection: `&arr[i]` — the index is stored as a NaN-boxed value
+    /// so it can be an int or string key at runtime.
+    Index {
+        index: ValueWord,
+    },
 }
 
 /// Heap-backed projected reference data.

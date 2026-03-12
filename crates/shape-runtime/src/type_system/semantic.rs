@@ -78,6 +78,12 @@ pub enum SemanticType {
         args: Vec<SemanticType>,
     },
 
+    // === Reference Types ===
+    /// Shared reference to a value: &T
+    Ref(Box<SemanticType>),
+    /// Exclusive (mutable) reference to a value: &mut T
+    RefMut(Box<SemanticType>),
+
     // === Special Types ===
     /// Bottom type - computation that never returns (e.g., panic, infinite loop)
     Never,
@@ -141,6 +147,16 @@ impl SemanticType {
         SemanticType::Array(Box::new(element))
     }
 
+    /// Create shared reference type: &T
+    pub fn shared_ref(inner: SemanticType) -> Self {
+        SemanticType::Ref(Box::new(inner))
+    }
+
+    /// Create exclusive reference type: &mut T
+    pub fn exclusive_ref(inner: SemanticType) -> Self {
+        SemanticType::RefMut(Box::new(inner))
+    }
+
     /// Create function type
     pub fn function(params: Vec<SemanticType>, return_type: SemanticType) -> Self {
         SemanticType::Function(Box::new(FunctionSignature {
@@ -182,6 +198,33 @@ impl SemanticType {
             SemanticType::Number => true,
             SemanticType::Named(name) => matches!(name.as_str(), "f32" | "f64"),
             _ => false,
+        }
+    }
+
+    /// Check if this is a reference type (&T or &mut T).
+    pub fn is_reference(&self) -> bool {
+        matches!(self, SemanticType::Ref(_) | SemanticType::RefMut(_))
+    }
+
+    /// Check if this is an exclusive (mutable) reference type (&mut T).
+    pub fn is_exclusive_ref(&self) -> bool {
+        matches!(self, SemanticType::RefMut(_))
+    }
+
+    /// Get the inner type of a reference (&T → T, &mut T → T).
+    pub fn deref_type(&self) -> Option<&SemanticType> {
+        match self {
+            SemanticType::Ref(inner) | SemanticType::RefMut(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// Strip reference wrappers to get the underlying value type.
+    /// For non-reference types, returns self.
+    pub fn auto_deref(&self) -> &SemanticType {
+        match self {
+            SemanticType::Ref(inner) | SemanticType::RefMut(inner) => inner.auto_deref(),
+            other => other,
         }
     }
 
@@ -323,6 +366,14 @@ impl SemanticType {
                 }
             }
 
+            SemanticType::Ref(inner) => {
+                let inner_info = inner.to_type_info();
+                TypeInfo::primitive(format!("&{}", inner_info.name))
+            }
+            SemanticType::RefMut(inner) => {
+                let inner_info = inner.to_type_info();
+                TypeInfo::primitive(format!("&mut {}", inner_info.name))
+            }
             SemanticType::Never => TypeInfo::primitive("Never"),
             SemanticType::Void => TypeInfo::null(),
 
@@ -375,6 +426,8 @@ impl fmt::Display for SemanticType {
                 }
                 write!(f, ">")
             }
+            SemanticType::Ref(inner) => write!(f, "&{}", inner),
+            SemanticType::RefMut(inner) => write!(f, "&mut {}", inner),
             SemanticType::Never => write!(f, "Never"),
             SemanticType::Void => write!(f, "Void"),
             SemanticType::Function(sig) => {
@@ -479,5 +532,64 @@ mod tests {
         assert!(SemanticType::Named("f32".to_string()).is_number_family());
         assert!(SemanticType::Named("f64".to_string()).is_numeric());
         assert!(!SemanticType::Named("Candle".to_string()).is_numeric());
+    }
+
+    // === Reference type tests ===
+
+    #[test]
+    fn test_shared_ref_creation() {
+        let r = SemanticType::shared_ref(SemanticType::Integer);
+        assert!(r.is_reference());
+        assert!(!r.is_exclusive_ref());
+        assert_eq!(r.deref_type(), Some(&SemanticType::Integer));
+    }
+
+    #[test]
+    fn test_exclusive_ref_creation() {
+        let r = SemanticType::exclusive_ref(SemanticType::Integer);
+        assert!(r.is_reference());
+        assert!(r.is_exclusive_ref());
+        assert_eq!(r.deref_type(), Some(&SemanticType::Integer));
+    }
+
+    #[test]
+    fn test_auto_deref() {
+        let r = SemanticType::shared_ref(SemanticType::Integer);
+        assert_eq!(r.auto_deref(), &SemanticType::Integer);
+
+        // Non-reference types return themselves
+        assert_eq!(SemanticType::Integer.auto_deref(), &SemanticType::Integer);
+
+        // Nested refs deref all the way through
+        let nested = SemanticType::shared_ref(SemanticType::shared_ref(SemanticType::Bool));
+        assert_eq!(nested.auto_deref(), &SemanticType::Bool);
+    }
+
+    #[test]
+    fn test_ref_display() {
+        let shared = SemanticType::shared_ref(SemanticType::Integer);
+        assert_eq!(format!("{}", shared), "&Integer");
+
+        let exclusive = SemanticType::exclusive_ref(SemanticType::Integer);
+        assert_eq!(format!("{}", exclusive), "&mut Integer");
+    }
+
+    #[test]
+    fn test_ref_to_type_info() {
+        let r = SemanticType::shared_ref(SemanticType::Number);
+        let info = r.to_type_info();
+        assert_eq!(info.name, "&Number");
+    }
+
+    #[test]
+    fn test_ref_is_not_numeric() {
+        let r = SemanticType::shared_ref(SemanticType::Integer);
+        assert!(!r.is_numeric());
+    }
+
+    #[test]
+    fn test_non_ref_deref_type_is_none() {
+        assert!(SemanticType::Integer.deref_type().is_none());
+        assert!(SemanticType::String.deref_type().is_none());
     }
 }

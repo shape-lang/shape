@@ -22,18 +22,19 @@ pub async fn run_login(token: String, registry: Option<String>) -> Result<()> {
 
     // Validate the token against the registry by making a test request
     let client = RegistryClient::new(Some(registry_url.clone())).with_token(token.clone());
-    client
-        .validate_token()
-        .await
-        .map_err(|e| anyhow::anyhow!("Token validation failed: {}\nCheck your token and try again.", e))?;
+    client.validate_token().await.map_err(|e| {
+        anyhow::anyhow!(
+            "Token validation failed: {}\nCheck your token and try again.",
+            e
+        )
+    })?;
 
     // Save credentials
     let credentials = Credentials {
         registry: registry_url.clone(),
         token,
     };
-    RegistryClient::save_credentials(&credentials)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    RegistryClient::save_credentials(&credentials).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     eprintln!("Logged in to {}", registry_url);
     eprintln!("Credentials saved to ~/.shape/credentials.json");

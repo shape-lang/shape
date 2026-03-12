@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Lightweight source span for AST nodes.
 /// Stores byte offsets from the beginning of the source text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Span {
     /// Start position (byte offset)
     pub start: usize,

@@ -42,16 +42,33 @@ impl BytecodeCompiler {
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
 
-        // Shape references are call-scoped; we do not allow closure capture of
-        // reference-typed locals because that would permit escaping borrows.
+        // Inside function bodies the MIR solver detects reference-capture errors
+        // via `closure_capture_loans` facts, producing `ReferenceEscapeIntoClosure`.
+        // For top-level code (no MIR), we still reject at the front-end.
         // Exception: inferred-ref locals (params passed by reference for performance)
         // are owned values and CAN be captured — the value is dereferenced at capture time.
-        for captured in &captured_vars {
-            if let Some(local_idx) = self.resolve_local(captured) {
-                let escapes_direct_borrow = self.ref_locals.contains(&local_idx)
-                    && !self.inferred_ref_locals.contains(&local_idx);
-                let escapes_reference_value = self.reference_value_locals.contains(&local_idx);
-                if escapes_direct_borrow || escapes_reference_value {
+        if self.current_function.is_none() {
+            for captured in &captured_vars {
+                if let Some(local_idx) = self.resolve_local(captured) {
+                    let escapes_direct_borrow = self.ref_locals.contains(&local_idx)
+                        && !self.inferred_ref_locals.contains(&local_idx);
+                    let escapes_reference_value =
+                        self.reference_value_locals.contains(&local_idx);
+                    if escapes_direct_borrow || escapes_reference_value {
+                        return Err(ShapeError::SemanticError {
+                            message: format!(
+                                "[B0003] reference '{}' cannot escape into a closure; capture a value instead",
+                                captured
+                            ),
+                            location: None,
+                        });
+                    }
+                }
+
+                if let Some(scoped_name) = self.resolve_scoped_module_binding_name(captured)
+                    && let Some(&binding_idx) = self.module_bindings.get(&scoped_name)
+                    && self.reference_value_module_bindings.contains(&binding_idx)
+                {
                     return Err(ShapeError::SemanticError {
                         message: format!(
                             "[B0003] reference '{}' cannot escape into a closure; capture a value instead",
@@ -60,19 +77,6 @@ impl BytecodeCompiler {
                         location: None,
                     });
                 }
-            }
-
-            if let Some(scoped_name) = self.resolve_scoped_module_binding_name(captured)
-                && let Some(&binding_idx) = self.module_bindings.get(&scoped_name)
-                && self.reference_value_module_bindings.contains(&binding_idx)
-            {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "[B0003] reference '{}' cannot escape into a closure; capture a value instead",
-                        captured
-                    ),
-                    location: None,
-                });
             }
         }
 
@@ -168,6 +172,24 @@ impl BytecodeCompiler {
         // Restore mutable_closure_captures
         self.mutable_closure_captures = saved_mutable_captures;
 
+        // Capture boxing decisions
+        // ────────────────────────
+        // The storage planner assigns each binding a BindingStorageClass that
+        // determines whether the variable needs heap indirection:
+        //
+        //   Direct     → LoadLocal / StoreLocal (no indirection needed)
+        //   Deferred   → plan not yet resolved; fall back to legacy boxing
+        //   UniqueHeap → currently: BoxLocal + Arc<RwLock<>> (SharedCell).
+        //                Future: unique Box without RwLock overhead.
+        //   SharedCow  → currently: BoxLocal + Arc<RwLock<>> (SharedCell).
+        //                Future: COW wrapper.
+        //   Reference  → DerefLoad / DerefStore (already handled above)
+        //
+        // We emit BoxLocal when the storage plan says the binding needs heap
+        // indirection (UniqueHeap, SharedCow, Direct, or Deferred). Only
+        // Reference bindings skip boxing — they are handled separately by the
+        // escape check above. In the future, the planner may introduce a
+        // dedicated "no-sharing" class to skip boxing for Direct bindings.
         for (i, captured) in captured_vars.iter().enumerate() {
             if matches!(
                 self.binding_semantics_for_name(captured),
@@ -182,34 +204,74 @@ impl BytecodeCompiler {
                 self.promote_flexible_binding_storage_for_name(captured, storage);
             }
             if mutable_flags.get(i).copied().unwrap_or(false) {
-                // Mutable capture: emit BoxLocal/BoxModuleBinding to convert the
-                // variable to a SharedCell and push the cell onto the stack.
-                // MakeClosure will extract the Arc so the closure and enclosing
-                // scope share the same mutable cell.
-                // Track that this variable has been boxed so subsequent closures
-                // in the same scope also use the SharedCell path.
-                self.boxed_locals.insert(captured.clone());
-                self.set_binding_storage_class_for_name(captured, BindingStorageClass::SharedCow);
-                if let Some(local_idx) = self.resolve_local(captured) {
-                    self.emit(Instruction::new(
-                        OpCode::BoxLocal,
-                        Some(Operand::Local(local_idx)),
-                    ));
-                } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(captured)
+                // Consult the storage plan to decide whether boxing is needed.
+                // Currently, Direct and Deferred bindings are both boxed for
+                // mutable captures because the storage plan runs before closure
+                // compilation and these are the default states. Reference
+                // bindings are already handled by the escape check above, so
+                // the only class that could skip boxing is one where the
+                // planner explicitly marks "no sharing needed" — a future
+                // optimization.
+                // Consult the MIR storage plan first (authoritative when available),
+                // then fall back to type-tracker binding semantics.
+                let mir_plan_class = self
+                    .resolve_local(captured)
+                    .and_then(|idx| self.mir_storage_class_for_slot(idx));
+                let should_box = if let Some(plan_class) = mir_plan_class {
+                    // MIR plan is authoritative: box when UniqueHeap/SharedCow,
+                    // skip for Reference (handled above), box for Direct/Deferred
+                    // since mutable capture needs heap indirection.
+                    !matches!(plan_class, BindingStorageClass::Reference)
+                } else if let Some((_, _, semantics)) =
+                    self.binding_semantics_for_name(captured)
                 {
-                    let mb_idx = self.get_or_create_module_binding(&scoped_name);
-                    self.emit(Instruction::new(
-                        OpCode::BoxModuleBinding,
-                        Some(Operand::ModuleBinding(mb_idx)),
-                    ));
-                } else if self.module_bindings.contains_key(captured) {
-                    let mb_idx = self.get_or_create_module_binding(captured);
-                    self.emit(Instruction::new(
-                        OpCode::BoxModuleBinding,
-                        Some(Operand::ModuleBinding(mb_idx)),
-                    ));
+                    // Fallback to type-tracker semantics
+                    !matches!(
+                        semantics.storage_class,
+                        BindingStorageClass::Reference
+                    )
                 } else {
-                    // Last resort fallback — just load the value
+                    true // no plan available, use legacy behavior (always box)
+                };
+
+                if should_box {
+                    // Mutable capture: emit BoxLocal/BoxModuleBinding to convert the
+                    // variable to a SharedCell and push the cell onto the stack.
+                    // MakeClosure will extract the Arc so the closure and enclosing
+                    // scope share the same mutable cell.
+                    // Track that this variable has been boxed so subsequent closures
+                    // in the same scope also use the SharedCell path.
+                    self.boxed_locals.insert(captured.clone());
+                    self.set_binding_storage_class_for_name(
+                        captured,
+                        BindingStorageClass::SharedCow,
+                    );
+                    if let Some(local_idx) = self.resolve_local(captured) {
+                        self.emit(Instruction::new(
+                            OpCode::BoxLocal,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                    } else if let Some(scoped_name) =
+                        self.resolve_scoped_module_binding_name(captured)
+                    {
+                        let mb_idx = self.get_or_create_module_binding(&scoped_name);
+                        self.emit(Instruction::new(
+                            OpCode::BoxModuleBinding,
+                            Some(Operand::ModuleBinding(mb_idx)),
+                        ));
+                    } else if self.module_bindings.contains_key(captured) {
+                        let mb_idx = self.get_or_create_module_binding(captured);
+                        self.emit(Instruction::new(
+                            OpCode::BoxModuleBinding,
+                            Some(Operand::ModuleBinding(mb_idx)),
+                        ));
+                    } else {
+                        // Last resort fallback — just load the value
+                        let temp = Expr::Identifier(captured.clone(), Span::DUMMY);
+                        self.compile_expr(&temp)?;
+                    }
+                } else {
+                    // Storage plan says Direct — no boxing needed, just load the value.
                     let temp = Expr::Identifier(captured.clone(), Span::DUMMY);
                     self.compile_expr(&temp)?;
                 }

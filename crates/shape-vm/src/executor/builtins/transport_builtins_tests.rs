@@ -186,7 +186,10 @@ fn test_transport_connect_refused() {
     );
     // Connection refused now returns Ok(Err(...)) instead of Err(...)
     // so users can handle it with ? or pattern matching
-    assert!(result.is_ok(), "transport_connect should return Ok even on connection failure");
+    assert!(
+        result.is_ok(),
+        "transport_connect should return Ok even on connection failure"
+    );
     let val = result.unwrap();
     match val.as_heap_ref() {
         Some(shape_value::heap_value::HeapValue::Err(_)) => {
@@ -356,7 +359,10 @@ fn test_transport_send_error_returns_result_err() {
         &ctx,
     );
     // Should return Ok(Err(...)) not a runtime error
-    assert!(result.is_ok(), "transport_send should return Ok even on network failure");
+    assert!(
+        result.is_ok(),
+        "transport_send should return Ok even on network failure"
+    );
     let val = result.unwrap();
     match val.as_heap_ref() {
         Some(shape_value::heap_value::HeapValue::Err(_)) => {

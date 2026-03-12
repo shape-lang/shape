@@ -941,8 +941,8 @@ pub fn run() -> int {
 
         let project =
             shape_runtime::project::find_project_root(root).expect("should find project root");
-        let bundle =
-            BundleCompiler::compile(&project).expect("bundle with submodule imports should compile");
+        let bundle = BundleCompiler::compile(&project)
+            .expect("bundle with submodule imports should compile");
         assert!(
             bundle.modules.iter().any(|m| m.module_path == "main"),
             "should have main module"

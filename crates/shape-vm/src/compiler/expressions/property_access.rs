@@ -192,8 +192,7 @@ impl BytecodeCompiler {
         if !optional && let Some(place) = self.try_resolve_typed_field_place(object, property) {
             let label = format!("{}.{}", place.root_name, property);
             let source_loc = self.span_to_source_location(object.span());
-            self.borrow_checker
-                .check_read_allowed(place.borrow_key, Some(source_loc))
+            self.check_read_allowed_in_current_context(place.borrow_key, Some(source_loc))
                 .map_err(|err| Self::relabel_borrow_error(err, place.borrow_key, &label))?;
 
             let field_ref = self.declare_temp_local("__field_read_ref_")?;

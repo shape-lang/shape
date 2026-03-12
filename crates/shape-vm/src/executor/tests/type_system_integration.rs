@@ -648,7 +648,11 @@ let projected = t.select(|row| row.id)
 projected.count()
 "#;
     let result = compile_and_execute(source);
-    assert!(result.is_ok(), "scalar select should produce a table: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "scalar select should produce a table: {:?}",
+        result.err()
+    );
 }
 
 // --- MED-25: .clone() method on arrays ---
@@ -662,7 +666,11 @@ fn test_array_clone_method() {
         cloned.len()
     "#;
     let result = compile_and_execute(source).unwrap();
-    assert_eq!(result.as_i64(), Some(3), "cloned array should have length 3");
+    assert_eq!(
+        result.as_i64(),
+        Some(3),
+        "cloned array should have length 3"
+    );
 }
 
 #[test]
@@ -674,7 +682,9 @@ fn test_array_clone_method_preserves_elements() {
     "#;
     let result = compile_and_execute(source).unwrap();
     // sum of [10, 20, 30] = 60
-    let val = result.as_i64().or_else(|| result.as_f64().map(|f| f as i64));
+    let val = result
+        .as_i64()
+        .or_else(|| result.as_f64().map(|f| f as i64));
     assert_eq!(val, Some(60), "cloned array sum should be 60");
 }
 

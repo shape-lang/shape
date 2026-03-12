@@ -1460,6 +1460,262 @@ pub fn validate_foreign_function_types(program: &Program, source: &str) -> Vec<D
     diagnostics
 }
 
+// ─── MIR borrow analysis → LSP diagnostics ─────────────────────────────────
+//
+// The compiler already converts MIR `BorrowError`/`MutabilityError` into
+// `ShapeError::SemanticError` which flows through `error_to_diagnostic`.
+// This module provides an *alternative* path that produces richer LSP
+// diagnostics directly from the structured analysis data (proper error
+// codes, `DiagnosticRelatedInformation` for borrow origins, etc.).
+//
+// Usage: call `borrow_analysis_to_diagnostics` after a successful or
+// recovered compilation to surface borrow warnings that the compiler's
+// `RecoverAll` mode collected but did not promote to hard errors.
+
+/// Convert structured MIR borrow errors into LSP diagnostics.
+///
+/// This produces higher-fidelity diagnostics than the `error_to_diagnostic`
+/// path because it has direct access to `BorrowError` fields:
+/// - Sets `code` to the unified `BorrowErrorCode` (`B0001`..`B0007`).
+/// - Attaches `DiagnosticRelatedInformation` for the loan origin span
+///   and the last-use span (if available).
+pub fn borrow_analysis_to_diagnostics(
+    analysis: &shape_vm::mir::analysis::BorrowAnalysis,
+    source: &str,
+    uri: &Uri,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for error in &analysis.errors {
+        let code = error.kind.code();
+
+        let primary_range = span_to_range(source, &error.span);
+
+        let message = borrow_error_message(&error.kind, code);
+
+        // Build related-information entries.
+        let mut related = Vec::new();
+
+        // 1. Where the conflicting loan was created.
+        let loan_range = span_to_range(source, &error.loan_span);
+        related.push(DiagnosticRelatedInformation {
+            location: Location {
+                uri: uri.clone(),
+                range: loan_range,
+            },
+            message: borrow_origin_note(&error.kind),
+        });
+
+        // 2. Where the loan is still needed (last use).
+        if let Some(last_use) = error.last_use_span {
+            let last_use_range = span_to_range(source, &last_use);
+            related.push(DiagnosticRelatedInformation {
+                location: Location {
+                    uri: uri.clone(),
+                    range: last_use_range,
+                },
+                message: "borrow is still needed here".to_string(),
+            });
+        }
+
+        // Build hint text from repair suggestions.
+        let hint = if let Some(repair) = error.repairs.first() {
+            format!(
+                "help: {}\nhelp: {}",
+                borrow_error_hint(&error.kind),
+                repair.description
+            )
+        } else {
+            format!("help: {}", borrow_error_hint(&error.kind))
+        };
+
+        diagnostics.push(Diagnostic {
+            range: primary_range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String(code.as_str().to_string())),
+            code_description: None,
+            source: Some("shape-borrow".to_string()),
+            message: format!("{}\n{}", message, hint),
+            related_information: Some(related),
+            tags: None,
+            data: None,
+        });
+    }
+
+    for error in &analysis.mutability_errors {
+        let primary_range = span_to_range(source, &error.span);
+
+        let binding_kind = if error.is_const {
+            "const"
+        } else if error.is_explicit_let {
+            "let"
+        } else {
+            "immutable"
+        };
+
+        let message = format!(
+            "cannot assign to {} binding '{}'",
+            binding_kind, error.variable_name
+        );
+
+        let decl_range = span_to_range(source, &error.declaration_span);
+        let related = vec![DiagnosticRelatedInformation {
+            location: Location {
+                uri: uri.clone(),
+                range: decl_range,
+            },
+            message: format!("'{}' declared here", error.variable_name),
+        }];
+
+        diagnostics.push(Diagnostic {
+            range: primary_range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("E0384".to_string())),
+            code_description: None,
+            source: Some("shape-borrow".to_string()),
+            message: format!(
+                "{}\nhelp: consider changing '{}' to 'let mut {}' or 'var {}'",
+                message, error.variable_name, error.variable_name, error.variable_name
+            ),
+            related_information: Some(related),
+            tags: None,
+            data: None,
+        });
+    }
+
+    diagnostics
+}
+
+/// Human-readable message for a borrow error kind (with code prefix).
+fn borrow_error_message(
+    kind: &shape_vm::mir::analysis::BorrowErrorKind,
+    code: shape_vm::mir::analysis::BorrowErrorCode,
+) -> String {
+    use shape_vm::mir::analysis::BorrowErrorKind;
+    let body = match kind {
+        BorrowErrorKind::ConflictSharedExclusive => {
+            "cannot mutably borrow this value while shared borrows are active"
+        }
+        BorrowErrorKind::ConflictExclusiveExclusive => {
+            "cannot mutably borrow this value because it is already borrowed"
+        }
+        BorrowErrorKind::ReadWhileExclusivelyBorrowed => {
+            "cannot read this value while it is mutably borrowed"
+        }
+        BorrowErrorKind::WriteWhileBorrowed => {
+            "cannot write to this value while it is borrowed"
+        }
+        BorrowErrorKind::ReferenceEscape => {
+            "cannot return or store a reference that outlives its owner"
+        }
+        BorrowErrorKind::ReferenceStoredInArray => {
+            "cannot store a reference in an array"
+        }
+        BorrowErrorKind::ReferenceStoredInObject => {
+            "cannot store a reference in an object or struct literal"
+        }
+        BorrowErrorKind::ReferenceStoredInEnum => {
+            "cannot store a reference in an enum payload"
+        }
+        BorrowErrorKind::ReferenceEscapeIntoClosure => {
+            "reference cannot escape into a closure"
+        }
+        BorrowErrorKind::UseAfterMove => {
+            "cannot use this value after it was moved"
+        }
+        BorrowErrorKind::ExclusiveRefAcrossTaskBoundary => {
+            "cannot move an exclusive reference across a task boundary"
+        }
+        BorrowErrorKind::SharedRefAcrossDetachedTask => {
+            "cannot send a shared reference across a detached task boundary"
+        }
+        BorrowErrorKind::InconsistentReferenceReturn => {
+            "reference-returning functions must return a reference on every path from the same borrowed origin and borrow kind"
+        }
+        BorrowErrorKind::CallSiteAliasConflict => {
+            "cannot pass the same variable to multiple parameters that conflict on aliasing"
+        }
+        BorrowErrorKind::NonSendableAcrossTaskBoundary => {
+            "cannot send a non-sendable value across a task boundary"
+        }
+    };
+    format!("[{}] {}", code, body)
+}
+
+/// Hint text for a borrow error kind.
+fn borrow_error_hint(kind: &shape_vm::mir::analysis::BorrowErrorKind) -> &'static str {
+    use shape_vm::mir::analysis::BorrowErrorKind;
+    match kind {
+        BorrowErrorKind::ConflictSharedExclusive => {
+            "move the mutable borrow later, or end the shared borrow sooner"
+        }
+        BorrowErrorKind::ConflictExclusiveExclusive => {
+            "end the previous mutable borrow before creating another one"
+        }
+        BorrowErrorKind::ReadWhileExclusivelyBorrowed => {
+            "read through the existing reference, or move the read after the borrow ends"
+        }
+        BorrowErrorKind::WriteWhileBorrowed => "move this write after the borrow ends",
+        BorrowErrorKind::ReferenceEscape => "return an owned value instead of a reference",
+        BorrowErrorKind::ReferenceStoredInArray
+        | BorrowErrorKind::ReferenceStoredInObject
+        | BorrowErrorKind::ReferenceStoredInEnum => {
+            "store owned values instead of references"
+        }
+        BorrowErrorKind::ReferenceEscapeIntoClosure => {
+            "capture an owned value instead of a reference"
+        }
+        BorrowErrorKind::UseAfterMove => {
+            "clone the value before moving it, or stop using the original after the move"
+        }
+        BorrowErrorKind::ExclusiveRefAcrossTaskBoundary => {
+            "keep the mutable reference within the current task or pass an owned value instead"
+        }
+        BorrowErrorKind::SharedRefAcrossDetachedTask => {
+            "clone the value before sending it to a detached task, or use a structured task instead"
+        }
+        BorrowErrorKind::InconsistentReferenceReturn => {
+            "return a reference from the same borrowed origin on every path, or return owned values instead"
+        }
+        BorrowErrorKind::CallSiteAliasConflict => {
+            "use separate variables for each argument, or clone one of them"
+        }
+        BorrowErrorKind::NonSendableAcrossTaskBoundary => {
+            "clone the captured state or use an owned value that is safe to send across tasks"
+        }
+    }
+}
+
+/// Note text for the related-information entry pointing at the loan origin.
+fn borrow_origin_note(kind: &shape_vm::mir::analysis::BorrowErrorKind) -> String {
+    use shape_vm::mir::analysis::BorrowErrorKind;
+    match kind {
+        BorrowErrorKind::ConflictSharedExclusive
+        | BorrowErrorKind::ConflictExclusiveExclusive
+        | BorrowErrorKind::ReadWhileExclusivelyBorrowed
+        | BorrowErrorKind::WriteWhileBorrowed => "conflicting borrow originates here".to_string(),
+        BorrowErrorKind::ReferenceEscape
+        | BorrowErrorKind::ReferenceStoredInArray
+        | BorrowErrorKind::ReferenceStoredInObject
+        | BorrowErrorKind::ReferenceStoredInEnum
+        | BorrowErrorKind::ReferenceEscapeIntoClosure
+        | BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
+        | BorrowErrorKind::SharedRefAcrossDetachedTask => {
+            "reference originates here".to_string()
+        }
+        BorrowErrorKind::UseAfterMove => "value was moved here".to_string(),
+        BorrowErrorKind::InconsistentReferenceReturn => {
+            "borrowed origin on another return path originates here".to_string()
+        }
+        BorrowErrorKind::CallSiteAliasConflict => {
+            "conflicting arguments originate here".to_string()
+        }
+        BorrowErrorKind::NonSendableAcrossTaskBoundary => {
+            "non-sendable value originates here".to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2087,5 +2343,88 @@ function my_func() {
             "valid Color.rgb should produce no diagnostics: {:?}",
             diagnostics
         );
+    }
+
+    #[test]
+    fn test_borrow_analysis_to_diagnostics_empty() {
+        let analysis = shape_vm::mir::analysis::BorrowAnalysis::empty();
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let diagnostics = borrow_analysis_to_diagnostics(&analysis, "", &uri);
+        assert!(
+            diagnostics.is_empty(),
+            "Empty analysis should produce no diagnostics"
+        );
+    }
+
+    #[test]
+    fn test_borrow_analysis_to_diagnostics_with_error() {
+        use shape_vm::mir::analysis::*;
+        use shape_vm::mir::types::*;
+
+        let mut analysis = BorrowAnalysis::empty();
+        analysis.errors.push(BorrowError {
+            kind: BorrowErrorKind::ConflictExclusiveExclusive,
+            span: Span { start: 10, end: 20 },
+            conflicting_loan: LoanId(0),
+            loan_span: Span { start: 0, end: 5 },
+            last_use_span: Some(Span { start: 25, end: 30 }),
+            repairs: Vec::new(),
+        });
+
+        let source = "let mut x = 10\nlet m1 = &mut x\nlet m2 = &mut x\nprint(m1)\nprint(m2)";
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let diagnostics = borrow_analysis_to_diagnostics(&analysis, source, &uri);
+
+        assert_eq!(diagnostics.len(), 1, "Should produce one diagnostic");
+        let diag = &diagnostics[0];
+        assert_eq!(diag.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(
+            diag.code,
+            Some(NumberOrString::String("B0001".to_string()))
+        );
+        assert_eq!(diag.source.as_deref(), Some("shape-borrow"));
+        assert!(
+            diag.message.contains("cannot mutably borrow"),
+            "Message should describe the conflict: {}",
+            diag.message
+        );
+        // Should have related information (loan origin + last use)
+        let related = diag.related_information.as_ref().unwrap();
+        assert_eq!(
+            related.len(),
+            2,
+            "Should have loan origin + last use entries"
+        );
+        assert!(related[0].message.contains("conflicting borrow"));
+        assert!(related[1].message.contains("still needed"));
+    }
+
+    #[test]
+    fn test_borrow_analysis_to_diagnostics_mutability_error() {
+        use shape_vm::mir::analysis::*;
+
+        let mut analysis = BorrowAnalysis::empty();
+        analysis.mutability_errors.push(MutabilityError {
+            span: Span { start: 10, end: 15 },
+            variable_name: "x".to_string(),
+            declaration_span: Span { start: 0, end: 5 },
+            is_explicit_let: true,
+            is_const: false,
+        });
+
+        let source = "let x = 42\nx = 100\n";
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let diagnostics = borrow_analysis_to_diagnostics(&analysis, source, &uri);
+
+        assert_eq!(diagnostics.len(), 1);
+        let diag = &diagnostics[0];
+        assert!(diag.message.contains("cannot assign to let binding"));
+        assert_eq!(
+            diag.code,
+            Some(NumberOrString::String("E0384".to_string()))
+        );
+        let related = diag.related_information.as_ref().unwrap();
+        assert_eq!(related.len(), 1);
+        assert!(related[0].message.contains("declared here"));
     }
 }

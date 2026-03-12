@@ -325,9 +325,9 @@ pub(crate) fn handle_select(
             if row_count == 0 {
                 return vm.push_vw(super::common::wrap_result_table_nb(
                     &args[0],
-                    shape_value::datatable::DataTable::new(
-                        arrow_array::RecordBatch::new_empty(dt_arc.inner().schema()),
-                    ),
+                    shape_value::datatable::DataTable::new(arrow_array::RecordBatch::new_empty(
+                        dt_arc.inner().schema(),
+                    )),
                 ));
             }
 

@@ -261,7 +261,9 @@ impl VirtualMachine {
         } else {
             value
         };
-        let formatter = ValueFormatter::new(&self.program.type_schema_registry);
+        let resolver = |v: &ValueWord| self.resolve_ref_value(v);
+        let formatter =
+            ValueFormatter::with_deref(&self.program.type_schema_registry, &resolver);
         formatter.format_nb(value)
     }
 

@@ -817,9 +817,8 @@ mod tests {
         };
 
         // JSON uses the wire name "user_name" instead of the field name "name"
-        let text = ValueWord::from_string(Arc::new(
-            r#"{"user_name": "Bob", "age": 30}"#.to_string(),
-        ));
+        let text =
+            ValueWord::from_string(Arc::new(r#"{"user_name": "Bob", "age": 30}"#.to_string()));
         let sid = ValueWord::from_f64(schema_id as f64);
         let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
@@ -866,9 +865,8 @@ mod tests {
             set_pending_frame_resume: None,
         };
 
-        let text = ValueWord::from_string(Arc::new(
-            r#"{"name": "test", "value": 42.5}"#.to_string(),
-        ));
+        let text =
+            ValueWord::from_string(Arc::new(r#"{"name": "test", "value": 42.5}"#.to_string()));
         let sid = ValueWord::from_f64(schema_id as f64);
         let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");

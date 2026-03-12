@@ -102,7 +102,10 @@ impl VirtualMachine {
                 crate::bytecode::Constant::Duration(duration) => {
                     // Convert AST Duration to chrono::Duration (TimeSpan) so it
                     // participates in DateTime arithmetic (Time +/- TimeSpan).
-                    let chrono_dur = crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(duration);
+                    let chrono_dur =
+                        crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(
+                            duration,
+                        );
                     HeapValue::TimeSpan(chrono_dur)
                 }
                 crate::bytecode::Constant::TimeReference(time_ref) => {

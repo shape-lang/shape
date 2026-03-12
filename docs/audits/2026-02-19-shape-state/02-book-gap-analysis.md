@@ -13,10 +13,9 @@ This analysis treats code as source of truth. Book drift is only flagged when it
 
 ## Real Gaps the Book Currently Fails to Cover
 
-1. **References and borrow model are effectively undocumented.**
-   - Code has first-class reference semantics and borrow checking.
-   - Missing from docs as an operational model: where `&` works, escape rules, mutation rules, and restrictions.
-   - Evidence: `shape/shape-ast/src/shape.pest:367`, `shape/shape-vm/src/compiler/expressions/mod.rs:646`, `shape/shape-vm/src/borrow_checker.rs:1`.
+1. **~~References and borrow model are effectively undocumented.~~** **(Resolved 2026-03-11)**
+   - Book chapters `fundamentals/references-borrowing.mdx` and `advanced/ownership-deep-dive.mdx` now document the full MIR-based NLL borrow checker with Datafrog solver, disjoint field borrows, index borrowing, task boundary rules, and reference capabilities/limits.
+   - RFC `rfc-borrow-lifetimes-ergonomics-v1.md` updated to Implemented status.
 
 2. **Annotation context API semantics are misleading.**
    - Book presents mutable-style `ctx.set/get/...` as direct runtime methods (`shape/docs/book/src/fundamentals/annotations.md:51`).

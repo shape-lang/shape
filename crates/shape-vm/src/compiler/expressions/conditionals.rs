@@ -18,17 +18,32 @@ impl BytecodeCompiler {
 
         let else_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
 
-        self.compile_expr(then_expr)?;
+        if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
+            self.compile_expr_preserving_refs(then_expr)?;
+        } else {
+            self.compile_expr(then_expr)?;
+        }
+        let then_result = self.capture_last_expr_reference_result();
 
         if let Some(else_e) = else_expr {
             let end_jump = self.emit_jump(OpCode::Jump, 0);
             self.patch_jump(else_jump);
-            self.compile_expr(else_e)?;
+            if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
+                self.compile_expr_preserving_refs(else_e)?;
+            } else {
+                self.compile_expr(else_e)?;
+            }
+            let else_result = self.capture_last_expr_reference_result();
+            self.restore_last_expr_reference_result(Self::merge_reference_results(&[
+                then_result,
+                else_result,
+            ]));
             self.patch_jump(end_jump);
         } else {
             let end_jump = self.emit_jump(OpCode::Jump, 0);
             self.patch_jump(else_jump);
             self.emit_unit();
+            self.clear_last_expr_reference_result();
             self.patch_jump(end_jump);
         }
         Ok(())
@@ -40,17 +55,32 @@ impl BytecodeCompiler {
 
         let else_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
 
-        self.compile_expr(&if_expr.then_branch)?;
+        if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
+            self.compile_expr_preserving_refs(&if_expr.then_branch)?;
+        } else {
+            self.compile_expr(&if_expr.then_branch)?;
+        }
+        let then_result = self.capture_last_expr_reference_result();
 
         if let Some(else_branch) = &if_expr.else_branch {
             let end_jump = self.emit_jump(OpCode::Jump, 0);
             self.patch_jump(else_jump);
-            self.compile_expr(else_branch)?;
+            if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
+                self.compile_expr_preserving_refs(else_branch)?;
+            } else {
+                self.compile_expr(else_branch)?;
+            }
+            let else_result = self.capture_last_expr_reference_result();
+            self.restore_last_expr_reference_result(Self::merge_reference_results(&[
+                then_result,
+                else_result,
+            ]));
             self.patch_jump(end_jump);
         } else {
             let end_jump = self.emit_jump(OpCode::Jump, 0);
             self.patch_jump(else_jump);
             self.emit_unit();
+            self.clear_last_expr_reference_result();
             self.patch_jump(end_jump);
         }
         Ok(())

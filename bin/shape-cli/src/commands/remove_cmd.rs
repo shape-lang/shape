@@ -7,9 +7,7 @@ pub async fn run_remove(name: String) -> Result<()> {
     let project = shape_runtime::project::try_find_project_root(&cwd)
         .map_err(|e| anyhow::anyhow!("{}", e))?
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No shape.toml found. Run `shape remove` from within a Shape project."
-            )
+            anyhow::anyhow!("No shape.toml found. Run `shape remove` from within a Shape project.")
         })?;
 
     let toml_path = project.root_path.join("shape.toml");

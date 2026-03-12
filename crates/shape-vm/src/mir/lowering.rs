@@ -4,6 +4,7 @@
 //! This is the bridge between parsing and borrow analysis.
 
 use super::types::*;
+use crate::mir::analysis::MutabilityError;
 use shape_ast::ast::{self, Expr, Span, Spanned, Statement};
 use shape_runtime::closure::EnvironmentAnalyzer;
 use std::collections::HashMap;
@@ -19,6 +20,32 @@ struct MirLoopContext {
 struct TaskBoundaryCaptureScope {
     outer_locals_cutoff: u16,
     operands: Vec<Operand>,
+}
+
+#[derive(Debug, Clone)]
+struct MirLocalRecord {
+    name: String,
+    type_info: LocalTypeInfo,
+    binding_info: Option<LoweredBindingInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoweredBindingInfo {
+    pub slot: SlotId,
+    pub name: String,
+    pub declaration_span: Span,
+    pub enforce_immutable_assignment: bool,
+    pub is_explicit_let: bool,
+    pub is_const: bool,
+    pub initialization_point: Option<Point>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BindingMetadata {
+    declaration_span: Span,
+    enforce_immutable_assignment: bool,
+    is_explicit_let: bool,
+    is_const: bool,
 }
 
 /// Builder for constructing a MIR function from AST.
@@ -44,7 +71,7 @@ pub struct MirBuilder {
     /// Next loan ID.
     next_loan: u32,
     /// Local variable name → slot mapping.
-    locals: Vec<(String, SlotId, LocalTypeInfo)>,
+    locals: Vec<MirLocalRecord>,
     /// Active local name → slot mapping for place resolution.
     local_slots: HashMap<String, SlotId>,
     /// Stable field indices for property-place lowering.
@@ -61,18 +88,27 @@ pub struct MirBuilder {
     loop_contexts: Vec<MirLoopContext>,
     /// Active task-boundary capture scopes for async lowering.
     task_boundary_capture_scopes: Vec<TaskBoundaryCaptureScope>,
+    /// Nesting depth of `async scope` blocks — nonzero means structured concurrency.
+    async_scope_depth: u32,
     /// Exit block for the enclosing function.
     exit_block: Option<BasicBlockId>,
     /// Function span.
     span: Span,
-    /// Whether lowering had to fall back to placeholder/Nop handling.
-    had_fallbacks: bool,
+    /// Spans where lowering had to fall back to placeholder/Nop handling.
+    /// Empty means clean lowering with no fallbacks.
+    fallback_spans: Vec<Span>,
 }
 
 #[derive(Debug)]
 pub struct MirLoweringResult {
     pub mir: MirFunction,
     pub had_fallbacks: bool,
+    /// Spans where lowering fell back to placeholder handling.
+    /// Used for span-granular error filtering in partial-authority mode.
+    pub fallback_spans: Vec<Span>,
+    pub binding_infos: Vec<LoweredBindingInfo>,
+    /// Reverse map from field index → field name (inverted from `field_indices`).
+    pub field_names: HashMap<FieldIdx, String>,
 }
 
 impl MirBuilder {
@@ -89,11 +125,11 @@ impl MirBuilder {
             return_slot,
             next_point: 0,
             next_loan: 0,
-            locals: vec![(
-                "__mir_return".to_string(),
-                return_slot,
-                LocalTypeInfo::Unknown,
-            )],
+            locals: vec![MirLocalRecord {
+                name: "__mir_return".to_string(),
+                type_info: LocalTypeInfo::Unknown,
+                binding_info: None,
+            }],
             local_slots: HashMap::new(),
             field_indices: HashMap::new(),
             next_field_idx: 0,
@@ -102,21 +138,53 @@ impl MirBuilder {
             scope_bindings: vec![Vec::new()],
             loop_contexts: Vec::new(),
             task_boundary_capture_scopes: Vec::new(),
+            async_scope_depth: 0,
             exit_block: None,
             span,
-            had_fallbacks: false,
+            fallback_spans: Vec::new(),
         }
     }
 
     /// Allocate a new local variable slot.
     pub fn alloc_local(&mut self, name: String, type_info: LocalTypeInfo) -> SlotId {
+        self.alloc_local_with_binding(name, type_info, None)
+    }
+
+    fn alloc_local_binding(
+        &mut self,
+        name: String,
+        type_info: LocalTypeInfo,
+        binding_metadata: BindingMetadata,
+    ) -> SlotId {
+        self.alloc_local_with_binding(name, type_info, Some(binding_metadata))
+    }
+
+    fn alloc_local_with_binding(
+        &mut self,
+        name: String,
+        type_info: LocalTypeInfo,
+        binding_metadata: Option<BindingMetadata>,
+    ) -> SlotId {
         let slot = SlotId(self.next_local);
         self.next_local += 1;
-        self.locals.push((name, slot, type_info));
-        if let Some((name, _, _)) = self.locals.last()
-            && !name.starts_with("__mir_")
+        let binding_info = binding_metadata.map(|binding_metadata| LoweredBindingInfo {
+            slot,
+            name: name.clone(),
+            declaration_span: binding_metadata.declaration_span,
+            enforce_immutable_assignment: binding_metadata.enforce_immutable_assignment,
+            is_explicit_let: binding_metadata.is_explicit_let,
+            is_const: binding_metadata.is_const,
+            initialization_point: None,
+        });
+        self.locals.push(MirLocalRecord {
+            name,
+            type_info,
+            binding_info,
+        });
+        if let Some(local) = self.locals.last()
+            && !local.name.starts_with("__mir_")
         {
-            self.bind_named_local(name.clone(), slot);
+            self.bind_named_local(local.name.clone(), slot);
         }
         slot
     }
@@ -128,13 +196,14 @@ impl MirBuilder {
     }
 
     /// Register a parameter slot.
-    pub fn add_param(
+    fn add_param(
         &mut self,
         name: String,
         type_info: LocalTypeInfo,
         reference_kind: Option<BorrowKind>,
+        binding_metadata: Option<BindingMetadata>,
     ) -> SlotId {
-        let slot = self.alloc_local(name, type_info);
+        let slot = self.alloc_local_with_binding(name, type_info, binding_metadata);
         self.param_slots.push(slot);
         self.param_reference_kinds.push(reference_kind);
         slot
@@ -206,7 +275,16 @@ impl MirBuilder {
     }
 
     pub fn mark_fallback(&mut self) {
-        self.had_fallbacks = true;
+        // Legacy: called without a span. Use the current function span as fallback.
+        self.fallback_spans.push(self.span);
+    }
+
+    pub fn mark_fallback_at(&mut self, span: Span) {
+        self.fallback_spans.push(span);
+    }
+
+    pub fn had_fallbacks(&self) -> bool {
+        !self.fallback_spans.is_empty()
     }
 
     pub fn push_loop(
@@ -294,9 +372,18 @@ impl MirBuilder {
     }
 
     /// Push a statement into the current block.
-    pub fn push_stmt(&mut self, kind: StatementKind, span: Span) {
+    pub fn push_stmt(&mut self, kind: StatementKind, span: Span) -> Point {
         let point = self.next_point();
         self.current_stmts.push(MirStatement { kind, span, point });
+        point
+    }
+
+    pub fn record_binding_initialization(&mut self, slot: SlotId, point: Point) {
+        if let Some(local) = self.locals.get_mut(slot.0 as usize)
+            && let Some(binding_info) = local.binding_info.as_mut()
+        {
+            binding_info.initialization_point = Some(point);
+        }
     }
 
     /// Finish the current block with a terminator and switch to a new block.
@@ -320,21 +407,80 @@ impl MirBuilder {
         self.current_block_finished = false;
     }
 
+    /// Emit a function call as a block terminator. Finishes current block
+    /// with TerminatorKind::Call and starts a continuation block.
+    pub fn emit_call(
+        &mut self,
+        func: Operand,
+        args: Vec<Operand>,
+        destination: Place,
+        span: Span,
+    ) {
+        let next_bb = self.new_block();
+        self.finish_block(
+            TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                next: next_bb,
+            },
+            span,
+        );
+        self.start_block(next_bb);
+    }
+
     /// Finalize and produce the MIR function.
     pub fn build(self) -> MirLoweringResult {
-        let local_types = self.locals.iter().map(|(_, _, t)| t.clone()).collect();
+        let local_types = self
+            .locals
+            .iter()
+            .map(|local| local.type_info.clone())
+            .collect();
+        let binding_infos = self
+            .locals
+            .iter()
+            .filter_map(|local| local.binding_info.clone())
+            .collect();
+        let field_names: HashMap<FieldIdx, String> = self
+            .field_indices
+            .iter()
+            .map(|(name, &idx)| (idx, name.clone()))
+            .collect();
+        // Sort blocks by ID so that MirFunction::block(id) can index by id.0
+        let mut blocks = self.blocks;
+        blocks.sort_by_key(|b| b.id.0);
+
+        let had_fallbacks = !self.fallback_spans.is_empty();
+        let fallback_spans = self.fallback_spans;
+
         MirLoweringResult {
             mir: MirFunction {
                 name: self.name,
-                blocks: self.blocks,
+                blocks,
                 num_locals: self.next_local,
                 param_slots: self.param_slots,
                 param_reference_kinds: self.param_reference_kinds,
                 local_types,
                 span: self.span,
             },
-            had_fallbacks: self.had_fallbacks,
+            had_fallbacks,
+            fallback_spans,
+            binding_infos,
+            field_names,
         }
+    }
+}
+
+fn immutable_binding_metadata(
+    declaration_span: Span,
+    is_explicit_let: bool,
+    is_const: bool,
+) -> BindingMetadata {
+    BindingMetadata {
+        declaration_span,
+        enforce_immutable_assignment: true,
+        is_explicit_let,
+        is_const,
     }
 }
 
@@ -361,16 +507,33 @@ pub fn lower_function_detailed(
         } else {
             None
         };
-        if let Some(param_name) = param.simple_name() {
-            builder.add_param(param_name.to_string(), type_info, reference_kind);
+        let binding_metadata = if param.is_const {
+            Some(immutable_binding_metadata(param.span(), false, true))
+        } else if matches!(reference_kind, Some(BorrowKind::Shared)) {
+            Some(immutable_binding_metadata(param.span(), false, false))
         } else {
-            let fallback_name = format!("__mir_param{}", builder.param_slots.len());
-            let slot = builder.add_param(fallback_name, type_info, reference_kind);
+            None
+        };
+        if let Some(param_name) = param.simple_name() {
+            builder.add_param(
+                param_name.to_string(),
+                type_info,
+                reference_kind,
+                binding_metadata,
+            );
+        } else {
+            let slot = builder.add_param(
+                format!("__mir_param{}", builder.param_slots.len()),
+                type_info,
+                reference_kind,
+                None,
+            );
             lower_destructure_bindings_from_place(
                 &mut builder,
                 &param.pattern,
                 &Place::Local(slot),
                 param.span(),
+                binding_metadata,
             );
         }
     }
@@ -402,6 +565,42 @@ pub fn lower_function(
     span: Span,
 ) -> MirFunction {
     lower_function_detailed(name, params, body, span).mir
+}
+
+pub fn compute_mutability_errors(lowering: &MirLoweringResult) -> Vec<MutabilityError> {
+    let tracked_bindings: HashMap<SlotId, &LoweredBindingInfo> = lowering
+        .binding_infos
+        .iter()
+        .filter(|binding| binding.enforce_immutable_assignment)
+        .map(|binding| (binding.slot, binding))
+        .collect();
+    let mut errors = Vec::new();
+
+    for block in &lowering.mir.blocks {
+        for stmt in &block.statements {
+            let StatementKind::Assign(place, _) = &stmt.kind else {
+                continue;
+            };
+            let root = place.root_local();
+            let Some(binding) = tracked_bindings.get(&root) else {
+                continue;
+            };
+            let is_declaration_init = matches!(place, Place::Local(slot) if *slot == root)
+                && binding.initialization_point == Some(stmt.point);
+            if is_declaration_init {
+                continue;
+            }
+            errors.push(MutabilityError {
+                span: stmt.span,
+                variable_name: binding.name.clone(),
+                declaration_span: binding.declaration_span,
+                is_explicit_let: binding.is_explicit_let,
+                is_const: binding.is_const,
+            });
+        }
+    }
+
+    errors
 }
 
 /// Lower a slice of statements into the current block.
@@ -479,13 +678,22 @@ fn lower_statement(
 
 /// Lower a variable declaration.
 fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span) {
+    let binding_metadata = match decl.kind {
+        ast::VarKind::Const => Some(immutable_binding_metadata(span, false, true)),
+        ast::VarKind::Let if !decl.is_mut => Some(immutable_binding_metadata(span, true, false)),
+        _ => None,
+    };
     if let Some(name) = decl.pattern.as_identifier() {
         let type_info = decl
             .value
             .as_ref()
             .map(infer_local_type_from_expr)
             .unwrap_or(LocalTypeInfo::Unknown);
-        let slot = builder.alloc_local(name.to_string(), type_info);
+        let slot = if let Some(binding_metadata) = binding_metadata {
+            builder.alloc_local_binding(name.to_string(), type_info, binding_metadata)
+        } else {
+            builder.alloc_local(name.to_string(), type_info)
+        };
 
         if let Some(init_expr) = &decl.value {
             // Determine operand based on ownership modifier
@@ -504,7 +712,10 @@ fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span
                 ast::OwnershipModifier::Clone => Rvalue::Clone(operand),
                 _ => Rvalue::Use(operand),
             };
-            builder.push_stmt(StatementKind::Assign(Place::Local(slot), rvalue), span);
+            let point = builder.push_stmt(StatementKind::Assign(Place::Local(slot), rvalue), span);
+            if binding_metadata.is_some() {
+                builder.record_binding_initialization(slot, point);
+            }
         }
         return;
     }
@@ -527,7 +738,13 @@ fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span
         );
         Place::Local(source_slot)
     });
-    lower_destructure_bindings_from_place_opt(builder, &decl.pattern, source_place.as_ref(), span);
+    lower_destructure_bindings_from_place_opt(
+        builder,
+        &decl.pattern,
+        source_place.as_ref(),
+        span,
+        binding_metadata,
+    );
 }
 
 fn projected_field_place(builder: &mut MirBuilder, base: &Place, property: &str) -> Place {
@@ -638,6 +855,7 @@ fn lower_constructor_bindings_from_place_opt(
     fields: &ast::PatternConstructorFields,
     source_place: Option<&Place>,
     span: Span,
+    binding_metadata: Option<BindingMetadata>,
 ) {
     match fields {
         ast::PatternConstructorFields::Unit => {}
@@ -650,6 +868,7 @@ fn lower_constructor_bindings_from_place_opt(
                     pattern,
                     projected_place.as_ref(),
                     span,
+                    binding_metadata,
                 );
             }
         }
@@ -662,6 +881,7 @@ fn lower_constructor_bindings_from_place_opt(
                     pattern,
                     projected_place.as_ref(),
                     span,
+                    binding_metadata,
                 );
             }
         }
@@ -724,18 +944,26 @@ fn lower_destructure_bindings_from_place_opt(
     pattern: &ast::DestructurePattern,
     source_place: Option<&Place>,
     span: Span,
+    binding_metadata: Option<BindingMetadata>,
 ) {
     match pattern {
         ast::DestructurePattern::Identifier(name, _) => {
-            let slot = builder.alloc_local(name.clone(), LocalTypeInfo::Unknown);
+            let slot = if let Some(binding_metadata) = binding_metadata {
+                builder.alloc_local_binding(name.clone(), LocalTypeInfo::Unknown, binding_metadata)
+            } else {
+                builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
+            };
             if let Some(source_place) = source_place {
-                builder.push_stmt(
+                let point = builder.push_stmt(
                     StatementKind::Assign(
                         Place::Local(slot),
                         Rvalue::Use(Operand::Copy(source_place.clone())),
                     ),
                     span,
                 );
+                if binding_metadata.is_some() {
+                    builder.record_binding_initialization(slot, point);
+                }
             }
         }
         ast::DestructurePattern::Array(patterns) => {
@@ -747,6 +975,7 @@ fn lower_destructure_bindings_from_place_opt(
                     pattern,
                     projected_place.as_ref(),
                     span,
+                    binding_metadata,
                 );
             }
         }
@@ -759,23 +988,41 @@ fn lower_destructure_bindings_from_place_opt(
                     &field.pattern,
                     projected_place.as_ref(),
                     span,
+                    binding_metadata,
                 );
             }
         }
         ast::DestructurePattern::Rest(pattern) => {
-            lower_destructure_bindings_from_place_opt(builder, pattern, source_place, span);
+            lower_destructure_bindings_from_place_opt(
+                builder,
+                pattern,
+                source_place,
+                span,
+                binding_metadata,
+            );
         }
         ast::DestructurePattern::Decomposition(bindings) => {
             for binding in bindings {
-                let slot = builder.alloc_local(binding.name.clone(), LocalTypeInfo::Unknown);
+                let slot = if let Some(binding_metadata) = binding_metadata {
+                    builder.alloc_local_binding(
+                        binding.name.clone(),
+                        LocalTypeInfo::Unknown,
+                        binding_metadata,
+                    )
+                } else {
+                    builder.alloc_local(binding.name.clone(), LocalTypeInfo::Unknown)
+                };
                 if let Some(source_place) = source_place {
-                    builder.push_stmt(
+                    let point = builder.push_stmt(
                         StatementKind::Assign(
                             Place::Local(slot),
                             Rvalue::Use(Operand::Copy(source_place.clone())),
                         ),
                         span,
                     );
+                    if binding_metadata.is_some() {
+                        builder.record_binding_initialization(slot, point);
+                    }
                 }
             }
         }
@@ -787,8 +1034,15 @@ fn lower_destructure_bindings_from_place(
     pattern: &ast::DestructurePattern,
     source_place: &Place,
     span: Span,
+    binding_metadata: Option<BindingMetadata>,
 ) {
-    lower_destructure_bindings_from_place_opt(builder, pattern, Some(source_place), span);
+    lower_destructure_bindings_from_place_opt(
+        builder,
+        pattern,
+        Some(source_place),
+        span,
+        binding_metadata,
+    );
 }
 
 fn lower_pattern_bindings_from_place_opt(
@@ -796,18 +1050,26 @@ fn lower_pattern_bindings_from_place_opt(
     pattern: &ast::Pattern,
     source_place: Option<&Place>,
     span: Span,
+    binding_metadata: Option<BindingMetadata>,
 ) {
     match pattern {
         ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
-            let slot = builder.alloc_local(name.clone(), LocalTypeInfo::Unknown);
+            let slot = if let Some(binding_metadata) = binding_metadata {
+                builder.alloc_local_binding(name.clone(), LocalTypeInfo::Unknown, binding_metadata)
+            } else {
+                builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
+            };
             if let Some(source_place) = source_place {
-                builder.push_stmt(
+                let point = builder.push_stmt(
                     StatementKind::Assign(
                         Place::Local(slot),
                         Rvalue::Use(Operand::Copy(source_place.clone())),
                     ),
                     span,
                 );
+                if binding_metadata.is_some() {
+                    builder.record_binding_initialization(slot, point);
+                }
             }
         }
         ast::Pattern::Array(patterns) => {
@@ -819,6 +1081,7 @@ fn lower_pattern_bindings_from_place_opt(
                     pattern,
                     projected_place.as_ref(),
                     span,
+                    binding_metadata,
                 );
             }
         }
@@ -831,11 +1094,18 @@ fn lower_pattern_bindings_from_place_opt(
                     pattern,
                     projected_place.as_ref(),
                     span,
+                    binding_metadata,
                 );
             }
         }
         ast::Pattern::Constructor { fields, .. } => {
-            lower_constructor_bindings_from_place_opt(builder, fields, source_place, span);
+            lower_constructor_bindings_from_place_opt(
+                builder,
+                fields,
+                source_place,
+                span,
+                binding_metadata,
+            );
         }
         ast::Pattern::Wildcard => {}
         ast::Pattern::Literal(_) => {}
@@ -847,8 +1117,15 @@ fn lower_pattern_bindings_from_place(
     pattern: &ast::Pattern,
     source_place: &Place,
     span: Span,
+    binding_metadata: Option<BindingMetadata>,
 ) {
-    lower_pattern_bindings_from_place_opt(builder, pattern, Some(source_place), span);
+    lower_pattern_bindings_from_place_opt(
+        builder,
+        pattern,
+        Some(source_place),
+        span,
+        binding_metadata,
+    );
 }
 
 fn lower_destructure_assignment_from_place(
@@ -1088,35 +1365,84 @@ fn emit_task_boundary_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>
     if operands.is_empty() {
         return;
     }
-    builder.push_stmt(StatementKind::TaskBoundary(operands), span);
+    let kind = if builder.async_scope_depth > 0 {
+        TaskBoundaryKind::Structured
+    } else {
+        TaskBoundaryKind::Detached
+    };
+    builder.push_stmt(StatementKind::TaskBoundary(operands, kind), span);
 }
 
-fn emit_closure_capture_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+fn emit_closure_capture_if_needed(
+    builder: &mut MirBuilder,
+    closure_slot: SlotId,
+    operands: Vec<Operand>,
+    span: Span,
+) {
     if operands.is_empty() {
         return;
     }
-    builder.push_stmt(StatementKind::ClosureCapture(operands), span);
+    builder.push_stmt(
+        StatementKind::ClosureCapture {
+            closure_slot,
+            operands,
+        },
+        span,
+    );
 }
 
-fn emit_array_store_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+fn emit_array_store_if_needed(
+    builder: &mut MirBuilder,
+    container_slot: SlotId,
+    operands: Vec<Operand>,
+    span: Span,
+) {
     if operands.is_empty() {
         return;
     }
-    builder.push_stmt(StatementKind::ArrayStore(operands), span);
+    builder.push_stmt(
+        StatementKind::ArrayStore {
+            container_slot,
+            operands,
+        },
+        span,
+    );
 }
 
-fn emit_object_store_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+fn emit_object_store_if_needed(
+    builder: &mut MirBuilder,
+    container_slot: SlotId,
+    operands: Vec<Operand>,
+    span: Span,
+) {
     if operands.is_empty() {
         return;
     }
-    builder.push_stmt(StatementKind::ObjectStore(operands), span);
+    builder.push_stmt(
+        StatementKind::ObjectStore {
+            container_slot,
+            operands,
+        },
+        span,
+    );
 }
 
-fn emit_enum_store_if_needed(builder: &mut MirBuilder, operands: Vec<Operand>, span: Span) {
+fn emit_enum_store_if_needed(
+    builder: &mut MirBuilder,
+    container_slot: SlotId,
+    operands: Vec<Operand>,
+    span: Span,
+) {
     if operands.is_empty() {
         return;
     }
-    builder.push_stmt(StatementKind::EnumStore(operands), span);
+    builder.push_stmt(
+        StatementKind::EnumStore {
+            container_slot,
+            operands,
+        },
+        span,
+    );
 }
 
 fn collect_function_expr_capture_operands(
@@ -1165,7 +1491,7 @@ fn lower_function_expr(
     span: Span,
 ) {
     let captures = collect_function_expr_capture_operands(builder, params, body);
-    emit_closure_capture_if_needed(builder, captures, span);
+    emit_closure_capture_if_needed(builder, temp, captures, span);
     assign_none(builder, temp, span);
 }
 
@@ -1178,7 +1504,43 @@ fn lower_array_expr(builder: &mut MirBuilder, elements: &[Expr], temp: SlotId, s
         StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
         span,
     );
-    emit_array_store_if_needed(builder, operands, span);
+    emit_array_store_if_needed(builder, temp, operands, span);
+}
+
+fn lower_window_function_operands(
+    builder: &mut MirBuilder,
+    func: &ast::windows::WindowFunction,
+    operands: &mut Vec<Operand>,
+) {
+    use ast::windows::WindowFunction;
+    match func {
+        WindowFunction::Lag { expr, default, .. }
+        | WindowFunction::Lead { expr, default, .. } => {
+            operands.push(lower_expr_as_moved_operand(builder, expr));
+            if let Some(d) = default {
+                operands.push(lower_expr_as_moved_operand(builder, d));
+            }
+        }
+        WindowFunction::FirstValue(e)
+        | WindowFunction::LastValue(e)
+        | WindowFunction::Sum(e)
+        | WindowFunction::Avg(e)
+        | WindowFunction::Min(e)
+        | WindowFunction::Max(e) => {
+            operands.push(lower_expr_as_moved_operand(builder, e));
+        }
+        WindowFunction::NthValue(e, _) => {
+            operands.push(lower_expr_as_moved_operand(builder, e));
+        }
+        WindowFunction::Count(Some(e)) => {
+            operands.push(lower_expr_as_moved_operand(builder, e));
+        }
+        WindowFunction::RowNumber
+        | WindowFunction::Rank
+        | WindowFunction::DenseRank
+        | WindowFunction::Ntile(_)
+        | WindowFunction::Count(None) => {}
+    }
 }
 
 fn lower_await_expr(builder: &mut MirBuilder, inner: &Expr, temp: SlotId, span: Span) {
@@ -1190,7 +1552,9 @@ fn lower_await_expr(builder: &mut MirBuilder, inner: &Expr, temp: SlotId, span: 
 }
 
 fn lower_async_scope_expr(builder: &mut MirBuilder, inner: &Expr, temp: SlotId, span: Span) {
+    builder.async_scope_depth += 1;
     let inner_slot = lower_expr_to_temp(builder, inner);
+    builder.async_scope_depth -= 1;
     assign_copy_from_slot(builder, temp, inner_slot, span);
 }
 
@@ -1205,8 +1569,21 @@ fn lower_async_let_expr(
     let captures = builder.pop_task_boundary_capture_scope();
     emit_task_boundary_if_needed(builder, captures, async_let.span);
 
-    let future_slot = builder.alloc_local(async_let.name.clone(), LocalTypeInfo::Unknown);
-    assign_none(builder, future_slot, async_let.span);
+    // async let bindings are immutable — the future must not be overwritten.
+    let binding_metadata = immutable_binding_metadata(async_let.span, true, false);
+    let future_slot = builder.alloc_local_binding(
+        async_let.name.clone(),
+        LocalTypeInfo::Unknown,
+        binding_metadata,
+    );
+    let init_point = builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(future_slot),
+            Rvalue::Use(Operand::Constant(crate::mir::types::MirConstant::None)),
+        ),
+        async_let.span,
+    );
+    builder.record_binding_initialization(future_slot, init_point);
     assign_copy_from_slot(builder, temp, future_slot, span);
 }
 
@@ -1216,6 +1593,9 @@ fn lower_join_expr(builder: &mut MirBuilder, join_expr: &ast::JoinExpr, temp: Sl
         return;
     }
 
+    // `join all/race/any/settle` is structured concurrency — all branches are
+    // joined before the parent scope exits.
+    builder.async_scope_depth += 1;
     let mut branch_operands = Vec::with_capacity(join_expr.branches.len());
     for branch in &join_expr.branches {
         builder.push_task_boundary_capture_scope();
@@ -1229,6 +1609,7 @@ fn lower_join_expr(builder: &mut MirBuilder, join_expr: &ast::JoinExpr, temp: Sl
         emit_task_boundary_if_needed(builder, captures, branch.expr.span());
         branch_operands.push(branch_operand);
     }
+    builder.async_scope_depth -= 1;
 
     builder.push_stmt(
         StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(branch_operands)),
@@ -1252,6 +1633,7 @@ fn lower_list_comprehension_expr(
             &clause.pattern,
             &Place::Local(element_slot),
             clause.iterable.span(),
+            None,
         );
         if let Some(filter) = &clause.filter {
             let _ = lower_expr_to_temp(builder, filter);
@@ -1587,8 +1969,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
             named_args,
             ..
         } => {
-            let mut arg_ops = Vec::with_capacity(1 + args.len() + named_args.len());
-            arg_ops.push(Operand::Constant(MirConstant::Function(name.clone())));
+            let mut arg_ops = Vec::with_capacity(args.len() + named_args.len());
             arg_ops.extend(
                 args.iter()
                     .map(|arg| lower_expr_as_moved_operand(builder, arg)),
@@ -1598,10 +1979,8 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                     .iter()
                     .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)),
             );
-            builder.push_stmt(
-                StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(arg_ops)),
-                span,
-            );
+            let func_op = Operand::Constant(MirConstant::Function(name.clone()));
+            builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
         Expr::EnumConstructor { payload, .. } => match payload {
             ast::EnumConstructorPayload::Unit => {
@@ -1616,7 +1995,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                     StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
-                emit_enum_store_if_needed(builder, operands, span);
+                emit_enum_store_if_needed(builder, temp, operands, span);
             }
             ast::EnumConstructorPayload::Struct(fields) => {
                 let operands: Vec<_> = fields
@@ -1627,7 +2006,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                     StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
-                emit_enum_store_if_needed(builder, operands, span);
+                emit_enum_store_if_needed(builder, temp, operands, span);
             }
         },
         Expr::Object(entries, _) => {
@@ -1646,7 +2025,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                 span,
             );
-            emit_object_store_if_needed(builder, operands, span);
+            emit_object_store_if_needed(builder, temp, operands, span);
         }
         Expr::Array(elements, _) => {
             lower_array_expr(builder, elements, temp, span);
@@ -1686,25 +2065,25 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         }
         Expr::MethodCall {
             receiver,
+            method,
             args,
             named_args,
             ..
         } => {
-            let mut operands = Vec::with_capacity(1 + args.len() + named_args.len());
-            operands.push(lower_expr_as_moved_operand(builder, receiver));
-            operands.extend(
+            let receiver_op = lower_expr_as_moved_operand(builder, receiver);
+            let mut arg_ops = Vec::with_capacity(1 + args.len() + named_args.len());
+            arg_ops.push(receiver_op);
+            arg_ops.extend(
                 args.iter()
                     .map(|arg| lower_expr_as_moved_operand(builder, arg)),
             );
-            operands.extend(
+            arg_ops.extend(
                 named_args
                     .iter()
                     .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)),
             );
-            builder.push_stmt(
-                StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands)),
-                span,
-            );
+            let func_op = Operand::Constant(MirConstant::Method(method.clone()));
+            builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
         Expr::Range { start, end, .. } => {
             let mut operands = Vec::new();
@@ -1737,7 +2116,7 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
                 StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                 span,
             );
-            emit_object_store_if_needed(builder, operands, span);
+            emit_object_store_if_needed(builder, temp, operands, span);
         }
         Expr::Annotated {
             annotation, target, ..
@@ -1789,9 +2168,23 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
         Expr::ComptimeFor(comptime_for, _) => {
             lower_comptime_for_expr(builder, comptime_for, temp, span);
         }
-        _ => {
-            builder.mark_fallback();
-            assign_none(builder, temp, span);
+        Expr::WindowExpr(window_expr, _) => {
+            // Lower window expressions as an aggregate of their sub-expressions.
+            // The borrow solver only needs to track which slots are read.
+            let mut operands = Vec::new();
+            lower_window_function_operands(builder, &window_expr.function, &mut operands);
+            for expr in &window_expr.over.partition_by {
+                operands.push(lower_expr_as_moved_operand(builder, expr));
+            }
+            if let Some(order_by) = &window_expr.over.order_by {
+                for (expr, _) in &order_by.columns {
+                    operands.push(lower_expr_as_moved_operand(builder, expr));
+                }
+            }
+            builder.push_stmt(
+                StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands)),
+                span,
+            );
         }
     }
 
@@ -1961,6 +2354,7 @@ fn lower_let_expr(builder: &mut MirBuilder, let_expr: &ast::LetExpr, temp: SlotI
             &let_expr.pattern,
             source_place.as_ref(),
             span,
+            Some(immutable_binding_metadata(span, false, false)),
         );
     }
 
@@ -2058,7 +2452,13 @@ fn lower_for_expr(builder: &mut MirBuilder, for_expr: &ast::ForExpr, temp: SlotI
         ),
         span,
     );
-    lower_pattern_bindings_from_place(builder, &for_expr.pattern, &Place::Local(elem_slot), span);
+    lower_pattern_bindings_from_place(
+        builder,
+        &for_expr.pattern,
+        &Place::Local(elem_slot),
+        span,
+        None,
+    );
     builder.push_loop(after, header, Some(temp));
     let body_slot = lower_expr_to_temp(builder, &for_expr.body);
     builder.push_stmt(
@@ -2147,6 +2547,7 @@ fn lower_match_expr(
                 &arm.pattern,
                 &Place::Local(scrutinee_slot),
                 pattern_span,
+                Some(immutable_binding_metadata(pattern_span, false, false)),
             );
         }
 
@@ -2357,6 +2758,7 @@ fn lower_for_loop(
                 pattern,
                 &Place::Local(pattern_slot),
                 span,
+                None,
             );
             builder.push_loop(after, header, None);
             builder.push_scope();
@@ -2479,6 +2881,106 @@ mod tests {
         assert!(mir.num_locals >= 1); // at least x + temp
         // Should have at least 2 blocks (entry + exit)
         assert!(mir.blocks.len() >= 2);
+    }
+
+    #[test]
+    fn test_compute_mutability_errors_ignores_binding_initializer() {
+        let lowering = lower_parsed_function(
+            r#"
+                function keep() {
+                    let x = 1
+                    x
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert!(
+            errors.is_empty(),
+            "declaration initializer should not be reported as a mutability error: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_compute_mutability_errors_flags_immutable_let_reassignment() {
+        let lowering = lower_parsed_function(
+            r#"
+                function mutate() {
+                    let x = 1
+                    x = 2
+                    x
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one mutability error, got {errors:?}"
+        );
+        assert_eq!(errors[0].variable_name, "x");
+        assert!(errors[0].is_explicit_let);
+    }
+
+    #[test]
+    fn test_compute_mutability_errors_flags_const_reassignment() {
+        let lowering = lower_parsed_function(
+            r#"
+                function mutate() {
+                    const x = 1
+                    x = 2
+                    x
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one mutability error, got {errors:?}"
+        );
+        assert_eq!(errors[0].variable_name, "x");
+        assert!(errors[0].is_const);
+    }
+
+    #[test]
+    fn test_compute_mutability_errors_flags_shared_ref_param_write() {
+        let lowering = lower_parsed_function(
+            r#"
+                function mutate(&x) {
+                    x = 2
+                    x
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one mutability error, got {errors:?}"
+        );
+        assert_eq!(errors[0].variable_name, "x");
+        assert!(!errors[0].is_explicit_let);
+    }
+
+    #[test]
+    fn test_compute_mutability_errors_flags_const_param_write() {
+        let lowering = lower_parsed_function(
+            r#"
+                function mutate(const x) {
+                    x = 2
+                    x
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected one mutability error, got {errors:?}"
+        );
+        assert_eq!(errors[0].variable_name, "x");
+        assert!(errors[0].is_const);
     }
 
     #[test]
@@ -2882,11 +3384,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
-            "expected array-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local array ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -2909,11 +3408,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
-            "expected indirect array-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect array ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -2935,11 +3431,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected object-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local object ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -2962,11 +3455,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected indirect object-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect object ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -2988,11 +3478,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected struct-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local struct ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -3015,11 +3502,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected indirect struct-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect struct ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -3041,11 +3525,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
-            "expected enum tuple-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local enum tuple ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -3068,11 +3549,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
-            "expected indirect enum tuple-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect enum tuple ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -3094,11 +3572,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
-            "expected enum struct-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local enum struct ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -3121,11 +3596,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
-            "expected indirect enum struct-stored-reference error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect enum struct ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -4107,6 +4579,7 @@ mod tests {
                     var obj = { value: 0 }
                     let x = 1
                     obj.value = &x
+                    0
                 }
             "#,
         );
@@ -4117,11 +4590,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected object-field reference escape error, got {:?}",
+            analysis.errors.is_empty(),
+            "local object-field ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -4135,6 +4605,7 @@ mod tests {
                     let x = 1
                     let r = &x
                     obj.value = r
+                    0
                 }
             "#,
         );
@@ -4145,11 +4616,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected indirect object-field reference escape error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect object-field ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -4162,6 +4630,7 @@ mod tests {
                     var arr = [0]
                     let x = 1
                     arr[0] = &x
+                    0
                 }
             "#,
         );
@@ -4172,11 +4641,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
-            "expected array-element reference escape error, got {:?}",
+            analysis.errors.is_empty(),
+            "local array-element ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -4190,6 +4656,7 @@ mod tests {
                     let x = 1
                     let r = &x
                     arr[0] = r
+                    0
                 }
             "#,
         );
@@ -4200,11 +4667,8 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
-            "expected indirect array-element reference escape error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect array-element ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -4575,11 +5039,63 @@ mod tests {
 
         let analysis = solver::analyze(&lowering.mir);
         assert!(
+            analysis.errors.is_empty(),
+            "non-escaping closure ref capture should now be accepted, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_returned_array_with_ref_still_errors() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let arr = [&x]
+                    return arr
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "returned local array with ref should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
+            "expected returned array ref storage to still error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_lowered_returned_closure_with_ref_still_errors() {
+        let lowering = lower_parsed_function(
+            r#"
+                function test() {
+                    let x = 1
+                    let r = &x
+                    let f = || r
+                    return f
+                }
+            "#,
+        );
+        assert!(
+            !lowering.had_fallbacks,
+            "returned closure with ref capture should stay in the supported MIR subset"
+        );
+
+        let analysis = solver::analyze(&lowering.mir);
+        assert!(
             analysis
                 .errors
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure),
-            "expected closure-capture reference escape, got {:?}",
+            "expected returned closure ref capture to still error, got {:?}",
             analysis.errors
         );
     }

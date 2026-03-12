@@ -134,8 +134,7 @@ pub(super) fn plan_coercion(
                 Err(()) => {
                     // Only u64 + signed is truly incompatible (u64 can't fit in i64).
                     // Other mismatches (e.g. u32 + i8) safely promote to default int (i64).
-                    let either_u64 =
-                        a == shape_ast::IntWidth::U64 || b == shape_ast::IntWidth::U64;
+                    let either_u64 = a == shape_ast::IntWidth::U64 || b == shape_ast::IntWidth::U64;
                     let mixed_sign = a.is_signed() != b.is_signed();
                     if either_u64 && mixed_sign {
                         Some(CoercionPlan::IncompatibleWidths(a, b))
@@ -447,7 +446,9 @@ mod tests {
         assert!(
             matches!(
                 plan,
-                Some(CoercionPlan::NoCoercion(NumericType::IntWidth(IntWidth::U8)))
+                Some(CoercionPlan::NoCoercion(NumericType::IntWidth(
+                    IntWidth::U8
+                )))
             ),
             "u8 + u8 should be NoCoercion(U8), got {:?}",
             plan

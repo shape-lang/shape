@@ -1,11 +1,11 @@
 //! Helper methods for bytecode compilation
 
-use crate::borrow_checker::{BorrowId, BorrowMode, BorrowPlace};
+use super::{BorrowMode, BorrowPlace};
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{
-    BindingOwnershipClass, BindingSemantics, BindingStorageClass, NumericType, StorageHint,
-    TypeTracker, VariableKind, VariableTypeInfo,
+    Aliasability, BindingOwnershipClass, BindingSemantics, BindingStorageClass, EscapeStatus,
+    MutationCapability, NumericType, StorageHint, TypeTracker, VariableKind, VariableTypeInfo,
 };
 use shape_ast::ast::{
     BlockItem, DestructurePattern, Expr, FunctionParameter, Item, Pattern,
@@ -15,10 +15,7 @@ use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::{
-    BytecodeCompiler, DropKind, FunctionReferenceReturnContract, ParamPassMode,
-    TrackedReferenceBorrow,
-};
+use super::{BytecodeCompiler, DropKind, FunctionReturnReferenceSummary, ParamPassMode};
 
 pub(super) struct TypedFieldPlace {
     pub root_name: String,
@@ -482,6 +479,18 @@ impl BytecodeCompiler {
         Self::MODULE_BINDING_BORROW_FLAG | binding_idx as BorrowPlace
     }
 
+    fn borrow_key_is_module_binding(place: BorrowPlace) -> bool {
+        (place & Self::MODULE_BINDING_BORROW_FLAG) != 0
+    }
+
+    pub(super) fn check_read_allowed_in_current_context(
+        &self,
+        _place: BorrowPlace,
+        _source_location: Option<SourceLocation>,
+    ) -> Result<()> {
+        Ok(()) // MIR analysis is the sole authority
+    }
+
     fn encode_field_borrow(field_idx: u16) -> BorrowPlace {
         ((field_idx as BorrowPlace + 1) & 0x7FFF) << Self::FIELD_BORROW_SHIFT
     }
@@ -527,6 +536,13 @@ impl BytecodeCompiler {
         BindingSemantics {
             ownership_class,
             storage_class: Self::default_storage_class_for_ownership_class(ownership_class),
+            aliasability: Aliasability::Unique,
+            mutation_capability: match ownership_class {
+                BindingOwnershipClass::OwnedImmutable => MutationCapability::Immutable,
+                BindingOwnershipClass::OwnedMutable => MutationCapability::LocalMutable,
+                BindingOwnershipClass::Flexible => MutationCapability::SharedMutable,
+            },
+            escape_status: EscapeStatus::Local,
         }
     }
 
@@ -552,6 +568,121 @@ impl BytecodeCompiler {
 
     pub(super) const fn owned_mutable_binding_semantics() -> BindingSemantics {
         Self::binding_semantics_for_ownership_class(BindingOwnershipClass::OwnedMutable)
+    }
+
+    // ─── Ownership-class-based mutability queries ───────────────────────
+    //
+    // These consult `BindingOwnershipClass` as the single source of truth
+    // for whether a binding is mutable, falling back to the legacy HashSet
+    // approach when no ownership class has been recorded yet.
+
+    /// Check if a local slot is immutable according to its ownership class.
+    /// Falls back to the `immutable_locals` HashSet if no ownership class was recorded.
+    pub(super) fn is_local_immutable(&self, slot: u16) -> bool {
+        if let Some(sem) = self.type_tracker.get_local_binding_semantics(slot) {
+            return sem.ownership_class == BindingOwnershipClass::OwnedImmutable;
+        }
+        self.immutable_locals.contains(&slot)
+    }
+
+    /// Check if a local slot is const according to its ownership class.
+    /// Falls back to the `const_locals` HashSet if no ownership class was recorded.
+    pub(super) fn is_local_const(&self, slot: u16) -> bool {
+        // `const` bindings are mapped to OwnedImmutable in binding_semantics_for_var_decl,
+        // but have additional restrictions (no write-through, no reference). We check the
+        // const_locals set as the canonical source since BindingOwnershipClass doesn't
+        // distinguish const from let.
+        self.const_locals.contains(&slot)
+    }
+
+    /// Check if a module binding is immutable according to its ownership class.
+    /// Falls back to the `immutable_module_bindings` HashSet.
+    pub(super) fn is_module_binding_immutable(&self, slot: u16) -> bool {
+        if let Some(sem) = self.type_tracker.get_binding_semantics(slot) {
+            return sem.ownership_class == BindingOwnershipClass::OwnedImmutable;
+        }
+        self.immutable_module_bindings.contains(&slot)
+    }
+
+    /// Check if a module binding is const according to its ownership class.
+    pub(super) fn is_module_binding_const(&self, slot: u16) -> bool {
+        self.const_module_bindings.contains(&slot)
+    }
+
+    // ─── MIR ownership decision queries ───────────────────────────────
+    //
+    // When MIR analysis is available and authoritative, the compiler can
+    // consult `OwnershipDecision` to decide Move vs Clone vs Copy for
+    // non-Copy type assignments.
+
+    /// Query the MIR ownership decision for a given MIR program point.
+    /// Returns `None` if no MIR analysis is available for the current function.
+    ///
+    /// Connected to assignment/variable-init codegen via the enriched storage
+    /// plan and span→point mapping. The actual emission of distinct
+    /// move/clone/copy opcodes is a follow-up refinement.
+    pub(super) fn query_mir_ownership_decision(
+        &self,
+        point: crate::mir::types::Point,
+    ) -> Option<crate::mir::analysis::OwnershipDecision> {
+        let func_name = self
+            .current_function
+            .map(|idx| &self.program.functions[idx].name)?;
+        let analysis = self.mir_borrow_analyses.get(func_name)?;
+        Some(analysis.ownership_at(point))
+    }
+
+    /// Query the MIR ownership decision for a given AST span.
+    /// Looks up the span→point mapping for the current function, then
+    /// delegates to `query_mir_ownership_decision`.
+    /// Returns `None` if no mapping or analysis is available.
+    pub(super) fn query_mir_ownership_decision_at_span(
+        &self,
+        span: shape_ast::ast::Span,
+    ) -> Option<crate::mir::analysis::OwnershipDecision> {
+        let func_name = self
+            .current_function
+            .and_then(|idx| self.program.functions.get(idx))
+            .map(|f| f.name.as_str())?;
+        let span_map = self.mir_span_to_point.get(func_name)?;
+        let point = span_map.get(&span)?;
+        self.query_mir_ownership_decision(*point)
+    }
+
+    /// Access the storage plan for the function currently being compiled.
+    /// Returns `None` if no MIR storage plan exists for the current function.
+    pub(super) fn current_storage_plan(&self) -> Option<&crate::mir::StoragePlan> {
+        let func_name = self
+            .current_function
+            .and_then(|idx| self.program.functions.get(idx))
+            .map(|f| f.name.as_str())?;
+        self.mir_storage_plans.get(func_name)
+    }
+
+    /// Query the MIR storage plan for a specific local slot's storage class.
+    /// Returns `None` if no plan exists or the slot is not in the plan.
+    pub(super) fn mir_storage_class_for_slot(
+        &self,
+        slot: u16,
+    ) -> Option<BindingStorageClass> {
+        self.current_storage_plan()
+            .and_then(|plan| {
+                plan.slot_classes
+                    .get(&crate::mir::SlotId(slot))
+                    .copied()
+            })
+    }
+
+    /// MIR analysis is always authoritative now (lexical borrow checker removed).
+    pub(super) fn current_function_has_mir_authority(&self) -> bool {
+        true
+    }
+
+    /// MIR analysis is authoritative for both function bodies and top-level code.
+    /// `analyze_non_function_items_with_mir` runs in the main pipeline before
+    /// compilation, so MIR write authority applies universally.
+    pub(super) fn current_binding_uses_mir_write_authority(&self, _is_local: bool) -> bool {
+        true
     }
 
     pub(super) fn apply_binding_semantics_to_pattern_bindings(
@@ -1023,6 +1154,45 @@ impl BytecodeCompiler {
                     )
                 }
             }
+            // Recursive case: handle chained property access like `a.b.c`
+            Expr::PropertyAccess {
+                object: inner_object,
+                property: inner_property,
+                optional: false,
+                ..
+            } => {
+                // Resolve the intermediate field place first
+                let parent = self.try_resolve_typed_field_place(inner_object, inner_property)?;
+                // The intermediate field must be a nested Object type with a known schema
+                let nested_type_name = match &parent.field_type_info {
+                    FieldType::Object(name) => name.clone(),
+                    _ => return None,
+                };
+                let nested_schema = self
+                    .type_tracker
+                    .schema_registry()
+                    .get(&nested_type_name)?;
+                let nested_field = nested_schema.get_field(property)?;
+                let nested_field_idx = nested_field.index as u16;
+                // For chained borrows, the borrow key uses the root slot + leaf field
+                let borrow_key = if parent.is_local {
+                    Self::borrow_key_for_local_field(parent.slot, nested_field_idx)
+                } else {
+                    Self::borrow_key_for_module_binding_field(parent.slot, nested_field_idx)
+                };
+                return Some(TypedFieldPlace {
+                    root_name: parent.root_name,
+                    is_local: parent.is_local,
+                    slot: parent.slot,
+                    typed_operand: Operand::TypedField {
+                        type_id: nested_schema.id as u16,
+                        field_idx: nested_field_idx,
+                        field_type_tag: field_type_to_tag(&nested_field.field_type),
+                    },
+                    borrow_key,
+                    field_type_info: nested_field.field_type.clone(),
+                });
+            }
             _ => return None,
         };
 
@@ -1063,7 +1233,7 @@ impl BytecodeCompiler {
         expr: &Expr,
         span: shape_ast::ast::Span,
         mode: BorrowMode,
-    ) -> Result<BorrowId> {
+    ) -> Result<u32> {
         let borrow_id = match expr {
             Expr::Identifier(name, id_span) => self.compile_reference_identifier(name, *id_span, mode),
             Expr::PropertyAccess {
@@ -1072,9 +1242,15 @@ impl BytecodeCompiler {
                 optional: false,
                 ..
             } => self.compile_reference_property_access(object, property, span, mode),
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index: None,
+                ..
+            } => self.compile_reference_index_access(object, index, span, mode),
             _ => Err(ShapeError::SemanticError {
                 message:
-                    "`&` can only be applied to a simple variable name or compile-time-resolved field access (e.g., `&x`, `&obj.a`)".to_string(),
+                    "`&` can only be applied to a place expression (variable, field access, or index access)".to_string(),
                 location: Some(self.span_to_source_location(span)),
             }),
         }?;
@@ -1090,27 +1266,22 @@ impl BytecodeCompiler {
         property: &str,
         span: shape_ast::ast::Span,
         mode: BorrowMode,
-    ) -> Result<BorrowId> {
+    ) -> Result<u32> {
         let Some(place) = self.try_resolve_typed_field_place(object, property) else {
             return Err(ShapeError::SemanticError {
                 message:
-                    "`&` can only be applied to a simple variable name or compile-time-resolved field access (e.g., `&x`, `&obj.a`)".to_string(),
+                    "`&` can only be applied to a simple variable name or compile-time-resolved field access (e.g., `&x`, `&obj.a`, `&obj.nested.field`)".to_string(),
                 location: Some(self.span_to_source_location(span)),
             });
         };
 
         if mode == BorrowMode::Exclusive {
-            if place.is_local {
-                if self.const_locals.contains(&place.slot) {
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "Cannot pass const variable '{}.{}' by exclusive reference",
-                            place.root_name, property
-                        ),
-                        location: Some(self.span_to_source_location(span)),
-                    });
-                }
-            } else if self.const_module_bindings.contains(&place.slot) {
+            let is_const = if place.is_local {
+                self.is_local_const(place.slot)
+            } else {
+                self.is_module_binding_const(place.slot)
+            };
+            if is_const {
                 return Err(ShapeError::SemanticError {
                     message: format!(
                         "Cannot pass const variable '{}.{}' by exclusive reference",
@@ -1121,12 +1292,8 @@ impl BytecodeCompiler {
             }
         }
 
-        let label = format!("{}.{}", place.root_name, property);
-        let source_loc = self.span_to_source_location(span);
-        let borrow_id = self
-            .borrow_checker
-            .create_borrow(place.borrow_key, place.slot, mode, span, Some(source_loc))
-            .map_err(|err| Self::relabel_borrow_error(err, place.borrow_key, &label))?;
+        // MIR analysis is the sole authority for borrow checking.
+        let borrow_id = u32::MAX;
 
         let root_operand = if place.is_local {
             Operand::Local(place.slot)
@@ -1134,10 +1301,124 @@ impl BytecodeCompiler {
             Operand::ModuleBinding(place.slot)
         };
         self.emit(Instruction::new(OpCode::MakeRef, Some(root_operand)));
-        self.emit(Instruction::new(
-            OpCode::MakeFieldRef,
-            Some(place.typed_operand),
-        ));
+
+        // For chained access (a.b.c), emit MakeFieldRef for each nesting level.
+        let field_chain = self.collect_property_access_chain(object, property);
+        for field_operand in field_chain {
+            self.emit(Instruction::new(OpCode::MakeFieldRef, Some(field_operand)));
+        }
+
+        Ok(borrow_id)
+    }
+
+    /// Collect the chain of typed field operands for a property access path.
+    /// For `a.b.c`, returns [operand_for_b, operand_for_c].
+    /// For `a.b` (flat), returns [operand_for_b].
+    fn collect_property_access_chain(
+        &self,
+        object: &Expr,
+        property: &str,
+    ) -> Vec<Operand> {
+        let mut chain = Vec::new();
+        self.collect_property_chain_inner(object, &mut chain);
+        // Add the leaf field operand
+        if let Some(place) = self.try_resolve_typed_field_place(object, property) {
+            chain.push(place.typed_operand);
+        }
+        chain
+    }
+
+    fn collect_property_chain_inner(
+        &self,
+        expr: &Expr,
+        chain: &mut Vec<Operand>,
+    ) {
+        if let Expr::PropertyAccess {
+            object: inner_object,
+            property: inner_property,
+            optional: false,
+            ..
+        } = expr
+        {
+            // Recurse into the inner object first
+            self.collect_property_chain_inner(inner_object, chain);
+            // Resolve this intermediate level
+            if let Some(place) = self.try_resolve_typed_field_place(inner_object, inner_property) {
+                chain.push(place.typed_operand);
+            }
+        }
+        // Base case: Identifier — no extra field ref needed (handled by MakeRef)
+    }
+
+    fn compile_reference_index_access(
+        &mut self,
+        object: &Expr,
+        index: &Expr,
+        span: shape_ast::ast::Span,
+        mode: BorrowMode,
+    ) -> Result<u32> {
+        // Resolve the base object to a local or module binding for MakeRef.
+        let (root_operand, is_const) = match object {
+            Expr::Identifier(name, _id_span) => {
+                if let Some(local_idx) = self.resolve_local(name) {
+                    (
+                        Operand::Local(local_idx),
+                        self.is_local_const(local_idx),
+                    )
+                } else if let Some(scoped_name) =
+                    self.resolve_scoped_module_binding_name(name)
+                {
+                    if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                        (
+                            Operand::ModuleBinding(binding_idx),
+                            self.is_module_binding_const(binding_idx),
+                        )
+                    } else {
+                        return Err(ShapeError::SemanticError {
+                            message: "`&expr[i]` requires the base to be a resolvable variable"
+                                .to_string(),
+                            location: Some(self.span_to_source_location(span)),
+                        });
+                    }
+                } else {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot resolve variable '{}' for index reference",
+                            name
+                        ),
+                        location: Some(self.span_to_source_location(span)),
+                    });
+                }
+            }
+            _ => {
+                // For arbitrary base expressions, compile into a temp local.
+                self.compile_expr(object)?;
+                let temp = self.declare_temp_local("__idx_ref_base_")?;
+                self.emit(Instruction::new(
+                    OpCode::StoreLocal,
+                    Some(Operand::Local(temp)),
+                ));
+                (Operand::Local(temp), false)
+            }
+        };
+
+        if mode == BorrowMode::Exclusive && is_const {
+            return Err(ShapeError::SemanticError {
+                message:
+                    "Cannot create an exclusive index reference into a const variable".to_string(),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+
+        // MIR analysis is the sole authority for borrow checking.
+        let borrow_id = u32::MAX;
+
+        // Emit MakeRef for the base array variable.
+        self.emit(Instruction::new(OpCode::MakeRef, Some(root_operand)));
+        // Compile the index expression (pushes index value onto stack).
+        self.compile_expr(index)?;
+        // MakeIndexRef pops [base_ref, index] and pushes a projected index reference.
+        self.emit(Instruction::new(OpCode::MakeIndexRef, None));
         Ok(borrow_id)
     }
 
@@ -1163,528 +1444,131 @@ impl BytecodeCompiler {
     pub(super) fn compile_expr_for_reference_binding(
         &mut self,
         expr: &shape_ast::ast::Expr,
-    ) -> Result<Option<(BorrowId, bool)>> {
-        if let shape_ast::ast::Expr::Reference {
-            expr: inner,
-            is_mutable,
-            span,
-        } = expr
-        {
-            let mode = if *is_mutable {
-                BorrowMode::Exclusive
-            } else {
-                BorrowMode::Shared
-            };
-            let borrow_id = self.compile_reference_expr(inner, *span, mode)?;
-            if borrow_id == BorrowId::MAX {
-                Ok(None)
-            } else {
-                Ok(Some((borrow_id, *is_mutable)))
-            }
-        } else if let shape_ast::ast::Expr::FunctionCall {
-            name,
-            args,
-            named_args,
-            span,
-        } = expr
-        {
-            if named_args.is_empty()
-                && self
-                    .function_reference_return_contract_for_name(name)
-                    .is_some()
-            {
-                self.compile_callable_name_call_for_reference_binding(name, args, *span)
-            } else {
-                self.compile_expr(expr)?;
-                Ok(None)
-            }
-        } else if let shape_ast::ast::Expr::MethodCall {
-            receiver,
-            method,
-            args,
-            named_args,
-            span,
-        } = expr
-        {
-            if method == "__call__"
-                && named_args.is_empty()
-                && self
-                    .callable_reference_return_contract_from_expr(receiver)
-                    .is_some()
-            {
-                self.compile_callable_expr_call_for_reference_binding(receiver, args, *span)
-            } else {
-                self.compile_expr(expr)?;
-                Ok(None)
-            }
+    ) -> Result<Option<(u32, bool)>> {
+        if self.expr_should_preserve_reference_binding(expr) {
+            self.compile_expr_preserving_refs(expr)?;
+            Ok(self
+                .last_expr_reference_mode()
+                .map(|mode| (u32::MAX, mode == BorrowMode::Exclusive)))
         } else {
             self.compile_expr(expr)?;
             Ok(None)
         }
     }
 
-    fn compile_persistent_reference_call_arg(
-        &mut self,
-        arg: &shape_ast::ast::Expr,
-        mode: BorrowMode,
-    ) -> Result<(BorrowId, bool)> {
-        use shape_ast::ast::Expr;
+    fn binding_target_requires_reference_value(&self) -> bool {
+        let Some(name) = self.pending_variable_name.as_deref() else {
+            return false;
+        };
 
-        let borrow_id = match arg {
-            Expr::Reference {
-                expr: inner,
-                is_mutable,
-                span,
+        if let Some(local_idx) = self.resolve_local(name) {
+            if self.reference_value_locals.contains(&local_idx) {
+                return true;
+            }
+        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name)
+            && let Some(binding_idx) = self.module_bindings.get(&scoped_name)
+            && self.reference_value_module_bindings.contains(binding_idx)
+        {
+            return true;
+        }
+
+        self.future_reference_use_name_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
+    fn expr_should_preserve_reference_binding(&self, expr: &shape_ast::ast::Expr) -> bool {
+        match expr {
+            shape_ast::ast::Expr::Reference { .. } => true,
+            shape_ast::ast::Expr::FunctionCall { .. }
+            | shape_ast::ast::Expr::MethodCall { .. } => {
+                self.binding_target_requires_reference_value()
+            }
+            shape_ast::ast::Expr::Identifier(name, _)
+            | shape_ast::ast::Expr::PatternRef(name, _) => {
+                if let Some(local_idx) = self.resolve_local(name) {
+                    self.reference_value_locals.contains(&local_idx)
+                        || (self.binding_target_requires_reference_value()
+                            && self.ref_locals.contains(&local_idx))
+                } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+                    self.module_bindings
+                        .get(&scoped_name)
+                        .is_some_and(|binding_idx| {
+                            self.reference_value_module_bindings.contains(binding_idx)
+                        })
+                } else {
+                    false
+                }
+            }
+            shape_ast::ast::Expr::Block(block, _) => block
+                .items
+                .last()
+                .is_some_and(|item| self.block_item_should_preserve_reference_binding(item)),
+            shape_ast::ast::Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
             } => {
-                let explicit_mode = if *is_mutable {
-                    BorrowMode::Exclusive
-                } else {
-                    BorrowMode::Shared
-                };
-                let borrow_id = self.compile_reference_expr(inner, *span, explicit_mode)?;
-                return Ok((borrow_id, *is_mutable));
+                self.expr_should_preserve_reference_binding(then_expr)
+                    || else_expr
+                        .as_deref()
+                        .is_some_and(|expr| self.expr_should_preserve_reference_binding(expr))
             }
-            Expr::Identifier(name, span) => {
-                if let Some(existing_borrow) =
-                    self.compile_existing_reference_call_arg(name, *span, mode)?
-                {
-                    return Ok(existing_borrow);
-                }
-                self.compile_reference_identifier(name, *span, mode)?
+            shape_ast::ast::Expr::If(if_expr, _) => {
+                self.expr_should_preserve_reference_binding(&if_expr.then_branch)
+                    || if_expr
+                        .else_branch
+                        .as_deref()
+                        .is_some_and(|expr| self.expr_should_preserve_reference_binding(expr))
             }
-            Expr::PropertyAccess {
-                object,
-                property,
-                optional: false,
-                span,
-            } => self.compile_reference_property_access(object, property, *span, mode)?,
-            _ if mode == BorrowMode::Exclusive => {
-                return Err(ShapeError::SemanticError {
-                    message: "[B0004] mutable reference arguments must be simple variables"
-                        .to_string(),
-                    location: Some(self.span_to_source_location(arg.span())),
-                });
+            shape_ast::ast::Expr::Match(match_expr, _) => match_expr
+                .arms
+                .iter()
+                .any(|arm| self.expr_should_preserve_reference_binding(&arm.body)),
+            shape_ast::ast::Expr::Let(let_expr, _) => {
+                self.expr_should_preserve_reference_binding(&let_expr.body)
             }
-            _ => {
-                self.compile_expr(arg)?;
-                let temp = self.declare_temp_local("__ret_ref_arg_")?;
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(temp)),
-                ));
-                let borrow_id = self.borrow_checker.create_borrow(
-                    Self::borrow_key_for_local(temp),
-                    temp,
-                    mode,
-                    arg.span(),
-                    Some(self.span_to_source_location(arg.span())),
-                )?;
-                self.emit(Instruction::new(
-                    OpCode::MakeRef,
-                    Some(Operand::Local(temp)),
-                ));
-                borrow_id
-            }
-        };
-
-        Ok((borrow_id, mode == BorrowMode::Exclusive))
-    }
-
-    fn compile_existing_reference_call_arg(
-        &mut self,
-        name: &str,
-        span: shape_ast::ast::Span,
-        mode: BorrowMode,
-    ) -> Result<Option<(BorrowId, bool)>> {
-        let (borrow_id, is_exclusive) = if let Some(local_idx) = self.resolve_local(name) {
-            if let Some(tracked) = self.tracked_reference_borrow_locals.get(&local_idx) {
-                (
-                    tracked.borrow_id,
-                    self.exclusive_reference_value_locals.contains(&local_idx),
-                )
-            } else if self.ref_locals.contains(&local_idx) {
-                (
-                    BorrowId::MAX,
-                    self.exclusive_ref_locals.contains(&local_idx),
-                )
-            } else if self.reference_value_locals.contains(&local_idx) {
-                (
-                    BorrowId::MAX,
-                    self.exclusive_reference_value_locals.contains(&local_idx),
-                )
-            } else {
-                return Ok(None);
-            }
-        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
-            let Some(&binding_idx) = self.module_bindings.get(&scoped_name) else {
-                return Ok(None);
-            };
-            if let Some(tracked) = self
-                .tracked_reference_borrow_module_bindings
-                .get(&binding_idx)
-            {
-                (
-                    tracked.borrow_id,
-                    self.exclusive_reference_value_module_bindings
-                        .contains(&binding_idx),
-                )
-            } else if self.reference_value_module_bindings.contains(&binding_idx) {
-                (
-                    BorrowId::MAX,
-                    self.exclusive_reference_value_module_bindings
-                        .contains(&binding_idx),
-                )
-            } else {
-                return Ok(None);
-            }
-        } else {
-            return Ok(None);
-        };
-
-        if mode == BorrowMode::Exclusive && !is_exclusive {
-            return Err(ShapeError::SemanticError {
-                message: format!(
-                    "Cannot pass shared reference variable '{}' as an exclusive reference",
-                    name
-                ),
-                location: Some(self.span_to_source_location(span)),
-            });
-        }
-
-        self.compile_identifier_as_raw_reference(name, span)?;
-        Ok(Some((borrow_id, is_exclusive)))
-    }
-
-    fn compile_reference_return_call_args(
-        &mut self,
-        args: &[shape_ast::ast::Expr],
-        pass_modes: &[ParamPassMode],
-        return_param_index: usize,
-    ) -> Result<(Option<(BorrowId, bool)>, Vec<(u16, u16)>)> {
-        let saved = self.in_call_args;
-        let saved_mode = self.current_call_arg_borrow_mode;
-        let parent_region = self.borrow_checker.current_region();
-        self.in_call_args = true;
-        self.borrow_checker.enter_region();
-        self.call_arg_module_binding_ref_writebacks.push(Vec::new());
-
-        let mut first_error: Option<ShapeError> = None;
-        let mut returned_borrow = None;
-
-        for (idx, arg) in args.iter().enumerate() {
-            let pass_mode = pass_modes
-                .get(idx)
-                .copied()
-                .unwrap_or(ParamPassMode::ByValue);
-            self.current_call_arg_borrow_mode = match pass_mode {
-                ParamPassMode::ByRefExclusive => Some(BorrowMode::Exclusive),
-                ParamPassMode::ByRefShared => Some(BorrowMode::Shared),
-                ParamPassMode::ByValue => None,
-            };
-
-            let arg_result = if idx == return_param_index {
-                let borrow_mode = if pass_mode.is_exclusive() {
-                    BorrowMode::Exclusive
-                } else {
-                    BorrowMode::Shared
-                };
-                self.compile_persistent_reference_call_arg(arg, borrow_mode)
-                    .map(Some)
-            } else {
-                match pass_mode {
-                    ParamPassMode::ByValue => {
-                        self.plan_flexible_binding_escape_from_expr(arg);
-                        self.compile_expr(arg).map(|_| None)
-                    }
-                    ParamPassMode::ByRefShared | ParamPassMode::ByRefExclusive => {
-                        let borrow_mode = if pass_mode.is_exclusive() {
-                            BorrowMode::Exclusive
-                        } else {
-                            BorrowMode::Shared
-                        };
-                        if matches!(arg, shape_ast::ast::Expr::Reference { .. }) {
-                            self.compile_expr(arg).map(|_| None)
-                        } else {
-                            self.compile_implicit_reference_arg(arg, borrow_mode)
-                                .map(|_| None)
-                        }
-                    }
-                }
-            };
-
-            match arg_result {
-                Ok(Some(borrow)) => returned_borrow = Some(borrow),
-                Ok(None) => {}
-                Err(err) => {
-                    if self.should_recover_compile_diagnostics() {
-                        self.errors.push(err);
-                        self.emit(Instruction::simple(OpCode::PushNull));
-                        continue;
-                    }
-                    first_error = Some(err);
-                    break;
-                }
-            }
-        }
-
-        self.current_call_arg_borrow_mode = saved_mode;
-        if let Some((borrow_id, _)) =
-            returned_borrow.filter(|(borrow_id, _)| *borrow_id != BorrowId::MAX)
-        {
-            self.borrow_checker
-                .rebind_borrow_region(borrow_id, parent_region);
-        }
-        self.borrow_checker.exit_region();
-        self.in_call_args = saved;
-        let writebacks = self
-            .call_arg_module_binding_ref_writebacks
-            .pop()
-            .unwrap_or_default();
-
-        if let Some(err) = first_error {
-            Err(err)
-        } else {
-            Ok((returned_borrow, writebacks))
+            _ => false,
         }
     }
 
-    fn restore_raw_reference_result_after_writebacks(
-        &mut self,
-        writebacks: Vec<(u16, u16)>,
-        temp_name: &str,
-    ) -> Result<()> {
-        if writebacks.is_empty() {
-            return Ok(());
-        }
-
-        let result_local = self.declare_temp_local(temp_name)?;
-        self.emit(Instruction::new(
-            OpCode::StoreLocal,
-            Some(Operand::Local(result_local)),
-        ));
-        for (shadow_local, binding_idx) in writebacks {
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(shadow_local)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::StoreModuleBinding,
-                Some(Operand::ModuleBinding(binding_idx)),
-            ));
-        }
-        self.emit(Instruction::new(
-            OpCode::LoadLocal,
-            Some(Operand::Local(result_local)),
-        ));
-        Ok(())
-    }
-
-    pub(super) fn compile_callable_name_call_for_reference_binding(
-        &mut self,
-        name: &str,
-        args: &[shape_ast::ast::Expr],
-        span: shape_ast::ast::Span,
-    ) -> Result<Option<(BorrowId, bool)>> {
-        if self.resolve_local(name).is_some()
-            || self.resolve_scoped_module_binding_name(name).is_some()
-        {
-            self.compile_callable_value_name_for_reference_binding(name, args, span)
-        } else {
-            self.compile_named_function_call_for_reference_binding(name, args, span)
+    fn block_item_should_preserve_reference_binding(&self, item: &BlockItem) -> bool {
+        match item {
+            BlockItem::Expression(expr) => self.expr_should_preserve_reference_binding(expr),
+            _ => false,
         }
     }
 
-    pub(super) fn compile_callable_expr_call_for_reference_binding(
-        &mut self,
-        callee_expr: &shape_ast::ast::Expr,
-        args: &[shape_ast::ast::Expr],
-        span: shape_ast::ast::Span,
-    ) -> Result<Option<(BorrowId, bool)>> {
-        let return_contract = self
-            .callable_reference_return_contract_from_expr(callee_expr)
-            .ok_or_else(|| ShapeError::SemanticError {
-                message: "callable expression does not return a reference".to_string(),
-                location: Some(self.span_to_source_location(span)),
-            })?;
-        if return_contract.param_index >= args.len() {
-            return Err(ShapeError::SemanticError {
-                message: "callable expression did not receive the reference parameter it returns"
-                    .to_string(),
-                location: Some(self.span_to_source_location(span)),
-            });
-        }
-
-        let pass_modes = self
-            .callable_pass_modes_from_expr(callee_expr)
-            .unwrap_or_else(|| vec![ParamPassMode::ByValue; args.len()]);
-
-        self.compile_expr(callee_expr)?;
-        let (returned_borrow, writebacks) = self.compile_reference_return_call_args(
-            args,
-            &pass_modes,
-            return_contract.param_index,
-        )?;
-
-        let arg_count = self
-            .program
-            .add_constant(Constant::Number(args.len() as f64));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(arg_count)),
-        ));
-        self.emit(Instruction::simple(OpCode::CallValue));
-        self.restore_raw_reference_result_after_writebacks(writebacks, "__callable_expr_ret_ref_")?;
-
-        Ok(returned_borrow)
+    pub(super) fn local_binding_is_reference_value(&self, slot: u16) -> bool {
+        self.ref_locals.contains(&slot) || self.reference_value_locals.contains(&slot)
     }
 
-    pub(super) fn compile_named_function_call_for_reference_binding(
-        &mut self,
-        name: &str,
-        args: &[shape_ast::ast::Expr],
-        span: shape_ast::ast::Span,
-    ) -> Result<Option<(BorrowId, bool)>> {
-        let return_contract = self
-            .function_reference_return_contract_for_name(name)
-            .ok_or_else(|| ShapeError::SemanticError {
-                message: format!("function '{}' does not return a reference", name),
-                location: Some(self.span_to_source_location(span)),
-            })?;
-        let func_idx = self
-            .find_function(name)
-            .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!("Undefined function: {}", name),
-                location: Some(self.span_to_source_location(span)),
-            })?;
-        let func = &self.program.functions[func_idx];
-        if args.len() != func.arity as usize {
-            return Err(ShapeError::SemanticError {
-                message: format!(
-                    "Function '{}' expects {} arguments, got {}",
-                    name,
-                    func.arity,
-                    args.len()
-                ),
-                location: Some(self.span_to_source_location(span)),
-            });
-        }
-
-        let pass_modes = Self::pass_modes_from_ref_flags(&func.ref_params, &func.ref_mutates);
-        let (returned_borrow, writebacks) = self.compile_reference_return_call_args(
-            args,
-            &pass_modes,
-            return_contract.param_index,
-        )?;
-
-        let arg_count = self
-            .program
-            .add_constant(Constant::Number(args.len() as f64));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(arg_count)),
-        ));
-        self.emit(Instruction::new(
-            OpCode::Call,
-            Some(Operand::Function(shape_value::FunctionId(func_idx as u16))),
-        ));
-        if let Some(ref mut blob) = self.current_blob_builder {
-            blob.record_call(name);
-        }
-        self.restore_raw_reference_result_after_writebacks(writebacks, "__call_ret_ref_")?;
-
-        Ok(returned_borrow)
+    pub(super) fn local_reference_binding_is_exclusive(&self, slot: u16) -> bool {
+        self.exclusive_ref_locals.contains(&slot)
+            || self.exclusive_reference_value_locals.contains(&slot)
     }
 
-    fn compile_callable_value_name_for_reference_binding(
-        &mut self,
-        name: &str,
-        args: &[shape_ast::ast::Expr],
-        span: shape_ast::ast::Span,
-    ) -> Result<Option<(BorrowId, bool)>> {
-        let return_contract = self
-            .function_reference_return_contract_for_name(name)
-            .ok_or_else(|| ShapeError::SemanticError {
-                message: format!("callable '{}' does not return a reference", name),
-                location: Some(self.span_to_source_location(span)),
-            })?;
-        if return_contract.param_index >= args.len() {
-            return Err(ShapeError::SemanticError {
-                message: format!(
-                    "callable '{}' did not receive the reference parameter it returns",
-                    name
-                ),
-                location: Some(self.span_to_source_location(span)),
-            });
-        }
-
-        let pass_modes = self
-            .callable_pass_modes_for_name(name)
-            .unwrap_or_else(|| vec![ParamPassMode::ByValue; args.len()]);
-
-        self.compile_expr_identifier(name, span)?;
-        let (returned_borrow, writebacks) = self.compile_reference_return_call_args(
-            args,
-            &pass_modes,
-            return_contract.param_index,
-        )?;
-
-        let arg_count = self
-            .program
-            .add_constant(Constant::Number(args.len() as f64));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(arg_count)),
-        ));
-        self.emit(Instruction::simple(OpCode::CallValue));
-        self.restore_raw_reference_result_after_writebacks(
-            writebacks,
-            "__callable_value_ret_ref_",
-        )?;
-
-        Ok(returned_borrow)
-    }
-
-    fn track_reference_binding_slot(&mut self, slot: u16, is_local: bool) {
-        if is_local {
-            if let Some(scope) = self.scoped_reference_value_locals.last_mut() {
-                scope.insert(slot);
-            }
-        } else if let Some(scope) = self.scoped_reference_value_module_bindings.last_mut() {
-            scope.insert(slot);
-        }
+    fn track_reference_binding_slot(&mut self, _slot: u16, _is_local: bool) {
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
 
     pub(super) fn bind_reference_value_slot(
         &mut self,
         slot: u16,
         is_local: bool,
-        name: &str,
+        _name: &str,
         is_exclusive: bool,
-        borrow_id: BorrowId,
+        _borrow_id: u32,
     ) {
-        self.borrow_checker.rebind_borrow_ref_slot(borrow_id, slot);
         self.mark_reference_binding(slot, is_local, is_exclusive);
         self.track_reference_binding_slot(slot, is_local);
-        *self
-            .tracked_reference_borrow_holder_counts
-            .entry(borrow_id)
-            .or_insert(0) += 1;
         if is_local {
             self.type_tracker
                 .set_local_type(slot, VariableTypeInfo::unknown());
         } else {
             self.type_tracker
                 .set_binding_type(slot, VariableTypeInfo::unknown());
-        }
-        let tracked = TrackedReferenceBorrow {
-            borrow_id,
-            name: name.to_string(),
-        };
-        if is_local {
-            self.tracked_reference_borrow_locals.insert(slot, tracked);
-        } else {
-            self.tracked_reference_borrow_module_bindings
-                .insert(slot, tracked);
         }
     }
 
@@ -1705,31 +1589,8 @@ impl BytecodeCompiler {
         }
     }
 
-    pub(super) fn release_tracked_reference_borrow(&mut self, slot: u16, is_local: bool) {
-        let tracked = if is_local {
-            self.tracked_reference_borrow_locals.remove(&slot)
-        } else {
-            self.tracked_reference_borrow_module_bindings.remove(&slot)
-        };
-        if let Some(tracked) = tracked {
-            match self
-                .tracked_reference_borrow_holder_counts
-                .entry(tracked.borrow_id)
-            {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    let count = entry.get_mut();
-                    if *count > 1 {
-                        *count -= 1;
-                    } else {
-                        entry.remove();
-                        self.borrow_checker.release_borrow_by_id(tracked.borrow_id);
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(_) => {
-                    self.borrow_checker.release_borrow_by_id(tracked.borrow_id);
-                }
-            }
-        }
+    pub(super) fn release_tracked_reference_borrow(&mut self, _slot: u16, _is_local: bool) {
+        // Lexical borrow tracking removed — MIR borrow checker is sole authority.
     }
 
     pub(super) fn clear_reference_binding(&mut self, slot: u16, is_local: bool) {
@@ -1765,11 +1626,11 @@ impl BytecodeCompiler {
         is_local: bool,
         name: &str,
         expr: &shape_ast::ast::Expr,
-        ref_borrow: Option<(BorrowId, bool)>,
+        ref_borrow: Option<(u32, bool)>,
     ) {
         if let Some((borrow_id, is_exclusive)) = ref_borrow {
             self.clear_reference_binding(slot, is_local);
-            if borrow_id == BorrowId::MAX {
+            if borrow_id == u32::MAX {
                 self.bind_untracked_reference_value_slot(slot, is_local, is_exclusive);
             } else {
                 self.bind_reference_value_slot(slot, is_local, name, is_exclusive, borrow_id);
@@ -1793,12 +1654,12 @@ impl BytecodeCompiler {
         }
     }
 
-    fn callable_reference_return_contract_from_function_expr(
+    fn callable_return_reference_summary_from_function_expr(
         &self,
         params: &[shape_ast::ast::FunctionParameter],
         body: &[Statement],
         span: shape_ast::ast::Span,
-    ) -> Option<FunctionReferenceReturnContract> {
+    ) -> Option<FunctionReturnReferenceSummary> {
         let mut effective_params = params.to_vec();
         let pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
         for (param, pass_mode) in effective_params.iter_mut().zip(pass_modes) {
@@ -1817,21 +1678,21 @@ impl BytecodeCompiler {
         }
 
         crate::mir::solver::analyze(&lowering.mir)
-            .return_reference_contract
+            .return_reference_summary
             .map(Into::into)
     }
 
-    pub(super) fn callable_reference_return_contract_from_expr(
+    pub(super) fn callable_return_reference_summary_from_expr(
         &self,
         expr: &shape_ast::ast::Expr,
-    ) -> Option<FunctionReferenceReturnContract> {
+    ) -> Option<FunctionReturnReferenceSummary> {
         match expr {
             shape_ast::ast::Expr::FunctionExpr {
                 params, body, span, ..
-            } => self.callable_reference_return_contract_from_function_expr(params, body, *span),
+            } => self.callable_return_reference_summary_from_function_expr(params, body, *span),
             shape_ast::ast::Expr::Identifier(name, _)
             | shape_ast::ast::Expr::PatternRef(name, _) => {
-                self.function_reference_return_contract_for_name(name)
+                self.function_return_reference_summary_for_name(name)
             }
             _ => None,
         }
@@ -1856,65 +1717,22 @@ impl BytecodeCompiler {
         }
     }
 
-    pub(super) fn function_reference_return_contract_for_name(
+    pub(super) fn function_return_reference_summary_for_name(
         &self,
         name: &str,
-    ) -> Option<FunctionReferenceReturnContract> {
+    ) -> Option<FunctionReturnReferenceSummary> {
         if let Some(local_idx) = self.resolve_local(name) {
-            self.local_callable_return_reference_contracts
+            self.local_callable_return_reference_summaries
                 .get(&local_idx)
-                .copied()
+                .cloned()
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let binding_idx = *self.module_bindings.get(&scoped_name)?;
-            self.module_binding_callable_return_reference_contracts
+            self.module_binding_callable_return_reference_summaries
                 .get(&binding_idx)
-                .copied()
+                .cloned()
         } else {
-            self.function_return_reference_contracts.get(name).copied()
+            self.function_return_reference_summaries.get(name).cloned()
         }
-    }
-
-    pub(super) fn compile_expr_for_reference_return(&mut self, expr: &Expr) -> Result<()> {
-        let Some(expected_contract) = self.current_function_return_reference_contract else {
-            return Err(ShapeError::SemanticError {
-                message: "internal compiler error: missing reference return contract".to_string(),
-                location: Some(self.span_to_source_location(expr.span())),
-            });
-        };
-
-        let is_exclusive = match expr {
-            Expr::Identifier(name, span) | Expr::PatternRef(name, span) => {
-                self.compile_identifier_as_raw_reference(name, *span)?
-            }
-            Expr::Reference {
-                expr: inner,
-                is_mutable,
-                span,
-            } => {
-                let mode = if *is_mutable {
-                    BorrowMode::Exclusive
-                } else {
-                    BorrowMode::Shared
-                };
-                self.compile_reference_expr(inner, *span, mode)?;
-                *is_mutable
-            }
-            other => {
-                return Err(ShapeError::SemanticError {
-                    message: "reference-returning functions must return a reference parameter or a direct `&` / `&mut` borrow".to_string(),
-                    location: Some(self.span_to_source_location(other.span())),
-                });
-            }
-        };
-
-        if is_exclusive != expected_contract.is_exclusive() {
-            return Err(ShapeError::SemanticError {
-                message: "reference-returning functions must use the same `&` / `&mut` return contract on every path".to_string(),
-                location: Some(self.span_to_source_location(expr.span())),
-            });
-        }
-
-        Ok(())
     }
 
     pub(super) fn update_callable_binding_from_expr(
@@ -1924,32 +1742,32 @@ impl BytecodeCompiler {
         expr: &shape_ast::ast::Expr,
     ) {
         let pass_modes = self.callable_pass_modes_from_expr(expr);
-        let return_contract = self.callable_reference_return_contract_from_expr(expr);
+        let return_summary = self.callable_return_reference_summary_from_expr(expr);
         if is_local {
             if let Some(pass_modes) = pass_modes {
                 self.local_callable_pass_modes.insert(slot, pass_modes);
             } else {
                 self.local_callable_pass_modes.remove(&slot);
             }
-            if let Some(return_contract) = return_contract {
-                self.local_callable_return_reference_contracts
-                    .insert(slot, return_contract);
+            if let Some(return_summary) = return_summary {
+                self.local_callable_return_reference_summaries
+                    .insert(slot, return_summary);
             } else {
-                self.local_callable_return_reference_contracts.remove(&slot);
+                self.local_callable_return_reference_summaries.remove(&slot);
             }
         } else if let Some(pass_modes) = pass_modes {
             self.module_binding_callable_pass_modes
                 .insert(slot, pass_modes);
-            if let Some(return_contract) = return_contract {
-                self.module_binding_callable_return_reference_contracts
-                    .insert(slot, return_contract);
+            if let Some(return_summary) = return_summary {
+                self.module_binding_callable_return_reference_summaries
+                    .insert(slot, return_summary);
             } else {
-                self.module_binding_callable_return_reference_contracts
+                self.module_binding_callable_return_reference_summaries
                     .remove(&slot);
             }
         } else {
             self.module_binding_callable_pass_modes.remove(&slot);
-            self.module_binding_callable_return_reference_contracts
+            self.module_binding_callable_return_reference_summaries
                 .remove(&slot);
         }
     }
@@ -1957,58 +1775,372 @@ impl BytecodeCompiler {
     pub(super) fn clear_callable_binding(&mut self, slot: u16, is_local: bool) {
         if is_local {
             self.local_callable_pass_modes.remove(&slot);
-            self.local_callable_return_reference_contracts.remove(&slot);
+            self.local_callable_return_reference_summaries.remove(&slot);
         } else {
             self.module_binding_callable_pass_modes.remove(&slot);
-            self.module_binding_callable_return_reference_contracts
+            self.module_binding_callable_return_reference_summaries
                 .remove(&slot);
         }
     }
 
     pub(super) fn push_module_reference_scope(&mut self) {
-        self.scoped_reference_value_module_bindings
-            .push(Default::default());
+        // Lexical reference scope tracking removed — MIR borrow checker is sole authority.
     }
 
     pub(super) fn pop_module_reference_scope(&mut self) {
-        self.scoped_reference_value_module_bindings.pop();
+        // Lexical reference scope tracking removed — MIR borrow checker is sole authority.
+    }
+
+    pub(super) fn collect_reference_use_names_from_expr(
+        &self,
+        expr: &Expr,
+        preserve_result: bool,
+        names: &mut HashSet<String>,
+    ) {
+        match expr {
+            Expr::Identifier(name, _) | Expr::PatternRef(name, _) => {
+                if preserve_result {
+                    names.insert(name.clone());
+                }
+            }
+            Expr::Assign(assign, _) => {
+                if let Expr::Identifier(name, _) = assign.target.as_ref() {
+                    names.insert(name.clone());
+                } else {
+                    self.collect_reference_use_names_from_expr(assign.target.as_ref(), false, names);
+                }
+                self.collect_reference_use_names_from_expr(&assign.value, false, names);
+            }
+            Expr::FunctionCall {
+                name: callee,
+                args,
+                named_args,
+                ..
+            } => {
+                let pass_modes = self.callable_pass_modes_for_name(callee);
+                for (idx, arg) in args.iter().enumerate() {
+                    let preserve_arg = pass_modes
+                        .as_ref()
+                        .and_then(|modes| modes.get(idx))
+                        .is_some_and(|mode| mode.is_reference());
+                    self.collect_reference_use_names_from_expr(arg, preserve_arg, names);
+                }
+                for (_, arg) in named_args {
+                    self.collect_reference_use_names_from_expr(arg, false, names);
+                }
+            }
+            Expr::MethodCall {
+                receiver,
+                args,
+                named_args,
+                ..
+            } => {
+                self.collect_reference_use_names_from_expr(receiver, false, names);
+                for arg in args {
+                    self.collect_reference_use_names_from_expr(arg, false, names);
+                }
+                for (_, arg) in named_args {
+                    self.collect_reference_use_names_from_expr(arg, false, names);
+                }
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.collect_reference_use_names_from_expr(condition, false, names);
+                self.collect_reference_use_names_from_expr(then_expr, preserve_result, names);
+                if let Some(else_expr) = else_expr.as_deref() {
+                    self.collect_reference_use_names_from_expr(else_expr, preserve_result, names);
+                }
+            }
+            Expr::If(if_expr, _) => {
+                self.collect_reference_use_names_from_expr(&if_expr.condition, false, names);
+                self.collect_reference_use_names_from_expr(
+                    &if_expr.then_branch,
+                    preserve_result,
+                    names,
+                );
+                if let Some(else_branch) = if_expr.else_branch.as_deref() {
+                    self.collect_reference_use_names_from_expr(
+                        else_branch,
+                        preserve_result,
+                        names,
+                    );
+                }
+            }
+            Expr::Match(match_expr, _) => {
+                self.collect_reference_use_names_from_expr(&match_expr.scrutinee, false, names);
+                for arm in &match_expr.arms {
+                    if let Some(guard) = arm.guard.as_ref() {
+                        self.collect_reference_use_names_from_expr(guard, false, names);
+                    }
+                    self.collect_reference_use_names_from_expr(&arm.body, preserve_result, names);
+                }
+            }
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    self.collect_reference_use_names_from_block_item(item, names);
+                }
+                if preserve_result
+                    && let Some(BlockItem::Expression(expr)) = block.items.last()
+                {
+                    self.collect_reference_use_names_from_expr(expr, true, names);
+                }
+            }
+            Expr::Let(let_expr, _) => {
+                if let Some(value) = &let_expr.value {
+                    self.collect_reference_use_names_from_expr(value, false, names);
+                }
+                self.collect_reference_use_names_from_expr(&let_expr.body, preserve_result, names);
+            }
+            Expr::Array(items, _) => {
+                for item in items {
+                    self.collect_reference_use_names_from_expr(item, false, names);
+                }
+            }
+            Expr::TableRows(rows, _) => {
+                for row in rows {
+                    for value in row {
+                        self.collect_reference_use_names_from_expr(value, false, names);
+                    }
+                }
+            }
+            Expr::Object(entries, _) => {
+                for entry in entries {
+                    match entry {
+                        shape_ast::ast::ObjectEntry::Field { value, .. } => {
+                            self.collect_reference_use_names_from_expr(value, false, names);
+                        }
+                        shape_ast::ast::ObjectEntry::Spread(expr) => {
+                            self.collect_reference_use_names_from_expr(expr, false, names);
+                        }
+                    }
+                }
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::Spread(operand, _)
+            | Expr::TryOperator(operand, _)
+            | Expr::Await(operand, _)
+            | Expr::TimeframeContext { expr: operand, .. }
+            | Expr::UsingImpl { expr: operand, .. }
+            | Expr::Reference { expr: operand, .. }
+            | Expr::InstanceOf { expr: operand, .. } => {
+                self.collect_reference_use_names_from_expr(operand, false, names);
+            }
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                self.collect_reference_use_names_from_expr(left, false, names);
+                self.collect_reference_use_names_from_expr(right, false, names);
+            }
+            Expr::PropertyAccess { object, .. } => {
+                self.collect_reference_use_names_from_expr(object, false, names);
+            }
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index,
+                ..
+            } => {
+                self.collect_reference_use_names_from_expr(object, false, names);
+                self.collect_reference_use_names_from_expr(index, false, names);
+                if let Some(end_index) = end_index.as_deref() {
+                    self.collect_reference_use_names_from_expr(end_index, false, names);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_reference_use_names_from_block_item(
+        &self,
+        item: &BlockItem,
+        names: &mut HashSet<String>,
+    ) {
+        match item {
+            BlockItem::VariableDecl(decl) => {
+                if let Some(value) = &decl.value {
+                    self.collect_reference_use_names_from_expr(value, false, names);
+                }
+            }
+            BlockItem::Assignment(assign) => {
+                if let Some(name) = assign.pattern.as_identifier() {
+                    names.insert(name.to_string());
+                }
+                self.collect_reference_use_names_from_expr(&assign.value, false, names);
+            }
+            BlockItem::Statement(stmt) => self.collect_reference_use_names_from_statement(stmt, names),
+            BlockItem::Expression(expr) => {
+                self.collect_reference_use_names_from_expr(expr, false, names);
+            }
+        }
+    }
+
+    fn collect_reference_use_names_from_statement(
+        &self,
+        stmt: &Statement,
+        names: &mut HashSet<String>,
+    ) {
+        use shape_ast::ast::ForInit;
+
+        match stmt {
+            Statement::VariableDecl(decl, _) => {
+                if let Some(value) = &decl.value {
+                    self.collect_reference_use_names_from_expr(value, false, names);
+                }
+            }
+            Statement::Assignment(assign, _) => {
+                if let Some(name) = assign.pattern.as_identifier() {
+                    names.insert(name.to_string());
+                }
+                self.collect_reference_use_names_from_expr(&assign.value, false, names);
+            }
+            Statement::Expression(expr, _) => {
+                self.collect_reference_use_names_from_expr(expr, false, names);
+            }
+            Statement::Return(Some(expr), _) => {
+                self.collect_reference_use_names_from_expr(expr, true, names);
+            }
+            Statement::If(if_stmt, _) => {
+                self.collect_reference_use_names_from_expr(&if_stmt.condition, false, names);
+                for stmt in &if_stmt.then_body {
+                    self.collect_reference_use_names_from_statement(stmt, names);
+                }
+                if let Some(else_body) = if_stmt.else_body.as_ref() {
+                    for stmt in else_body {
+                        self.collect_reference_use_names_from_statement(stmt, names);
+                    }
+                }
+            }
+            Statement::While(while_loop, _) => {
+                self.collect_reference_use_names_from_expr(&while_loop.condition, false, names);
+                for stmt in &while_loop.body {
+                    self.collect_reference_use_names_from_statement(stmt, names);
+                }
+            }
+            Statement::For(for_loop, _) => {
+                match &for_loop.init {
+                    ForInit::ForIn { iter, .. } => {
+                        self.collect_reference_use_names_from_expr(iter, false, names);
+                    }
+                    ForInit::ForC {
+                        init,
+                        condition,
+                        update,
+                    } => {
+                        self.collect_reference_use_names_from_statement(init, names);
+                        self.collect_reference_use_names_from_expr(condition, false, names);
+                        self.collect_reference_use_names_from_expr(update, false, names);
+                    }
+                }
+                for stmt in &for_loop.body {
+                    self.collect_reference_use_names_from_statement(stmt, names);
+                }
+            }
+            Statement::Extend(ext, _) => {
+                for method in &ext.methods {
+                    for stmt in &method.body {
+                        self.collect_reference_use_names_from_statement(stmt, names);
+                    }
+                }
+            }
+            Statement::SetParamValue { expression, .. }
+            | Statement::SetReturnExpr { expression, .. }
+            | Statement::ReplaceBodyExpr { expression, .. }
+            | Statement::ReplaceModuleExpr { expression, .. } => {
+                self.collect_reference_use_names_from_expr(expression, false, names);
+            }
+            Statement::ReplaceBody { body, .. } => {
+                for stmt in body {
+                    self.collect_reference_use_names_from_statement(stmt, names);
+                }
+            }
+            Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::Return(None, _)
+            | Statement::RemoveTarget(_)
+            | Statement::SetParamType { .. }
+            | Statement::SetReturnType { .. } => {}
+        }
+    }
+
+    fn collect_reference_use_names_from_item(&self, item: &Item, names: &mut HashSet<String>) {
+        match item {
+            Item::VariableDecl(decl, _) => {
+                if let Some(value) = &decl.value {
+                    self.collect_reference_use_names_from_expr(value, false, names);
+                }
+            }
+            Item::Assignment(assign, _) => {
+                if let Some(name) = assign.pattern.as_identifier() {
+                    names.insert(name.to_string());
+                }
+                self.collect_reference_use_names_from_expr(&assign.value, false, names);
+            }
+            Item::Expression(expr, _) => {
+                self.collect_reference_use_names_from_expr(expr, false, names);
+            }
+            Item::Statement(stmt, _) => self.collect_reference_use_names_from_statement(stmt, names),
+            Item::Function(func, _) => {
+                for stmt in &func.body {
+                    self.collect_reference_use_names_from_statement(stmt, names);
+                }
+            }
+            Item::Module(module, _) => {
+                for item in &module.items {
+                    self.collect_reference_use_names_from_item(item, names);
+                }
+            }
+            Item::Export(export, _) => {
+                if let Some(decl) = export.source_decl.as_ref()
+                    && let Some(value) = decl.value.as_ref()
+                {
+                    self.collect_reference_use_names_from_expr(value, false, names);
+                }
+                if let shape_ast::ast::ExportItem::Function(func_def) = &export.item {
+                    for stmt in &func_def.body {
+                        self.collect_reference_use_names_from_statement(stmt, names);
+                    }
+                }
+            }
+            Item::Extend(ext, _) => {
+                for method in &ext.methods {
+                    for stmt in &method.body {
+                        self.collect_reference_use_names_from_statement(stmt, names);
+                    }
+                }
+            }
+            Item::Impl(impl_block, _) => {
+                for method in &impl_block.methods {
+                    for stmt in &method.body {
+                        self.collect_reference_use_names_from_statement(stmt, names);
+                    }
+                }
+            }
+            Item::Comptime(stmts, _) => {
+                for stmt in stmts {
+                    self.collect_reference_use_names_from_statement(stmt, names);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn push_future_reference_use_names(&mut self, names: HashSet<String>) {
-        self.future_reference_use_names.push(names);
+        self.future_reference_use_name_scopes.push(names);
     }
 
     pub(super) fn pop_future_reference_use_names(&mut self) {
-        self.future_reference_use_names.pop();
-        if self.future_reference_use_names.is_empty() {
-            self.future_reference_use_names.push(HashSet::new());
-        }
+        self.future_reference_use_name_scopes.pop();
     }
 
     pub(super) fn future_reference_use_names_for_remaining_statements(
         &self,
         remaining: &[Statement],
     ) -> HashSet<String> {
-        let mut names = self
-            .future_reference_use_names
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        for tracked in self.tracked_reference_borrow_locals.values() {
-            if remaining
-                .iter()
-                .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
-            {
-                names.insert(tracked.name.clone());
-            }
-        }
-        for tracked in self.tracked_reference_borrow_module_bindings.values() {
-            if remaining
-                .iter()
-                .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
-            {
-                names.insert(tracked.name.clone());
-            }
+        let mut names = HashSet::new();
+        for stmt in remaining {
+            self.collect_reference_use_names_from_statement(stmt, &mut names);
         }
         names
     }
@@ -2017,26 +2149,9 @@ impl BytecodeCompiler {
         &self,
         remaining: &[BlockItem],
     ) -> HashSet<String> {
-        let mut names = self
-            .future_reference_use_names
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        for tracked in self.tracked_reference_borrow_locals.values() {
-            if remaining
-                .iter()
-                .any(|item| block_item_uses_identifier(item, &tracked.name))
-            {
-                names.insert(tracked.name.clone());
-            }
-        }
-        for tracked in self.tracked_reference_borrow_module_bindings.values() {
-            if remaining
-                .iter()
-                .any(|item| block_item_uses_identifier(item, &tracked.name))
-            {
-                names.insert(tracked.name.clone());
-            }
+        let mut names = HashSet::new();
+        for item in remaining {
+            self.collect_reference_use_names_from_block_item(item, &mut names);
         }
         names
     }
@@ -2045,98 +2160,37 @@ impl BytecodeCompiler {
         &self,
         remaining: &[Item],
     ) -> HashSet<String> {
-        let mut names = self
-            .future_reference_use_names
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        for tracked in self.tracked_reference_borrow_locals.values() {
-            if remaining
-                .iter()
-                .any(|item| item_uses_identifier(item, &tracked.name))
-            {
-                names.insert(tracked.name.clone());
-            }
-        }
-        for tracked in self.tracked_reference_borrow_module_bindings.values() {
-            if remaining
-                .iter()
-                .any(|item| item_uses_identifier(item, &tracked.name))
-            {
-                names.insert(tracked.name.clone());
-            }
+        let mut names = HashSet::new();
+        for item in remaining {
+            self.collect_reference_use_names_from_item(item, &mut names);
         }
         names
     }
 
     pub(super) fn push_repeating_reference_release_barrier(&mut self) {
-        self.repeating_body_reference_local_barriers.push(
-            self.tracked_reference_borrow_locals
-                .keys()
-                .copied()
-                .collect(),
-        );
-        self.repeating_body_reference_module_binding_barriers.push(
-            self.tracked_reference_borrow_module_bindings
-                .keys()
-                .copied()
-                .collect(),
-        );
-        let active_borrow_ids: std::collections::HashSet<BorrowId> = self
-            .tracked_reference_borrow_locals
-            .values()
-            .chain(self.tracked_reference_borrow_module_bindings.values())
-            .map(|tracked| tracked.borrow_id)
-            .collect();
-        let protected_places = active_borrow_ids
-            .into_iter()
-            .filter_map(|borrow_id| self.borrow_checker.borrow_place_for_borrow_id(borrow_id))
-            .collect();
-        self.repeating_body_protected_places.push(protected_places);
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
 
     pub(super) fn pop_repeating_reference_release_barrier(&mut self) {
-        self.repeating_body_reference_local_barriers.pop();
-        self.repeating_body_reference_module_binding_barriers.pop();
-        self.repeating_body_protected_places.pop();
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
 
-    fn local_reference_release_is_barrier_protected(&self, slot: u16) -> bool {
-        self.repeating_body_reference_local_barriers
-            .iter()
-            .any(|slots| slots.contains(&slot))
+    fn local_reference_release_is_barrier_protected(&self, _slot: u16) -> bool {
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
+        false
     }
 
-    fn module_reference_release_is_barrier_protected(&self, slot: u16) -> bool {
-        self.repeating_body_reference_module_binding_barriers
-            .iter()
-            .any(|slots| slots.contains(&slot))
+    fn module_reference_release_is_barrier_protected(&self, _slot: u16) -> bool {
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
+        false
     }
 
     pub(super) fn check_write_allowed_in_current_context(
         &self,
-        place: BorrowPlace,
-        source_location: Option<SourceLocation>,
+        _place: BorrowPlace,
+        _source_location: Option<SourceLocation>,
     ) -> Result<()> {
-        self.borrow_checker
-            .check_write_allowed(place, source_location.clone())?;
-        if self
-            .repeating_body_protected_places
-            .iter()
-            .flatten()
-            .any(|protected| {
-                crate::borrow_checker::BorrowChecker::places_conflict(place, *protected)
-            })
-        {
-            return Err(ShapeError::SemanticError {
-                message: format!(
-                    "[B0002] cannot write to this value while it is borrowed in an active loop iteration (slot {})",
-                    place
-                ),
-                location: source_location,
-            });
-        }
-        Ok(())
+        Ok(()) // MIR analysis is the sole authority
     }
 
     pub(super) fn check_named_binding_write_allowed(
@@ -2145,13 +2199,15 @@ impl BytecodeCompiler {
         source_location: Option<SourceLocation>,
     ) -> Result<()> {
         if let Some(local_idx) = self.resolve_local(name) {
-            if self.const_locals.contains(&local_idx) {
+            // Immutability/const checks always run — even when MIR is authoritative.
+            // MIR authority only bypasses the borrow checker (aliasing) checks below.
+            if self.is_local_const(local_idx) {
                 return Err(ShapeError::SemanticError {
                     message: format!("Cannot reassign const variable '{}'", name),
                     location: source_location,
                 });
             }
-            if self.immutable_locals.contains(&local_idx) {
+            if self.is_local_immutable(local_idx) {
                 return Err(ShapeError::SemanticError {
                     message: format!(
                         "Cannot reassign immutable variable '{}'. Use `let mut` or `var` for mutable bindings",
@@ -2160,27 +2216,21 @@ impl BytecodeCompiler {
                     location: source_location,
                 });
             }
-            return self
-                .check_write_allowed_in_current_context(
-                    Self::borrow_key_for_local(local_idx),
-                    source_location,
-                )
-                .map_err(|e| {
-                    Self::relabel_borrow_error(e, Self::borrow_key_for_local(local_idx), name)
-                });
+            return Ok(()); // MIR analysis is the sole authority for borrow checks
         }
 
         let scoped_name = self
             .resolve_scoped_module_binding_name(name)
             .unwrap_or_else(|| name.to_string());
         if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-            if self.const_module_bindings.contains(&binding_idx) {
+            // Immutability/const checks always run.
+            if self.is_module_binding_const(binding_idx) {
                 return Err(ShapeError::SemanticError {
                     message: format!("Cannot reassign const variable '{}'", name),
                     location: source_location,
                 });
             }
-            if self.immutable_module_bindings.contains(&binding_idx) {
+            if self.is_module_binding_immutable(binding_idx) {
                 return Err(ShapeError::SemanticError {
                     message: format!(
                         "Cannot reassign immutable variable '{}'. Use `let mut` or `var` for mutable bindings",
@@ -2189,18 +2239,7 @@ impl BytecodeCompiler {
                     location: source_location,
                 });
             }
-            return self
-                .check_write_allowed_in_current_context(
-                    Self::borrow_key_for_module_binding(binding_idx),
-                    source_location,
-                )
-                .map_err(|e| {
-                    Self::relabel_borrow_error(
-                        e,
-                        Self::borrow_key_for_module_binding(binding_idx),
-                        name,
-                    )
-                });
+            return Ok(()); // MIR analysis is the sole authority for borrow checks
         }
 
         Ok(())
@@ -2208,152 +2247,37 @@ impl BytecodeCompiler {
 
     pub(super) fn release_unused_local_reference_borrows_for_remaining_statements(
         &mut self,
-        remaining: &[Statement],
+        _remaining: &[Statement],
     ) {
-        let future_names = self
-            .future_reference_use_names
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        let dead_slots: Vec<u16> = self
-            .tracked_reference_borrow_locals
-            .iter()
-            .filter_map(|(slot, tracked)| {
-                if self.local_reference_release_is_barrier_protected(*slot)
-                    || future_names.contains(&tracked.name)
-                    || remaining
-                        .iter()
-                        .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
-                {
-                    None
-                } else {
-                    Some(*slot)
-                }
-            })
-            .collect();
-        for slot in dead_slots {
-            self.release_tracked_reference_borrow(slot, true);
-        }
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
 
     pub(super) fn release_unused_local_reference_borrows_for_remaining_block_items(
         &mut self,
-        remaining: &[BlockItem],
+        _remaining: &[BlockItem],
     ) {
-        let future_names = self
-            .future_reference_use_names
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        let dead_slots: Vec<u16> = self
-            .tracked_reference_borrow_locals
-            .iter()
-            .filter_map(|(slot, tracked)| {
-                if self.local_reference_release_is_barrier_protected(*slot)
-                    || future_names.contains(&tracked.name)
-                    || remaining
-                        .iter()
-                        .any(|item| block_item_uses_identifier(item, &tracked.name))
-                {
-                    None
-                } else {
-                    Some(*slot)
-                }
-            })
-            .collect();
-        for slot in dead_slots {
-            self.release_tracked_reference_borrow(slot, true);
-        }
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
 
     pub(super) fn release_unused_module_reference_borrows_for_remaining_statements(
         &mut self,
-        remaining: &[Statement],
+        _remaining: &[Statement],
     ) {
-        let future_names = self
-            .future_reference_use_names
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        let dead_slots: Vec<u16> = self
-            .tracked_reference_borrow_module_bindings
-            .iter()
-            .filter_map(|(slot, tracked)| {
-                if self.module_reference_release_is_barrier_protected(*slot)
-                    || future_names.contains(&tracked.name)
-                    || remaining
-                        .iter()
-                        .any(|stmt| statement_uses_identifier(stmt, &tracked.name))
-                {
-                    None
-                } else {
-                    Some(*slot)
-                }
-            })
-            .collect();
-        for slot in dead_slots {
-            self.release_tracked_reference_borrow(slot, false);
-        }
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
 
     pub(super) fn release_unused_module_reference_borrows_for_remaining_block_items(
         &mut self,
-        remaining: &[BlockItem],
+        _remaining: &[BlockItem],
     ) {
-        let future_names = self
-            .future_reference_use_names
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        let dead_slots: Vec<u16> = self
-            .tracked_reference_borrow_module_bindings
-            .iter()
-            .filter_map(|(slot, tracked)| {
-                if self.module_reference_release_is_barrier_protected(*slot)
-                    || future_names.contains(&tracked.name)
-                    || remaining
-                        .iter()
-                        .any(|item| block_item_uses_identifier(item, &tracked.name))
-                {
-                    None
-                } else {
-                    Some(*slot)
-                }
-            })
-            .collect();
-        for slot in dead_slots {
-            self.release_tracked_reference_borrow(slot, false);
-        }
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
 
     pub(super) fn release_unused_module_reference_borrows_for_remaining_items(
         &mut self,
-        remaining: &[Item],
+        _remaining: &[Item],
     ) {
-        let future_names = self
-            .future_reference_use_names
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        let dead_slots: Vec<u16> = self
-            .tracked_reference_borrow_module_bindings
-            .iter()
-            .filter_map(|(slot, tracked)| {
-                if self.module_reference_release_is_barrier_protected(*slot)
-                    || future_names.contains(&tracked.name)
-                    || remaining
-                        .iter()
-                        .any(|item| item_uses_identifier(item, &tracked.name))
-                {
-                    None
-                } else {
-                    Some(*slot)
-                }
-            })
-            .collect();
-        for slot in dead_slots {
-            self.release_tracked_reference_borrow(slot, false);
-        }
+        // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
 
     fn scalar_type_name_from_numeric(numeric_type: NumericType) -> &'static str {
@@ -2601,10 +2525,6 @@ impl BytecodeCompiler {
         args: &[shape_ast::ast::Expr],
         expected_param_modes: Option<&[ParamPassMode]>,
     ) -> Result<Vec<(u16, u16)>> {
-        let saved = self.in_call_args;
-        let saved_mode = self.current_call_arg_borrow_mode;
-        self.in_call_args = true;
-        self.borrow_checker.enter_region();
         self.call_arg_module_binding_ref_writebacks.push(Vec::new());
 
         let mut first_error: Option<ShapeError> = None;
@@ -2612,11 +2532,6 @@ impl BytecodeCompiler {
             let pass_mode = expected_param_modes
                 .and_then(|modes| modes.get(idx).copied())
                 .unwrap_or(ParamPassMode::ByValue);
-            self.current_call_arg_borrow_mode = match pass_mode {
-                ParamPassMode::ByRefExclusive => Some(BorrowMode::Exclusive),
-                ParamPassMode::ByRefShared => Some(BorrowMode::Shared),
-                ParamPassMode::ByValue => None,
-            };
 
             let arg_result = match pass_mode {
                 ParamPassMode::ByRefExclusive | ParamPassMode::ByRefShared => {
@@ -2625,8 +2540,8 @@ impl BytecodeCompiler {
                     } else {
                         BorrowMode::Shared
                     };
-                    if matches!(arg, shape_ast::ast::Expr::Reference { .. }) {
-                        self.compile_expr(arg)
+                    if let shape_ast::ast::Expr::Reference { expr, span, .. } = arg {
+                        self.compile_reference_expr(expr, *span, borrow_mode).map(|_| ())
                     } else {
                         self.compile_implicit_reference_arg(arg, borrow_mode)
                     }
@@ -2663,9 +2578,6 @@ impl BytecodeCompiler {
             }
         }
 
-        self.current_call_arg_borrow_mode = saved_mode;
-        self.borrow_checker.exit_region();
-        self.in_call_args = saved;
         let writebacks = self
             .call_arg_module_binding_ref_writebacks
             .pop()
@@ -2678,8 +2590,8 @@ impl BytecodeCompiler {
     }
 
     pub(super) fn current_arg_borrow_mode(&self) -> BorrowMode {
-        self.current_call_arg_borrow_mode
-            .unwrap_or(BorrowMode::Exclusive)
+        // With lexical borrow checker removed, default to Exclusive for codegen.
+        BorrowMode::Exclusive
     }
 
     pub(super) fn record_call_arg_module_binding_writeback(
@@ -2692,7 +2604,7 @@ impl BytecodeCompiler {
         }
     }
 
-    fn compile_implicit_reference_arg(
+    pub(super) fn compile_implicit_reference_arg(
         &mut self,
         arg: &shape_ast::ast::Expr,
         mode: BorrowMode,
@@ -2710,25 +2622,41 @@ impl BytecodeCompiler {
             } => self
                 .compile_reference_property_access(object, property, *span, mode)
                 .map(|_| ()),
-            _ if mode == BorrowMode::Exclusive => Err(ShapeError::SemanticError {
-                message: "[B0004] mutable reference arguments must be simple variables".to_string(),
-                location: Some(self.span_to_source_location(arg.span())),
-            }),
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index: None,
+                span,
+            } => self
+                .compile_reference_index_access(object, index, *span, mode)
+                .map(|_| ()),
             _ => {
-                self.compile_expr(arg)?;
+                self.compile_expr_preserving_refs(arg)?;
+                if let Some(returned_mode) = self.last_expr_reference_mode() {
+                    if mode == BorrowMode::Exclusive && returned_mode != BorrowMode::Exclusive {
+                        return Err(ShapeError::SemanticError {
+                            message:
+                                "cannot pass a shared reference result to an exclusive parameter"
+                                    .to_string(),
+                            location: Some(self.span_to_source_location(arg.span())),
+                        });
+                    }
+                    return Ok(());
+                }
+                if mode == BorrowMode::Exclusive {
+                    return Err(ShapeError::SemanticError {
+                        message:
+                            "[B0004] mutable reference arguments must be simple variables or existing exclusive references"
+                                .to_string(),
+                        location: Some(self.span_to_source_location(arg.span())),
+                    });
+                }
                 let temp = self.declare_temp_local("__arg_ref_")?;
                 self.emit(Instruction::new(
                     OpCode::StoreLocal,
                     Some(Operand::Local(temp)),
                 ));
-                let source_loc = self.span_to_source_location(arg.span());
-                self.borrow_checker.create_borrow(
-                    Self::borrow_key_for_local(temp),
-                    temp,
-                    mode,
-                    arg.span(),
-                    Some(source_loc),
-                )?;
+                // MIR analysis is the sole authority for borrow checking.
                 self.emit(Instruction::new(
                     OpCode::MakeRef,
                     Some(Operand::Local(temp)),
@@ -2743,7 +2671,7 @@ impl BytecodeCompiler {
         name: &str,
         span: shape_ast::ast::Span,
         mode: BorrowMode,
-    ) -> Result<BorrowId> {
+    ) -> Result<u32> {
         if let Some(local_idx) = self.resolve_local(name) {
             // Reject exclusive borrows of const variables
             if mode == BorrowMode::Exclusive && self.const_locals.contains(&local_idx) {
@@ -2754,28 +2682,6 @@ impl BytecodeCompiler {
                     ),
                     location: Some(self.span_to_source_location(span)),
                 });
-            }
-            if let Some(borrow_id) = self
-                .tracked_reference_borrow_locals
-                .get(&local_idx)
-                .map(|tracked| tracked.borrow_id)
-            {
-                if mode == BorrowMode::Exclusive
-                    && !self.exclusive_reference_value_locals.contains(&local_idx)
-                {
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "Cannot pass shared reference variable '{}' as an exclusive reference",
-                            name
-                        ),
-                        location: Some(self.span_to_source_location(span)),
-                    });
-                }
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(local_idx)),
-                ));
-                return Ok(borrow_id);
             }
             if self.ref_locals.contains(&local_idx) {
                 // Forward an existing reference parameter by value (TAG_REF).
@@ -2803,32 +2709,12 @@ impl BytecodeCompiler {
                 ));
                 return Ok(u32::MAX);
             }
-            let source_loc = self.span_to_source_location(span);
-            let borrow_id = self
-                .borrow_checker
-                .create_borrow(
-                    Self::borrow_key_for_local(local_idx),
-                    local_idx,
-                    mode,
-                    span,
-                    Some(source_loc),
-                )
-                .map_err(|e| match e {
-                    ShapeError::SemanticError { message, location } => {
-                        let user_msg = message
-                            .replace(&format!("(slot {})", local_idx), &format!("'{}'", name));
-                        ShapeError::SemanticError {
-                            message: user_msg,
-                            location,
-                        }
-                    }
-                    other => other,
-                })?;
+            // MIR analysis is the sole authority for borrow checking.
             self.emit(Instruction::new(
                 OpCode::MakeRef,
                 Some(Operand::Local(local_idx)),
             ));
-            Ok(borrow_id)
+            Ok(u32::MAX)
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let Some(&binding_idx) = self.module_bindings.get(&scoped_name) else {
                 return Err(ShapeError::SemanticError {
@@ -2848,30 +2734,6 @@ impl BytecodeCompiler {
                     ),
                     location: Some(self.span_to_source_location(span)),
                 });
-            }
-            if let Some(borrow_id) = self
-                .tracked_reference_borrow_module_bindings
-                .get(&binding_idx)
-                .map(|tracked| tracked.borrow_id)
-            {
-                if mode == BorrowMode::Exclusive
-                    && !self
-                        .exclusive_reference_value_module_bindings
-                        .contains(&binding_idx)
-                {
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "Cannot pass shared reference variable '{}' as an exclusive reference",
-                            name
-                        ),
-                        location: Some(self.span_to_source_location(span)),
-                    });
-                }
-                self.emit(Instruction::new(
-                    OpCode::LoadModuleBinding,
-                    Some(Operand::ModuleBinding(binding_idx)),
-                ));
-                return Ok(borrow_id);
             }
             if self.reference_value_module_bindings.contains(&binding_idx) {
                 if mode == BorrowMode::Exclusive
@@ -2893,37 +2755,12 @@ impl BytecodeCompiler {
                 ));
                 return Ok(u32::MAX);
             }
-            let source_loc = self.span_to_source_location(span);
-            let borrow_id = self
-                .borrow_checker
-                .create_borrow(
-                    Self::borrow_key_for_module_binding(binding_idx),
-                    binding_idx,
-                    mode,
-                    span,
-                    Some(source_loc),
-                )
-                .map_err(|e| match e {
-                    ShapeError::SemanticError { message, location } => {
-                        let user_msg = message.replace(
-                            &format!(
-                                "(slot {})",
-                                Self::borrow_key_for_module_binding(binding_idx)
-                            ),
-                            &format!("'{}'", name),
-                        );
-                        ShapeError::SemanticError {
-                            message: user_msg,
-                            location,
-                        }
-                    }
-                    other => other,
-                })?;
+            // MIR analysis is the sole authority for borrow checking.
             self.emit(Instruction::new(
                 OpCode::MakeRef,
                 Some(Operand::ModuleBinding(binding_idx)),
             ));
-            Ok(borrow_id)
+            Ok(u32::MAX)
         } else if let Some(func_idx) = self.find_function(name) {
             // Function name passed as reference argument: create a temporary local
             // with the function constant and make a reference to it.
@@ -2939,19 +2776,12 @@ impl BytecodeCompiler {
                 OpCode::StoreLocal,
                 Some(Operand::Local(temp)),
             ));
-            let source_loc = self.span_to_source_location(span);
-            let borrow_id = self.borrow_checker.create_borrow(
-                Self::borrow_key_for_local(temp),
-                temp,
-                mode,
-                span,
-                Some(source_loc),
-            )?;
+            // MIR analysis is the sole authority for borrow checking.
             self.emit(Instruction::new(
                 OpCode::MakeRef,
                 Some(Operand::Local(temp)),
             ));
-            Ok(borrow_id)
+            Ok(u32::MAX)
         } else {
             Err(ShapeError::SemanticError {
                 message: format!(
@@ -2966,18 +2796,11 @@ impl BytecodeCompiler {
     /// Push a new scope
     pub(super) fn push_scope(&mut self) {
         self.locals.push(HashMap::new());
-        self.scoped_reference_value_locals.push(Default::default());
         self.type_tracker.push_scope();
-        self.borrow_checker.enter_region();
     }
 
     /// Pop a scope
     pub(super) fn pop_scope(&mut self) {
-        let scope_slots = self.scoped_reference_value_locals.pop().unwrap_or_default();
-        for slot in scope_slots {
-            self.clear_reference_binding(slot, true);
-        }
-        self.borrow_checker.exit_region();
         self.locals.pop();
         self.type_tracker.pop_scope();
     }
@@ -3216,7 +3039,7 @@ impl BytecodeCompiler {
     /// Reference locals are skipped because assignment writes through to a pointee.
     pub(super) fn propagate_assignment_type_to_identifier(&mut self, name: &str) {
         if let Some(local_idx) = self.resolve_local(name) {
-            if self.ref_locals.contains(&local_idx) {
+            if self.local_binding_is_reference_value(local_idx) {
                 return;
             }
             self.propagate_assignment_type_to_slot(local_idx, true, true);
@@ -3451,7 +3274,16 @@ impl BytecodeCompiler {
             return Ok(());
         }
         if let Some(local_idx) = self.resolve_local(name) {
-            if self.ref_locals.contains(&local_idx) {
+            if self.local_binding_is_reference_value(local_idx) {
+                if !self.local_reference_binding_is_exclusive(local_idx) {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "cannot assign through shared reference variable '{}'",
+                            name
+                        ),
+                        location: None,
+                    });
+                }
                 self.emit(Instruction::new(
                     OpCode::DerefStore,
                     Some(Operand::Local(local_idx)),
@@ -3861,9 +3693,10 @@ impl BytecodeCompiler {
     pub(super) fn has_any_user_defined_method(&self, method: &str) -> bool {
         let dot_suffix = format!(".{}", method);
         let colon_suffix = format!("::{}", method);
-        self.program.functions.iter().any(|f| {
-            f.name.ends_with(&dot_suffix) || f.name.ends_with(&colon_suffix)
-        })
+        self.program
+            .functions
+            .iter()
+            .any(|f| f.name.ends_with(&dot_suffix) || f.name.ends_with(&colon_suffix))
     }
 
     /// Check if a method name is a known built-in method on any VM type.

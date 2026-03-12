@@ -927,7 +927,10 @@ absolute = { path = "/usr/local/lib/shape-lib" }
 
         // try_find_project_root returns a structured error
         let result = try_find_project_root(tmp.path());
-        assert!(result.is_err(), "try_find_project_root should return Err for invalid TOML");
+        assert!(
+            result.is_err(),
+            "try_find_project_root should return Err for invalid TOML"
+        );
         let err_msg = result.unwrap_err();
         assert!(
             err_msg.contains("Malformed shape.toml"),
@@ -959,7 +962,10 @@ absolute = { path = "/usr/local/lib/shape-lib" }
 
         // try_find_project_root returns an error for the invalid TOML
         let result = try_find_project_root(&child);
-        assert!(result.is_err(), "try_find_project_root should return Err for invalid child TOML");
+        assert!(
+            result.is_err(),
+            "try_find_project_root should return Err for invalid child TOML"
+        );
     }
 
     #[test]

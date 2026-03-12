@@ -327,6 +327,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // Field reference — pops 1 (object), pushes 1 (field ref) via FFI
             OpCode::MakeFieldRef => self.compile_opcode_via_generic_ffi(instr.opcode, 1, true),
+
+            // Index reference — pops 2 (base ref, index), pushes 1 (indexed ref) via FFI
+            OpCode::MakeIndexRef => self.compile_opcode_via_generic_ffi(instr.opcode, 2, true),
         }
     }
 }

@@ -17,7 +17,8 @@ pub struct Variable {
     pub kind: VarKind,
     /// Whether the variable has been initialized
     pub is_initialized: bool,
-    /// Whether this is a function-scoped variable (var) vs block-scoped (let/const)
+    /// Whether this is a function-scoped variable (var, Flexible ownership)
+    /// vs block-scoped (let/const, Owned{Immutable,Mutable} ownership)
     pub is_function_scoped: bool,
     /// Optional format hint for display (e.g., "Percent" for meta lookup)
     pub format_hint: Option<String>,

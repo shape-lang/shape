@@ -528,7 +528,7 @@ impl BytecodeCompiler {
             } else {
                 None
             };
-            let return_reference_contract = self.function_reference_return_contract_for_name(name);
+            let return_reference_summary = self.function_return_reference_summary_for_name(name);
             // Use compile_expr_identifier to correctly load the callee value,
             // handling ref_locals (DerefLoad), mutable closure captures (LoadClosure), etc.
             self.compile_expr_identifier(name, span)?;
@@ -558,31 +558,19 @@ impl BytecodeCompiler {
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
                 }
-                if return_reference_contract.is_some() {
-                    self.emit(Instruction::new(
-                        OpCode::DerefLoad,
-                        Some(Operand::Local(result_local)),
-                    ));
-                } else {
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
-                }
-            } else if return_reference_contract.is_some() {
-                let result_local = self.declare_temp_local("__call_value_ref_result_")?;
                 self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(result_local)),
-                ));
-                self.emit(Instruction::new(
-                    OpCode::DerefLoad,
+                    OpCode::LoadLocal,
                     Some(Operand::Local(result_local)),
                 ));
             }
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
             self.last_expr_numeric_type = None;
+            if let Some(return_reference_summary) = return_reference_summary {
+                self.set_last_expr_reference_result(return_reference_summary.mode, true);
+            } else {
+                self.clear_last_expr_reference_result();
+            }
             return Ok(());
         }
 
@@ -668,8 +656,8 @@ impl BytecodeCompiler {
             let ref_params = self.program.functions[call_func_idx].ref_params.clone();
             let ref_mutates = self.program.functions[call_func_idx].ref_mutates.clone();
             let pass_modes = Self::pass_modes_from_ref_flags(&ref_params, &ref_mutates);
-            let return_reference_contract =
-                self.function_reference_return_contract_for_name(&call_name);
+            let return_reference_summary =
+                self.function_return_reference_summary_for_name(&call_name);
             let writebacks = self.compile_call_args(args, Some(&pass_modes))?;
 
             // Compile default expressions for missing arguments
@@ -686,20 +674,17 @@ impl BytecodeCompiler {
                             if let Some(ref default_expr) = param.default_value {
                                 let is_ref_param =
                                     ref_params.get(param_idx).copied().unwrap_or(false);
-                                let default_clone = default_expr.clone();
-                                self.compile_expr(&default_clone)?;
-                                // If the callee expects a reference, wrap the
-                                // default value: store in a temp and MakeRef.
                                 if is_ref_param {
-                                    let temp = self.declare_temp_local("__default_ref_")?;
-                                    self.emit(Instruction::new(
-                                        OpCode::StoreLocal,
-                                        Some(Operand::Local(temp)),
-                                    ));
-                                    self.emit(Instruction::new(
-                                        OpCode::MakeRef,
-                                        Some(Operand::Local(temp)),
-                                    ));
+                                    let borrow_mode =
+                                        if ref_mutates.get(param_idx).copied().unwrap_or(false) {
+                                            crate::compiler::BorrowMode::Exclusive
+                                        } else {
+                                            crate::compiler::BorrowMode::Shared
+                                        };
+                                    self.compile_implicit_reference_arg(default_expr, borrow_mode)?;
+                                }
+                                if !is_ref_param {
+                                    self.compile_expr(default_expr)?;
                                 }
                                 emitted_default = true;
                             }
@@ -743,25 +728,8 @@ impl BytecodeCompiler {
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
                 }
-                if return_reference_contract.is_some() {
-                    self.emit(Instruction::new(
-                        OpCode::DerefLoad,
-                        Some(Operand::Local(result_local)),
-                    ));
-                } else {
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
-                }
-            } else if return_reference_contract.is_some() {
-                let result_local = self.declare_temp_local("__call_ref_result_")?;
                 self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(result_local)),
-                ));
-                self.emit(Instruction::new(
-                    OpCode::DerefLoad,
+                    OpCode::LoadLocal,
                     Some(Operand::Local(result_local)),
                 ));
             }
@@ -788,6 +756,11 @@ impl BytecodeCompiler {
                 .type_tracker
                 .get_function_return_type(&call_name)
                 .and_then(|rt| return_type_to_numeric(rt));
+            if let Some(return_reference_summary) = return_reference_summary {
+                self.set_last_expr_reference_result(return_reference_summary.mode, true);
+            } else {
+                self.clear_last_expr_reference_result();
+            }
             return Ok(());
         }
 
@@ -818,6 +791,7 @@ impl BytecodeCompiler {
             self.last_expr_numeric_type = builtin_return_numeric_type(name);
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
+            self.clear_last_expr_reference_result();
             return Ok(());
         }
 
@@ -987,8 +961,8 @@ impl BytecodeCompiler {
         // Compile as: evaluate receiver (which produces a callable), compile args, CallValue.
         if method == "__call__" {
             let expected_param_modes = self.callable_pass_modes_from_expr(receiver);
-            let return_reference_contract =
-                self.callable_reference_return_contract_from_expr(receiver);
+            let return_reference_summary =
+                self.callable_return_reference_summary_from_expr(receiver);
             self.compile_expr(receiver)?;
             let writebacks = self.compile_call_args(args, expected_param_modes.as_deref())?;
             let arg_count = self
@@ -1015,31 +989,19 @@ impl BytecodeCompiler {
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
                 }
-                if return_reference_contract.is_some() {
-                    self.emit(Instruction::new(
-                        OpCode::DerefLoad,
-                        Some(Operand::Local(result_local)),
-                    ));
-                } else {
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
-                }
-            } else if return_reference_contract.is_some() {
-                let result_local = self.declare_temp_local("__chained_call_ref_result_")?;
                 self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(result_local)),
-                ));
-                self.emit(Instruction::new(
-                    OpCode::DerefLoad,
+                    OpCode::LoadLocal,
                     Some(Operand::Local(result_local)),
                 ));
             }
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
             self.last_expr_numeric_type = None;
+            if let Some(return_reference_summary) = return_reference_summary {
+                self.set_last_expr_reference_result(return_reference_summary.mode, true);
+            } else {
+                self.clear_last_expr_reference_result();
+            }
             return Ok(());
         }
 
@@ -1079,6 +1041,7 @@ impl BytecodeCompiler {
                             Some(Operand::Local(local_idx)),
                         ));
                     }
+                    self.clear_last_expr_reference_result();
                     return Ok(());
                 } else if !self
                     .mutable_closure_captures
@@ -1096,6 +1059,7 @@ impl BytecodeCompiler {
                         OpCode::LoadModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
+                    self.clear_last_expr_reference_result();
                     return Ok(());
                 }
             }
@@ -1153,6 +1117,7 @@ impl BytecodeCompiler {
             self.last_expr_schema = None;
             self.last_expr_numeric_type = None;
             self.last_expr_type_info = None;
+            self.clear_last_expr_reference_result();
             return Ok(());
         }
 
@@ -1189,6 +1154,7 @@ impl BytecodeCompiler {
             self.last_expr_schema = None;
             self.last_expr_numeric_type = None;
             self.last_expr_type_info = None;
+            self.clear_last_expr_reference_result();
             return Ok(());
         }
 
@@ -1251,6 +1217,7 @@ impl BytecodeCompiler {
                     self.last_expr_schema = None;
                     self.last_expr_numeric_type = None;
                     self.last_expr_type_info = None;
+                    self.clear_last_expr_reference_result();
                     return Ok(());
                 }
             }
@@ -1373,6 +1340,7 @@ impl BytecodeCompiler {
                 .and_then(Self::value_schema_from_type_info);
             self.last_expr_numeric_type = None;
             self.closure_row_schema = None;
+            self.clear_last_expr_reference_result();
             return Ok(());
         }
 
@@ -1455,6 +1423,7 @@ impl BytecodeCompiler {
             } else {
                 self.last_expr_type_info = None;
             }
+            self.clear_last_expr_reference_result();
             return Ok(());
         }
 
@@ -1525,6 +1494,7 @@ impl BytecodeCompiler {
                 } else {
                     self.last_expr_type_info = None;
                 }
+                self.clear_last_expr_reference_result();
                 return Ok(());
             }
         }
@@ -1552,6 +1522,7 @@ impl BytecodeCompiler {
                 } else {
                     self.last_expr_type_info = None;
                 }
+                self.clear_last_expr_reference_result();
                 return Ok(());
             }
         }
@@ -1594,6 +1565,7 @@ impl BytecodeCompiler {
             }
         }
 
+        self.clear_last_expr_reference_result();
         Ok(())
     }
 

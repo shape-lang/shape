@@ -211,7 +211,12 @@ pub fn parse_interpolation_with_mode(
 
     while let Some(ch) = chars.next() {
         // Backslash-escaped delimiters: `\{` → `{`, `\}` → `}`, `\$` → `$`, `\#` → `#`
-        if ch == '\\' && matches!(chars.peek(), Some(&'{') | Some(&'}') | Some(&'$') | Some(&'#')) {
+        if ch == '\\'
+            && matches!(
+                chars.peek(),
+                Some(&'{') | Some(&'}') | Some(&'$') | Some(&'#')
+            )
+        {
             current_text.push(chars.next().unwrap());
             continue;
         }
@@ -304,7 +309,12 @@ pub fn parse_content_interpolation_with_mode(
 
     while let Some(ch) = chars.next() {
         // Backslash-escaped delimiters: `\{` → `{`, `\}` → `}`, `\$` → `$`, `\#` → `#`
-        if ch == '\\' && matches!(chars.peek(), Some(&'{') | Some(&'}') | Some(&'$') | Some(&'#')) {
+        if ch == '\\'
+            && matches!(
+                chars.peek(),
+                Some(&'{') | Some(&'}') | Some(&'$') | Some(&'#')
+            )
+        {
             current_text.push(chars.next().unwrap());
             continue;
         }

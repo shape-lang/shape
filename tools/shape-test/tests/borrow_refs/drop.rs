@@ -60,7 +60,7 @@ fn test_drop_break_drops_loop_locals() {
     ShapeTest::new(
         r#"
         fn f() {
-            let sum = 0
+            var sum = 0
             for i in [1, 2, 3, 4, 5] {
                 let x = i * 2
                 if x > 6 {
@@ -81,7 +81,7 @@ fn test_drop_continue_drops_iteration_locals() {
     ShapeTest::new(
         r#"
         fn f() {
-            let sum = 0
+            var sum = 0
             for i in [1, 2, 3, 4, 5] {
                 let x = i
                 if i == 3 {
@@ -218,8 +218,8 @@ fn test_drop_while_loop_break() {
     ShapeTest::new(
         r#"
         fn f() {
-            let i = 0
-            let sum = 0
+            var i = 0
+            var sum = 0
             while i < 10 {
                 let val = i
                 if i == 5 { break }
@@ -239,8 +239,8 @@ fn test_drop_while_loop_continue() {
     ShapeTest::new(
         r#"
         fn f() {
-            let i = 0
-            let sum = 0
+            var i = 0
+            var sum = 0
             while i < 5 {
                 i = i + 1
                 let val = i
@@ -260,7 +260,7 @@ fn test_drop_for_empty_iterable() {
     ShapeTest::new(
         r#"
         fn f() {
-            let sum = 0
+            var sum = 0
             for i in [] {
                 let x = i
                 sum = sum + x
@@ -314,7 +314,7 @@ fn test_drop_custom_type_in_loop() {
         r#"
         type Wrapper { value: number }
         fn f() {
-            let sum = 0
+            var sum = 0
             for i in [1, 2, 3] {
                 let w = Wrapper { value: i * 10 }
                 sum = sum + w.value
@@ -460,8 +460,8 @@ fn test_drop_iterative_factorial() {
     ShapeTest::new(
         r#"
         fn f() {
-            let n = 5
-            let result = 1
+            var n = 5
+            var result = 1
             while n > 0 {
                 let current = n
                 result = result * current

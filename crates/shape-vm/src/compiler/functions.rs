@@ -3,7 +3,7 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{
-    DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Statement, VarKind,
+    DestructurePattern, Expr, FunctionDef, Item, Literal, ObjectEntry, Span, Statement, VarKind,
     VariableDecl,
 };
 use shape_ast::error::{ErrorNote, Result, ShapeError};
@@ -202,8 +202,7 @@ impl BytecodeCompiler {
         {
             // Track removed functions so call sites produce a clear error
             // instead of jumping to an invalid entry point (stack overflow).
-            self.removed_functions
-                .insert(effective_def.name.clone());
+            self.removed_functions.insert(effective_def.name.clone());
             self.function_defs.remove(&effective_def.name);
             return Ok(());
         }
@@ -214,9 +213,10 @@ impl BytecodeCompiler {
             .insert(effective_def.name.clone(), effective_def.clone());
 
         // Lower every compiled function to MIR and run the shared borrow analysis.
-        // Diagnostics still come from the bytecode compiler paths for now, but
-        // this gives real compilations a single analysis artifact we can
-        // progressively hook into later.
+        // MIR borrow analysis is the primary authority for functions with clean
+        // lowering (no fallbacks). When authoritative, the lexical borrow checker
+        // calls in helpers.rs are skipped. For functions where MIR lowering had
+        // fallbacks, the lexical checker remains the active fallback.
         let mir_lowering = crate::mir::lowering::lower_function_detailed(
             &effective_def.name,
             &effective_def.params,
@@ -224,24 +224,173 @@ impl BytecodeCompiler {
             effective_def.name_span,
         );
         let mut mir_analysis = crate::mir::solver::analyze(&mir_lowering.mir);
+        mir_analysis.mutability_errors =
+            crate::mir::lowering::compute_mutability_errors(&mir_lowering);
         crate::mir::repair::attach_repairs(&mut mir_analysis, &mir_lowering.mir);
-        let first_mir_error = if mir_lowering.had_fallbacks {
-            None
+        // MIR is the sole authority for borrow checking. Span-granular error
+        // filtering: when lowering had fallbacks, only suppress errors whose span
+        // overlaps a fallback span. Errors in cleanly-lowered regions pass through.
+        let first_mutability_error = if mir_lowering.fallback_spans.is_empty() {
+            mir_analysis.mutability_errors.first().cloned()
         } else {
-            mir_analysis.errors.first().cloned()
+            mir_analysis
+                .mutability_errors
+                .iter()
+                .find(|e| !Self::span_overlaps_any(&e.span, &mir_lowering.fallback_spans))
+                .cloned()
         };
-        if let Some(contract) = mir_analysis.return_reference_contract {
-            self.function_return_reference_contracts
-                .insert(effective_def.name.clone(), contract.into());
+        let first_mir_error = if mir_lowering.fallback_spans.is_empty() {
+            mir_analysis.errors.first().cloned()
         } else {
-            self.function_return_reference_contracts
+            mir_analysis
+                .errors
+                .iter()
+                .find(|e| !Self::span_overlaps_any(&e.span, &mir_lowering.fallback_spans))
+                .cloned()
+        };
+        if let Some(summary) = mir_analysis.return_reference_summary.clone() {
+            self.function_return_reference_summaries
+                .insert(effective_def.name.clone(), summary.into());
+        } else {
+            self.function_return_reference_summaries
                 .remove(&effective_def.name);
         }
+        // Run storage planning pass: decide Direct / UniqueHeap / SharedCow / Reference
+        // for each MIR slot based on closure captures, aliasing, and mutation.
+        {
+            let (closure_captures, mutable_captures) =
+                crate::mir::storage_planning::collect_closure_captures(&mir_lowering.mir);
+
+            // Gather binding semantics from the type tracker for each slot.
+            let mut binding_semantics = std::collections::HashMap::new();
+            for slot_idx in 0..mir_lowering.mir.num_locals {
+                if let Some(sem) = self.type_tracker.get_local_binding_semantics(slot_idx) {
+                    binding_semantics.insert(slot_idx, *sem);
+                }
+            }
+
+            let planner_input = crate::mir::storage_planning::StoragePlannerInput {
+                mir: &mir_lowering.mir,
+                analysis: &mir_analysis,
+                binding_semantics: &binding_semantics,
+                closure_captures: &closure_captures,
+                mutable_captures: &mutable_captures,
+                had_fallbacks: mir_lowering.had_fallbacks,
+            };
+
+            let storage_plan = crate::mir::storage_planning::plan_storage(&planner_input);
+
+            // Post-solve relaxation: remove ReferenceStoredIn* errors when the
+            // container slot is Local (never escapes the function).
+            crate::mir::solver::relax_local_container_errors(
+                &mut mir_analysis.errors,
+                &storage_plan,
+                &mir_lowering.mir,
+            );
+
+            self.mir_storage_plans
+                .insert(effective_def.name.clone(), storage_plan);
+        }
+
+        // Run field-level definite-initialization and liveness analysis.
+        // This is Phase 2 of the two-phase TypedObject hoisting design:
+        // the AST pre-pass (Phase 1, in compiler_impl_part4.rs) collects
+        // property assignments for initial schema sizing, and this MIR
+        // analysis validates initialization flow and detects dead fields.
+        let field_cfg = crate::mir::cfg::ControlFlowGraph::build(&mir_lowering.mir);
+        let mut field_analysis = crate::mir::field_analysis::analyze_fields(
+            &crate::mir::field_analysis::FieldAnalysisInput {
+                mir: &mir_lowering.mir,
+                cfg: &field_cfg,
+            },
+        );
+
+        // Populate hoisting_recommendations from field names (MIR-authoritative).
+        // Dead fields are pruned: if a field is written but never read, it's
+        // excluded from the recommendation (schema compaction).
+        for (slot_id, field_indices) in &field_analysis.hoisted_fields {
+            let recommendations: Vec<(crate::mir::FieldIdx, String)> = field_indices
+                .iter()
+                .filter(|idx| !field_analysis.dead_fields.contains(&(*slot_id, **idx)))
+                .filter_map(|idx| {
+                    mir_lowering
+                        .field_names
+                        .get(idx)
+                        .map(|name| (*idx, name.clone()))
+                })
+                .collect();
+            if !recommendations.is_empty() {
+                field_analysis
+                    .hoisting_recommendations
+                    .insert(*slot_id, recommendations);
+            }
+        }
+
+        // Merge MIR-derived hoisted fields into the AST pre-pass hoisted_fields map.
+        // MIR field analysis is authoritative per-function: it refines the AST
+        // pre-pass (which over-hoists conservatively). Dead fields detected by MIR
+        // are excluded from the hoisted list.
+        for (slot_id, field_indices) in &field_analysis.hoisted_fields {
+            if let Some(binding) = mir_lowering.binding_infos.iter().find(|b| b.slot == *slot_id) {
+                let var_name = &binding.name;
+                let field_names: Vec<String> = field_indices
+                    .iter()
+                    // Prune dead fields from hoisted list (schema compaction)
+                    .filter(|idx| !field_analysis.dead_fields.contains(&(*slot_id, **idx)))
+                    .filter_map(|idx| mir_lowering.field_names.get(idx))
+                    .cloned()
+                    .collect();
+                if !field_names.is_empty() {
+                    // For function scope, use MIR list as authoritative (replace, don't merge)
+                    self.hoisted_fields.insert(var_name.clone(), field_names);
+                }
+            }
+        }
+
+        self.mir_field_analyses
+            .insert(effective_def.name.clone(), field_analysis);
+
+        // Build span→point mapping for ownership decision lookups.
+        // This lets the bytecode compiler translate AST spans (which it knows
+        // at expression compile time) into MIR Points (which the ownership
+        // decision API expects).
+        {
+            let mut span_to_point = HashMap::new();
+            for block in mir_lowering.mir.iter_blocks() {
+                for stmt in &block.statements {
+                    span_to_point.entry(stmt.span).or_insert(stmt.point);
+                }
+            }
+            self.mir_span_to_point
+                .insert(effective_def.name.clone(), span_to_point);
+        }
+
+        // Extract and store borrow summary for interprocedural alias checking.
+        let borrow_summary =
+            crate::mir::solver::extract_borrow_summary(&mir_lowering.mir);
+        if !borrow_summary.conflict_pairs.is_empty() {
+            self.function_borrow_summaries
+                .insert(effective_def.name.clone(), borrow_summary);
+        }
+
+        // Interprocedural alias checking: scan call sites in this function's MIR
+        // for argument aliasing conflicts using stored callee summaries.
+        let alias_errors =
+            self.check_call_site_aliasing(&mir_lowering.mir, &mir_lowering.fallback_spans);
+        let first_alias_error = alias_errors.first().cloned();
+        mir_analysis.errors.extend(alias_errors);
+
         self.mir_functions
             .insert(effective_def.name.clone(), mir_lowering.mir);
         self.mir_borrow_analyses
             .insert(effective_def.name.clone(), mir_analysis);
+        if let Some(error) = first_mutability_error.as_ref() {
+            return Err(self.mir_mutability_error(error));
+        }
         if let Some(error) = first_mir_error.as_ref() {
+            return Err(self.mir_borrow_error(error));
+        }
+        if let Some(error) = first_alias_error.as_ref() {
             return Err(self.mir_borrow_error(error));
         }
 
@@ -283,25 +432,30 @@ impl BytecodeCompiler {
         self.emit_annotation_lifecycle_calls(&effective_def)
     }
 
+    /// Return the (message_body, hint) pair for a MIR borrow error kind.
+    ///
+    /// The message body does NOT include the `[B00XX]` prefix — that is
+    /// prepended by `mir_borrow_error` using `BorrowErrorKind::code()` so
+    /// the code mapping is defined in exactly one place.
     fn mir_borrow_error_message(
         &self,
         kind: crate::mir::analysis::BorrowErrorKind,
     ) -> (&'static str, &'static str) {
         match kind {
             crate::mir::analysis::BorrowErrorKind::ConflictSharedExclusive => (
-                "[B0001] cannot mutably borrow this value while shared borrows are active",
+                "cannot mutably borrow this value while shared borrows are active",
                 "move the mutable borrow later, or end the shared borrow sooner",
             ),
             crate::mir::analysis::BorrowErrorKind::ConflictExclusiveExclusive => (
-                "[B0001] cannot mutably borrow this value because it is already borrowed",
+                "cannot mutably borrow this value because it is already borrowed",
                 "end the previous mutable borrow before creating another one",
             ),
             crate::mir::analysis::BorrowErrorKind::ReadWhileExclusivelyBorrowed => (
-                "[B0001] cannot read this value while it is mutably borrowed",
+                "cannot read this value while it is mutably borrowed",
                 "read through the existing reference, or move the read after the borrow ends",
             ),
             crate::mir::analysis::BorrowErrorKind::WriteWhileBorrowed => (
-                "[B0002] cannot write to this value while it is borrowed",
+                "cannot write to this value while it is borrowed",
                 "move this write after the borrow ends",
             ),
             crate::mir::analysis::BorrowErrorKind::ReferenceEscape => (
@@ -321,7 +475,7 @@ impl BytecodeCompiler {
                 "store owned values in the enum payload instead of references",
             ),
             crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure => (
-                "[B0003] reference cannot escape into a closure",
+                "reference cannot escape into a closure",
                 "capture an owned value instead of a reference",
             ),
             crate::mir::analysis::BorrowErrorKind::UseAfterMove => (
@@ -332,9 +486,21 @@ impl BytecodeCompiler {
                 "cannot move an exclusive reference across a task boundary",
                 "keep the mutable reference within the current task or pass an owned value instead",
             ),
+            crate::mir::analysis::BorrowErrorKind::SharedRefAcrossDetachedTask => (
+                "cannot send a shared reference across a detached task boundary",
+                "clone the value before sending it to a detached task, or use a structured task instead",
+            ),
             crate::mir::analysis::BorrowErrorKind::InconsistentReferenceReturn => (
-                "reference-returning functions must consistently return the same reference parameter",
-                "return the same `&` or `&mut` parameter on every return path, or return owned values instead",
+                "reference-returning functions must return a reference on every path from the same borrowed origin and borrow kind",
+                "return a reference from the same borrowed origin on every path, or return owned values instead",
+            ),
+            crate::mir::analysis::BorrowErrorKind::CallSiteAliasConflict => (
+                "cannot pass the same variable to multiple parameters that require non-aliased access",
+                "use separate variables or clone one of the arguments",
+            ),
+            crate::mir::analysis::BorrowErrorKind::NonSendableAcrossTaskBoundary => (
+                "cannot send a closure with mutable captures across a detached task boundary",
+                "clone the captured values before spawning the task",
             ),
         }
     }
@@ -355,17 +521,26 @@ impl BytecodeCompiler {
                 "reference originates here"
             }
             crate::mir::analysis::BorrowErrorKind::UseAfterMove => "value was moved here",
-            crate::mir::analysis::BorrowErrorKind::ExclusiveRefAcrossTaskBoundary => {
+            crate::mir::analysis::BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
+            | crate::mir::analysis::BorrowErrorKind::SharedRefAcrossDetachedTask => {
                 "reference originates here"
             }
             crate::mir::analysis::BorrowErrorKind::InconsistentReferenceReturn => {
-                "reference return contract originates here"
+                "borrowed origin on another return path originates here"
+            }
+            crate::mir::analysis::BorrowErrorKind::CallSiteAliasConflict => {
+                "conflicting argument originates here"
+            }
+            crate::mir::analysis::BorrowErrorKind::NonSendableAcrossTaskBoundary => {
+                "closure with mutable captures originates here"
             }
         }
     }
 
     fn mir_borrow_error(&self, error: &crate::mir::analysis::BorrowError) -> ShapeError {
-        let (message, default_hint) = self.mir_borrow_error_message(error.kind.clone());
+        let (body, default_hint) = self.mir_borrow_error_message(error.kind.clone());
+        let code = error.kind.code();
+        let message = format!("[{}] {}", code, body);
         let mut location = self.span_to_source_location(error.span);
         location.hints.push(default_hint.to_string());
         if let Some(repair) = error.repairs.first() {
@@ -382,9 +557,261 @@ impl BytecodeCompiler {
             });
         }
         ShapeError::SemanticError {
-            message: message.to_string(),
+            message,
             location: Some(location),
         }
+    }
+
+    fn mir_mutability_error(&self, error: &crate::mir::analysis::MutabilityError) -> ShapeError {
+        let mut location = self.span_to_source_location(error.span);
+        if error.is_const {
+            location
+                .hints
+                .push("const bindings cannot be reassigned".to_string());
+        } else if error.is_explicit_let {
+            location
+                .hints
+                .push("declare it as `let mut` if mutation is intended".to_string());
+        } else {
+            location
+                .hints
+                .push("this binding is immutable in this context".to_string());
+        }
+        location.notes.push(ErrorNote {
+            message: "binding declared here".to_string(),
+            location: Some(self.span_to_source_location(error.declaration_span)),
+        });
+        ShapeError::SemanticError {
+            message: if error.is_const {
+                format!("cannot assign to const binding '{}'", error.variable_name)
+            } else {
+                format!(
+                    "cannot assign to immutable binding '{}'",
+                    error.variable_name
+                )
+            },
+            location: Some(location),
+        }
+    }
+
+    /// Check call sites in a function's MIR for interprocedural alias conflicts.
+    /// Returns errors for each call where the same variable is passed to multiple
+    /// parameters that the callee's borrow summary says must not alias.
+    fn check_call_site_aliasing(
+        &self,
+        mir: &crate::mir::types::MirFunction,
+        fallback_spans: &[Span],
+    ) -> Vec<crate::mir::analysis::BorrowError> {
+        use crate::mir::analysis::{BorrowError, BorrowErrorKind};
+        use crate::mir::types::*;
+        let mut errors = Vec::new();
+
+        for block in mir.iter_blocks() {
+            if let TerminatorKind::Call { func, args, .. } = &block.terminator.kind {
+                // Determine callee name from the func operand
+                let callee_name = match func {
+                    Operand::Constant(MirConstant::Function(name)) => Some(name.as_str()),
+                    _ => None,
+                };
+
+                let Some(callee_name) = callee_name else {
+                    continue;
+                };
+
+                // Look up the callee's borrow summary
+                let Some(summary) = self.function_borrow_summaries.get(callee_name) else {
+                    continue;
+                };
+
+                // For each conflict pair, check if the corresponding args share root slots
+                for &(i, j) in &summary.conflict_pairs {
+                    if i >= args.len() || j >= args.len() {
+                        continue;
+                    }
+                    let root_i = arg_root_slot(block, &args[i]);
+                    let root_j = arg_root_slot(block, &args[j]);
+                    if let (Some(ri), Some(rj)) = (root_i, root_j) {
+                        if ri == rj {
+                            let span = block.terminator.span;
+                            // Skip if this span overlaps a fallback region
+                            if !fallback_spans.is_empty()
+                                && Self::span_overlaps_any(&span, fallback_spans)
+                            {
+                                continue;
+                            }
+                            errors.push(BorrowError {
+                                kind: BorrowErrorKind::CallSiteAliasConflict,
+                                span,
+                                conflicting_loan: LoanId(0),
+                                loan_span: span,
+                                last_use_span: None,
+                                repairs: Vec::new(),
+                            });
+                            break; // one error per call site
+                        }
+                    }
+                }
+            }
+        }
+
+        errors
+    }
+
+    /// Check if a span overlaps with any span in a list.
+    /// Used for span-granular error filtering: errors in fallback regions are suppressed.
+    fn span_overlaps_any(span: &Span, fallback_spans: &[Span]) -> bool {
+        fallback_spans.iter().any(|fb| {
+            // Overlap: not (span ends before fb starts || span starts after fb ends)
+            !(span.end <= fb.start || span.start >= fb.end)
+        })
+    }
+
+    fn synthetic_item_sequence_span(items: &[Item]) -> Span {
+        items
+            .first()
+            .map(|item| match item {
+                Item::Import(_, span)
+                | Item::Export(_, span)
+                | Item::Module(_, span)
+                | Item::TypeAlias(_, span)
+                | Item::Interface(_, span)
+                | Item::Trait(_, span)
+                | Item::Enum(_, span)
+                | Item::Extend(_, span)
+                | Item::Impl(_, span)
+                | Item::Function(_, span)
+                | Item::Query(_, span)
+                | Item::VariableDecl(_, span)
+                | Item::Assignment(_, span)
+                | Item::Expression(_, span)
+                | Item::Stream(_, span)
+                | Item::Test(_, span)
+                | Item::Optimize(_, span)
+                | Item::AnnotationDef(_, span)
+                | Item::StructType(_, span)
+                | Item::DataSource(_, span)
+                | Item::QueryDecl(_, span)
+                | Item::Statement(_, span)
+                | Item::Comptime(_, span)
+                | Item::BuiltinTypeDecl(_, span)
+                | Item::BuiltinFunctionDecl(_, span)
+                | Item::ForeignFunction(_, span) => *span,
+            })
+            .unwrap_or(Span::DUMMY)
+    }
+
+    fn synthetic_mir_statements_for_items(items: &[Item]) -> Vec<Statement> {
+        let mut body = Vec::new();
+        for item in items {
+            match item {
+                Item::VariableDecl(var_decl, span) => {
+                    body.push(Statement::VariableDecl(var_decl.clone(), *span));
+                }
+                Item::Assignment(assign, span) => {
+                    body.push(Statement::Assignment(assign.clone(), *span));
+                }
+                Item::Expression(expr, span) => {
+                    body.push(Statement::Expression(expr.clone(), *span));
+                }
+                Item::Statement(stmt, _) => body.push(stmt.clone()),
+                Item::Export(export, span) => {
+                    if let Some(source_decl) = &export.source_decl {
+                        body.push(Statement::VariableDecl(source_decl.clone(), *span));
+                    }
+                }
+                Item::Comptime(..)
+                | Item::Function(..)
+                | Item::Module(..)
+                | Item::Import(..)
+                | Item::TypeAlias(..)
+                | Item::Interface(..)
+                | Item::Trait(..)
+                | Item::Enum(..)
+                | Item::Extend(..)
+                | Item::Impl(..)
+                | Item::Query(..)
+                | Item::Stream(..)
+                | Item::Test(..)
+                | Item::Optimize(..)
+                | Item::AnnotationDef(..)
+                | Item::StructType(..)
+                | Item::DataSource(..)
+                | Item::QueryDecl(..)
+                | Item::BuiltinTypeDecl(..)
+                | Item::BuiltinFunctionDecl(..)
+                | Item::ForeignFunction(..) => {}
+            }
+        }
+        body
+    }
+
+    pub(super) fn analyze_non_function_items_with_mir(
+        &mut self,
+        context_name: &str,
+        items: &[Item],
+    ) -> Result<()> {
+        let body = Self::synthetic_mir_statements_for_items(items);
+        if body.is_empty() {
+            return Ok(());
+        }
+
+        let lowering = crate::mir::lowering::lower_function_detailed(
+            context_name,
+            &[],
+            &body,
+            Self::synthetic_item_sequence_span(items),
+        );
+        let mut analysis = crate::mir::solver::analyze(&lowering.mir);
+        analysis.mutability_errors = crate::mir::lowering::compute_mutability_errors(&lowering);
+        crate::mir::repair::attach_repairs(&mut analysis, &lowering.mir);
+
+        // Span-granular error filtering: when lowering had fallbacks, only
+        // suppress errors whose span overlaps a fallback span. Errors in
+        // cleanly-lowered regions pass through even when other regions fell back.
+        let first_mutability_error = if lowering.fallback_spans.is_empty() {
+            analysis.mutability_errors.first().cloned()
+        } else {
+            analysis
+                .mutability_errors
+                .iter()
+                .find(|e| !Self::span_overlaps_any(&e.span, &lowering.fallback_spans))
+                .cloned()
+        };
+        let first_borrow_error = if lowering.fallback_spans.is_empty() {
+            analysis.errors.first().cloned()
+        } else {
+            analysis
+                .errors
+                .iter()
+                .find(|e| !Self::span_overlaps_any(&e.span, &lowering.fallback_spans))
+                .cloned()
+        };
+
+        // Build span→point mapping for non-function MIR contexts too.
+        {
+            let mut span_to_point = HashMap::new();
+            for block in lowering.mir.iter_blocks() {
+                for stmt in &block.statements {
+                    span_to_point.entry(stmt.span).or_insert(stmt.point);
+                }
+            }
+            self.mir_span_to_point
+                .insert(context_name.to_string(), span_to_point);
+        }
+
+        self.mir_functions
+            .insert(context_name.to_string(), lowering.mir);
+        self.mir_borrow_analyses
+            .insert(context_name.to_string(), analysis);
+
+        if let Some(error) = first_mutability_error.as_ref() {
+            return Err(self.mir_mutability_error(error));
+        }
+        if let Some(error) = first_borrow_error.as_ref() {
+            return Err(self.mir_borrow_error(error));
+        }
+
+        Ok(())
     }
 
     pub(super) fn compile_foreign_function(
@@ -3051,47 +3478,30 @@ impl BytecodeCompiler {
         let saved_exclusive_ref_locals = std::mem::take(&mut self.exclusive_ref_locals);
         let saved_inferred_ref_locals = std::mem::take(&mut self.inferred_ref_locals);
         let saved_local_callable_pass_modes = std::mem::take(&mut self.local_callable_pass_modes);
-        let saved_local_callable_return_reference_contracts =
-            std::mem::take(&mut self.local_callable_return_reference_contracts);
+        let saved_local_callable_return_reference_summaries =
+            std::mem::take(&mut self.local_callable_return_reference_summaries);
         let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
         let saved_exclusive_reference_value_locals =
             std::mem::take(&mut self.exclusive_reference_value_locals);
-        let saved_tracked_reference_borrow_locals =
-            std::mem::take(&mut self.tracked_reference_borrow_locals);
-        let saved_tracked_reference_borrow_holder_counts =
-            std::mem::take(&mut self.tracked_reference_borrow_holder_counts);
-        let saved_scoped_reference_value_locals =
-            std::mem::take(&mut self.scoped_reference_value_locals);
-        let saved_future_reference_use_names = std::mem::take(&mut self.future_reference_use_names);
-        let saved_repeating_body_reference_local_barriers =
-            std::mem::take(&mut self.repeating_body_reference_local_barriers);
-        let saved_repeating_body_reference_module_binding_barriers =
-            std::mem::take(&mut self.repeating_body_reference_module_binding_barriers);
-        let saved_repeating_body_protected_places =
-            std::mem::take(&mut self.repeating_body_protected_places);
         let saved_reference_value_module_bindings = self.reference_value_module_bindings.clone();
         let saved_exclusive_reference_value_module_bindings =
             self.exclusive_reference_value_module_bindings.clone();
-        let saved_tracked_reference_borrow_module_bindings =
-            self.tracked_reference_borrow_module_bindings.clone();
-        let saved_scoped_reference_value_module_bindings =
-            self.scoped_reference_value_module_bindings.clone();
         let saved_comptime_mode = self.comptime_mode;
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
         let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
         let saved_param_locals = std::mem::take(&mut self.param_locals);
         let saved_function_params =
             std::mem::replace(&mut self.current_function_params, func_def.params.clone());
-        let saved_current_function_return_reference_contract =
-            self.current_function_return_reference_contract;
+        let saved_current_function_return_reference_summary =
+            self.current_function_return_reference_summary.clone();
 
         // Set up isolated locals for function compilation
         self.current_function = Some(func_idx);
         self.current_function_is_async = func_def.is_async;
-        self.current_function_return_reference_contract = self
-            .function_return_reference_contracts
+        self.current_function_return_reference_summary = self
+            .function_return_reference_summaries
             .get(&func_def.name)
-            .copied();
+            .cloned();
 
         // If this is a `comptime fn`, mark the compilation context as comptime
         // so that calls to other `comptime fn` functions within the body are allowed.
@@ -3100,25 +3510,14 @@ impl BytecodeCompiler {
         }
         self.locals = vec![HashMap::new()];
         self.type_tracker.clear_locals(); // Clear local type info for new function
-        self.borrow_checker.reset(); // Reset borrow checker for new function scope
         self.ref_locals.clear();
         self.exclusive_ref_locals.clear();
         self.inferred_ref_locals.clear();
         self.local_callable_pass_modes.clear();
-        self.local_callable_return_reference_contracts.clear();
+        self.local_callable_return_reference_summaries.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
-        self.tracked_reference_borrow_locals.clear();
-        self.tracked_reference_borrow_holder_counts.clear();
-        self.scoped_reference_value_locals = vec![HashSet::new()];
-        self.future_reference_use_names = vec![HashSet::new()];
-        self.repeating_body_reference_local_barriers.clear();
-        self.repeating_body_reference_module_binding_barriers
-            .clear();
-        self.repeating_body_protected_places.clear();
         self.immutable_locals.clear();
-        self.tracked_reference_borrow_module_bindings.clear();
-        self.scoped_reference_value_module_bindings = vec![HashSet::new()];
         self.param_locals.clear();
         self.push_scope();
         self.push_drop_scope();
@@ -3308,8 +3707,8 @@ impl BytecodeCompiler {
                 match stmt {
                     Statement::Expression(expr, _) => {
                         // Compile expression and keep value on stack for implicit return.
-                        if self.current_function_return_reference_contract.is_some() {
-                            self.compile_expr_for_reference_return(expr)?;
+                        if self.current_function_return_reference_summary.is_some() {
+                            self.compile_expr_preserving_refs(expr)?;
                         } else {
                             self.compile_expr(expr)?;
                         }
@@ -3340,34 +3739,18 @@ impl BytecodeCompiler {
                         self.exclusive_ref_locals = saved_exclusive_ref_locals.clone();
                         self.inferred_ref_locals = saved_inferred_ref_locals.clone();
                         self.local_callable_pass_modes = saved_local_callable_pass_modes.clone();
-                        self.local_callable_return_reference_contracts =
-                            saved_local_callable_return_reference_contracts.clone();
+                        self.local_callable_return_reference_summaries =
+                            saved_local_callable_return_reference_summaries.clone();
                         self.reference_value_locals = saved_reference_value_locals;
                         self.exclusive_reference_value_locals =
                             saved_exclusive_reference_value_locals;
-                        self.tracked_reference_borrow_locals =
-                            saved_tracked_reference_borrow_locals;
-                        self.tracked_reference_borrow_holder_counts =
-                            saved_tracked_reference_borrow_holder_counts;
-                        self.scoped_reference_value_locals = saved_scoped_reference_value_locals;
-                        self.future_reference_use_names = saved_future_reference_use_names;
-                        self.repeating_body_reference_local_barriers =
-                            saved_repeating_body_reference_local_barriers;
-                        self.repeating_body_reference_module_binding_barriers =
-                            saved_repeating_body_reference_module_binding_barriers;
-                        self.repeating_body_protected_places =
-                            saved_repeating_body_protected_places;
                         self.reference_value_module_bindings =
                             saved_reference_value_module_bindings;
                         self.exclusive_reference_value_module_bindings =
                             saved_exclusive_reference_value_module_bindings;
-                        self.tracked_reference_borrow_module_bindings =
-                            saved_tracked_reference_borrow_module_bindings;
-                        self.scoped_reference_value_module_bindings =
-                            saved_scoped_reference_value_module_bindings;
                         self.comptime_mode = saved_comptime_mode;
-                        self.current_function_return_reference_contract =
-                            saved_current_function_return_reference_contract;
+                        self.current_function_return_reference_summary =
+                            saved_current_function_return_reference_summary;
                         // Patch the jump-over instruction if we emitted one
                         if let Some(jump_addr) = jump_over {
                             self.patch_jump(jump_addr);
@@ -3403,8 +3786,14 @@ impl BytecodeCompiler {
                     }
                 }
             } else {
-                let future_names = self
+                let mut future_names = self
                     .future_reference_use_names_for_remaining_statements(&func_def.body[idx + 1..]);
+                if self.current_function_return_reference_summary.is_some()
+                    && idx + 1 < body_len
+                    && let Some(Statement::Expression(expr, _)) = func_def.body.last()
+                {
+                    self.collect_reference_use_names_from_expr(expr, true, &mut future_names);
+                }
                 self.push_future_reference_use_names(future_names);
                 let compile_result = self.compile_statement(stmt);
                 self.pop_future_reference_use_names();
@@ -3446,28 +3835,16 @@ impl BytecodeCompiler {
         self.exclusive_ref_locals = saved_exclusive_ref_locals;
         self.inferred_ref_locals = saved_inferred_ref_locals;
         self.local_callable_pass_modes = saved_local_callable_pass_modes;
-        self.local_callable_return_reference_contracts =
-            saved_local_callable_return_reference_contracts;
+        self.local_callable_return_reference_summaries =
+            saved_local_callable_return_reference_summaries;
         self.reference_value_locals = saved_reference_value_locals;
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
-        self.tracked_reference_borrow_locals = saved_tracked_reference_borrow_locals;
-        self.tracked_reference_borrow_holder_counts = saved_tracked_reference_borrow_holder_counts;
-        self.scoped_reference_value_locals = saved_scoped_reference_value_locals;
-        self.future_reference_use_names = saved_future_reference_use_names;
-        self.repeating_body_reference_local_barriers =
-            saved_repeating_body_reference_local_barriers;
-        self.repeating_body_reference_module_binding_barriers =
-            saved_repeating_body_reference_module_binding_barriers;
-        self.repeating_body_protected_places = saved_repeating_body_protected_places;
         self.reference_value_module_bindings = saved_reference_value_module_bindings;
         self.exclusive_reference_value_module_bindings =
             saved_exclusive_reference_value_module_bindings;
-        self.tracked_reference_borrow_module_bindings =
-            saved_tracked_reference_borrow_module_bindings;
-        self.scoped_reference_value_module_bindings = saved_scoped_reference_value_module_bindings;
         self.comptime_mode = saved_comptime_mode;
-        self.current_function_return_reference_contract =
-            saved_current_function_return_reference_contract;
+        self.current_function_return_reference_summary =
+            saved_current_function_return_reference_summary;
 
         // Patch the jump-over instruction if we emitted one
         if let Some(jump_addr) = jump_over {
@@ -3478,6 +3855,67 @@ impl BytecodeCompiler {
     }
 
     // Compile a statement
+}
+
+/// Extract the root SlotId from a MIR operand if it references a local.
+fn arg_root_slot(
+    block: &crate::mir::types::BasicBlock,
+    op: &crate::mir::types::Operand,
+) -> Option<crate::mir::types::SlotId> {
+    use crate::mir::types::{Operand, Place, Rvalue, StatementKind};
+    use std::collections::{HashMap, HashSet};
+
+    fn resolve_slot_root(
+        slot: crate::mir::types::SlotId,
+        alias_roots: &HashMap<crate::mir::types::SlotId, crate::mir::types::SlotId>,
+    ) -> crate::mir::types::SlotId {
+        let mut current = slot;
+        let mut seen = HashSet::new();
+        while seen.insert(current) {
+            let Some(next) = alias_roots.get(&current).copied() else {
+                break;
+            };
+            current = next;
+        }
+        current
+    }
+
+    fn operand_root_slot(
+        op: &Operand,
+        alias_roots: &HashMap<crate::mir::types::SlotId, crate::mir::types::SlotId>,
+    ) -> Option<crate::mir::types::SlotId> {
+        match op {
+            Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+                Some(resolve_slot_root(place.root_local(), alias_roots))
+            }
+            Operand::Constant(_) => None,
+        }
+    }
+
+    let mut alias_roots = HashMap::new();
+    for stmt in &block.statements {
+        let StatementKind::Assign(Place::Local(dst), rvalue) = &stmt.kind else {
+            continue;
+        };
+
+        match rvalue {
+            Rvalue::Borrow(_, place) => {
+                alias_roots.insert(*dst, resolve_slot_root(place.root_local(), &alias_roots));
+            }
+            Rvalue::Use(inner) | Rvalue::Clone(inner) | Rvalue::UnaryOp(_, inner) => {
+                if let Some(root) = operand_root_slot(inner, &alias_roots) {
+                    alias_roots.insert(*dst, root);
+                } else {
+                    alias_roots.remove(dst);
+                }
+            }
+            _ => {
+                alias_roots.remove(dst);
+            }
+        }
+    }
+
+    operand_root_slot(op, &alias_roots)
 }
 
 #[cfg(test)]
@@ -4709,7 +5147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_function_records_reference_return_contract() {
+    fn test_compile_function_records_return_reference_summary() {
         let program = shape_ast::parser::parse_program(
             r#"
                 function borrow_id(&x) {
@@ -4736,16 +5174,56 @@ mod tests {
             .get("borrow_id")
             .expect("borrow analysis should be recorded");
         assert_eq!(
-            analysis.return_reference_contract,
-            Some(crate::mir::analysis::ReferenceReturnContract {
+            analysis.return_reference_summary,
+            Some(crate::mir::analysis::ReturnReferenceSummary {
                 param_index: 0,
                 kind: crate::mir::types::BorrowKind::Shared,
+                projection: Some(Vec::new()),
             })
         );
     }
 
     #[test]
-    fn test_compile_function_rejects_inconsistent_reference_return_contract() {
+    fn test_compile_function_allows_expression_return_reference_with_summary() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function borrow_id(&x) {
+                    let ignored = {
+                        return &x
+                    }
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        compiler
+            .compile_function(func)
+            .expect("expression-form reference return should compile");
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("borrow_id")
+            .expect("borrow analysis should be recorded");
+        assert_eq!(
+            analysis.return_reference_summary,
+            Some(crate::mir::analysis::ReturnReferenceSummary {
+                param_index: 0,
+                kind: crate::mir::types::BorrowKind::Shared,
+                projection: Some(Vec::new()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_compile_function_rejects_inconsistent_return_reference_summary() {
         let program = shape_ast::parser::parse_program(
             r#"
                 function borrow_id(flag, &x) {
@@ -4770,7 +5248,7 @@ mod tests {
             .compile_function(func)
             .expect_err("mixed ref/value returns should be rejected");
         assert!(
-            format!("{}", err).contains("consistently return the same reference parameter"),
+            format!("{}", err).contains("same borrowed origin and borrow kind"),
             "expected inconsistent-ref-return error, got {}",
             err
         );
@@ -4831,6 +5309,140 @@ mod tests {
                 .any(|error| error.kind == BorrowErrorKind::ConflictSharedExclusive),
             "expected MIR borrow conflict, got {:?}",
             analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_mutability_error() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function reassign() {
+                    let x = 1
+                    x = 2
+                    x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("immutable reassignment should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot assign to immutable binding 'x'"),
+            "expected immutable binding error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("reassign")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .mutability_errors
+                .iter()
+                .any(|error| error.variable_name == "x"),
+            "expected MIR mutability error, got {:?}",
+            analysis.mutability_errors
+        );
+    }
+
+    // Tests for MIR authority tracking removed: MIR is now the sole authority,
+    // there is no longer a lexical fallback mechanism.
+
+    #[test]
+    fn test_compile_function_records_mir_const_mutability_error() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function reassign() {
+                    const x = 1
+                    x = 2
+                    x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("const reassignment should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot assign to const binding 'x'"),
+            "expected const binding error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("reassign")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .mutability_errors
+                .iter()
+                .any(|error| error.variable_name == "x" && error.is_const),
+            "expected MIR const mutability error, got {:?}",
+            analysis.mutability_errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_const_param_mutability_error() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function reassign(const x) {
+                    x = 2
+                    x
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        let err = compiler
+            .compile_function(func)
+            .expect_err("const parameter reassignment should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot assign to const binding 'x'"),
+            "expected const parameter binding error, got {}",
+            err
+        );
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("reassign")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis
+                .mutability_errors
+                .iter()
+                .any(|error| error.variable_name == "x" && error.is_const),
+            "expected MIR const parameter mutability error, got {:?}",
+            analysis.mutability_errors
         );
     }
 
@@ -5173,25 +5785,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("closure-capture reference escape should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("[B0003]"),
-            "expected B0003-style closure escape error, got {}",
-            err
-        );
+            .expect("non-escaping closure ref capture should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("closure_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure),
-            "expected MIR closure escape error, got {:?}",
+            analysis.errors.is_empty(),
+            "non-escaping closure ref capture should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5216,25 +5820,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("array reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an array"),
-            "expected array-storage error, got {}",
-            err
-        );
+            .expect("local array ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("array_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
-            "expected MIR array-storage error, got {:?}",
+            analysis.errors.is_empty(),
+            "local array ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5260,25 +5856,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("indirect array reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an array"),
-            "expected array-storage error, got {}",
-            err
-        );
+            .expect("local indirect array ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("indirect_array_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
-            "expected MIR indirect array-storage error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect array ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5303,25 +5891,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("object reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
-            "expected object-storage error, got {}",
-            err
-        );
+            .expect("local object ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("object_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected MIR object-storage error, got {:?}",
+            analysis.errors.is_empty(),
+            "local object ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5347,25 +5927,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("indirect object reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
-            "expected object-storage error, got {}",
-            err
-        );
+            .expect("local indirect object ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("indirect_object_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected MIR indirect object-storage error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect object ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5395,24 +5967,16 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("struct reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
-            "expected struct-storage error, got {}",
-            err
-        );
+            .expect("local struct ref storage should now compile");
         let analysis = compiler
             .mir_borrow_analyses
             .get("struct_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected MIR struct-storage error, got {:?}",
+            analysis.errors.is_empty(),
+            "local struct ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5433,6 +5997,47 @@ mod tests {
         assert!(
             format!("{}", err).contains("cannot store a reference in an object or struct literal"),
             "expected top-level object-storage error, got {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_compile_top_level_array_direct_reference_storage_rejected() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                let x = 1
+                let arr = [&x]
+            "#,
+        )
+        .expect("parse failed");
+
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("top-level array reference storage should surface as a compile error");
+        assert!(
+            format!("{}", err).contains("cannot store a reference in an array"),
+            "expected top-level array-storage error, got {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_compile_top_level_reference_cannot_escape_into_closure() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                let x = 1
+                let r = &x
+                let f = || r
+            "#,
+        )
+        .expect("parse failed");
+
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("top-level closure capture should reject escaped references");
+        assert!(
+            format!("{}", err).contains("[B0003]"),
+            "expected top-level closure reference escape error, got {}",
             err
         );
     }
@@ -5483,25 +6088,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("enum tuple reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an enum payload"),
-            "expected enum-payload error, got {}",
-            err
-        );
+            .expect("local enum tuple ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("enum_tuple_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
-            "expected MIR enum-payload error, got {:?}",
+            analysis.errors.is_empty(),
+            "local enum tuple ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5532,25 +6129,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("indirect enum tuple reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an enum payload"),
-            "expected enum-payload error, got {}",
-            err
-        );
+            .expect("local indirect enum tuple ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("indirect_enum_tuple_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
-            "expected MIR indirect enum-payload error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect enum tuple ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5582,25 +6171,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("enum struct reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an enum payload"),
-            "expected enum-payload error, got {}",
-            err
-        );
+            .expect("local enum struct ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("enum_struct_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInEnum),
-            "expected MIR enum struct-payload error, got {:?}",
+            analysis.errors.is_empty(),
+            "local enum struct ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5634,6 +6215,7 @@ mod tests {
                     var obj = { value: 0 }
                     let x = 1
                     obj.value = &x
+                    0
                 }
             "#,
         )
@@ -5647,25 +6229,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler
+        compiler
             .compile_function(func)
-            .expect_err("property assignment reference storage should surface as a compile error");
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
-            "expected object-field storage error, got {}",
-            err
-        );
+            .expect("local property ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("property_assignment_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected MIR object-field reference escape error, got {:?}",
+            analysis.errors.is_empty(),
+            "local property ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5679,6 +6253,7 @@ mod tests {
                     let x = 1
                     let r = &x
                     obj.value = r
+                    0
                 }
             "#,
         )
@@ -5692,25 +6267,17 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler.compile_function(func).expect_err(
-            "indirect property assignment reference storage should surface as a compile error",
-        );
-        assert!(
-            format!("{}", err).contains("cannot store a reference in an object or struct literal"),
-            "expected indirect object-field storage error, got {}",
-            err
-        );
+        compiler
+            .compile_function(func)
+            .expect("local indirect property ref storage should now compile");
 
         let analysis = compiler
             .mir_borrow_analyses
             .get("indirect_property_assignment_escape")
             .expect("borrow analysis should be recorded");
         assert!(
-            analysis
-                .errors
-                .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInObject),
-            "expected MIR indirect object-field reference escape error, got {:?}",
+            analysis.errors.is_empty(),
+            "local indirect property ref storage should now be accepted, got {:?}",
             analysis.errors
         );
     }
@@ -5723,6 +6290,81 @@ mod tests {
                     var arr = [0]
                     let x = 1
                     arr[0] = &x
+                    0
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        compiler
+            .compile_function(func)
+            .expect("local index ref storage should now compile");
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("index_assignment_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis.errors.is_empty(),
+            "local index ref storage should now be accepted, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_records_mir_indirect_index_assignment_reference_escape() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function indirect_index_assignment_escape() {
+                    var arr = [0]
+                    let x = 1
+                    let r = &x
+                    arr[0] = r
+                    0
+                }
+            "#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            Item::Function(func, _) => func,
+            _ => panic!("expected function item"),
+        };
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(func)
+            .expect("function should register");
+        compiler
+            .compile_function(func)
+            .expect("local indirect index ref storage should now compile");
+
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("indirect_index_assignment_escape")
+            .expect("borrow analysis should be recorded");
+        assert!(
+            analysis.errors.is_empty(),
+            "local indirect index ref storage should now be accepted, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_function_returning_local_array_with_ref_still_errors() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                function array_escape() {
+                    let x = 1
+                    let arr = [&x]
+                    return arr
                 }
             "#,
         )
@@ -5738,36 +6380,36 @@ mod tests {
             .expect("function should register");
         let err = compiler
             .compile_function(func)
-            .expect_err("index assignment reference storage should surface as a compile error");
+            .expect_err("returned local array ref storage should still surface as a compile error");
         assert!(
             format!("{}", err).contains("cannot store a reference in an array"),
-            "expected array-element storage error, got {}",
+            "expected returned array-storage error, got {}",
             err
         );
 
         let analysis = compiler
             .mir_borrow_analyses
-            .get("index_assignment_escape")
+            .get("array_escape")
             .expect("borrow analysis should be recorded");
         assert!(
             analysis
                 .errors
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
-            "expected MIR array-element reference escape error, got {:?}",
+            "expected returned array ref storage error, got {:?}",
             analysis.errors
         );
     }
 
     #[test]
-    fn test_compile_function_records_mir_indirect_index_assignment_reference_escape() {
+    fn test_compile_function_returning_closure_with_ref_still_errors() {
         let program = shape_ast::parser::parse_program(
             r#"
-                function indirect_index_assignment_escape() {
-                    var arr = [0]
+                function closure_escape() {
                     let x = 1
                     let r = &x
-                    arr[0] = r
+                    let f = || r
+                    return f
                 }
             "#,
         )
@@ -5781,25 +6423,25 @@ mod tests {
         compiler
             .register_function(func)
             .expect("function should register");
-        let err = compiler.compile_function(func).expect_err(
-            "indirect index assignment reference storage should surface as a compile error",
-        );
+        let err = compiler
+            .compile_function(func)
+            .expect_err("returned closure ref capture should still surface as a compile error");
         assert!(
-            format!("{}", err).contains("cannot store a reference in an array"),
-            "expected indirect array-element storage error, got {}",
+            format!("{}", err).contains("[B0003]"),
+            "expected returned closure escape error, got {}",
             err
         );
 
         let analysis = compiler
             .mir_borrow_analyses
-            .get("indirect_index_assignment_escape")
+            .get("closure_escape")
             .expect("borrow analysis should be recorded");
         assert!(
             analysis
                 .errors
                 .iter()
-                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray),
-            "expected MIR indirect array-element reference escape error, got {:?}",
+                .any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure),
+            "expected returned closure ref capture error, got {:?}",
             analysis.errors
         );
     }
@@ -6710,6 +7352,143 @@ mod tests {
             err_msg.contains("removed"),
             "Error should mention function was removed: {}",
             err_msg
+        );
+    }
+
+    #[test]
+    fn test_analyze_non_function_items_records_main_context() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                let x = 1
+                x
+            "#,
+        )
+        .expect("parse failed");
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .analyze_non_function_items_with_mir("__main__", &program.items)
+            .expect("top-level MIR analysis should succeed");
+
+        // MIR is now the sole authority - no need to check authority flag.
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("__main__")
+            .expect("top-level borrow analysis should be recorded");
+        assert!(
+            analysis.errors.is_empty(),
+            "unexpected top-level MIR errors: {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_analyze_non_function_items_reports_top_level_write_while_borrowed() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+                let mut x = [1]
+                let r = &x
+                x = [2]
+                let y = r
+            "#,
+        )
+        .expect("parse failed");
+
+        let mut compiler = BytecodeCompiler::new();
+        let err = compiler
+            .analyze_non_function_items_with_mir("__main__", &program.items)
+            .expect_err("top-level MIR analysis should reject write-while-borrowed");
+
+        assert!(
+            format!("{}", err).contains("[B0002]"),
+            "expected MIR top-level borrow diagnostic, got {}",
+            err
+        );
+        let analysis = compiler
+            .mir_borrow_analyses
+            .get("__main__")
+            .expect("top-level borrow analysis should be recorded");
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed),
+            "expected top-level write-while-borrowed error, got {:?}",
+            analysis.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_reports_top_level_mir_borrow_error() {
+        // Direct call to analyze_non_function_items_with_mir validates that
+        // the MIR analysis correctly detects borrow violations in top-level code.
+        // (Not yet wired into the compilation pipeline due to false positives
+        // on method chains.)
+        let source = r#"
+                let mut x = [1]
+                let r = &x
+                x = [2]
+                let y = r
+            "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+        let mut compiler = BytecodeCompiler::new();
+        let result = compiler
+            .analyze_non_function_items_with_mir("__main__", &program.items);
+
+        assert!(result.is_err(), "expected top-level compile error");
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("B0002"),
+            "expected top-level MIR borrow diagnostic, got {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_compile_reports_module_body_mir_borrow_error() {
+        // Direct call to analyze_non_function_items_with_mir validates that
+        // the MIR analysis correctly detects borrow violations in module-level code.
+        let source = r#"
+                let mut x = [1]
+                let r = &x
+                x = [2]
+                let y = r
+            "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+        let mut compiler = BytecodeCompiler::new();
+        let result = compiler
+            .analyze_non_function_items_with_mir("__module__", &program.items);
+
+        assert!(result.is_err(), "expected module-body compile error");
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("B0002"),
+            "expected module-body MIR borrow diagnostic, got {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_interprocedural_alias_summary_extracted() {
+        let code = r#"
+            function touch(a, b) {
+                a[0] = 1
+                return b[0]
+            }
+        "#;
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        if let Item::Function(func, _) = &program.items[0] {
+            compiler.register_function(func).expect("register");
+            compiler.compile_function(func).expect("compile touch");
+        }
+        let summary = compiler
+            .function_borrow_summaries
+            .get("touch")
+            .expect("touch should have a borrow summary");
+        assert!(
+            !summary.conflict_pairs.is_empty(),
+            "touch should have conflict pairs: mutated param 0 vs read param 1"
         );
     }
 }

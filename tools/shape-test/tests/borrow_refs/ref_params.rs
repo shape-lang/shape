@@ -179,7 +179,7 @@ fn test_ref_on_literal_should_error() {
         f(&5)
     "#,
     )
-    .expect_run_err_contains("simple variable name");
+    .expect_run_err_contains("place expression");
 }
 
 #[test]
@@ -331,7 +331,7 @@ fn test_ref_not_allowed_in_let_binding() {
         r
     "#,
     )
-    .expect_run_ok();
+    .expect_run_err_contains("B0003");
 }
 
 #[test]
@@ -345,7 +345,64 @@ fn test_ref_not_allowed_in_return() {
         f()
     "#,
     )
-    .expect_run_err_contains("cannot return a reference");
+    .expect_run_err_contains("cannot return or store a reference");
+}
+
+#[test]
+fn test_ref_return_binding_preserves_reference_identity() {
+    ShapeTest::new(
+        r#"
+        fn borrow_mut_id(&mut x) { x }
+        fn update() {
+            let mut a = 5
+            let mut r = borrow_mut_id(&mut a)
+            r = r + 3
+            a
+        }
+        update()
+    "#,
+    )
+    .expect_number(8.0);
+}
+
+#[test]
+fn test_ref_return_auto_derefs_in_arithmetic_and_by_value_calls() {
+    ShapeTest::new(
+        r#"
+        fn borrow_id(&x) { x }
+        fn add_one(x) { x + 1 }
+        let a = 41
+        add_one(borrow_id(&a)) + borrow_id(&a)
+    "#,
+    )
+    .expect_number(83.0);
+}
+
+#[test]
+fn test_ref_return_auto_derefs_for_property_access() {
+    ShapeTest::new(
+        r#"
+        type Pt { x: int, y: int }
+        fn borrow_id(&x) { x }
+        let p = Pt { x: 4, y: 9 }
+        borrow_id(&p).x + borrow_id(&p).y
+    "#,
+    )
+    .expect_number(13.0);
+}
+
+#[test]
+fn test_ref_return_can_forward_directly_into_ref_param() {
+    ShapeTest::new(
+        r#"
+        fn borrow_mut_id(&mut x) { x }
+        fn inc(&mut x) { x = x + 1 }
+        let mut a = 0
+        inc(borrow_mut_id(&mut a))
+        a
+    "#,
+    )
+    .expect_number(1.0);
 }
 
 #[test]

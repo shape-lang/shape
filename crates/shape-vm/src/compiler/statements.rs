@@ -538,12 +538,17 @@ impl BytecodeCompiler {
                 // to prevent cascading "Undefined variable" errors on later references.
                 let mut ref_borrow = None;
                 let init_err = if let Some(init_expr) = &var_decl.value {
+                    let saved_pending_variable_name = self.pending_variable_name.clone();
+                    self.pending_variable_name =
+                        var_decl.pattern.as_identifier().map(|name| name.to_string());
                     match self.compile_expr_for_reference_binding(init_expr) {
                         Ok(tracked_borrow) => {
                             ref_borrow = tracked_borrow;
+                            self.pending_variable_name = saved_pending_variable_name;
                             None
                         }
                         Err(e) => {
+                            self.pending_variable_name = saved_pending_variable_name;
                             // Push null as placeholder so the variable still gets registered
                             self.emit(Instruction::simple(OpCode::PushNull));
                             Some(e)
@@ -555,6 +560,16 @@ impl BytecodeCompiler {
                 };
 
                 if let Some(name) = var_decl.pattern.as_identifier() {
+                    if ref_borrow.is_some() {
+                        return Err(ShapeError::SemanticError {
+                            message:
+                                "[B0003] cannot return or store a reference that outlives its owner"
+                                    .to_string(),
+                            location: var_decl.value.as_ref().map(|expr| {
+                                self.span_to_source_location(expr.span())
+                            }),
+                        });
+                    }
                     let binding_idx = self.get_or_create_module_binding(name);
                     self.emit(Instruction::new(
                         OpCode::StoreModuleBinding,
@@ -641,7 +656,20 @@ impl BytecodeCompiler {
                 if let Some(ref var_decl) = export.source_decl {
                     let mut ref_borrow = None;
                     if let Some(init_expr) = &var_decl.value {
-                        ref_borrow = self.compile_expr_for_reference_binding(init_expr)?;
+                        let saved_pending_variable_name = self.pending_variable_name.clone();
+                        self.pending_variable_name =
+                            var_decl.pattern.as_identifier().map(|name| name.to_string());
+                        let compile_result = self.compile_expr_for_reference_binding(init_expr);
+                        self.pending_variable_name = saved_pending_variable_name;
+                        ref_borrow = compile_result?;
+                        if ref_borrow.is_some() {
+                            return Err(ShapeError::SemanticError {
+                                message:
+                                    "[B0003] cannot return or store a reference that outlives its owner"
+                                        .to_string(),
+                                location: Some(self.span_to_source_location(init_expr.span())),
+                            });
+                        }
                     } else {
                         self.emit(Instruction::simple(OpCode::PushNull));
                     }
@@ -3042,17 +3070,24 @@ impl BytecodeCompiler {
             self.register_missing_module_functions(qualified)?;
         }
 
-        for (idx, qualified) in qualified_items.iter().enumerate() {
-            let future_names =
-                self.future_reference_use_names_for_remaining_items(&qualified_items[idx + 1..]);
-            self.push_future_reference_use_names(future_names);
-            let compile_result = self.compile_item_with_context(qualified, false);
-            self.pop_future_reference_use_names();
-            compile_result?;
-            self.release_unused_module_reference_borrows_for_remaining_items(
-                &qualified_items[idx + 1..],
-            );
-        }
+        self.non_function_mir_context_stack
+            .push(module_path.clone());
+        let compile_result = (|| -> Result<()> {
+            for (idx, qualified) in qualified_items.iter().enumerate() {
+                let future_names = self
+                    .future_reference_use_names_for_remaining_items(&qualified_items[idx + 1..]);
+                self.push_future_reference_use_names(future_names);
+                let compile_result = self.compile_item_with_context(qualified, false);
+                self.pop_future_reference_use_names();
+                compile_result?;
+                self.release_unused_module_reference_borrows_for_remaining_items(
+                    &qualified_items[idx + 1..],
+                );
+            }
+            Ok(())
+        })();
+        self.non_function_mir_context_stack.pop();
+        compile_result?;
 
         let exports = self.collect_module_runtime_exports(&module_items, &module_path);
         let entries: Vec<ObjectEntry> = exports
@@ -3147,27 +3182,12 @@ impl BytecodeCompiler {
             Statement::Return(expr_opt, _span) => {
                 if let Some(expr) = expr_opt {
                     self.plan_flexible_binding_escape_from_expr(expr);
-                    if self.current_function_return_reference_contract.is_some() {
-                        self.compile_expr_for_reference_return(expr)?;
+                    if self.current_function_return_reference_summary.is_some() {
+                        self.compile_expr_preserving_refs(expr)?;
                     } else {
-                        if let Expr::Reference { span: ref_span, .. } = expr {
-                            return Err(ShapeError::SemanticError {
-                                message: "cannot return a reference — references are scoped borrows that cannot escape the function. Return an owned value instead".to_string(),
-                                location: Some(self.span_to_source_location(*ref_span)),
-                            });
-                        }
-                        // Note: returning a ref_local identifier is allowed — compile_expr
-                        // emits DerefLoad which returns the dereferenced *value*, not the
-                        // reference itself. Only returning `&x` (Expr::Reference) is blocked.
                         self.compile_expr(expr)?;
                     }
                 } else {
-                    if self.current_function_return_reference_contract.is_some() {
-                        return Err(ShapeError::SemanticError {
-                            message: "reference-returning functions must return a reference on every path".to_string(),
-                            location: None,
-                        });
-                    }
                     self.emit(Instruction::simple(OpCode::PushNull));
                 }
                 // Emit drops for all active drop scopes before returning
@@ -3293,7 +3313,11 @@ impl BytecodeCompiler {
                         );
                         if is_table_annotated {
                             let single_row = vec![items.clone()];
-                            match self.compile_table_rows(&single_row, &var_decl.type_annotation, *arr_span) {
+                            match self.compile_table_rows(
+                                &single_row,
+                                &var_decl.type_annotation,
+                                *arr_span,
+                            ) {
                                 Ok(()) => None,
                                 Err(e) => {
                                     self.emit(Instruction::simple(OpCode::PushNull));
@@ -3346,6 +3370,16 @@ impl BytecodeCompiler {
                 if self.current_function.is_none() {
                     // Top-level: create module_binding variable
                     if let Some(name) = var_decl.pattern.as_identifier() {
+                        if ref_borrow.is_some() {
+                            return Err(ShapeError::SemanticError {
+                                message:
+                                    "[B0003] cannot return or store a reference that outlives its owner"
+                                        .to_string(),
+                                location: var_decl.value.as_ref().map(|expr| {
+                                    self.span_to_source_location(expr.span())
+                                }),
+                            });
+                        }
                         let binding_idx = self.get_or_create_module_binding(name);
 
                         // Emit StoreModuleBindingTyped for width-typed bindings,
@@ -3575,14 +3609,18 @@ impl BytecodeCompiler {
                 // Check for const reassignment
                 if let Some(name) = assign.pattern.as_identifier() {
                     if let Some(local_idx) = self.resolve_local(name) {
-                        if self.const_locals.contains(&local_idx) {
+                        if !self.current_binding_uses_mir_write_authority(true)
+                            && self.const_locals.contains(&local_idx)
+                        {
                             return Err(ShapeError::SemanticError {
                                 message: format!("Cannot reassign const variable '{}'", name),
                                 location: None,
                             });
                         }
                         // Check for immutable `let` reassignment
-                        if self.immutable_locals.contains(&local_idx) {
+                        if !self.current_binding_uses_mir_write_authority(true)
+                            && self.immutable_locals.contains(&local_idx)
+                        {
                             return Err(ShapeError::SemanticError {
                                 message: format!(
                                     "Cannot reassign immutable variable '{}'. Use `let mut` or `var` for mutable bindings",
@@ -3613,14 +3651,18 @@ impl BytecodeCompiler {
                             .resolve_scoped_module_binding_name(name)
                             .unwrap_or_else(|| name.to_string());
                         if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-                            if self.const_module_bindings.contains(&binding_idx) {
+                            if !self.current_binding_uses_mir_write_authority(false)
+                                && self.const_module_bindings.contains(&binding_idx)
+                            {
                                 return Err(ShapeError::SemanticError {
                                     message: format!("Cannot reassign const variable '{}'", name),
                                     location: None,
                                 });
                             }
                             // Check for immutable `let` reassignment at module level
-                            if self.immutable_module_bindings.contains(&binding_idx) {
+                            if !self.current_binding_uses_mir_write_authority(false)
+                                && self.immutable_module_bindings.contains(&binding_idx)
+                            {
                                 return Err(ShapeError::SemanticError {
                                     message: format!(
                                         "Cannot reassign immutable variable '{}'. Use `let mut` or `var` for mutable bindings",
@@ -3714,14 +3756,19 @@ impl BytecodeCompiler {
                 }
 
                 // Compile value
-                let ref_borrow = self.compile_expr_for_reference_binding(&assign.value)?;
+                let saved_pending_variable_name = self.pending_variable_name.clone();
+                self.pending_variable_name =
+                    assign.pattern.as_identifier().map(|name| name.to_string());
+                let compile_result = self.compile_expr_for_reference_binding(&assign.value);
+                self.pending_variable_name = saved_pending_variable_name;
+                let ref_borrow = compile_result?;
                 let assigned_ident = assign.pattern.as_identifier().map(str::to_string);
 
                 // Store in variable
                 self.compile_destructure_assignment(&assign.pattern)?;
                 if let Some(name) = assigned_ident.as_deref() {
                     if let Some(local_idx) = self.resolve_local(name) {
-                        if !self.ref_locals.contains(&local_idx) {
+                        if !self.local_binding_is_reference_value(local_idx) {
                             self.finish_reference_binding_from_expr(
                                 local_idx,
                                 true,

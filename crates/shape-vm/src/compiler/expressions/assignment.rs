@@ -12,34 +12,58 @@ impl BytecodeCompiler {
     pub(super) fn compile_expr_let(&mut self, let_expr: &shape_ast::ast::LetExpr) -> Result<()> {
         self.push_scope();
 
-        let mut ref_borrow = None;
-        if let Some(value) = &let_expr.value {
-            ref_borrow = self.compile_expr_for_reference_binding(value)?;
-        } else {
-            self.emit(Instruction::simple(OpCode::PushNull));
-        }
-
-        self.compile_pattern_binding(&let_expr.pattern)?;
-        self.mark_value_pattern_bindings_immutable(&let_expr.pattern);
-        self.apply_binding_semantics_to_value_pattern_bindings(
-            &let_expr.pattern,
-            Self::owned_immutable_binding_semantics(),
+        let mut future_names = std::collections::HashSet::new();
+        self.collect_reference_use_names_from_expr(
+            &let_expr.body,
+            self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef,
+            &mut future_names,
         );
-        if let Some(name) = let_expr.pattern.as_simple_name()
-            && let Some(local_idx) = self.resolve_local(name)
-        {
-            if let Some(value) = &let_expr.value {
-                self.finish_reference_binding_from_expr(local_idx, true, name, value, ref_borrow);
-                self.update_callable_binding_from_expr(local_idx, true, value);
-            } else {
-                self.clear_reference_binding(local_idx, true);
-                self.clear_callable_binding(local_idx, true);
-            }
-        }
-        self.compile_expr(&let_expr.body)?;
+        self.push_future_reference_use_names(future_names);
 
+        let compile_result = (|| -> Result<()> {
+            let mut ref_borrow = None;
+            if let Some(value) = &let_expr.value {
+                let saved_pending_variable_name = self.pending_variable_name.clone();
+                self.pending_variable_name =
+                    let_expr.pattern.as_simple_name().map(|name| name.to_string());
+                let compile_result = self.compile_expr_for_reference_binding(value);
+                self.pending_variable_name = saved_pending_variable_name;
+                ref_borrow = compile_result?;
+            } else {
+                self.emit(Instruction::simple(OpCode::PushNull));
+            }
+
+            self.compile_pattern_binding(&let_expr.pattern)?;
+            self.mark_value_pattern_bindings_immutable(&let_expr.pattern);
+            self.apply_binding_semantics_to_value_pattern_bindings(
+                &let_expr.pattern,
+                Self::owned_immutable_binding_semantics(),
+            );
+            if let Some(name) = let_expr.pattern.as_simple_name()
+                && let Some(local_idx) = self.resolve_local(name)
+            {
+                if let Some(value) = &let_expr.value {
+                    self.finish_reference_binding_from_expr(
+                        local_idx, true, name, value, ref_borrow,
+                    );
+                    self.update_callable_binding_from_expr(local_idx, true, value);
+                } else {
+                    self.clear_reference_binding(local_idx, true);
+                    self.clear_callable_binding(local_idx, true);
+                }
+            }
+            if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
+                self.compile_expr_preserving_refs(&let_expr.body)?;
+            } else {
+                self.compile_expr(&let_expr.body)?;
+            }
+
+            Ok(())
+        })();
+
+        self.pop_future_reference_use_names();
         self.pop_scope();
-        Ok(())
+        compile_result
     }
 
     /// Compile an assignment expression
@@ -50,7 +74,9 @@ impl BytecodeCompiler {
         // Check for const reassignment (covers compound assignments like +=)
         if let Expr::Identifier(name, _) = assign_expr.target.as_ref() {
             if let Some(local_idx) = self.resolve_local(name) {
-                if self.const_locals.contains(&local_idx) {
+                if !self.current_binding_uses_mir_write_authority(true)
+                    && self.const_locals.contains(&local_idx)
+                {
                     return Err(ShapeError::SemanticError {
                         message: format!("Cannot reassign const variable '{}'", name),
                         location: None,
@@ -58,7 +84,9 @@ impl BytecodeCompiler {
                 }
             } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
                 if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-                    if self.const_module_bindings.contains(&binding_idx) {
+                    if !self.current_binding_uses_mir_write_authority(false)
+                        && self.const_module_bindings.contains(&binding_idx)
+                    {
                         return Err(ShapeError::SemanticError {
                             message: format!("Cannot reassign const variable '{}'", name),
                             location: None,
@@ -147,7 +175,11 @@ impl BytecodeCompiler {
                     }
                 }
 
-                let ref_borrow = self.compile_expr_for_reference_binding(&assign_expr.value)?;
+                let saved_pending_variable_name = self.pending_variable_name.clone();
+                self.pending_variable_name = Some(name.clone());
+                let compile_result = self.compile_expr_for_reference_binding(&assign_expr.value);
+                self.pending_variable_name = saved_pending_variable_name;
+                let ref_borrow = compile_result?;
                 self.emit(Instruction::simple(OpCode::Dup));
                 // Mutable closure captures: emit StoreClosure
                 if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name.as_str()) {
@@ -158,8 +190,17 @@ impl BytecodeCompiler {
                     return Ok(());
                 }
                 if let Some(local_idx) = self.resolve_local(name) {
-                    if self.ref_locals.contains(&local_idx) {
-                        // Reference parameter: write through the reference
+                    if self.local_binding_is_reference_value(local_idx) {
+                        if !self.local_reference_binding_is_exclusive(local_idx) {
+                            return Err(ShapeError::SemanticError {
+                                message: format!(
+                                    "cannot assign through shared reference variable '{}'",
+                                    name
+                                ),
+                                location: Some(self.span_to_source_location(*id_span)),
+                            });
+                        }
+                        // Reference parameter or reference-valued binding: write through the reference
                         self.emit(Instruction::new(
                             OpCode::DerefStore,
                             Some(Operand::Local(local_idx)),
@@ -192,7 +233,7 @@ impl BytecodeCompiler {
                             }
                         }
                     }
-                    if !self.ref_locals.contains(&local_idx) {
+                    if !self.local_binding_is_reference_value(local_idx) {
                         self.finish_reference_binding_from_expr(
                             local_idx,
                             true,

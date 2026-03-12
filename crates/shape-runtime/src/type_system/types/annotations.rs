@@ -262,6 +262,14 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
         SemanticType::Enum { name, .. } | SemanticType::Interface { name, .. } => {
             TypeAnnotation::Reference(name.clone())
         }
+        SemanticType::Ref(inner) => {
+            // Map &T to the annotation for T — references don't have a distinct
+            // TypeAnnotation variant yet; the compiler tracks ref-ness separately.
+            semantic_to_annotation(inner)
+        }
+        SemanticType::RefMut(inner) => {
+            semantic_to_annotation(inner)
+        }
     }
 }
 

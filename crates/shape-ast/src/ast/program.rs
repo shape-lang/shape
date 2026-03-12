@@ -87,8 +87,10 @@ pub enum Item {
 pub struct VariableDecl {
     pub kind: VarKind,
     /// Explicit mutability: `let mut x = ...`
-    /// When false with VarKind::Let, the binding is immutable.
-    /// When VarKind::Var, mutability is inferred from usage.
+    /// When false with VarKind::Let, the binding is immutable (OwnedImmutable).
+    /// When true with VarKind::Let, the binding is mutable (OwnedMutable).
+    /// VarKind::Var always has flexible ownership: always mutable,
+    /// function-scoped, with smart clone/move inference on initialization.
     #[serde(default)]
     pub is_mut: bool,
     pub pattern: DestructurePattern,

@@ -5,7 +5,28 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::blob_cache_v2::BlobCache;
-use crate::borrow_checker::{BorrowId, BorrowMode};
+/// Borrow mode for reference parameters - Shared (&) or Exclusive (&mut).
+/// Kept for codegen even though the lexical borrow checker has been removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorrowMode {
+    Shared,
+    Exclusive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExprResultMode {
+    Value,
+    PreserveRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ExprReferenceResult {
+    pub raw_mode: Option<BorrowMode>,
+    pub auto_deref_mode: Option<BorrowMode>,
+}
+
+/// A borrow place key used for encoding borrow targets in codegen.
+pub type BorrowPlace = u32;
 use crate::bytecode::{
     BytecodeProgram, Constant, FunctionBlob, FunctionHash, Instruction, OpCode,
     Program as ContentAddressedProgram,
@@ -62,12 +83,6 @@ pub(crate) struct StructGenericInfo {
     pub runtime_field_types: HashMap<String, shape_ast::ast::TypeAnnotation>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct TrackedReferenceBorrow {
-    pub borrow_id: BorrowId,
-    pub name: String,
-}
-
 /// Whether a type's Drop impl is sync-only, async-only, or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DropKind {
@@ -96,26 +111,22 @@ impl ParamPassMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FunctionReferenceReturnContract {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FunctionReturnReferenceSummary {
     pub param_index: usize,
     pub mode: BorrowMode,
+    pub projection: Option<Vec<crate::mir::types::ProjectionStep>>,
 }
 
-impl FunctionReferenceReturnContract {
-    pub const fn is_exclusive(self) -> bool {
-        matches!(self.mode, BorrowMode::Exclusive)
-    }
-}
-
-impl From<crate::mir::analysis::ReferenceReturnContract> for FunctionReferenceReturnContract {
-    fn from(value: crate::mir::analysis::ReferenceReturnContract) -> Self {
+impl From<crate::mir::analysis::ReturnReferenceSummary> for FunctionReturnReferenceSummary {
+    fn from(value: crate::mir::analysis::ReturnReferenceSummary) -> Self {
         Self {
             param_index: value.param_index,
             mode: match value.kind {
                 crate::mir::types::BorrowKind::Shared => BorrowMode::Shared,
                 crate::mir::types::BorrowKind::Exclusive => BorrowMode::Exclusive,
             },
+            projection: value.projection,
         }
     }
 }
@@ -445,26 +456,36 @@ pub struct BytecodeCompiler {
     /// Read by binary op compilation to emit typed opcodes (e.g., MulInt).
     pub(crate) last_expr_numeric_type: Option<crate::type_tracking::NumericType>,
 
+    /// Result mode for the expression currently being compiled.
+    pub(crate) current_expr_result_mode: ExprResultMode,
+
+    /// Whether the last compiled expression left a raw reference on the stack.
+    ///
+    /// `auto_deref_mode` is only set for propagated ref results (identifier loads,
+    /// ref-returning calls) that should implicitly dereference in value contexts.
+    /// Explicit `&expr` results keep `raw_mode` without enabling auto-deref.
+    pub(crate) last_expr_reference_result: ExprReferenceResult,
+
     /// Known pass modes for local callable bindings (closures / function aliases).
     pub(crate) local_callable_pass_modes: HashMap<u16, Vec<ParamPassMode>>,
 
-    /// Known safe reference-return contracts for local callable bindings.
-    pub(crate) local_callable_return_reference_contracts:
-        HashMap<u16, FunctionReferenceReturnContract>,
+    /// Known safe return-reference summaries for local callable bindings.
+    pub(crate) local_callable_return_reference_summaries:
+        HashMap<u16, FunctionReturnReferenceSummary>,
 
     /// Known pass modes for module-binding callable values.
     pub(crate) module_binding_callable_pass_modes: HashMap<u16, Vec<ParamPassMode>>,
 
-    /// Known safe reference-return contracts for module-binding callable values.
-    pub(crate) module_binding_callable_return_reference_contracts:
-        HashMap<u16, FunctionReferenceReturnContract>,
+    /// Known safe return-reference summaries for module-binding callable values.
+    pub(crate) module_binding_callable_return_reference_summaries:
+        HashMap<u16, FunctionReturnReferenceSummary>,
 
     /// Named functions that safely return one reference parameter unchanged.
-    pub(crate) function_return_reference_contracts:
-        HashMap<String, FunctionReferenceReturnContract>,
+    pub(crate) function_return_reference_summaries:
+        HashMap<String, FunctionReturnReferenceSummary>,
 
-    /// The reference-return contract of the function currently being compiled, if any.
-    pub(crate) current_function_return_reference_contract: Option<FunctionReferenceReturnContract>,
+    /// The return-reference summary of the function currently being compiled, if any.
+    pub(crate) current_function_return_reference_summary: Option<FunctionReturnReferenceSummary>,
 
     /// Type inference engine for match exhaustiveness and type checking
     pub(crate) type_inference: shape_runtime::type_system::inference::TypeInferenceEngine,
@@ -545,6 +566,10 @@ pub struct BytecodeCompiler {
     /// When compiling a variable initializer, the name of the variable being assigned to.
     /// Used by compile_typed_object_literal to include hoisted fields in the schema.
     pub(crate) pending_variable_name: Option<String>,
+    /// Lexical names that will later need their binding value to remain a raw reference.
+    /// This is only used to choose `Value` vs `PreserveRef` lowering for bindings; MIR
+    /// remains the sole authority for borrow legality.
+    pub(crate) future_reference_use_name_scopes: Vec<HashSet<String>>,
 
     /// Known trait names (populated in the first pass so meta definitions can reference traits)
     pub(crate) known_traits: std::collections::HashSet<String>,
@@ -578,8 +603,6 @@ pub struct BytecodeCompiler {
     /// Used to replace hardcoded heuristics (e.g., is_type_preserving_table_method)
     /// with MethodTable lookups (is_self_returning, takes_closure_with_receiver_param).
     pub(crate) method_table: MethodTable,
-    /// Borrow checker for reference lifetime tracking.
-    pub(crate) borrow_checker: crate::borrow_checker::BorrowChecker,
     /// Locals that are reference-typed in the current function.
     pub(crate) ref_locals: HashSet<u16>,
     /// Subset of ref_locals that hold exclusive (`&mut`) borrows.
@@ -609,29 +632,6 @@ pub struct BytecodeCompiler {
     pub(crate) reference_value_module_bindings: HashSet<u16>,
     /// Subset of reference_value_module_bindings that hold exclusive (`&mut`) references.
     pub(crate) exclusive_reference_value_module_bindings: HashSet<u16>,
-    /// Local first-class reference bindings with active borrow ownership.
-    pub(crate) tracked_reference_borrow_locals: HashMap<u16, TrackedReferenceBorrow>,
-    /// Module first-class reference bindings with active borrow ownership.
-    pub(crate) tracked_reference_borrow_module_bindings: HashMap<u16, TrackedReferenceBorrow>,
-    /// Active holder counts per borrow ID for first-class reference aliases.
-    pub(crate) tracked_reference_borrow_holder_counts:
-        HashMap<crate::borrow_checker::BorrowId, usize>,
-    /// Local ref-holder slots declared in the current lexical scopes.
-    pub(crate) scoped_reference_value_locals: Vec<HashSet<u16>>,
-    /// Module ref-holder slots declared in the current module scopes.
-    pub(crate) scoped_reference_value_module_bindings: Vec<HashSet<u16>>,
-    /// Reference-holder names used later in the enclosing statement/item sequence.
-    pub(crate) future_reference_use_names: Vec<HashSet<String>>,
-    /// Active repeated-body barriers for local ref holders.
-    pub(crate) repeating_body_reference_local_barriers: Vec<HashSet<u16>>,
-    /// Active repeated-body barriers for module ref holders.
-    pub(crate) repeating_body_reference_module_binding_barriers: Vec<HashSet<u16>>,
-    /// Borrow places that must stay frozen for the duration of the active repeated bodies.
-    pub(crate) repeating_body_protected_places: Vec<Vec<crate::borrow_checker::BorrowPlace>>,
-    /// True while compiling function call arguments (allows `&` references).
-    pub(crate) in_call_args: bool,
-    /// Borrow mode for the argument currently being compiled.
-    pub(crate) current_call_arg_borrow_mode: Option<BorrowMode>,
     /// ModuleBinding-ref writebacks collected while compiling current call args.
     pub(crate) call_arg_module_binding_ref_writebacks: Vec<Vec<(u16, u16)>>,
     /// Inferred reference parameters for untyped params: function -> per-param flag.
@@ -714,11 +714,31 @@ pub struct BytecodeCompiler {
     pub(crate) native_resolution_context:
         Option<shape_runtime::native_resolution::NativeResolutionSet>,
 
-    /// MIR lowered for functions compiled by this compiler instance.
+    /// Active synthetic MIR context while compiling non-function code.
+    pub(crate) non_function_mir_context_stack: Vec<String>,
+
+    /// MIR lowered for compiled functions and synthetic non-function contexts.
     pub(crate) mir_functions: HashMap<String, crate::mir::types::MirFunction>,
 
-    /// Borrow analyses produced from lowered MIR for compiled functions.
+    /// Borrow analyses produced from lowered MIR for compiled functions and
+    /// synthetic non-function contexts.
     pub(crate) mir_borrow_analyses: HashMap<String, crate::mir::BorrowAnalysis>,
+
+    /// Storage plans produced by the storage planning pass for each function.
+    /// Maps function name to the plan mapping each MIR slot to a `BindingStorageClass`.
+    pub(crate) mir_storage_plans: HashMap<String, crate::mir::StoragePlan>,
+
+    /// Per-function borrow summaries for interprocedural alias checking.
+    /// Describes which parameters conflict and must not alias at call sites.
+    pub(crate) function_borrow_summaries: HashMap<String, crate::mir::FunctionBorrowSummary>,
+
+    /// Per-function mapping from AST spans to MIR program points.
+    /// Used to bridge the bytecode compiler (which knows AST spans) to
+    /// MIR ownership decisions (which are keyed by `Point`).
+    pub(crate) mir_span_to_point: HashMap<String, HashMap<shape_ast::ast::Span, crate::mir::types::Point>>,
+
+    /// Field-level definite-initialization and liveness analyses for compiled functions.
+    pub(crate) mir_field_analyses: HashMap<String, crate::mir::FieldAnalysis>,
 }
 
 impl Default for BytecodeCompiler {
@@ -760,7 +780,3 @@ pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPas
 #[cfg(all(test, feature = "deep-tests"))]
 #[path = "compiler_tests.rs"]
 mod compiler_deep;
-
-#[cfg(all(test, feature = "deep-tests"))]
-#[path = "borrow_deep_tests.rs"]
-mod borrow_deep_tests;

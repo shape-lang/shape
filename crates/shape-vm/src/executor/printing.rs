@@ -15,9 +15,15 @@ use shape_value::{NanTag, ValueWord};
 /// Formatter for ValueWord values
 ///
 /// Uses TypeSchemaRegistry to format TypedObjects with their field names.
+/// Optionally accepts a reference resolver to dereference `&ref` values
+/// (requires VM stack access, so only available during execution).
 pub struct ValueFormatter<'a> {
     /// Type schema registry for TypedObject field resolution
     schema_registry: &'a TypeSchemaRegistry,
+    /// Optional callback to resolve reference values to their targets.
+    /// When provided, refs are dereferenced and their underlying values printed.
+    /// When absent, refs display as `<ref>`.
+    deref_fn: Option<&'a dyn Fn(&ValueWord) -> Option<ValueWord>>,
 }
 
 /// Backward-compat alias used by test code.
@@ -27,7 +33,25 @@ pub type VMValueFormatter<'a> = ValueFormatter<'a>;
 impl<'a> ValueFormatter<'a> {
     /// Create a new formatter
     pub fn new(schema_registry: &'a TypeSchemaRegistry) -> Self {
-        Self { schema_registry }
+        Self {
+            schema_registry,
+            deref_fn: None,
+        }
+    }
+
+    /// Create a formatter with a reference resolver.
+    ///
+    /// The resolver is called when a `NanTag::Ref` or `HeapValue::ProjectedRef`
+    /// is encountered, allowing the formatter to print the underlying value
+    /// instead of `<ref>`.
+    pub fn with_deref(
+        schema_registry: &'a TypeSchemaRegistry,
+        deref_fn: &'a dyn Fn(&ValueWord) -> Option<ValueWord>,
+    ) -> Self {
+        Self {
+            schema_registry,
+            deref_fn: Some(deref_fn),
+        }
     }
 
     /// Format a ValueWord to string (test-only, delegates to ValueWord path)
@@ -81,7 +105,14 @@ impl<'a> ValueFormatter<'a> {
                 return "[Function]".to_string();
             }
             NanTag::ModuleFunction => return "[ModuleFunction]".to_string(),
-            NanTag::Ref => return "<ref>".to_string(),
+            NanTag::Ref => {
+                if let Some(deref) = &self.deref_fn {
+                    if let Some(resolved) = deref(value) {
+                        return self.format_nb_with_depth(&resolved, depth + 1);
+                    }
+                }
+                return "<ref>".to_string();
+            }
             NanTag::Heap => {}
         }
 
@@ -89,7 +120,14 @@ impl<'a> ValueFormatter<'a> {
         match value.as_heap_ref() {
             Some(HeapValue::String(s)) => s.as_ref().clone(),
             Some(HeapValue::Array(arr)) => self.format_nanboxed_array(arr.as_ref(), depth),
-            Some(HeapValue::ProjectedRef(_)) => "<ref>".to_string(),
+            Some(HeapValue::ProjectedRef(_)) => {
+                if let Some(deref) = &self.deref_fn {
+                    if let Some(resolved) = deref(value) {
+                        return self.format_nb_with_depth(&resolved, depth + 1);
+                    }
+                }
+                "<ref>".to_string()
+            }
             Some(HeapValue::TypedObject {
                 schema_id,
                 slots,
@@ -490,11 +528,7 @@ impl<'a> ValueFormatter<'a> {
             format!("{}({})", variant.name, payload_values[0])
         } else {
             // Multiple payloads - use tuple style with variant name
-            format!(
-                "{}({})",
-                variant.name,
-                payload_values.join(", ")
-            )
+            format!("{}({})", variant.name, payload_values.join(", "))
         }
     }
 
@@ -854,13 +888,27 @@ mod tests {
     // ===== LOW-9: References show <ref> (or dereferenced value via VM) =====
 
     #[test]
-    fn test_ref_display_no_ampersand_prefix() {
+    fn test_ref_display_without_resolver() {
         let schema_reg = create_test_registry();
         let formatter = VMValueFormatter::new(&schema_reg);
 
-        // Inline stack ref shows <ref> (cannot resolve without VM stack)
+        // Without a resolver, inline stack refs show <ref>
         let ref_val = ValueWord::from_ref(42);
         let formatted = formatter.format_nb(&ref_val);
         assert_eq!(formatted, "<ref>");
+    }
+
+    #[test]
+    fn test_ref_display_with_resolver() {
+        let schema_reg = create_test_registry();
+        // Resolver that returns a concrete value for any ref
+        let resolver = |_v: &ValueWord| -> Option<ValueWord> {
+            Some(ValueWord::from_i64(99))
+        };
+        let formatter = ValueFormatter::with_deref(&schema_reg, &resolver);
+
+        let ref_val = ValueWord::from_ref(42);
+        let formatted = formatter.format_nb(&ref_val);
+        assert_eq!(formatted, "99");
     }
 }

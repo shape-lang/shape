@@ -166,11 +166,7 @@ impl VirtualMachine {
                     .and_then(|id| self.function_entry_points.get(id as usize).copied())
                     .unwrap_or(0);
                 let local_offset = self.ip.saturating_sub(entry_point);
-                (
-                    blob_hash.map(|h| h.0),
-                    Some(local_offset),
-                    fid,
-                )
+                (blob_hash.map(|h| h.0), Some(local_offset), fid)
             } else {
                 (None, None, None)
             };

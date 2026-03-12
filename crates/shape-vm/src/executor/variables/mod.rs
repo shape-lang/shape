@@ -60,6 +60,36 @@ impl VirtualMachine {
                     }
                     Ok(ValueWord::none())
                 }
+                RefProjection::Index { index } => {
+                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "internal error: projected reference base is not a reference"
+                                .to_string(),
+                        )
+                    })?;
+                    let base_value = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
+                        base_value.as_heap_ref()
+                    {
+                        value.as_ref().clone()
+                    } else {
+                        base_value
+                    };
+                    if let Some(arr) = base_value.as_any_array() {
+                        let idx_opt = index
+                            .as_i64()
+                            .or_else(|| index.as_f64().map(|f| f as i64));
+                        if let Some(idx) = idx_opt {
+                            let len = arr.len() as i64;
+                            let actual = if idx < 0 { len + idx } else { idx };
+                            if actual >= 0 && (actual as usize) < arr.len() {
+                                return Ok(arr
+                                    .get_nb(actual as usize)
+                                    .unwrap_or_else(ValueWord::none));
+                            }
+                        }
+                    }
+                    Ok(ValueWord::none())
+                }
             },
         }
     }
@@ -131,6 +161,35 @@ impl VirtualMachine {
                         "cannot write through a field reference to a non-object value".to_string(),
                     ))
                 }
+                RefProjection::Index { index } => {
+                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "internal error: projected reference base is not a reference"
+                                .to_string(),
+                        )
+                    })?;
+                    let mut base_value = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
+                        base_value.as_heap_ref()
+                    {
+                        value.as_ref().clone()
+                    } else {
+                        base_value
+                    };
+                    Self::set_array_index_on_object(&mut base_value, index, value).map_err(
+                        |err| match err {
+                            VMError::RuntimeError(message)
+                                if message.starts_with("Cannot set property") =>
+                            {
+                                VMError::RuntimeError(
+                                    "cannot write through an index reference to a non-array value"
+                                        .to_string(),
+                                )
+                            }
+                            other => other,
+                        },
+                    )?;
+                    self.write_ref_value(&data.base, base_value)
+                }
             },
         }
     }
@@ -170,6 +229,7 @@ impl VirtualMachine {
             CloseUpvalue => self.op_close_upvalue(instruction)?,
             MakeRef => self.op_make_ref(instruction)?,
             MakeFieldRef => self.op_make_field_ref(instruction)?,
+            MakeIndexRef => self.op_make_index_ref(instruction)?,
             DerefLoad => self.op_deref_load(instruction)?,
             DerefStore => self.op_deref_store(instruction)?,
             SetIndexRef => self.op_set_index_ref(instruction)?,
@@ -462,6 +522,26 @@ impl VirtualMachine {
             )),
             _ => Err(VMError::InvalidOperand),
         }
+    }
+
+    /// MakeIndexRef: pop an index value and a base reference, push a projected
+    /// `RefProjection::Index` reference that points to `base[index]`.
+    pub(in crate::executor) fn op_make_index_ref(
+        &mut self,
+        _instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let index = self.pop_vw()?;
+        let base_ref = self.pop_vw()?;
+        if base_ref.as_ref_target().is_none() {
+            return Err(VMError::RuntimeError(
+                "internal error: MakeIndexRef expected a base reference".to_string(),
+            ));
+        }
+        self.push_vw(ValueWord::from_projected_ref(
+            base_ref,
+            RefProjection::Index { index },
+        ))?;
+        Ok(())
     }
 
     /// DerefLoad: Follow a reference stored in a local slot and push the target value.

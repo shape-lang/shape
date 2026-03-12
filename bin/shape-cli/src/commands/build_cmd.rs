@@ -123,12 +123,7 @@ mod tests {
 
     #[test]
     fn test_compute_output_path_fallback_to_filename() {
-        let result = compute_output_path(
-            None,
-            Path::new("/project"),
-            None,
-            "pkg-1.0.0.shapec",
-        );
+        let result = compute_output_path(None, Path::new("/project"), None, "pkg-1.0.0.shapec");
         assert_eq!(result, PathBuf::from("pkg-1.0.0.shapec"));
     }
 

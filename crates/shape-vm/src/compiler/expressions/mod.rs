@@ -5,8 +5,7 @@
 use shape_ast::ast::{Expr, Span};
 use shape_ast::error::{Result, ShapeError};
 
-use super::BytecodeCompiler;
-use crate::borrow_checker::BorrowMode;
+use super::{BorrowMode, BytecodeCompiler, ExprReferenceResult, ExprResultMode};
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_runtime::type_schema::FieldType;
@@ -834,10 +833,151 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    pub(super) fn capture_last_expr_reference_result(&self) -> ExprReferenceResult {
+        self.last_expr_reference_result
+    }
+
+    pub(super) fn restore_last_expr_reference_result(
+        &mut self,
+        result: ExprReferenceResult,
+    ) {
+        self.last_expr_reference_result = result;
+    }
+
+    pub(super) fn clear_last_expr_reference_result(&mut self) {
+        self.last_expr_reference_result = ExprReferenceResult::default();
+    }
+
+    pub(super) fn set_last_expr_reference_result(
+        &mut self,
+        mode: BorrowMode,
+        auto_deref: bool,
+    ) {
+        self.last_expr_reference_result = ExprReferenceResult {
+            raw_mode: Some(mode),
+            auto_deref_mode: auto_deref.then_some(mode),
+        };
+    }
+
+    pub(super) fn last_expr_reference_mode(&self) -> Option<BorrowMode> {
+        self.last_expr_reference_result.raw_mode
+    }
+
+    pub(super) fn merge_reference_results(
+        results: &[ExprReferenceResult],
+    ) -> ExprReferenceResult {
+        let Some(first) = results.first().copied() else {
+            return ExprReferenceResult::default();
+        };
+        let Some(raw_mode) = first.raw_mode else {
+            return ExprReferenceResult::default();
+        };
+        if !results
+            .iter()
+            .all(|result| result.raw_mode == Some(raw_mode))
+        {
+            return ExprReferenceResult::default();
+        }
+        let auto_deref_mode = if first.auto_deref_mode.is_some()
+            && results
+                .iter()
+                .all(|result| result.auto_deref_mode == first.auto_deref_mode)
+        {
+            first.auto_deref_mode
+        } else {
+            None
+        };
+        ExprReferenceResult {
+            raw_mode: Some(raw_mode),
+            auto_deref_mode,
+        }
+    }
+
+    fn auto_deref_last_expr_result_if_needed(&mut self) -> Result<()> {
+        if self.last_expr_reference_result.auto_deref_mode.is_none() {
+            return Ok(());
+        }
+        let temp = self.declare_temp_local("__expr_auto_deref_")?;
+        self.emit(Instruction::new(
+            OpCode::StoreLocal,
+            Some(Operand::Local(temp)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::DerefLoad,
+            Some(Operand::Local(temp)),
+        ));
+        self.clear_last_expr_reference_result();
+        Ok(())
+    }
+
+    pub(super) fn current_expr_result_mode(&self) -> ExprResultMode {
+        self.current_expr_result_mode
+    }
+
+    pub(super) fn compile_expr_preserving_refs(&mut self, expr: &Expr) -> Result<()> {
+        let saved_mode = self.current_expr_result_mode;
+        self.current_expr_result_mode = ExprResultMode::PreserveRef;
+        self.clear_last_expr_reference_result();
+
+        let result = match expr {
+            Expr::Identifier(name, span) => self.compile_expr_identifier_preserving_refs(name, *span),
+            Expr::FunctionCall {
+                name, args, span, ..
+            } => self.compile_expr_function_call(name, args, *span),
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => self.compile_expr_method_call(receiver, method, args),
+            Expr::Reference {
+                expr: inner,
+                is_mutable,
+                span,
+            } => {
+                let mode = if *is_mutable {
+                    BorrowMode::Exclusive
+                } else {
+                    BorrowMode::Shared
+                };
+                let result = self.compile_reference_expr(inner, *span, mode).map(|_| ());
+                if result.is_ok() {
+                    self.set_last_expr_reference_result(mode, false);
+                }
+                result
+            }
+            Expr::Block(block, _) => self.compile_expr_block(block),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => self.compile_expr_conditional(condition, then_expr, else_expr),
+            Expr::If(if_expr, _) => self.compile_expr_if(if_expr),
+            Expr::Let(let_expr, _) => self.compile_expr_let(let_expr),
+            Expr::Assign(assign_expr, _) => self.compile_expr_assign(assign_expr),
+            Expr::Match(match_expr, _) => self.compile_expr_match(match_expr),
+            _ => {
+                let result = self.compile_expr(expr);
+                if result.is_ok() {
+                    self.clear_last_expr_reference_result();
+                }
+                result
+            }
+        };
+
+        self.current_expr_result_mode = saved_mode;
+        result
+    }
+
     /// Main expression compilation dispatcher
     ///
     /// This method dispatches to specialized compilation methods based on expression type.
     pub(super) fn compile_expr(&mut self, expr: &Expr) -> Result<()> {
+        let saved_mode = self.current_expr_result_mode;
+        self.current_expr_result_mode = ExprResultMode::Value;
+        self.clear_last_expr_reference_result();
+
         // Reset numeric type tracking — each expression must explicitly set it.
         // Without this, a stale numeric type from a previous sub-expression
         // could cause the wrong typed opcode to be emitted.
@@ -850,7 +990,7 @@ impl BytecodeCompiler {
             self.set_line_from_span(span);
         }
 
-        match expr {
+        let result = match expr {
             // Literals
             Expr::Literal(lit, _) => self.compile_expr_literal(lit),
 
@@ -1128,14 +1268,16 @@ impl BytecodeCompiler {
                 is_mutable,
                 span,
             } => {
-                let mode = if self.in_call_args {
-                    self.current_arg_borrow_mode()
-                } else if *is_mutable {
+                let mode = if *is_mutable {
                     BorrowMode::Exclusive
                 } else {
                     BorrowMode::Shared
                 };
-                self.compile_reference_expr(inner, *span, mode).map(|_| ())
+                let result = self.compile_reference_expr(inner, *span, mode).map(|_| ());
+                if result.is_ok() {
+                    self.set_last_expr_reference_result(mode, false);
+                }
+                result
             }
 
             // Table row literals — compiled via compile_table_rows() in the VariableDecl handler.
@@ -1144,7 +1286,13 @@ impl BytecodeCompiler {
                 message: "table row literal `[...], [...]` can only be used as a variable initializer with a `Table<T>` type annotation".to_string(),
                 location: Some(self.span_to_source_location(*span)),
             }),
+        };
+
+        if result.is_ok() {
+            self.auto_deref_last_expr_result_if_needed()?;
         }
+        self.current_expr_result_mode = saved_mode;
+        result
     }
 
     /// Infer the type of an expression using the type inference engine

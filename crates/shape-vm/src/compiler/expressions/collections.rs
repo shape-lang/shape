@@ -111,12 +111,32 @@ fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
+    fn expr_is_local_mir_place(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(name, _) | Expr::PatternRef(name, _) => {
+                self.resolve_local(name).is_some()
+            }
+            Expr::PropertyAccess { object, .. } => self.expr_is_local_mir_place(object),
+            Expr::IndexAccess {
+                object, end_index, ..
+            } => end_index.is_none() && self.expr_is_local_mir_place(object),
+            _ => false,
+        }
+    }
+
+    /// Reject reference storage in collections/aggregates for **top-level code only**.
+    /// Inside function bodies the MIR solver detects these via `array_store_loans`,
+    /// `object_store_loans`, and `enum_store_loans` facts, so we defer to it.
     pub(super) fn reject_direct_reference_storage(
         &self,
         expr: &Expr,
         message: &'static str,
     ) -> Result<()> {
         if let Expr::Reference { span, .. } = expr {
+            // Inside a function body, MIR handles this — only reject at top level.
+            if self.current_function.is_some() {
+                return Ok(());
+            }
             return Err(ShapeError::SemanticError {
                 message: message.to_string(),
                 location: Some(self.span_to_source_location(*span)),
@@ -127,15 +147,11 @@ impl BytecodeCompiler {
 
     /// Compile an array expression
     pub(super) fn compile_expr_array(&mut self, elements: &[Expr]) -> Result<()> {
-        // Reject references in array literals — refs are scoped borrows
-        // that cannot be stored in collections (would escape scope).
+        // Inside function bodies the MIR solver handles ref-in-collection;
+        // at top level reject_direct_reference_storage still fires.
+        const ARRAY_REF_STORAGE_ERROR: &str = "cannot store a reference in an array — references are scoped borrows that cannot escape into collections. Use owned values instead";
         for elem in elements {
-            if let Expr::Reference { span, .. } = elem {
-                return Err(ShapeError::SemanticError {
-                    message: "cannot store a reference in an array — references are scoped borrows that cannot escape into collections. Use owned values instead".to_string(),
-                    location: Some(self.span_to_source_location(*span)),
-                });
-            }
+            self.reject_direct_reference_storage(elem, ARRAY_REF_STORAGE_ERROR)?;
         }
         let literal_numeric = infer_array_literal_numeric_type(elements);
         let is_bool = is_homogeneous_bool_array(elements);
@@ -193,8 +209,9 @@ impl BytecodeCompiler {
         entries: &[shape_ast::ast::ObjectEntry],
     ) -> Result<()> {
         use shape_ast::ast::ObjectEntry;
+        // Inside function bodies the MIR solver handles ref-in-object;
+        // at top level reject_direct_reference_storage still fires.
         const OBJECT_REF_STORAGE_ERROR: &str = "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
-
         for entry in entries {
             match entry {
                 ObjectEntry::Field { value, .. } => {
@@ -238,7 +255,7 @@ impl BytecodeCompiler {
             .collect();
 
         // Include hoisted fields if this object is being assigned to a variable
-        // with future property assignments (optimistic hoisting pre-pass).
+        // with future property assignments (Phase 1: AST pre-pass hoisting).
         let hoisted: Vec<String> = self
             .pending_variable_name
             .as_ref()
@@ -251,6 +268,17 @@ impl BytecodeCompiler {
                     .collect()
             })
             .unwrap_or_default();
+
+        // MIR field analysis integration note:
+        // Phase 2 (MIR) can identify dead hoisted fields — fields that were
+        // included in the schema by the AST pre-pass but are never actually
+        // read within the function. To prune these, the compiler would need to
+        // map `mir_field_analyses[func].dead_fields` (which uses `(SlotId,
+        // FieldIdx)`) back to field names via the schema registry. This mapping
+        // is not available during object construction because the schema is
+        // being *created* here. A future optimization can perform a post-MIR
+        // schema compaction pass that shrinks schemas after all field accesses
+        // are known.
 
         // Build typed field list by inferring types from expressions
         let typed_fields: Vec<(&str, FieldType)> = entries
@@ -552,11 +580,13 @@ impl BytecodeCompiler {
         fields: &[(String, Expr)],
         literal_span: shape_ast::ast::Span,
     ) -> Result<()> {
+        // Inside function bodies the MIR solver handles ref-in-struct;
+        // at top level reject_direct_reference_storage still fires.
         const OBJECT_REF_STORAGE_ERROR: &str = "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
-        let literal_loc = self.span_to_source_location(literal_span);
         for (_, value) in fields {
             self.reject_direct_reference_storage(value, OBJECT_REF_STORAGE_ERROR)?;
         }
+        let literal_loc = self.span_to_source_location(literal_span);
         // Look up struct type definition, resolving through type aliases if needed
         let struct_info = self.struct_types.get(type_name).cloned().or_else(|| {
             self.type_aliases

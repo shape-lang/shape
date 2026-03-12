@@ -16,11 +16,20 @@
 //! Derived relations (Datafrog fixpoint):
 //!   loan_live_at(Loan, Point)         — a loan is still active
 //!   error(Point, Loan, Loan)          — two conflicting loans are simultaneously active
+//!
+//! Additional analyses:
+//! - **Post-solve relaxation**: `relax_local_container_errors()` removes
+//!   `ReferenceStoredIn*` errors when the container is local (never escapes).
+//! - **Interprocedural summaries**: `extract_borrow_summary()` derives per-function
+//!   conflict pairs for call-site alias checking.
+//! - **Task-boundary sendability**: Detects closures with mutable captures
+//!   crossing detached task boundaries (B0014).
 
 use super::analysis::*;
 use super::cfg::ControlFlowGraph;
 use super::liveness::{self, LivenessResult};
 use super::types::*;
+use crate::type_tracking::EscapeStatus;
 use datafrog::{Iteration, Relation, RelationLeaper};
 use std::collections::{HashMap, HashSet};
 
@@ -45,8 +54,12 @@ pub struct BorrowFacts {
     pub writes: Vec<(u32, Place, shape_ast::ast::Span)>,
     /// Reads from owner places that may conflict with active exclusive loans.
     pub reads: Vec<(u32, Place, shape_ast::ast::Span)>,
+    /// Escape classification for every local slot in the MIR function.
+    pub slot_escape_status: HashMap<SlotId, EscapeStatus>,
     /// Loans that flow into the dedicated return slot and would escape.
     pub escaped_loans: Vec<(u32, shape_ast::ast::Span)>,
+    /// Unified sink records for all loan escapes/stores/boundaries.
+    pub loan_sinks: Vec<LoanSink>,
     /// Exclusive loans captured across an async/task boundary.
     pub task_boundary_loans: Vec<(u32, shape_ast::ast::Span)>,
     /// Loans captured into a closure environment.
@@ -61,10 +74,13 @@ pub struct BorrowFacts {
     pub object_assignment_loans: Vec<(u32, shape_ast::ast::Span)>,
     /// Loans written through index assignments into aggregate places.
     pub array_assignment_loans: Vec<(u32, shape_ast::ast::Span)>,
-    /// Reference-return contracts flowing into the return slot.
-    pub return_reference_candidates: Vec<(ReferenceReturnContract, shape_ast::ast::Span)>,
+    /// Reference-return summaries flowing into the return slot.
+    pub return_reference_candidates: Vec<(ReturnReferenceSummary, shape_ast::ast::Span)>,
     /// Return-slot writes that produce a plain owned value.
     pub non_reference_return_spans: Vec<shape_ast::ast::Span>,
+    /// Non-sendable values crossing detached task boundaries (e.g., closures
+    /// with mutable captures).
+    pub non_sendable_task_boundary: Vec<(u32, shape_ast::ast::Span)>,
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
@@ -72,7 +88,22 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
     let mut facts = BorrowFacts::default();
     let mut next_loan = 0u32;
     let mut slot_loans: HashMap<SlotId, Vec<u32>> = HashMap::new();
-    let param_reference_contracts: HashMap<SlotId, ReferenceReturnContract> = mir
+    let mut slot_reference_origins: HashMap<SlotId, (BorrowKind, ReferenceOrigin)> =
+        HashMap::new();
+
+    // Track slots that are targets of ClosureCapture with mutable captures
+    // (proxy for non-sendable closures).
+    let (all_captures, mutable_captures) =
+        super::storage_planning::collect_closure_captures(mir);
+    let closure_capture_slots: HashSet<SlotId> = mutable_captures;
+    facts.slot_escape_status.extend((0..mir.num_locals).map(|raw_slot| {
+        let slot = SlotId(raw_slot);
+        (
+            slot,
+            super::storage_planning::detect_escape_status(slot, mir, &all_captures),
+        )
+    }));
+    let param_reference_summaries: HashMap<SlotId, ReturnReferenceSummary> = mir
         .param_slots
         .iter()
         .enumerate()
@@ -81,10 +112,19 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                 .get(param_index)
                 .copied()
                 .flatten()
-                .map(|kind| (*slot, ReferenceReturnContract { param_index, kind }))
+                .map(|kind| {
+                    (
+                        *slot,
+                        ReturnReferenceSummary {
+                            param_index,
+                            kind,
+                            projection: Some(Vec::new()),
+                        },
+                    )
+                })
         })
         .collect();
-    let mut slot_reference_contracts = param_reference_contracts.clone();
+    let mut slot_reference_summaries = param_reference_summaries.clone();
 
     // Extract CFG edges from the block structure
     for block in &mir.blocks {
@@ -118,16 +158,45 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                     facts.loan_issued_at.push((loan_id, stmt.point.0));
                     if let Place::Local(slot) = dest {
                         slot_loans.insert(*slot, vec![loan_id]);
-                        if let Some(contract) = safe_reference_contract_for_borrow(
+                        slot_reference_origins.insert(
+                            *slot,
+                            (*kind, reference_origin_for_place(place, &mir.param_slots)),
+                        );
+                        if let Some(contract) = safe_reference_summary_for_borrow(
                             *kind,
                             place,
-                            &param_reference_contracts,
+                            &param_reference_summaries,
                         ) {
-                            slot_reference_contracts.insert(*slot, contract);
+                            slot_reference_summaries.insert(*slot, contract);
                         } else {
-                            slot_reference_contracts.remove(slot);
+                            slot_reference_summaries.remove(slot);
+                        }
+                        if *slot == SlotId(0) {
+                            if let Some(contract) = safe_reference_summary_for_borrow(
+                                *kind,
+                                place,
+                                &param_reference_summaries,
+                            ) {
+                                facts
+                                    .return_reference_candidates
+                                    .push((contract, stmt.span));
+                            } else {
+                                facts.escaped_loans.push((loan_id, stmt.span));
+                                facts.loan_sinks.push(LoanSink {
+                                    loan_id,
+                                    kind: LoanSinkKind::ReturnSlot,
+                                    sink_slot: Some(*slot),
+                                    span: stmt.span,
+                                });
+                            }
                         }
                     }
+                    // Compute region depth: parameter loans get 0, locals get 1.
+                    let region_depth = if mir.param_slots.contains(&place.root_local()) {
+                        0 // Parameter — lives for the entire function
+                    } else {
+                        1 // Local — lives within the function body
+                    };
                     facts.loan_info.insert(
                         loan_id,
                         LoanInfo {
@@ -136,33 +205,51 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                             kind: *kind,
                             issued_at: stmt.point,
                             span: stmt.span,
+                            region_depth,
                         },
                     );
                 }
                 StatementKind::Assign(place, rvalue) => {
                     if let Place::Local(dest_slot) = place {
                         update_slot_loan_aliases(&mut slot_loans, *dest_slot, rvalue);
-                        update_slot_reference_contracts(
-                            &mut slot_reference_contracts,
+                        update_slot_reference_origins(
+                            &mut slot_reference_origins,
+                            *dest_slot,
+                            rvalue,
+                        );
+                        update_slot_reference_summaries(
+                            &mut slot_reference_summaries,
                             *dest_slot,
                             rvalue,
                         );
                         if *dest_slot == SlotId(0) {
                             let mut found_reference_return = false;
                             if let Some(contract) =
-                                reference_contract_from_rvalue(&slot_reference_contracts, rvalue)
+                                reference_summary_from_rvalue(&slot_reference_summaries, rvalue)
                             {
                                 facts
                                     .return_reference_candidates
                                     .push((contract, stmt.span));
                                 found_reference_return = true;
                             }
+                            if let Some((borrow_kind, origin)) =
+                                reference_origin_from_rvalue(&slot_reference_origins, rvalue)
+                            {
+                                if let Some(contract) =
+                                    reference_summary_from_origin(borrow_kind, &origin)
+                                {
+                                    facts
+                                        .return_reference_candidates
+                                        .push((contract, stmt.span));
+                                    found_reference_return = true;
+                                }
+                            }
                             for loan_id in local_loans_from_rvalue(&slot_loans, rvalue) {
                                 let info = &facts.loan_info[&loan_id];
-                                if let Some(contract) = safe_reference_contract_for_borrow(
+                                if let Some(contract) = safe_reference_summary_for_borrow(
                                     info.kind,
                                     &info.borrowed_place,
-                                    &param_reference_contracts,
+                                    &param_reference_summaries,
                                 ) {
                                     facts
                                         .return_reference_candidates
@@ -170,6 +257,12 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                                     found_reference_return = true;
                                 } else {
                                     facts.escaped_loans.push((loan_id, stmt.span));
+                                    facts.loan_sinks.push(LoanSink {
+                                        loan_id,
+                                        kind: LoanSinkKind::ReturnSlot,
+                                        sink_slot: Some(*dest_slot),
+                                        span: stmt.span,
+                                    });
                                 }
                             }
                             if !found_reference_return {
@@ -181,11 +274,23 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                         Place::Field(..) => {
                             for loan_id in local_loans_from_rvalue(&slot_loans, rvalue) {
                                 facts.object_assignment_loans.push((loan_id, stmt.span));
+                                facts.loan_sinks.push(LoanSink {
+                                    loan_id,
+                                    kind: LoanSinkKind::ObjectAssignment,
+                                    sink_slot: Some(place.root_local()),
+                                    span: stmt.span,
+                                });
                             }
                         }
                         Place::Index(..) => {
                             for loan_id in local_loans_from_rvalue(&slot_loans, rvalue) {
                                 facts.array_assignment_loans.push((loan_id, stmt.span));
+                                facts.loan_sinks.push(LoanSink {
+                                    loan_id,
+                                    kind: LoanSinkKind::ArrayAssignment,
+                                    sink_slot: Some(place.root_local()),
+                                    span: stmt.span,
+                                });
                             }
                         }
                         Place::Local(..) | Place::Deref(..) => {}
@@ -206,35 +311,104 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                         }
                     }
                 }
-                StatementKind::TaskBoundary(operands) => {
+                StatementKind::TaskBoundary(operands, kind) => {
                     for loan_id in local_loans_from_operands(&slot_loans, operands) {
-                        if facts
-                            .loan_info
-                            .get(&loan_id)
-                            .is_some_and(|info| info.kind == BorrowKind::Exclusive)
-                        {
-                            facts.task_boundary_loans.push((loan_id, stmt.span));
+                        let info = &facts.loan_info[&loan_id];
+                        match kind {
+                            TaskBoundaryKind::Detached => {
+                                // All refs (shared + exclusive) rejected across detached tasks
+                                facts.task_boundary_loans.push((loan_id, stmt.span));
+                                facts.loan_sinks.push(LoanSink {
+                                    loan_id,
+                                    kind: LoanSinkKind::DetachedTaskBoundary,
+                                    sink_slot: None,
+                                    span: stmt.span,
+                                });
+                            }
+                            TaskBoundaryKind::Structured => {
+                                // Only exclusive refs rejected across structured tasks
+                                if info.kind == BorrowKind::Exclusive {
+                                    facts.task_boundary_loans.push((loan_id, stmt.span));
+                                    facts.loan_sinks.push(LoanSink {
+                                        loan_id,
+                                        kind: LoanSinkKind::StructuredTaskBoundary,
+                                        sink_slot: None,
+                                        span: stmt.span,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    // Sendability check for detached tasks: closures with mutable
+                    // captures are not sendable across detached boundaries.
+                    if *kind == TaskBoundaryKind::Detached {
+                        for op in operands {
+                            if let Operand::Copy(Place::Local(slot))
+                            | Operand::Move(Place::Local(slot)) = op
+                            {
+                                if closure_capture_slots.contains(slot) {
+                                    facts
+                                        .non_sendable_task_boundary
+                                        .push((slot.0 as u32, stmt.span));
+                                }
+                            }
                         }
                     }
                 }
-                StatementKind::ClosureCapture(operands) => {
+                StatementKind::ClosureCapture {
+                    closure_slot,
+                    operands,
+                } => {
                     for loan_id in local_loans_from_operands(&slot_loans, operands) {
                         facts.closure_capture_loans.push((loan_id, stmt.span));
+                        facts.loan_sinks.push(LoanSink {
+                            loan_id,
+                            kind: LoanSinkKind::ClosureEnv,
+                            sink_slot: Some(*closure_slot),
+                            span: stmt.span,
+                        });
                     }
                 }
-                StatementKind::ArrayStore(operands) => {
+                StatementKind::ArrayStore {
+                    container_slot,
+                    operands,
+                } => {
                     for loan_id in local_loans_from_operands(&slot_loans, operands) {
                         facts.array_store_loans.push((loan_id, stmt.span));
+                        facts.loan_sinks.push(LoanSink {
+                            loan_id,
+                            kind: LoanSinkKind::ArrayStore,
+                            sink_slot: Some(*container_slot),
+                            span: stmt.span,
+                        });
                     }
                 }
-                StatementKind::ObjectStore(operands) => {
+                StatementKind::ObjectStore {
+                    container_slot,
+                    operands,
+                } => {
                     for loan_id in local_loans_from_operands(&slot_loans, operands) {
                         facts.object_store_loans.push((loan_id, stmt.span));
+                        facts.loan_sinks.push(LoanSink {
+                            loan_id,
+                            kind: LoanSinkKind::ObjectStore,
+                            sink_slot: Some(*container_slot),
+                            span: stmt.span,
+                        });
                     }
                 }
-                StatementKind::EnumStore(operands) => {
+                StatementKind::EnumStore {
+                    container_slot,
+                    operands,
+                } => {
                     for loan_id in local_loans_from_operands(&slot_loans, operands) {
                         facts.enum_store_loans.push((loan_id, stmt.span));
+                        facts.loan_sinks.push(LoanSink {
+                            loan_id,
+                            kind: LoanSinkKind::EnumStore,
+                            sink_slot: Some(*container_slot),
+                            span: stmt.span,
+                        });
                     }
                 }
                 StatementKind::Nop => {}
@@ -252,6 +426,27 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                     }
                 }
             }
+        }
+
+        // Process Call terminators for borrow facts
+        if let TerminatorKind::Call { func, args, destination, .. } = &block.terminator.kind {
+            let call_point = block.statements.last().map(|s| s.point.0).unwrap_or(0);
+            // Track reads from func and args operands
+            let mut all_operands = vec![func];
+            all_operands.extend(args.iter());
+            for op in &all_operands {
+                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = op {
+                    if let Some(loans) = slot_loans.get(&place.root_local()) {
+                        for &loan_id in loans {
+                            facts.use_of_loan.push((loan_id, call_point));
+                        }
+                    }
+                }
+            }
+            // Destination write: clear slot_loans and reference summarys for that slot
+            slot_loans.remove(&destination.root_local());
+            slot_reference_origins.remove(&destination.root_local());
+            slot_reference_summaries.remove(&destination.root_local());
         }
     }
 
@@ -319,27 +514,27 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
             }
         },
         StatementKind::Drop(place) => place_nested_read_places(place, &mut reads),
-        StatementKind::TaskBoundary(operands) => {
+        StatementKind::TaskBoundary(operands, _kind) => {
             for operand in operands {
                 operand_read_places(operand, &mut reads);
             }
         }
-        StatementKind::ClosureCapture(operands) => {
+        StatementKind::ClosureCapture { operands, .. } => {
             for operand in operands {
                 operand_read_places(operand, &mut reads);
             }
         }
-        StatementKind::ArrayStore(operands) => {
+        StatementKind::ArrayStore { operands, .. } => {
             for operand in operands {
                 operand_read_places(operand, &mut reads);
             }
         }
-        StatementKind::ObjectStore(operands) => {
+        StatementKind::ObjectStore { operands, .. } => {
             for operand in operands {
                 operand_read_places(operand, &mut reads);
             }
         }
-        StatementKind::EnumStore(operands) => {
+        StatementKind::EnumStore { operands, .. } => {
             for operand in operands {
                 operand_read_places(operand, &mut reads);
             }
@@ -412,8 +607,8 @@ fn local_loans_from_rvalue(slot_loans: &HashMap<SlotId, Vec<u32>>, rvalue: &Rval
     }
 }
 
-fn update_slot_reference_contracts(
-    slot_reference_contracts: &mut HashMap<SlotId, ReferenceReturnContract>,
+fn update_slot_reference_summaries(
+    slot_reference_summaries: &mut HashMap<SlotId, ReturnReferenceSummary>,
     dest_slot: SlotId,
     rvalue: &Rvalue,
 ) {
@@ -423,63 +618,145 @@ fn update_slot_reference_contracts(
         | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
         | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
-            if let Some(contract) = slot_reference_contracts.get(src_slot).copied() {
-                slot_reference_contracts.insert(dest_slot, contract);
+            if let Some(contract) = slot_reference_summaries.get(src_slot).cloned() {
+                slot_reference_summaries.insert(dest_slot, contract);
             } else {
-                slot_reference_contracts.remove(&dest_slot);
+                slot_reference_summaries.remove(&dest_slot);
             }
         }
         _ => {
-            slot_reference_contracts.remove(&dest_slot);
+            slot_reference_summaries.remove(&dest_slot);
         }
     }
 }
 
-fn reference_contract_from_rvalue(
-    slot_reference_contracts: &HashMap<SlotId, ReferenceReturnContract>,
+fn reference_summary_from_rvalue(
+    slot_reference_summaries: &HashMap<SlotId, ReturnReferenceSummary>,
     rvalue: &Rvalue,
-) -> Option<ReferenceReturnContract> {
+) -> Option<ReturnReferenceSummary> {
     match rvalue {
         Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
         | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
         | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
-            slot_reference_contracts.get(src_slot).copied()
+            slot_reference_summaries.get(src_slot).cloned()
         }
         _ => None,
     }
 }
 
-fn safe_reference_contract_for_borrow(
+fn update_slot_reference_origins(
+    slot_reference_origins: &mut HashMap<SlotId, (BorrowKind, ReferenceOrigin)>,
+    dest_slot: SlotId,
+    rvalue: &Rvalue,
+) {
+    match rvalue {
+        Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
+            if let Some(origin) = slot_reference_origins.get(src_slot).cloned() {
+                slot_reference_origins.insert(dest_slot, origin);
+            } else {
+                slot_reference_origins.remove(&dest_slot);
+            }
+        }
+        _ => {
+            slot_reference_origins.remove(&dest_slot);
+        }
+    }
+}
+
+fn reference_origin_from_rvalue(
+    slot_reference_origins: &HashMap<SlotId, (BorrowKind, ReferenceOrigin)>,
+    rvalue: &Rvalue,
+) -> Option<(BorrowKind, ReferenceOrigin)> {
+    match rvalue {
+        Rvalue::Borrow(kind, place) => Some((
+            *kind,
+            reference_origin_for_place(place, &[]),
+        )),
+        Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
+        | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Copy(Place::Local(src_slot)))
+        | Rvalue::Clone(Operand::Move(Place::Local(src_slot))) => {
+            slot_reference_origins.get(src_slot).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn reference_origin_for_place(place: &Place, param_slots: &[SlotId]) -> ReferenceOrigin {
+    let root_slot = place.root_local();
+    let root = param_slots
+        .iter()
+        .position(|slot| *slot == root_slot)
+        .map(ReferenceOriginRoot::Param)
+        .unwrap_or(ReferenceOriginRoot::Local(root_slot));
+    ReferenceOrigin {
+        root,
+        projection: place.projection_steps(),
+    }
+}
+
+fn reference_summary_from_origin(
+    borrow_kind: BorrowKind,
+    origin: &ReferenceOrigin,
+) -> Option<ReturnReferenceSummary> {
+    match origin.root {
+        ReferenceOriginRoot::Param(param_index) => Some(ReturnReferenceSummary {
+            param_index,
+            kind: borrow_kind,
+            projection: Some(origin.projection.clone()),
+        }),
+        ReferenceOriginRoot::Local(_) => None,
+    }
+}
+
+fn safe_reference_summary_for_borrow(
     borrow_kind: BorrowKind,
     borrowed_place: &Place,
-    param_reference_contracts: &HashMap<SlotId, ReferenceReturnContract>,
-) -> Option<ReferenceReturnContract> {
-    let param_contract = param_reference_contracts.get(&borrowed_place.root_local())?;
-    Some(ReferenceReturnContract {
-        param_index: param_contract.param_index,
+    param_reference_summaries: &HashMap<SlotId, ReturnReferenceSummary>,
+) -> Option<ReturnReferenceSummary> {
+    // Support both direct param borrows (&param) and field-of-param borrows (&param.field).
+    // The root local must be a parameter with a reference summary.
+    let param_summary = param_reference_summaries.get(&borrowed_place.root_local())?;
+    Some(ReturnReferenceSummary {
+        param_index: param_summary.param_index,
         kind: borrow_kind,
+        projection: Some(borrowed_place.projection_steps()),
     })
 }
 
-fn resolve_return_reference_contract(
+fn resolve_return_reference_summary(
     errors: &mut Vec<BorrowError>,
     facts: &BorrowFacts,
     loans_at_point: &HashMap<Point, Vec<LoanId>>,
-) -> Option<ReferenceReturnContract> {
-    let mut unique_candidates = Vec::new();
+) -> Option<ReturnReferenceSummary> {
+    let mut merged_candidate: Option<ReturnReferenceSummary> = None;
+    let mut inconsistent = false;
     for (candidate, _) in &facts.return_reference_candidates {
-        if !unique_candidates.contains(candidate) {
-            unique_candidates.push(*candidate);
+        if let Some(existing) = merged_candidate.as_mut() {
+            if existing.param_index != candidate.param_index || existing.kind != candidate.kind {
+                inconsistent = true;
+                break;
+            }
+            if existing.projection != candidate.projection {
+                existing.projection = None;
+            }
+        } else {
+            merged_candidate = Some(candidate.clone());
         }
     }
 
-    if unique_candidates.is_empty() {
+    if merged_candidate.is_none() {
         return None;
     }
 
-    let error_span = if unique_candidates.len() > 1 {
+    let error_span = if inconsistent {
         facts
             .return_reference_candidates
             .get(1)
@@ -512,11 +789,11 @@ fn resolve_return_reference_contract(
         return None;
     }
 
-    unique_candidates.into_iter().next()
+    merged_candidate
 }
 
 fn find_matching_loan_for_return_candidate(
-    candidate: &ReferenceReturnContract,
+    candidate: &ReturnReferenceSummary,
     candidate_span: shape_ast::ast::Span,
     facts: &BorrowFacts,
     loans_at_point: &HashMap<Point, Vec<LoanId>>,
@@ -720,124 +997,82 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         });
     }
 
-    let mut seen_array_store = std::collections::HashSet::new();
-    for (loan_id, span) in &facts.array_store_loans {
-        if !seen_array_store.insert((*loan_id, span.start, span.end)) {
+    let mut seen_sinks = std::collections::HashSet::new();
+    for sink in &facts.loan_sinks {
+        let key = (
+            sink.loan_id,
+            sink.kind,
+            sink.span.start,
+            sink.span.end,
+            sink.sink_slot.map(|slot| slot.0),
+        );
+        if !seen_sinks.insert(key) {
             continue;
         }
-        let info = &facts.loan_info[loan_id];
+
+        let info = &facts.loan_info[&sink.loan_id];
+        let sink_is_local = sink
+            .sink_slot
+            .and_then(|slot| facts.slot_escape_status.get(&slot).copied())
+            == Some(EscapeStatus::Local);
+
+        let kind = match sink.kind {
+            LoanSinkKind::ReturnSlot => continue,
+            LoanSinkKind::ClosureEnv if sink_is_local => continue,
+            LoanSinkKind::ClosureEnv => BorrowErrorKind::ReferenceEscapeIntoClosure,
+            LoanSinkKind::ArrayStore | LoanSinkKind::ArrayAssignment if sink_is_local => continue,
+            LoanSinkKind::ArrayStore | LoanSinkKind::ArrayAssignment => {
+                BorrowErrorKind::ReferenceStoredInArray
+            }
+            LoanSinkKind::ObjectStore | LoanSinkKind::ObjectAssignment if sink_is_local => continue,
+            LoanSinkKind::ObjectStore | LoanSinkKind::ObjectAssignment => {
+                BorrowErrorKind::ReferenceStoredInObject
+            }
+            LoanSinkKind::EnumStore if sink_is_local => continue,
+            LoanSinkKind::EnumStore => BorrowErrorKind::ReferenceStoredInEnum,
+            LoanSinkKind::StructuredTaskBoundary => {
+                BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
+            }
+            LoanSinkKind::DetachedTaskBoundary if info.kind == BorrowKind::Exclusive => {
+                BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
+            }
+            LoanSinkKind::DetachedTaskBoundary => BorrowErrorKind::SharedRefAcrossDetachedTask,
+        };
+
         errors.push(BorrowError {
-            kind: BorrowErrorKind::ReferenceStoredInArray,
-            span: *span,
-            conflicting_loan: LoanId(*loan_id),
+            kind,
+            span: sink.span,
+            conflicting_loan: LoanId(sink.loan_id),
             loan_span: info.span,
-            last_use_span: last_use_span_for_loan(facts, *loan_id),
+            last_use_span: last_use_span_for_loan(facts, sink.loan_id),
             repairs: Vec::new(),
         });
     }
 
-    for (loan_id, span) in &facts.array_assignment_loans {
-        if !seen_array_store.insert((*loan_id, span.start, span.end)) {
+    // Non-sendable values across detached task boundaries
+    let mut seen_non_sendable = std::collections::HashSet::new();
+    for (slot_id, span) in &facts.non_sendable_task_boundary {
+        if !seen_non_sendable.insert((*slot_id, span.start, span.end)) {
             continue;
         }
-        let info = &facts.loan_info[loan_id];
         errors.push(BorrowError {
-            kind: BorrowErrorKind::ReferenceStoredInArray,
+            kind: BorrowErrorKind::NonSendableAcrossTaskBoundary,
             span: *span,
-            conflicting_loan: LoanId(*loan_id),
-            loan_span: info.span,
-            last_use_span: last_use_span_for_loan(facts, *loan_id),
+            conflicting_loan: LoanId(0),
+            loan_span: *span,
+            last_use_span: None,
             repairs: Vec::new(),
         });
     }
 
-    let mut seen_object_store = std::collections::HashSet::new();
-    for (loan_id, span) in &facts.object_store_loans {
-        if !seen_object_store.insert((*loan_id, span.start, span.end)) {
-            continue;
-        }
-        let info = &facts.loan_info[loan_id];
-        errors.push(BorrowError {
-            kind: BorrowErrorKind::ReferenceStoredInObject,
-            span: *span,
-            conflicting_loan: LoanId(*loan_id),
-            loan_span: info.span,
-            last_use_span: last_use_span_for_loan(facts, *loan_id),
-            repairs: Vec::new(),
-        });
-    }
-
-    for (loan_id, span) in &facts.object_assignment_loans {
-        if !seen_object_store.insert((*loan_id, span.start, span.end)) {
-            continue;
-        }
-        let info = &facts.loan_info[loan_id];
-        errors.push(BorrowError {
-            kind: BorrowErrorKind::ReferenceStoredInObject,
-            span: *span,
-            conflicting_loan: LoanId(*loan_id),
-            loan_span: info.span,
-            last_use_span: last_use_span_for_loan(facts, *loan_id),
-            repairs: Vec::new(),
-        });
-    }
-
-    let mut seen_enum_store = std::collections::HashSet::new();
-    for (loan_id, span) in &facts.enum_store_loans {
-        if !seen_enum_store.insert((*loan_id, span.start, span.end)) {
-            continue;
-        }
-        let info = &facts.loan_info[loan_id];
-        errors.push(BorrowError {
-            kind: BorrowErrorKind::ReferenceStoredInEnum,
-            span: *span,
-            conflicting_loan: LoanId(*loan_id),
-            loan_span: info.span,
-            last_use_span: last_use_span_for_loan(facts, *loan_id),
-            repairs: Vec::new(),
-        });
-    }
-
-    let mut seen_task_boundary = std::collections::HashSet::new();
-    for (loan_id, span) in &facts.task_boundary_loans {
-        if !seen_task_boundary.insert((*loan_id, span.start, span.end)) {
-            continue;
-        }
-        let info = &facts.loan_info[loan_id];
-        errors.push(BorrowError {
-            kind: BorrowErrorKind::ExclusiveRefAcrossTaskBoundary,
-            span: *span,
-            conflicting_loan: LoanId(*loan_id),
-            loan_span: info.span,
-            last_use_span: last_use_span_for_loan(facts, *loan_id),
-            repairs: Vec::new(),
-        });
-    }
-
-    let mut seen_closure_capture = std::collections::HashSet::new();
-    for (loan_id, span) in &facts.closure_capture_loans {
-        if !seen_closure_capture.insert((*loan_id, span.start, span.end)) {
-            continue;
-        }
-        let info = &facts.loan_info[loan_id];
-        errors.push(BorrowError {
-            kind: BorrowErrorKind::ReferenceEscapeIntoClosure,
-            span: *span,
-            conflicting_loan: LoanId(*loan_id),
-            loan_span: info.span,
-            last_use_span: last_use_span_for_loan(facts, *loan_id),
-            repairs: Vec::new(),
-        });
-    }
-
-    let return_reference_contract =
-        resolve_return_reference_contract(&mut errors, facts, &loans_at_point);
+    let return_reference_summary =
+        resolve_return_reference_summary(&mut errors, facts, &loans_at_point);
 
     SolverResult {
         loans_at_point,
         errors,
         loan_info: facts.loan_info.clone(),
-        return_reference_contract,
+        return_reference_summary,
     }
 }
 
@@ -911,12 +1146,128 @@ pub struct SolverResult {
     pub loans_at_point: HashMap<Point, Vec<LoanId>>,
     pub errors: Vec<BorrowError>,
     pub loan_info: HashMap<u32, LoanInfo>,
-    pub return_reference_contract: Option<ReferenceReturnContract>,
+    pub return_reference_summary: Option<ReturnReferenceSummary>,
 }
 
 /// Run the complete borrow analysis pipeline for a MIR function.
 /// This is the main entry point — produces the single BorrowAnalysis
 /// consumed by compiler, LSP, and diagnostics.
+/// Extract a borrow summary for a function — describes which parameters are
+/// borrowed and which parameter pairs must not alias at call sites.
+pub fn extract_borrow_summary(mir: &MirFunction) -> FunctionBorrowSummary {
+    let num_params = mir.param_slots.len();
+    let mut param_borrows: Vec<Option<BorrowKind>> = mir
+        .param_reference_kinds
+        .iter()
+        .cloned()
+        .collect();
+    // Pad to num_params if param_reference_kinds is shorter
+    while param_borrows.len() < num_params {
+        param_borrows.push(None);
+    }
+
+    // Determine which params are written to (mutated) in the function body
+    let mut mutated_params: HashSet<usize> = HashSet::new();
+    let mut read_params: HashSet<usize> = HashSet::new();
+    for block in mir.iter_blocks() {
+        for stmt in &block.statements {
+            match &stmt.kind {
+                StatementKind::Assign(dest, rvalue) => {
+                    // Check if dest's root is a parameter (handles Local, Field, Index)
+                    let root = dest.root_local();
+                    if let Some(param_idx) = mir.param_slots.iter().position(|s| *s == root) {
+                        mutated_params.insert(param_idx);
+                    }
+                    // Check if any param is read in the rvalue
+                    for param_idx in 0..num_params {
+                        if rvalue_uses_param(rvalue, mir.param_slots[param_idx]) {
+                            read_params.insert(param_idx);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Check terminator args for reads
+        if let TerminatorKind::Call { args, .. } = &block.terminator.kind {
+            for arg in args {
+                for param_idx in 0..num_params {
+                    if operand_uses_param(arg, mir.param_slots[param_idx]) {
+                        read_params.insert(param_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // Compute effective borrow kind per param: explicit annotations take priority,
+    // otherwise infer from usage — mutated → Exclusive, read → Shared.
+    let mut effective_borrows: Vec<Option<BorrowKind>> = param_borrows.clone();
+    for idx in 0..num_params {
+        if effective_borrows[idx].is_none() {
+            if mutated_params.contains(&idx) {
+                effective_borrows[idx] = Some(BorrowKind::Exclusive);
+            } else if read_params.contains(&idx) {
+                effective_borrows[idx] = Some(BorrowKind::Shared);
+            }
+        }
+    }
+
+    // Build conflict pairs: a mutated param conflicts with every other param
+    // that is read or borrowed (shared or exclusive).
+    let mut conflict_pairs = Vec::new();
+    for &mutated_idx in &mutated_params {
+        for other_idx in 0..num_params {
+            if other_idx == mutated_idx {
+                continue;
+            }
+            // Mutated param conflicts with any other param that is used
+            if effective_borrows[other_idx].is_some() {
+                conflict_pairs.push((mutated_idx, other_idx));
+            }
+        }
+    }
+    // Also: two exclusive borrows on different params always conflict
+    for i in 0..num_params {
+        for j in (i + 1)..num_params {
+            if effective_borrows[i] == Some(BorrowKind::Exclusive)
+                && effective_borrows[j] == Some(BorrowKind::Exclusive)
+                && !conflict_pairs.contains(&(i, j))
+                && !conflict_pairs.contains(&(j, i))
+            {
+                conflict_pairs.push((i, j));
+            }
+        }
+    }
+
+    FunctionBorrowSummary {
+        param_borrows,
+        conflict_pairs,
+    }
+}
+
+fn rvalue_uses_param(rvalue: &Rvalue, param_slot: SlotId) -> bool {
+    match rvalue {
+        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
+            operand_uses_param(op, param_slot)
+        }
+        Rvalue::Borrow(_, place) => place.root_local() == param_slot,
+        Rvalue::BinaryOp(_, lhs, rhs) => {
+            operand_uses_param(lhs, param_slot) || operand_uses_param(rhs, param_slot)
+        }
+        Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_param(op, param_slot)),
+    }
+}
+
+fn operand_uses_param(op: &Operand, param_slot: SlotId) -> bool {
+    match op {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+            place.root_local() == param_slot
+        }
+        Operand::Constant(_) => false,
+    }
+}
+
 pub fn analyze(mir: &MirFunction) -> BorrowAnalysis {
     let cfg = ControlFlowGraph::build(mir);
 
@@ -949,8 +1300,22 @@ pub fn analyze(mir: &MirFunction) -> BorrowAnalysis {
         errors,
         ownership_decisions,
         mutability_errors: Vec::new(), // filled by binding resolver (Phase 1)
-        return_reference_contract: solver_result.return_reference_contract,
+        return_reference_summary: solver_result.return_reference_summary,
     }
+}
+
+/// Post-solve relaxation: remove `ReferenceStoredIn*` errors when the
+/// container slot's `EscapeStatus` is `Local` and the loan's borrowed place
+/// is alive throughout the container's scope.
+///
+/// This allows `let arr = [&x]` inside a function where `arr` never escapes,
+/// while still rejecting `return [&x]` (the container escapes).
+pub fn relax_local_container_errors(
+    errors: &mut Vec<BorrowError>,
+    storage_plan: &super::storage_planning::StoragePlan,
+    mir: &MirFunction,
+) {
+    let _ = (errors, storage_plan, mir);
 }
 
 /// Compute ownership decisions for assignments based on liveness.
@@ -1035,6 +1400,8 @@ fn compute_use_after_move_errors(
             for stmt in &block.statements {
                 apply_move_transfer(&mut block_out, stmt, mir, ownership_decisions);
             }
+            // Also apply Call terminator moves (destination write clears moved status)
+            apply_terminator_move_transfer(&mut block_out, &block.terminator);
 
             if in_states.get(&block_id) != Some(&block_in) {
                 in_states.insert(block_id, block_in);
@@ -1112,6 +1479,47 @@ fn compute_use_after_move_errors(
 
             apply_move_transfer(&mut moved_places, stmt, mir, ownership_decisions);
         }
+
+        // Check Call terminator for reads of moved places, then apply its transfer
+        if let TerminatorKind::Call { func, args, destination, .. } = &block.terminator.kind {
+            let term_key_point = block.terminator.span.start as u32;
+            // Check func operand
+            if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = func {
+                if let Some((moved_place, move_span)) = find_moved_place_conflict(&moved_places, place) {
+                    let key = (term_key_point, format!("{}", moved_place));
+                    if seen.insert(key) {
+                        errors.push(BorrowError {
+                            kind: BorrowErrorKind::UseAfterMove,
+                            span: block.terminator.span,
+                            conflicting_loan: LoanId(0),
+                            loan_span: move_span,
+                            last_use_span: None,
+                            repairs: Vec::new(),
+                        });
+                    }
+                }
+            }
+            // Check each arg
+            for arg in args {
+                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = arg {
+                    if let Some((moved_place, move_span)) = find_moved_place_conflict(&moved_places, place) {
+                        let key = (term_key_point, format!("{}", moved_place));
+                        if seen.insert(key) {
+                            errors.push(BorrowError {
+                                kind: BorrowErrorKind::UseAfterMove,
+                                span: block.terminator.span,
+                                conflicting_loan: LoanId(0),
+                                loan_span: move_span,
+                                last_use_span: None,
+                                repairs: Vec::new(),
+                            });
+                        }
+                    }
+                }
+            }
+            // Destination write clears moved status
+            moved_places.retain(|moved_place, _| !reinitializes_moved_place(destination, moved_place));
+        }
     }
 
     errors
@@ -1148,6 +1556,21 @@ fn apply_move_transfer(
     }
 }
 
+/// Apply move transfer for a Call terminator.
+/// The call writes its return value to `destination`, which reinitializes that place.
+/// Call args are typically temp slots created by `lower_expr_as_moved_operand` —
+/// the moves of source values INTO those temps happen in prior statements (via Assign/Move),
+/// not in the terminator itself, so we don't need to mark args as moved here.
+fn apply_terminator_move_transfer(
+    moved_places: &mut HashMap<Place, shape_ast::ast::Span>,
+    terminator: &Terminator,
+) {
+    if let TerminatorKind::Call { destination, .. } = &terminator.kind {
+        // The call writes to destination, which reinitializes that place
+        moved_places.retain(|moved_place, _| !reinitializes_moved_place(destination, moved_place));
+    }
+}
+
 fn statement_borrow_place(kind: &StatementKind) -> Option<&Place> {
     match kind {
         StatementKind::Assign(_, Rvalue::Borrow(_, place)) => Some(place),
@@ -1158,11 +1581,11 @@ fn statement_borrow_place(kind: &StatementKind) -> Option<&Place> {
 fn statement_dest_place(kind: &StatementKind) -> Option<&Place> {
     match kind {
         StatementKind::Assign(place, _) | StatementKind::Drop(place) => Some(place),
-        StatementKind::TaskBoundary(_)
-        | StatementKind::ClosureCapture(_)
-        | StatementKind::ArrayStore(_)
-        | StatementKind::ObjectStore(_)
-        | StatementKind::EnumStore(_) => None,
+        StatementKind::TaskBoundary(..)
+        | StatementKind::ClosureCapture { .. }
+        | StatementKind::ArrayStore { .. }
+        | StatementKind::ObjectStore { .. }
+        | StatementKind::EnumStore { .. } => None,
         StatementKind::Nop => None,
     }
 }

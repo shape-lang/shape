@@ -89,14 +89,10 @@ impl VirtualMachine {
                     crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(duration);
                 match operator.as_str() {
                     "+" => base_dt.checked_add_signed(chrono_dur).ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "DateTime overflow in addition".to_string(),
-                        )
+                        VMError::RuntimeError("DateTime overflow in addition".to_string())
                     }),
                     "-" => base_dt.checked_sub_signed(chrono_dur).ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "DateTime overflow in subtraction".to_string(),
-                        )
+                        VMError::RuntimeError("DateTime overflow in subtraction".to_string())
                     }),
                     _ => Err(VMError::RuntimeError(format!(
                         "Invalid datetime arithmetic operator: {}",

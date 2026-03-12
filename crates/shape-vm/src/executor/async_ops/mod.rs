@@ -561,5 +561,4 @@ mod tests {
             _ => panic!("Expected TaskGroup"),
         }
     }
-
 }

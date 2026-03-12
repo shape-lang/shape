@@ -5,11 +5,75 @@ use shape_ast::ast::Span;
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::suggestions::suggest_variable;
 
-use crate::type_tracking::{NumericType, StorageHint, VariableKind};
+use crate::type_tracking::{BindingStorageClass, NumericType, StorageHint, VariableKind};
 
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
+    pub(in crate::compiler) fn compile_expr_identifier_preserving_refs(
+        &mut self,
+        name: &str,
+        span: Span,
+    ) -> Result<()> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            if self.ref_locals.contains(&local_idx) {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(local_idx)),
+                ));
+                let mode = if self.exclusive_ref_locals.contains(&local_idx) {
+                    crate::compiler::BorrowMode::Exclusive
+                } else {
+                    crate::compiler::BorrowMode::Shared
+                };
+                self.set_last_expr_reference_result(mode, true);
+                return Ok(());
+            }
+            if self.reference_value_locals.contains(&local_idx) {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(local_idx)),
+                ));
+                let mode = if self.exclusive_reference_value_locals.contains(&local_idx) {
+                    crate::compiler::BorrowMode::Exclusive
+                } else {
+                    crate::compiler::BorrowMode::Shared
+                };
+                self.set_last_expr_reference_result(mode, true);
+                return Ok(());
+            }
+        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+            let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
+                ShapeError::RuntimeError {
+                    message: format!("Undefined variable: {}", name),
+                    location: Some(self.span_to_source_location(span)),
+                }
+            })?;
+            if self.reference_value_module_bindings.contains(&binding_idx) {
+                self.emit(Instruction::new(
+                    OpCode::LoadModuleBinding,
+                    Some(Operand::ModuleBinding(binding_idx)),
+                ));
+                let mode = if self
+                    .exclusive_reference_value_module_bindings
+                    .contains(&binding_idx)
+                {
+                    crate::compiler::BorrowMode::Exclusive
+                } else {
+                    crate::compiler::BorrowMode::Shared
+                };
+                self.set_last_expr_reference_result(mode, true);
+                return Ok(());
+            }
+        }
+
+        let result = self.compile_expr_identifier(name, span);
+        if result.is_ok() {
+            self.clear_last_expr_reference_result();
+        }
+        result
+    }
+
     /// Map a storage hint to a numeric type (if applicable).
     /// Width-specific hints (Int8, UInt16, etc.) → IntWidth(w);
     /// default Int64 → Int; Float64 → Number.
@@ -82,40 +146,76 @@ impl BytecodeCompiler {
                 ));
             } else {
                 let source_loc = self.span_to_source_location(span);
-                self.borrow_checker
-                    .check_read_allowed(Self::borrow_key_for_local(local_idx), Some(source_loc))
-                    .map_err(|e| match e {
-                        ShapeError::SemanticError { message, location } => {
-                            let user_msg = message
-                                .replace(&format!("(slot {})", local_idx), &format!("'{}'", name));
-                            ShapeError::SemanticError {
-                                message: user_msg,
-                                location,
-                            }
+                self.check_read_allowed_in_current_context(
+                    Self::borrow_key_for_local(local_idx),
+                    Some(source_loc),
+                )
+                .map_err(|e| match e {
+                    ShapeError::SemanticError { message, location } => {
+                        let user_msg = message
+                            .replace(&format!("(slot {})", local_idx), &format!("'{}'", name));
+                        ShapeError::SemanticError {
+                            message: user_msg,
+                            location,
                         }
-                        other => other,
-                    })?;
-                // Upgrade to LoadLocalTrusted when the slot has a known
-                // *primitive* type AND is immutable. We only upgrade for
-                // immutable let-bindings with int/float/bool slots to avoid
-                // breaking SharedCell, heap-type, or ref-mutated semantics.
-                let load_op = if self.immutable_locals.contains(&local_idx)
-                    && self
-                        .type_tracker
-                        .get_local_type(local_idx)
-                        .map(|info| {
-                            matches!(
-                                info.storage_hint,
-                                StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool
-                            )
-                        })
-                        .unwrap_or(false)
+                    }
+                    other => other,
+                })?;
+
+                // Storage-plan–aware load decision
+                // ─────────────────────────────────
+                // The MIR storage planner assigns each binding a BindingStorageClass:
+                //   Direct    → LoadLocal / LoadLocalTrusted (no indirection)
+                //   Deferred  → same as Direct (plan not yet resolved)
+                //   UniqueHeap→ BoxLocal + Arc<RwLock<>> (SharedCell), read via LoadClosure
+                //   SharedCow → BoxLocal + Arc<RwLock<>> (SharedCell), read via LoadClosure
+                //   Reference → DerefLoad / DerefStore (handled above)
+                //
+                // Consult the MIR storage plan first (authoritative when available),
+                // then fall back to type-tracker semantics for non-function contexts.
+                let storage_class = self
+                    .mir_storage_class_for_slot(local_idx)
+                    .or_else(|| {
+                        self.type_tracker
+                            .get_local_binding_semantics(local_idx)
+                            .map(|s| s.storage_class)
+                    });
+
+                if self.boxed_locals.contains(name)
+                    && matches!(
+                        storage_class,
+                        Some(BindingStorageClass::UniqueHeap | BindingStorageClass::SharedCow)
+                    )
                 {
-                    OpCode::LoadLocalTrusted
+                    // The variable has been boxed into a SharedCell by a prior
+                    // closure capture — read through the cell.
+                    self.emit(Instruction::new(
+                        OpCode::LoadClosure,
+                        Some(Operand::Local(local_idx)),
+                    ));
                 } else {
-                    OpCode::LoadLocal
-                };
-                self.emit(Instruction::new(load_op, Some(Operand::Local(local_idx))));
+                    // Upgrade to LoadLocalTrusted when the slot has a known
+                    // *primitive* type AND is immutable. We only upgrade for
+                    // immutable let-bindings with int/float/bool slots to avoid
+                    // breaking SharedCell, heap-type, or ref-mutated semantics.
+                    let load_op = if self.immutable_locals.contains(&local_idx)
+                        && self
+                            .type_tracker
+                            .get_local_type(local_idx)
+                            .map(|info| {
+                                matches!(
+                                    info.storage_hint,
+                                    StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool
+                                )
+                            })
+                            .unwrap_or(false)
+                    {
+                        OpCode::LoadLocalTrusted
+                    } else {
+                        OpCode::LoadLocal
+                    };
+                    self.emit(Instruction::new(load_op, Some(Operand::Local(local_idx))));
+                }
             }
             // Track schema for typed merge optimization
             let local_type = self.type_tracker.get_local_type(local_idx).cloned();
@@ -140,27 +240,26 @@ impl BytecodeCompiler {
                 }
             })?;
             let source_loc = self.span_to_source_location(span);
-            self.borrow_checker
-                .check_read_allowed(
-                    Self::borrow_key_for_module_binding(binding_idx),
-                    Some(source_loc),
-                )
-                .map_err(|e| match e {
-                    ShapeError::SemanticError { message, location } => {
-                        let user_msg = message.replace(
-                            &format!(
-                                "(slot {})",
-                                Self::borrow_key_for_module_binding(binding_idx)
-                            ),
-                            &format!("'{}'", name),
-                        );
-                        ShapeError::SemanticError {
-                            message: user_msg,
-                            location,
-                        }
+            self.check_read_allowed_in_current_context(
+                Self::borrow_key_for_module_binding(binding_idx),
+                Some(source_loc),
+            )
+            .map_err(|e| match e {
+                ShapeError::SemanticError { message, location } => {
+                    let user_msg = message.replace(
+                        &format!(
+                            "(slot {})",
+                            Self::borrow_key_for_module_binding(binding_idx)
+                        ),
+                        &format!("'{}'", name),
+                    );
+                    ShapeError::SemanticError {
+                        message: user_msg,
+                        location,
                     }
-                    other => other,
-                })?;
+                }
+                other => other,
+            })?;
             if self.reference_value_module_bindings.contains(&binding_idx) {
                 let temp = self.declare_temp_local("__module_binding_ref_read_")?;
                 self.emit(Instruction::new(
@@ -251,53 +350,6 @@ impl BytecodeCompiler {
             });
         }
         Ok(())
-    }
-
-    pub(in crate::compiler) fn compile_identifier_as_raw_reference(
-        &mut self,
-        name: &str,
-        span: Span,
-    ) -> Result<bool> {
-        if let Some(local_idx) = self.resolve_local(name) {
-            if self.ref_locals.contains(&local_idx) {
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(local_idx)),
-                ));
-                return Ok(self.exclusive_ref_locals.contains(&local_idx));
-            }
-            if self.reference_value_locals.contains(&local_idx) {
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(local_idx)),
-                ));
-                return Ok(self.exclusive_reference_value_locals.contains(&local_idx));
-            }
-        } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
-            let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
-                ShapeError::RuntimeError {
-                    message: format!("Undefined variable: {}", name),
-                    location: Some(self.span_to_source_location(span)),
-                }
-            })?;
-            if self.reference_value_module_bindings.contains(&binding_idx) {
-                self.emit(Instruction::new(
-                    OpCode::LoadModuleBinding,
-                    Some(Operand::ModuleBinding(binding_idx)),
-                ));
-                return Ok(self
-                    .exclusive_reference_value_module_bindings
-                    .contains(&binding_idx));
-            }
-        }
-
-        Err(ShapeError::SemanticError {
-            message: format!(
-                "expected '{}' to be a reference value on this return path",
-                name
-            ),
-            location: Some(self.span_to_source_location(span)),
-        })
     }
 
     /// Collect all available variable and function names for suggestions

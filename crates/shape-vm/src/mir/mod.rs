@@ -10,13 +10,17 @@
 
 pub mod analysis;
 pub mod cfg;
+pub mod field_analysis;
 pub mod liveness;
 pub mod lowering;
 pub mod repair;
 pub mod solver;
+pub mod storage_planning;
 pub mod types;
 
-pub use analysis::BorrowAnalysis;
+pub use analysis::{BorrowAnalysis, BorrowErrorCode, BorrowErrorKind, FunctionBorrowSummary};
 pub use cfg::ControlFlowGraph;
+pub use field_analysis::FieldAnalysis;
 pub use liveness::LivenessResult;
+pub use storage_planning::StoragePlan;
 pub use types::*;

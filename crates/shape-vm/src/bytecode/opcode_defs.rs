@@ -234,6 +234,9 @@ define_opcodes! {
     BoxModuleBinding = 0x5D, Variable, pops: 0, pushes: 1;
     /// Create a projected typed-field reference from a base reference on the stack.
     MakeFieldRef = 0x5E, Variable, pops: 1, pushes: 1;
+    /// Create a projected index reference: pops [base_ref, index] and pushes a
+    /// projected reference whose `RefProjection::Index` stores the index value.
+    MakeIndexRef = 0x5F, Variable, pops: 2, pushes: 1;
 
     // ===== Object/Array Operations =====
     /// Create new array
