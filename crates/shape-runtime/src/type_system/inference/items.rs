@@ -780,7 +780,18 @@ impl TypeInferenceEngine {
             // Collect inline bounds from type params: <T: Comparable>
             for tp in type_params {
                 if !tp.trait_bounds.is_empty() {
-                    bounds.insert(tp.name.clone(), tp.trait_bounds.clone());
+                    let mut expanded = tp.trait_bounds.clone();
+                    // Transitively include supertrait bounds:
+                    // If T: Foo and trait Foo: Bar + Baz, also add Bar and Baz.
+                    for trait_name in &tp.trait_bounds {
+                        let supers = self.env.get_transitive_supertrait_names(trait_name);
+                        for st in supers {
+                            if !expanded.contains(&st) {
+                                expanded.push(st);
+                            }
+                        }
+                    }
+                    bounds.insert(tp.name.clone(), expanded);
                 }
                 if let Some(default_ann) = &tp.default_type {
                     defaults.insert(tp.name.clone(), self.resolve_type_annotation(default_ann));
@@ -790,10 +801,20 @@ impl TypeInferenceEngine {
             // Merge where clause predicates: where T: Display + Serializable
             if let Some(where_preds) = &func.where_clause {
                 for pred in where_preds {
+                    let mut expanded = pred.bounds.clone();
+                    // Transitively include supertrait bounds from where clauses too
+                    for trait_name in &pred.bounds {
+                        let supers = self.env.get_transitive_supertrait_names(trait_name);
+                        for st in supers {
+                            if !expanded.contains(&st) {
+                                expanded.push(st);
+                            }
+                        }
+                    }
                     bounds
                         .entry(pred.type_name.clone())
                         .or_insert_with(Vec::new)
-                        .extend(pred.bounds.clone());
+                        .extend(expanded);
                 }
             }
 

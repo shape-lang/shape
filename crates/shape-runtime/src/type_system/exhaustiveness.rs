@@ -120,6 +120,12 @@ pub fn check_exhaustiveness_for_type(
     if has_unguarded_catch_all(&match_expr.arms) {
         ExhaustivenessResult::TriviallyExhaustive
     } else {
+        // Type inference could not resolve the scrutinee type, so exhaustiveness
+        // checking is skipped. This can mask missing match arms at compile time.
+        tracing::debug!(
+            "exhaustiveness check skipped: scrutinee type {:?} could not be resolved",
+            scrutinee_type
+        );
         ExhaustivenessResult::NotApplicable
     }
 }

@@ -931,6 +931,14 @@ impl TypeEnvironment {
         self.type_registry.trait_impl_keys()
     }
 
+    /// Get the transitive closure of supertrait names for a given trait.
+    ///
+    /// Given `trait A: B`, `trait B: C`, returns `["B", "C"]` for "A".
+    pub fn get_transitive_supertrait_names(&self, trait_name: &str) -> Vec<String> {
+        self.type_registry
+            .get_transitive_supertrait_names(trait_name)
+    }
+
     /// Register a blanket implementation: `impl<T: Bound> Trait for T`
     pub fn register_blanket_impl(
         &mut self,

@@ -341,14 +341,64 @@ impl TypeInferenceEngine {
                     });
                 }
                 ObjectEntry::Spread(expr) => {
-                    // For spread, we infer the type of the expression
-                    // TODO: merge fields from spread object type
-                    let _spread_type = self.infer_expr(expr)?;
+                    // Infer the type of the spread expression and merge its fields.
+                    // Explicit fields declared later in the literal override spread fields.
+                    let spread_type = self.infer_expr(expr)?;
+                    let spread_fields = self.extract_object_fields(&spread_type);
+                    for sf in spread_fields {
+                        result_fields.push(sf);
+                    }
                 }
             }
         }
 
-        Ok(Type::Concrete(TypeAnnotation::Object(result_fields)))
+        // Deduplicate fields: later entries (explicit fields) override earlier ones (spread fields).
+        // This matches JS/TS semantics: { ...obj, x: 1 } means x: 1 overrides obj.x.
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped = Vec::new();
+        for field in result_fields.into_iter().rev() {
+            if seen.insert(field.name.clone()) {
+                deduped.push(field);
+            }
+        }
+        deduped.reverse();
+
+        Ok(Type::Concrete(TypeAnnotation::Object(deduped)))
+    }
+
+    /// Extract object-typed fields from a type for spread merging.
+    ///
+    /// Handles:
+    /// - `Type::Concrete(TypeAnnotation::Object(fields))` -- inline object types
+    /// - `Type::Concrete(TypeAnnotation::Reference(name))` -- named struct types via type alias
+    ///   or struct_type_defs lookup
+    fn extract_object_fields(&self, ty: &Type) -> Vec<shape_ast::ast::ObjectTypeField> {
+        match ty {
+            Type::Concrete(TypeAnnotation::Object(fields)) => fields.clone(),
+            Type::Concrete(TypeAnnotation::Reference(name)) => {
+                // Try struct_type_defs first (registered during hoisting)
+                if let Some(struct_def) = self.struct_type_defs.get(name.as_str()) {
+                    return struct_def
+                        .fields
+                        .iter()
+                        .map(|f| shape_ast::ast::ObjectTypeField {
+                            name: f.name.clone(),
+                            optional: false,
+                            type_annotation: f.type_annotation.clone(),
+                            annotations: vec![],
+                        })
+                        .collect();
+                }
+                // Fall back to type alias lookup (struct types are stored as Object aliases)
+                if let Some(alias) = self.env.lookup_type_alias(name) {
+                    if let TypeAnnotation::Object(fields) = &alias.type_annotation {
+                        return fields.clone();
+                    }
+                }
+                vec![]
+            }
+            _ => vec![],
+        }
     }
 }
 
@@ -373,5 +423,66 @@ mod tests {
         assert!(!CheckMode::Infer.is_hard_constraint());
         assert!(CheckMode::Check(BuiltinTypes::number()).is_hard_constraint());
         assert!(!CheckMode::Synth(BuiltinTypes::number()).is_hard_constraint());
+    }
+
+    #[test]
+    fn test_extract_object_fields_from_inline_object() {
+        let engine = super::super::TypeInferenceEngine::new();
+        let ty = Type::Concrete(TypeAnnotation::Object(vec![
+            shape_ast::ast::ObjectTypeField {
+                name: "x".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("int".to_string()),
+                annotations: vec![],
+            },
+            shape_ast::ast::ObjectTypeField {
+                name: "y".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("string".to_string()),
+                annotations: vec![],
+            },
+        ]));
+        let fields = engine.extract_object_fields(&ty);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "x");
+        assert_eq!(fields[1].name, "y");
+    }
+
+    #[test]
+    fn test_extract_object_fields_from_unknown_returns_empty() {
+        let engine = super::super::TypeInferenceEngine::new();
+        let ty = BuiltinTypes::number();
+        let fields = engine.extract_object_fields(&ty);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_extract_object_fields_from_reference_via_alias() {
+        let mut engine = super::super::TypeInferenceEngine::new();
+        // Register a type alias: type Point = { x: int, y: int }
+        engine.env.define_type_alias(
+            "Point",
+            &TypeAnnotation::Object(vec![
+                shape_ast::ast::ObjectTypeField {
+                    name: "x".to_string(),
+                    optional: false,
+                    type_annotation: TypeAnnotation::Basic("int".to_string()),
+                    annotations: vec![],
+                },
+                shape_ast::ast::ObjectTypeField {
+                    name: "y".to_string(),
+                    optional: false,
+                    type_annotation: TypeAnnotation::Basic("int".to_string()),
+                    annotations: vec![],
+                },
+            ]),
+            None,
+        );
+
+        let ty = Type::Concrete(TypeAnnotation::Reference("Point".to_string()));
+        let fields = engine.extract_object_fields(&ty);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "x");
+        assert_eq!(fields[1].name, "y");
     }
 }

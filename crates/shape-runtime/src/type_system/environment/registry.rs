@@ -396,12 +396,18 @@ impl TypeRegistry {
         visited: &mut std::collections::HashSet<String>,
     ) -> bool {
         // Check direct impl first (default OR any named impl)
-        if self
+        let has_direct = self
             .trait_impls
             .values()
-            .any(|entry| entry.trait_name == trait_name && entry.target_type == type_name)
-        {
-            return true;
+            .any(|entry| entry.trait_name == trait_name && entry.target_type == type_name);
+
+        if has_direct {
+            // Also verify supertrait satisfaction: if trait Foo: Bar + Baz,
+            // the type must also implement Bar and Baz.
+            let supertrait_names = self.get_supertrait_names(trait_name);
+            return supertrait_names
+                .iter()
+                .all(|st| self.type_implements_trait_inner(type_name, st, visited));
         }
 
         // Cycle detection: if we're already checking this (type, trait) pair, bail out
@@ -424,6 +430,50 @@ impl TypeRegistry {
         }
 
         false
+    }
+
+    /// Extract supertrait names from a trait definition.
+    ///
+    /// Given `trait Foo: Bar + Baz { ... }`, returns `["Bar", "Baz"]`.
+    fn get_supertrait_names(&self, trait_name: &str) -> Vec<String> {
+        let Some(trait_def) = self.traits.get(trait_name) else {
+            return vec![];
+        };
+        trait_def
+            .super_traits
+            .iter()
+            .filter_map(|ann| match ann {
+                TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
+                    Some(name.clone())
+                }
+                TypeAnnotation::Generic { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Get the transitive closure of supertrait names for a given trait.
+    ///
+    /// Given `trait A: B`, `trait B: C`, calling this for "A" returns `["B", "C"]`.
+    pub fn get_transitive_supertrait_names(&self, trait_name: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        self.collect_supertraits(trait_name, &mut result, &mut visited);
+        result
+    }
+
+    fn collect_supertraits(
+        &self,
+        trait_name: &str,
+        result: &mut Vec<String>,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        for st in self.get_supertrait_names(trait_name) {
+            if visited.insert(st.clone()) {
+                result.push(st.clone());
+                self.collect_supertraits(&st, result, visited);
+            }
+        }
     }
 
     /// Look up a trait implementation
@@ -1058,5 +1108,119 @@ mod tests {
             reg.resolve_associated_type("Collection", "HashMap", "Key"),
             Some(TypeAnnotation::Basic(s)) if s == "int"
         ));
+    }
+
+    // ---------------------------------------------------------------
+    // Supertrait tests
+    // ---------------------------------------------------------------
+
+    /// Helper: build a trait with supertraits
+    fn make_trait_with_supers(
+        name: &str,
+        methods: Vec<&str>,
+        super_traits: Vec<&str>,
+    ) -> TraitDef {
+        TraitDef {
+            name: name.to_string(),
+            doc_comment: None,
+            type_params: None,
+            super_traits: super_traits
+                .into_iter()
+                .map(|s| TypeAnnotation::Basic(s.to_string()))
+                .collect(),
+            members: methods
+                .into_iter()
+                .map(|m| {
+                    TraitMember::Required(InterfaceMember::Method {
+                        name: m.to_string(),
+                        optional: false,
+                        params: vec![FunctionParam {
+                            name: Some("self".to_string()),
+                            type_annotation: TypeAnnotation::Basic("Self".to_string()),
+                            optional: false,
+                        }],
+                        return_type: TypeAnnotation::Basic("string".to_string()),
+                        is_async: false,
+                        span: Span::DUMMY,
+                        doc_comment: None,
+                    })
+                })
+                .collect(),
+            annotations: vec![],
+        }
+    }
+
+    #[test]
+    fn supertrait_names_extracted_correctly() {
+        let mut reg = TypeRegistry::new();
+        reg.define_trait(&make_trait_with_supers(
+            "Printable",
+            vec!["print"],
+            vec!["Display", "Debug"],
+        ));
+
+        let names = reg.get_transitive_supertrait_names("Printable");
+        assert!(names.contains(&"Display".to_string()));
+        assert!(names.contains(&"Debug".to_string()));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn transitive_supertrait_names_work() {
+        let mut reg = TypeRegistry::new();
+        reg.define_trait(&make_trait("Base", vec!["base_method"]));
+        reg.define_trait(&make_trait_with_supers("Mid", vec!["mid_method"], vec!["Base"]));
+        reg.define_trait(&make_trait_with_supers("Top", vec!["top_method"], vec!["Mid"]));
+
+        let names = reg.get_transitive_supertrait_names("Top");
+        assert!(names.contains(&"Mid".to_string()));
+        assert!(names.contains(&"Base".to_string()));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn type_implements_trait_requires_supertrait_impls() {
+        let mut reg = TypeRegistry::new();
+        reg.define_trait(&make_trait("Display", vec!["to_string"]));
+        reg.define_trait(&make_trait_with_supers(
+            "Printable",
+            vec!["print"],
+            vec!["Display"],
+        ));
+
+        // Register impl Printable for MyType, but NOT impl Display for MyType
+        assert!(
+            reg.register_trait_impl("Printable", "MyType", vec!["print".into()])
+                .is_ok()
+        );
+
+        // Should return false: MyType has direct Printable impl but missing Display supertrait
+        assert!(
+            !reg.type_implements_trait("MyType", "Printable"),
+            "type_implements_trait should fail when supertrait Display is not implemented"
+        );
+
+        // Now implement Display for MyType
+        assert!(
+            reg.register_trait_impl("Display", "MyType", vec!["to_string".into()])
+                .is_ok()
+        );
+
+        // Now both trait and supertrait are satisfied
+        assert!(reg.type_implements_trait("MyType", "Printable"));
+    }
+
+    #[test]
+    fn type_implements_trait_no_supertrait_is_ok() {
+        let mut reg = TypeRegistry::new();
+        reg.define_trait(&make_trait("Simple", vec!["do_thing"]));
+
+        assert!(
+            reg.register_trait_impl("Simple", "MyType", vec!["do_thing".into()])
+                .is_ok()
+        );
+
+        // No supertraits, so direct impl is sufficient
+        assert!(reg.type_implements_trait("MyType", "Simple"));
     }
 }
