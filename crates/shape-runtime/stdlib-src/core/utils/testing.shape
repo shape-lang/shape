@@ -7,21 +7,17 @@
 /// Assert that a condition is true.
 ///
 /// @param condition - The condition to check
-/// @param message - Optional failure message
+/// @param message - Failure message (default: "Assertion failed: condition was false")
 /// @returns Ok(true) if condition is true, Err with message otherwise
 ///
 /// @example
 /// assert(x > 0, "x must be positive")
-pub fn assert(condition, message) {
+/// assert(x > 0)
+pub fn assert(condition, message = "Assertion failed: condition was false") {
     if condition {
         Ok(true)
     } else {
-        let msg = if message != None {
-            message
-        } else {
-            "Assertion failed: condition was false"
-        };
-        Err(msg)
+        Err(message)
     }
 }
 
@@ -29,21 +25,17 @@ pub fn assert(condition, message) {
 ///
 /// @param actual - The actual value
 /// @param expected - The expected value
-/// @param message - Optional failure message
+/// @param message - Failure message prefix (default: "Assertion failed")
 /// @returns Ok(true) if equal, Err with details otherwise
 ///
 /// @example
 /// assert_eq(add(2, 3), 5, "addition should work")
-pub fn assert_eq(actual, expected, message) {
+/// assert_eq(add(2, 3), 5)
+pub fn assert_eq(actual, expected, message = "Assertion failed") {
     if actual == expected {
         Ok(true)
     } else {
-        let msg = if message != None {
-            message + " — expected " + expected.toString() + ", got " + actual.toString()
-        } else {
-            "Assertion failed: expected " + expected.toString() + ", got " + actual.toString()
-        };
-        Err(msg)
+        Err(message + ": expected " + expected.toString() + ", got " + actual.toString())
     }
 }
 
@@ -51,21 +43,17 @@ pub fn assert_eq(actual, expected, message) {
 ///
 /// @param actual - The actual value
 /// @param expected - The value that actual should NOT equal
-/// @param message - Optional failure message
+/// @param message - Failure message prefix (default: "Assertion failed")
 /// @returns Ok(true) if not equal, Err with details otherwise
 ///
 /// @example
 /// assert_ne(result, 0, "result must not be zero")
-pub fn assert_ne(actual, expected, message) {
+/// assert_ne(result, 0)
+pub fn assert_ne(actual, expected, message = "Assertion failed") {
     if actual != expected {
         Ok(true)
     } else {
-        let msg = if message != None {
-            message + " — values should differ but both were " + actual.toString()
-        } else {
-            "Assertion failed: expected values to differ but both were " + actual.toString()
-        };
-        Err(msg)
+        Err(message + ": expected values to differ but both were " + actual.toString())
     }
 }
 
@@ -79,17 +67,12 @@ pub fn assert_ne(actual, expected, message) {
 /// @example
 /// assert_approx(sqrt(2) * sqrt(2), 2.0)
 /// assert_approx(pi(), 3.14, 0.01)
-pub fn assert_approx(actual, expected, tolerance) {
-    let tol = if tolerance != None {
-        tolerance
-    } else {
-        1e-10
-    };
+pub fn assert_approx(actual, expected, tolerance = 1e-10) {
     let diff = abs(actual - expected);
-    if diff <= tol {
+    if diff <= tolerance {
         Ok(true)
     } else {
-        Err("Assertion failed: expected " + expected.toString() + " (+-" + tol.toString() + "), got " + actual.toString() + " (diff=" + diff.toString() + ")")
+        Err("Assertion failed: expected " + expected.toString() + " (+-" + tolerance.toString() + "), got " + actual.toString() + " (diff=" + diff.toString() + ")")
     }
 }
 
