@@ -216,7 +216,7 @@ fn test_typed_merge_decomposition_with_cast() {
         type TypeA { x: number, y: number }
         type TypeB { z: number }
 
-        let a = { x: 1 };
+        var a = { x: 1 };
         a.y = 2;
         let b = { z: 3 };
 
@@ -1950,7 +1950,7 @@ fn test_param_array_destructure() {
 fn test_for_loop_object_destructure() {
     let code = r#"
     let points = [{x: 1, y: 2}, {x: 3, y: 4}];
-    let sum = 0;
+    var sum = 0;
     for {x, y} in points {
         sum = sum + x + y;
     }
