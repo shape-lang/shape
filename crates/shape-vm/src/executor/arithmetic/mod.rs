@@ -11,7 +11,16 @@ use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
 
-const EXACT_F64_INT_LIMIT: i128 = 9_007_199_254_740_992;
+use crate::constants::EXACT_F64_INT_LIMIT;
+
+/// Produce a `VMError::RuntimeError` for mixed int/float operations where the
+/// integer operand is too large to convert losslessly to f64.
+fn cannot_apply_without_cast(op: &str, value: i128) -> VMError {
+    VMError::RuntimeError(format!(
+        "Cannot apply '{}' without explicit cast: {} is not losslessly representable as number",
+        op, value
+    ))
+}
 
 /// Check if an i64 result fits in the I48 inline range.
 /// Values outside this range would be heap-boxed as BigInt, so we promote to f64 instead.
@@ -24,6 +33,7 @@ fn fits_i48(v: i64) -> bool {
 enum NumericDomain {
     Int(i128),
     Float(f64),
+    Decimal(rust_decimal::Decimal),
 }
 
 /// Unwrap TypeAnnotatedValue wrapper to get the inner value.
@@ -114,6 +124,9 @@ impl VirtualMachine {
         if let Some(i) = nb.as_i128_exact() {
             return Some(NumericDomain::Int(i));
         }
+        if let Some(d) = nb.as_decimal() {
+            return Some(NumericDomain::Decimal(d));
+        }
         nb.as_number_strict().map(NumericDomain::Float)
     }
 
@@ -142,21 +155,53 @@ impl VirtualMachine {
                 Ok(Some(ValueWord::from_f64(float_op(af, bf))))
             }
             (NumericDomain::Int(ai), NumericDomain::Float(bf)) => {
-                let af = Self::arith_i128_to_lossless_f64(ai).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '{}' without explicit cast: {} is not losslessly representable as number",
-                        op_name, ai
-                    ))
-                })?;
+                let af = Self::arith_i128_to_lossless_f64(ai)
+                    .ok_or_else(|| cannot_apply_without_cast(op_name, ai))?;
                 Ok(Some(ValueWord::from_f64(float_op(af, bf))))
             }
             (NumericDomain::Float(af), NumericDomain::Int(bi)) => {
-                let bf = Self::arith_i128_to_lossless_f64(bi).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '{}' without explicit cast: {} is not losslessly representable as number",
-                        op_name, bi
-                    ))
-                })?;
+                let bf = Self::arith_i128_to_lossless_f64(bi)
+                    .ok_or_else(|| cannot_apply_without_cast(op_name, bi))?;
+                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
+            }
+            // Decimal cases: promote the other operand to Decimal
+            (NumericDomain::Decimal(ad), NumericDomain::Decimal(bd)) => {
+                // Delegate to the float_op via f64 conversion for consistency;
+                // callers that want exact decimal arithmetic already use the
+                // typed Decimal opcodes (AddDecimal, etc.).
+                use rust_decimal::prelude::ToPrimitive;
+                let af = ad.to_f64().unwrap_or(0.0);
+                let bf = bd.to_f64().unwrap_or(0.0);
+                Ok(Some(ValueWord::from_decimal(
+                    rust_decimal::Decimal::from_f64_retain(float_op(af, bf)).unwrap_or_default(),
+                )))
+            }
+            (NumericDomain::Decimal(ad), NumericDomain::Int(bi)) => {
+                let bd = rust_decimal::Decimal::from_i128_with_scale(bi, 0);
+                use rust_decimal::prelude::ToPrimitive;
+                let af = ad.to_f64().unwrap_or(0.0);
+                let bf = bd.to_f64().unwrap_or(0.0);
+                Ok(Some(ValueWord::from_decimal(
+                    rust_decimal::Decimal::from_f64_retain(float_op(af, bf)).unwrap_or_default(),
+                )))
+            }
+            (NumericDomain::Int(ai), NumericDomain::Decimal(bd)) => {
+                let ad = rust_decimal::Decimal::from_i128_with_scale(ai, 0);
+                use rust_decimal::prelude::ToPrimitive;
+                let af = ad.to_f64().unwrap_or(0.0);
+                let bf = bd.to_f64().unwrap_or(0.0);
+                Ok(Some(ValueWord::from_decimal(
+                    rust_decimal::Decimal::from_f64_retain(float_op(af, bf)).unwrap_or_default(),
+                )))
+            }
+            (NumericDomain::Decimal(ad), NumericDomain::Float(bf)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let af = ad.to_f64().unwrap_or(0.0);
+                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
+            }
+            (NumericDomain::Float(af), NumericDomain::Decimal(bd)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let bf = bd.to_f64().unwrap_or(0.0);
                 Ok(Some(ValueWord::from_f64(float_op(af, bf))))
             }
         }
@@ -192,21 +237,50 @@ impl VirtualMachine {
                 if bf == 0.0 {
                     return Err(VMError::DivisionByZero);
                 }
-                let af = Self::arith_i128_to_lossless_f64(ai).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '/' without explicit cast: {} is not losslessly representable as number",
-                        ai
-                    ))
-                })?;
+                let af = Self::arith_i128_to_lossless_f64(ai)
+                    .ok_or_else(|| cannot_apply_without_cast("/", ai))?;
                 Ok(Some(ValueWord::from_f64(af / bf)))
             }
             (NumericDomain::Float(af), NumericDomain::Int(bi)) => {
-                let bf = Self::arith_i128_to_lossless_f64(bi).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '/' without explicit cast: {} is not losslessly representable as number",
-                        bi
-                    ))
-                })?;
+                let bf = Self::arith_i128_to_lossless_f64(bi)
+                    .ok_or_else(|| cannot_apply_without_cast("/", bi))?;
+                if bf == 0.0 {
+                    return Err(VMError::DivisionByZero);
+                }
+                Ok(Some(ValueWord::from_f64(af / bf)))
+            }
+            // Decimal division
+            (NumericDomain::Decimal(ad), NumericDomain::Decimal(bd)) => {
+                if bd.is_zero() {
+                    return Err(VMError::DivisionByZero);
+                }
+                Ok(Some(ValueWord::from_decimal(ad / bd)))
+            }
+            (NumericDomain::Decimal(ad), NumericDomain::Int(bi)) => {
+                let bd = rust_decimal::Decimal::from_i128_with_scale(bi, 0);
+                if bd.is_zero() {
+                    return Err(VMError::DivisionByZero);
+                }
+                Ok(Some(ValueWord::from_decimal(ad / bd)))
+            }
+            (NumericDomain::Int(ai), NumericDomain::Decimal(bd)) => {
+                if bd.is_zero() {
+                    return Err(VMError::DivisionByZero);
+                }
+                let ad = rust_decimal::Decimal::from_i128_with_scale(ai, 0);
+                Ok(Some(ValueWord::from_decimal(ad / bd)))
+            }
+            (NumericDomain::Decimal(ad), NumericDomain::Float(bf)) => {
+                if bf == 0.0 {
+                    return Err(VMError::DivisionByZero);
+                }
+                use rust_decimal::prelude::ToPrimitive;
+                let af = ad.to_f64().unwrap_or(0.0);
+                Ok(Some(ValueWord::from_f64(af / bf)))
+            }
+            (NumericDomain::Float(af), NumericDomain::Decimal(bd)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let bf = bd.to_f64().unwrap_or(0.0);
                 if bf == 0.0 {
                     return Err(VMError::DivisionByZero);
                 }
@@ -245,21 +319,50 @@ impl VirtualMachine {
                 if bf == 0.0 {
                     return Err(VMError::DivisionByZero);
                 }
-                let af = Self::arith_i128_to_lossless_f64(ai).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '%' without explicit cast: {} is not losslessly representable as number",
-                        ai
-                    ))
-                })?;
+                let af = Self::arith_i128_to_lossless_f64(ai)
+                    .ok_or_else(|| cannot_apply_without_cast("%", ai))?;
                 Ok(Some(ValueWord::from_f64(af % bf)))
             }
             (NumericDomain::Float(af), NumericDomain::Int(bi)) => {
-                let bf = Self::arith_i128_to_lossless_f64(bi).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '%' without explicit cast: {} is not losslessly representable as number",
-                        bi
-                    ))
-                })?;
+                let bf = Self::arith_i128_to_lossless_f64(bi)
+                    .ok_or_else(|| cannot_apply_without_cast("%", bi))?;
+                if bf == 0.0 {
+                    return Err(VMError::DivisionByZero);
+                }
+                Ok(Some(ValueWord::from_f64(af % bf)))
+            }
+            // Decimal modulo
+            (NumericDomain::Decimal(ad), NumericDomain::Decimal(bd)) => {
+                if bd.is_zero() {
+                    return Err(VMError::DivisionByZero);
+                }
+                Ok(Some(ValueWord::from_decimal(ad % bd)))
+            }
+            (NumericDomain::Decimal(ad), NumericDomain::Int(bi)) => {
+                let bd = rust_decimal::Decimal::from_i128_with_scale(bi, 0);
+                if bd.is_zero() {
+                    return Err(VMError::DivisionByZero);
+                }
+                Ok(Some(ValueWord::from_decimal(ad % bd)))
+            }
+            (NumericDomain::Int(ai), NumericDomain::Decimal(bd)) => {
+                if bd.is_zero() {
+                    return Err(VMError::DivisionByZero);
+                }
+                let ad = rust_decimal::Decimal::from_i128_with_scale(ai, 0);
+                Ok(Some(ValueWord::from_decimal(ad % bd)))
+            }
+            (NumericDomain::Decimal(ad), NumericDomain::Float(bf)) => {
+                if bf == 0.0 {
+                    return Err(VMError::DivisionByZero);
+                }
+                use rust_decimal::prelude::ToPrimitive;
+                let af = ad.to_f64().unwrap_or(0.0);
+                Ok(Some(ValueWord::from_f64(af % bf)))
+            }
+            (NumericDomain::Float(af), NumericDomain::Decimal(bd)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let bf = bd.to_f64().unwrap_or(0.0);
                 if bf == 0.0 {
                     return Err(VMError::DivisionByZero);
                 }
@@ -300,39 +403,61 @@ impl VirtualMachine {
                         .ok_or_else(|| VMError::RuntimeError("Integer overflow in '**'".into()))?;
                     return Self::integer_result_boxed(out, "**").map(Some);
                 }
-                let base_f = Self::arith_i128_to_lossless_f64(base).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '**' without explicit cast: {} is not losslessly representable as number",
-                        base
-                    ))
-                })?;
-                let exp_f = Self::arith_i128_to_lossless_f64(exp).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '**' without explicit cast: {} is not losslessly representable as number",
-                        exp
-                    ))
-                })?;
+                let base_f = Self::arith_i128_to_lossless_f64(base)
+                    .ok_or_else(|| cannot_apply_without_cast("**", base))?;
+                let exp_f = Self::arith_i128_to_lossless_f64(exp)
+                    .ok_or_else(|| cannot_apply_without_cast("**", exp))?;
                 Ok(Some(ValueWord::from_f64(base_f.powf(exp_f))))
             }
             (NumericDomain::Float(base), NumericDomain::Float(exp)) => {
                 Ok(Some(ValueWord::from_f64(base.powf(exp))))
             }
             (NumericDomain::Int(base), NumericDomain::Float(exp)) => {
-                let base_f = Self::arith_i128_to_lossless_f64(base).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '**' without explicit cast: {} is not losslessly representable as number",
-                        base
-                    ))
-                })?;
+                let base_f = Self::arith_i128_to_lossless_f64(base)
+                    .ok_or_else(|| cannot_apply_without_cast("**", base))?;
                 Ok(Some(ValueWord::from_f64(base_f.powf(exp))))
             }
             (NumericDomain::Float(base), NumericDomain::Int(exp)) => {
-                let exp_f = Self::arith_i128_to_lossless_f64(exp).ok_or_else(|| {
-                    VMError::RuntimeError(format!(
-                        "Cannot apply '**' without explicit cast: {} is not losslessly representable as number",
-                        exp
-                    ))
-                })?;
+                let exp_f = Self::arith_i128_to_lossless_f64(exp)
+                    .ok_or_else(|| cannot_apply_without_cast("**", exp))?;
+                Ok(Some(ValueWord::from_f64(base.powf(exp_f))))
+            }
+            // Decimal power — convert to f64 for the operation, return decimal
+            (NumericDomain::Decimal(ad), NumericDomain::Decimal(bd)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let base_f = ad.to_f64().unwrap_or(0.0);
+                let exp_f = bd.to_f64().unwrap_or(0.0);
+                use rust_decimal::prelude::FromPrimitive;
+                Ok(Some(ValueWord::from_decimal(
+                    rust_decimal::Decimal::from_f64(base_f.powf(exp_f)).unwrap_or_default(),
+                )))
+            }
+            (NumericDomain::Decimal(ad), NumericDomain::Int(exp)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let base_f = ad.to_f64().unwrap_or(0.0);
+                let exp_f = exp as f64;
+                use rust_decimal::prelude::FromPrimitive;
+                Ok(Some(ValueWord::from_decimal(
+                    rust_decimal::Decimal::from_f64(base_f.powf(exp_f)).unwrap_or_default(),
+                )))
+            }
+            (NumericDomain::Int(base), NumericDomain::Decimal(bd)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let base_f = base as f64;
+                let exp_f = bd.to_f64().unwrap_or(0.0);
+                use rust_decimal::prelude::FromPrimitive;
+                Ok(Some(ValueWord::from_decimal(
+                    rust_decimal::Decimal::from_f64(base_f.powf(exp_f)).unwrap_or_default(),
+                )))
+            }
+            (NumericDomain::Decimal(ad), NumericDomain::Float(exp)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let base_f = ad.to_f64().unwrap_or(0.0);
+                Ok(Some(ValueWord::from_f64(base_f.powf(exp))))
+            }
+            (NumericDomain::Float(base), NumericDomain::Decimal(bd)) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let exp_f = bd.to_f64().unwrap_or(0.0);
                 Ok(Some(ValueWord::from_f64(base.powf(exp_f))))
             }
         }

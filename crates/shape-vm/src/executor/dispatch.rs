@@ -541,12 +541,26 @@ impl VirtualMachine {
                 return self.op_call_method(instruction, ctx);
             }
 
-            // Operations not yet implemented
-            PushTimeframe | PopTimeframe | RunSimulation => {
-                return Err(VMError::NotImplemented(format!(
-                    "Operation {:?}",
-                    instruction.opcode
-                )));
+            // Reserved opcodes — defined for forward compatibility but not yet implemented.
+            Pattern => {
+                return Err(VMError::NotImplemented(
+                    "Opcode 'Pattern' is reserved but not yet implemented".into(),
+                ));
+            }
+            PushTimeframe => {
+                return Err(VMError::NotImplemented(
+                    "Opcode 'PushTimeframe' is reserved but not yet implemented".into(),
+                ));
+            }
+            PopTimeframe => {
+                return Err(VMError::NotImplemented(
+                    "Opcode 'PopTimeframe' is reserved but not yet implemented".into(),
+                ));
+            }
+            RunSimulation => {
+                return Err(VMError::NotImplemented(
+                    "Opcode 'RunSimulation' is reserved but not yet implemented".into(),
+                ));
             }
 
             // Typed column access on RowView values
