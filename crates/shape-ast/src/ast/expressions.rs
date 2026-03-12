@@ -169,12 +169,15 @@ pub enum Expr {
     /// Return with optional value
     Return(Option<Box<Expr>>, Span),
 
-    /// Method call: expr.method(args) or expr.method(name: value)
+    /// Method call: expr.method(args) or expr?.method(args)
     MethodCall {
         receiver: Box<Expr>,
         method: String,
         args: Vec<Expr>,
         named_args: Vec<(String, Expr)>,
+        /// True when called via optional chaining: `expr?.method(args)`
+        #[serde(default)]
+        optional: bool,
         span: Span,
     },
 

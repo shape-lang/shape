@@ -191,13 +191,6 @@ pub fn parse_item(pair: pest::iterators::Pair<Rule>) -> Result<Item> {
             Item::BuiltinFunctionDecl(functions::parse_builtin_function_decl(inner)?, span)
         }
         Rule::stream_def => Item::Stream(stream::parse_stream_def(inner)?, span),
-        Rule::test_def => {
-            return Err(ShapeError::ParseError {
-                message: "Embedded test definitions are no longer supported in this refactor"
-                    .to_string(),
-                location: None,
-            });
-        }
         Rule::statement => Item::Statement(statements::parse_statement(inner)?, span),
         Rule::extend_statement => Item::Extend(extensions::parse_extend_statement(inner)?, span),
         Rule::impl_block => Item::Impl(extensions::parse_impl_block(inner)?, span),

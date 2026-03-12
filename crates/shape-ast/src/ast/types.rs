@@ -370,6 +370,9 @@ pub struct TraitDef {
     #[serde(default)]
     pub doc_comment: Option<DocComment>,
     pub type_params: Option<Vec<TypeParam>>,
+    /// Supertrait bounds: `trait Foo: Bar + Baz { ... }`
+    #[serde(default)]
+    pub super_traits: Vec<TypeAnnotation>,
     pub members: Vec<TraitMember>,
     /// Annotations applied to the trait (e.g., `@documented("...") trait Foo { ... }`)
     #[serde(default)]

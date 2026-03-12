@@ -117,6 +117,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                 method: (*target_method).to_string(),
                 args,
                 named_args: Vec::new(),
+                optional: false,
                 span: Span::DUMMY,
             };
 

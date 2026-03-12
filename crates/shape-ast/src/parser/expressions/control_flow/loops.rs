@@ -299,14 +299,15 @@ fn if_stmt_to_conditional(if_stmt: IfStatement, span: Span) -> Expr {
 
     let else_expr = if_stmt.else_body.map(|stmts| {
         // An `else if` is represented as a single Statement::If inside the vec.
-        if stmts.len() == 1 {
-            if matches!(stmts.first(), Some(Statement::If(..))) {
-                let stmt = stmts.into_iter().next().unwrap();
-                if let Statement::If(nested_if, nested_span) = stmt {
-                    return Box::new(if_stmt_to_conditional(nested_if, nested_span));
-                }
-                unreachable!();
+        if stmts.len() == 1 && matches!(stmts.first(), Some(Statement::If(..))) {
+            let mut iter = stmts.into_iter();
+            if let Some(Statement::If(nested_if, nested_span)) = iter.next() {
+                return Box::new(if_stmt_to_conditional(nested_if, nested_span));
             }
+            // The matches! guard above ensures we have Statement::If, so this
+            // path is not reachable. Fall through to stmts_to_block_expr with
+            // an empty vec if it ever were.
+            return Box::new(stmts_to_block_expr(Vec::new(), span));
         }
         Box::new(stmts_to_block_expr(stmts, span))
     });

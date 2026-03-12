@@ -79,13 +79,12 @@ pub fn parse_postfix_expr(pair: Pair<Rule>) -> Result<Expr> {
                 {
                     let (args, named_args) =
                         super::functions::parse_arg_list(postfix_ops[i + 1].clone())?;
-                    // For optional chaining, we'd need to add optional to MethodCall as well
-                    // For now, treating it as a regular method call
                     expr = Expr::MethodCall {
                         receiver: Box::new(expr),
                         method: property,
                         args,
                         named_args,
+                        optional: is_optional,
                         span: full_span,
                     };
                     i += 2; // Skip the function call we just processed
@@ -172,6 +171,7 @@ pub fn parse_postfix_expr(pair: Pair<Rule>) -> Result<Expr> {
                         method: "__call__".to_string(),
                         args,
                         named_args,
+                        optional: false,
                         span: full_span,
                     };
                 }

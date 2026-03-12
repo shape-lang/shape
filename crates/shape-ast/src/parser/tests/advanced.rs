@@ -1069,20 +1069,57 @@ fn test_trait_with_type_params() {
 }
 
 #[test]
-fn test_trait_with_extends_is_rejected() {
+fn test_trait_with_supertrait_colon_syntax() {
     let content = r#"
-        trait AdvancedQueryable<T> extends Queryable<T> {
+        trait AdvancedQueryable<T>: Queryable<T> {
             groupBy(column: string): Self
         }
     "#;
     let result = parse_program_helper(content);
-    match result {
-        Err(_) => {}
-        Ok(items) => assert!(
-            items.is_empty(),
-            "trait extends should not produce AST items, got: {:?}",
-            items
-        ),
+    assert!(
+        result.is_ok(),
+        "Trait with supertrait : syntax should parse: {:?}",
+        result.err()
+    );
+    let items = result.unwrap();
+    match &items[0] {
+        Item::Trait(def, _) => {
+            assert_eq!(def.name, "AdvancedQueryable");
+            assert_eq!(def.super_traits.len(), 1);
+            match &def.super_traits[0] {
+                crate::ast::TypeAnnotation::Generic { name, args } => {
+                    assert_eq!(name, "Queryable");
+                    assert_eq!(args.len(), 1);
+                }
+                other => panic!("expected Generic supertrait, got {:?}", other),
+            }
+        }
+        other => panic!("expected Trait, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_trait_with_multiple_supertraits() {
+    let content = r#"
+        trait Foo: Bar + Baz {
+            method(self): int
+        }
+    "#;
+    let result = parse_program_helper(content);
+    assert!(
+        result.is_ok(),
+        "Trait with multiple supertraits should parse: {:?}",
+        result.err()
+    );
+    let items = result.unwrap();
+    match &items[0] {
+        Item::Trait(def, _) => {
+            assert_eq!(def.name, "Foo");
+            assert_eq!(def.super_traits.len(), 2);
+            assert_eq!(def.super_traits[0].as_simple_name(), Some("Bar"));
+            assert_eq!(def.super_traits[1].as_simple_name(), Some("Baz"));
+        }
+        other => panic!("expected Trait, got {:?}", other),
     }
 }
 

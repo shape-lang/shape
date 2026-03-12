@@ -538,6 +538,7 @@ mod tests {
             name: name.to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members: methods
                 .into_iter()
                 .map(|m| {
@@ -771,6 +772,7 @@ mod tests {
             name: name.to_string(),
             doc_comment: None,
             type_params: None,
+            super_traits: vec![],
             members,
             annotations: vec![],
         }

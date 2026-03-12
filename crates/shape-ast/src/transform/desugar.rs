@@ -616,6 +616,7 @@ fn method_call(receiver: Expr, method: &str, args: Vec<Expr>, span: Span) -> Exp
         method: method.to_string(),
         args,
         named_args: vec![],
+        optional: false,
         span,
     }
 }

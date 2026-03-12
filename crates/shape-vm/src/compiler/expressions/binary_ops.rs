@@ -362,6 +362,7 @@ impl BytecodeCompiler {
                         method,
                         args,
                         named_args,
+                        optional,
                         span,
                     } => {
                         // a |> obj.method(x) -> obj.method(a, x)
@@ -372,6 +373,7 @@ impl BytecodeCompiler {
                             method: method.clone(),
                             args: new_args,
                             named_args: named_args.clone(),
+                            optional: *optional,
                             span: *span,
                         };
                         self.compile_expr(&new_call)?;

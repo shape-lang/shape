@@ -913,15 +913,17 @@ pub fn parse_interface_def(pair: Pair<Rule>) -> Result<crate::ast::InterfaceDef>
 
 /// Parse trait definition
 ///
-/// Grammar: `"trait" ~ ident ~ type_params? ~ "{" ~ trait_body ~ "}"`
+/// Grammar: `annotations? ~ "trait" ~ ident ~ type_params? ~ (":" ~ type_annotation ~ ("+" ~ type_annotation)*)? ~ "{" ~ trait_body ~ "}"`
 ///
 /// Traits reuse the same body syntax as interfaces (method/property signatures).
+/// Supertrait bounds use `:` syntax: `trait Foo: Bar + Baz { ... }`
 pub fn parse_trait_def(pair: Pair<Rule>) -> Result<crate::ast::TraitDef> {
     let pair_loc = pair_location(&pair);
     let inner = pair.into_inner();
 
     let mut annotations = Vec::new();
     let mut type_params = None;
+    let mut super_traits = Vec::new();
     let mut members = Vec::new();
     let mut name = String::new();
 
@@ -938,6 +940,13 @@ pub fn parse_trait_def(pair: Pair<Rule>) -> Result<crate::ast::TraitDef> {
             }
             Rule::type_params => {
                 type_params = Some(parse_type_params(part)?);
+            }
+            Rule::supertrait_list => {
+                for inner_part in part.into_inner() {
+                    if inner_part.as_rule() == Rule::optional_type {
+                        super_traits.push(parse_type_annotation(inner_part)?);
+                    }
+                }
             }
             Rule::trait_body => {
                 members = parse_trait_body(part)?;
@@ -957,6 +966,7 @@ pub fn parse_trait_def(pair: Pair<Rule>) -> Result<crate::ast::TraitDef> {
         name,
         doc_comment: None,
         type_params,
+        super_traits,
         members,
         annotations,
     })
@@ -1119,7 +1129,7 @@ pub(crate) fn parse_documented_method_def_shared(
         return parse_method_def_shared(pair);
     }
     assert_eq!(pair.as_rule(), Rule::documented_method_def);
-    let mut inner = pair.into_inner();
+    let inner = pair.into_inner();
     let mut doc_comment = None;
     let mut annotations = Vec::new();
     let mut method_pair = None;

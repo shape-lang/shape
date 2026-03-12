@@ -1685,6 +1685,7 @@ impl BytecodeCompiler {
             method: method.to_string(),
             args: args.to_vec(),
             named_args: vec![],
+            optional: false,
             span: receiver.span(),
         };
         let inferred = self.infer_expr_type(&namespace_call_expr).ok();
