@@ -18,8 +18,8 @@
 //!   error(Point, Loan, Loan)          — two conflicting loans are simultaneously active
 //!
 //! Additional analyses:
-//! - **Post-solve relaxation**: `relax_local_container_errors()` removes
-//!   `ReferenceStoredIn*` errors when the container is local (never escapes).
+//! - **Post-solve relaxation**: `solve()` skips `ReferenceStoredIn*` errors
+//!   when the container slot's `EscapeStatus` is `Local` (never escapes).
 //! - **Interprocedural summaries**: `extract_borrow_summary()` derives per-function
 //!   conflict pairs for call-site alias checking.
 //! - **Task-boundary sendability**: Detects closures with mutable captures
@@ -32,6 +32,9 @@ use super::types::*;
 use crate::type_tracking::EscapeStatus;
 use datafrog::{Iteration, Relation, RelationLeaper};
 use std::collections::{HashMap, HashSet};
+
+/// Callee return-reference summaries, keyed by function name.
+pub type CalleeSummaries = HashMap<String, ReturnReferenceSummary>;
 
 /// Input facts extracted from MIR for the Datafrog solver.
 #[derive(Debug, Default)]
@@ -84,7 +87,11 @@ pub struct BorrowFacts {
 }
 
 /// Populate borrow facts from a MIR function and its CFG.
-pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
+pub fn extract_facts(
+    mir: &MirFunction,
+    cfg: &ControlFlowGraph,
+    callee_summaries: &CalleeSummaries,
+) -> BorrowFacts {
     let mut facts = BorrowFacts::default();
     let mut next_loan = 0u32;
     let mut slot_loans: HashMap<SlotId, Vec<u32>> = HashMap::new();
@@ -443,10 +450,72 @@ pub fn extract_facts(mir: &MirFunction, cfg: &ControlFlowGraph) -> BorrowFacts {
                     }
                 }
             }
-            // Destination write: clear slot_loans and reference summarys for that slot
-            slot_loans.remove(&destination.root_local());
-            slot_reference_origins.remove(&destination.root_local());
-            slot_reference_summaries.remove(&destination.root_local());
+            // Destination write: clear provenance, then compose callee summary if available
+            let dest_slot = destination.root_local();
+            slot_loans.remove(&dest_slot);
+            slot_reference_origins.remove(&dest_slot);
+            slot_reference_summaries.remove(&dest_slot);
+
+            // Compose callee return summary into destination slot (summary-driven).
+            // Only compose for MirConstant::Function calls — indirect calls (closures,
+            // method dispatch) use conservative clearing.
+            if let Operand::Constant(MirConstant::Function(callee_name)) = func {
+                if let Some(callee_summary) = callee_summaries.get(callee_name.as_str()) {
+                    if let Some(arg_operand) = args.get(callee_summary.param_index) {
+                        if let Operand::Copy(arg_place)
+                        | Operand::Move(arg_place)
+                        | Operand::MoveExplicit(arg_place) = arg_operand
+                        {
+                            let arg_slot = arg_place.root_local();
+
+                            // Inherit loans from the argument slot
+                            if let Some(arg_loans) = slot_loans.get(&arg_slot).cloned() {
+                                slot_loans.insert(dest_slot, arg_loans);
+                            }
+
+                            // Compose reference summary (handles imprecision correctly)
+                            if let Some(arg_summary) =
+                                slot_reference_summaries.get(&arg_slot).cloned()
+                            {
+                                let composed = compose_return_reference_summary(
+                                    &arg_summary,
+                                    callee_summary,
+                                );
+
+                                // Only compose origin when projection precision is preserved.
+                                // Origin is always-precise (Vec, not Option<Vec>); if projection
+                                // loses precision the origin becomes meaningless.
+                                if composed.projection.is_some() {
+                                    if let Some((_, origin)) =
+                                        slot_reference_origins.get(&arg_slot).cloned()
+                                    {
+                                        // callee_proj is guaranteed Some and Field-free here
+                                        if let Some(ref callee_proj) = callee_summary.projection {
+                                            let mut proj = origin.projection.clone();
+                                            proj.extend(callee_proj.iter().copied());
+                                            slot_reference_origins.insert(
+                                                dest_slot,
+                                                (
+                                                    composed.kind,
+                                                    ReferenceOrigin {
+                                                        root: origin.root,
+                                                        projection: proj,
+                                                    },
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    // Ref params seed summaries but NOT origins (solver.rs:106).
+                                    // If arg has summary but no origin, origin stays cleared.
+                                }
+                                // else: projection lost → origin stays cleared
+
+                                slot_reference_summaries.insert(dest_slot, composed);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -729,6 +798,39 @@ fn safe_reference_summary_for_borrow(
         kind: borrow_kind,
         projection: Some(borrowed_place.projection_steps()),
     })
+}
+
+/// Compose a callee's return summary with the argument slot's existing summary.
+///
+/// - `param_index`: from `arg_summary` (traces to the caller's parameter)
+/// - `kind`: from `callee_summary` (callee dictates the returned borrow kind)
+/// - `projection`: concatenate only when BOTH are `Some` AND the callee
+///   projection contains no `Field` steps (FieldIdx is per-MirBuilder,
+///   not cross-function stable). Otherwise `None` (precision lost).
+fn compose_return_reference_summary(
+    arg_summary: &ReturnReferenceSummary,
+    callee_summary: &ReturnReferenceSummary,
+) -> ReturnReferenceSummary {
+    let projection = match (&arg_summary.projection, &callee_summary.projection) {
+        (Some(arg_proj), Some(callee_proj)) => {
+            if callee_proj
+                .iter()
+                .any(|step| matches!(step, ProjectionStep::Field(_)))
+            {
+                None // FieldIdx is per-MirBuilder, unsound across functions
+            } else {
+                let mut composed = arg_proj.clone();
+                composed.extend(callee_proj.iter().copied());
+                Some(composed)
+            }
+        }
+        _ => None, // precision already lost on one side
+    };
+    ReturnReferenceSummary {
+        param_index: arg_summary.param_index,
+        kind: callee_summary.kind,
+        projection,
+    }
 }
 
 fn resolve_return_reference_summary(
@@ -1154,7 +1256,10 @@ pub struct SolverResult {
 /// consumed by compiler, LSP, and diagnostics.
 /// Extract a borrow summary for a function — describes which parameters are
 /// borrowed and which parameter pairs must not alias at call sites.
-pub fn extract_borrow_summary(mir: &MirFunction) -> FunctionBorrowSummary {
+pub fn extract_borrow_summary(
+    mir: &MirFunction,
+    return_summary: Option<ReturnReferenceSummary>,
+) -> FunctionBorrowSummary {
     let num_params = mir.param_slots.len();
     let mut param_borrows: Vec<Option<BorrowKind>> = mir
         .param_reference_kinds
@@ -1243,6 +1348,7 @@ pub fn extract_borrow_summary(mir: &MirFunction) -> FunctionBorrowSummary {
     FunctionBorrowSummary {
         param_borrows,
         conflict_pairs,
+        return_summary,
     }
 }
 
@@ -1268,14 +1374,14 @@ fn operand_uses_param(op: &Operand, param_slot: SlotId) -> bool {
     }
 }
 
-pub fn analyze(mir: &MirFunction) -> BorrowAnalysis {
+pub fn analyze(mir: &MirFunction, callee_summaries: &CalleeSummaries) -> BorrowAnalysis {
     let cfg = ControlFlowGraph::build(mir);
 
     // 1. Compute liveness (for move/clone inference)
     let liveness = liveness::compute_liveness(mir, &cfg);
 
     // 2. Extract Datafrog input facts
-    let facts = extract_facts(mir, &cfg);
+    let facts = extract_facts(mir, &cfg, callee_summaries);
 
     // 3. Run the Datafrog solver
     let solver_result = solve(&facts);
@@ -1302,20 +1408,6 @@ pub fn analyze(mir: &MirFunction) -> BorrowAnalysis {
         mutability_errors: Vec::new(), // filled by binding resolver (Phase 1)
         return_reference_summary: solver_result.return_reference_summary,
     }
-}
-
-/// Post-solve relaxation: remove `ReferenceStoredIn*` errors when the
-/// container slot's `EscapeStatus` is `Local` and the loan's borrowed place
-/// is alive throughout the container's scope.
-///
-/// This allows `let arr = [&x]` inside a function where `arr` never escapes,
-/// while still rejecting `return [&x]` (the container escapes).
-pub fn relax_local_container_errors(
-    errors: &mut Vec<BorrowError>,
-    storage_plan: &super::storage_planning::StoragePlan,
-    mir: &MirFunction,
-) {
-    let _ = (errors, storage_plan, mir);
 }
 
 /// Compute ownership decisions for assignments based on liveness.
@@ -1691,7 +1783,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         assert!(analysis.errors.is_empty(), "expected no errors");
     }
 
@@ -1740,7 +1832,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         assert!(
             !analysis.errors.is_empty(),
             "expected borrow conflict error"
@@ -1801,7 +1893,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "disjoint field borrows should not conflict, got: {:?}",
@@ -1851,7 +1943,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -1912,7 +2004,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -1965,7 +2057,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -2009,7 +2101,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         // _0 is not used after point 1, so decision should be Move
         assert_eq!(
             analysis.ownership_at(Point(1)),
@@ -2082,7 +2174,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         // With NLL, the shared borrow on _0 ends after last use of _1 (point 2).
         // The exclusive borrow at point 3 should NOT conflict.
         // Note: our current solver propagates loan_live_at through cfg_edge
@@ -2137,7 +2229,7 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         // At point 1, _0 is still used at point 2, so it's live → Clone
         assert_eq!(
             analysis.ownership_at(Point(1)),
@@ -2185,11 +2277,452 @@ mod tests {
             span: span(),
         };
 
-        let analysis = analyze(&mir);
+        let analysis = analyze(&mir, &Default::default());
         assert_eq!(
             analysis.ownership_at(Point(1)),
             OwnershipDecision::Copy,
             "Copy type → always Copy regardless of liveness"
+        );
+    }
+
+    // =========================================================================
+    // compose_return_reference_summary unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_compose_summary_identity() {
+        // Both empty projections — identity composition
+        let arg = ReturnReferenceSummary {
+            param_index: 2,
+            kind: BorrowKind::Shared,
+            projection: Some(vec![]),
+        };
+        let callee = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Exclusive,
+            projection: Some(vec![]),
+        };
+        let result = compose_return_reference_summary(&arg, &callee);
+        assert_eq!(result.param_index, 2); // from arg
+        assert_eq!(result.kind, BorrowKind::Exclusive); // from callee
+        assert_eq!(result.projection, Some(vec![]));
+    }
+
+    #[test]
+    fn test_compose_summary_some_index_some_empty() {
+        let arg = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Shared,
+            projection: Some(vec![ProjectionStep::Index]),
+        };
+        let callee = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Shared,
+            projection: Some(vec![]),
+        };
+        let result = compose_return_reference_summary(&arg, &callee);
+        assert_eq!(result.projection, Some(vec![ProjectionStep::Index]));
+    }
+
+    #[test]
+    fn test_compose_summary_callee_field_loses_precision() {
+        let arg = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Shared,
+            projection: Some(vec![]),
+        };
+        let callee = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Shared,
+            projection: Some(vec![ProjectionStep::Field(FieldIdx(0))]),
+        };
+        let result = compose_return_reference_summary(&arg, &callee);
+        assert_eq!(result.projection, None); // Field loses precision
+    }
+
+    #[test]
+    fn test_compose_summary_callee_index_composes() {
+        let arg = ReturnReferenceSummary {
+            param_index: 1,
+            kind: BorrowKind::Shared,
+            projection: Some(vec![ProjectionStep::Index]),
+        };
+        let callee = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Exclusive,
+            projection: Some(vec![ProjectionStep::Index]),
+        };
+        let result = compose_return_reference_summary(&arg, &callee);
+        assert_eq!(result.param_index, 1);
+        assert_eq!(result.kind, BorrowKind::Exclusive);
+        assert_eq!(
+            result.projection,
+            Some(vec![ProjectionStep::Index, ProjectionStep::Index])
+        );
+    }
+
+    #[test]
+    fn test_compose_summary_arg_none() {
+        let arg = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Shared,
+            projection: None, // precision already lost
+        };
+        let callee = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Shared,
+            projection: Some(vec![]),
+        };
+        let result = compose_return_reference_summary(&arg, &callee);
+        assert_eq!(result.projection, None);
+    }
+
+    #[test]
+    fn test_compose_summary_callee_none() {
+        let arg = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Shared,
+            projection: Some(vec![ProjectionStep::Index]),
+        };
+        let callee = ReturnReferenceSummary {
+            param_index: 0,
+            kind: BorrowKind::Exclusive,
+            projection: None,
+        };
+        let result = compose_return_reference_summary(&arg, &callee);
+        assert_eq!(result.projection, None);
+    }
+
+    // =========================================================================
+    // Solver-level call composition tests (synthetic MIR)
+    // =========================================================================
+
+    #[test]
+    fn test_call_composition_identity() {
+        // fn identity(&x) { x }
+        // Caller: param _1 (&ref), call identity(_1) → _2, return _2
+        // With callee summary for "identity": param_index=0, kind=Shared, projection=Some([])
+        let mir = MirFunction {
+            name: "caller".to_string(),
+            blocks: vec![
+                BasicBlock {
+                    id: BasicBlockId(0),
+                    statements: vec![
+                        MirStatement {
+                            kind: StatementKind::Assign(
+                                Place::Local(SlotId(2)),
+                                Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                            ),
+                            span: span(),
+                            point: Point(0),
+                        },
+                    ],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Function(
+                                "identity".to_string(),
+                            )),
+                            args: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                            destination: Place::Local(SlotId(3)),
+                            next: BasicBlockId(1),
+                        },
+                        span: span(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(1),
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(3)))),
+                        ),
+                        span: span(),
+                        point: Point(1),
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Return,
+                        span: span(),
+                    },
+                },
+            ],
+            num_locals: 4,
+            param_slots: vec![SlotId(1)],
+            param_reference_kinds: vec![Some(BorrowKind::Shared)],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+        };
+
+        let mut callee_summaries = CalleeSummaries::new();
+        callee_summaries.insert(
+            "identity".to_string(),
+            ReturnReferenceSummary {
+                param_index: 0,
+                kind: BorrowKind::Shared,
+                projection: Some(vec![]),
+            },
+        );
+
+        let analysis = analyze(&mir, &callee_summaries);
+        assert!(
+            analysis.return_reference_summary.is_some(),
+            "expected return reference summary from composed call"
+        );
+        let summary = analysis.return_reference_summary.unwrap();
+        assert_eq!(summary.param_index, 0);
+        assert_eq!(summary.kind, BorrowKind::Shared);
+    }
+
+    #[test]
+    fn test_call_composition_unknown_callee() {
+        // Same as above but no callee summary → conservative (no return summary)
+        let mir = MirFunction {
+            name: "caller".to_string(),
+            blocks: vec![
+                BasicBlock {
+                    id: BasicBlockId(0),
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                        ),
+                        span: span(),
+                        point: Point(0),
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Function(
+                                "unknown_fn".to_string(),
+                            )),
+                            args: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                            destination: Place::Local(SlotId(3)),
+                            next: BasicBlockId(1),
+                        },
+                        span: span(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(1),
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(3)))),
+                        ),
+                        span: span(),
+                        point: Point(1),
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Return,
+                        span: span(),
+                    },
+                },
+            ],
+            num_locals: 4,
+            param_slots: vec![SlotId(1)],
+            param_reference_kinds: vec![Some(BorrowKind::Shared)],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+        };
+
+        let analysis = analyze(&mir, &Default::default());
+        // Unknown callee → no return reference summary composed
+        assert!(
+            analysis.return_reference_summary.is_none(),
+            "unknown callee should not produce return reference summary"
+        );
+    }
+
+    #[test]
+    fn test_call_composition_indirect_call() {
+        // Call via Method (not Function) → conservative
+        let mir = MirFunction {
+            name: "caller".to_string(),
+            blocks: vec![
+                BasicBlock {
+                    id: BasicBlockId(0),
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                        ),
+                        span: span(),
+                        point: Point(0),
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Method(
+                                "identity".to_string(),
+                            )),
+                            args: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                            destination: Place::Local(SlotId(3)),
+                            next: BasicBlockId(1),
+                        },
+                        span: span(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(1),
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(3)))),
+                        ),
+                        span: span(),
+                        point: Point(1),
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Return,
+                        span: span(),
+                    },
+                },
+            ],
+            num_locals: 4,
+            param_slots: vec![SlotId(1)],
+            param_reference_kinds: vec![Some(BorrowKind::Shared)],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+        };
+
+        let mut callee_summaries = CalleeSummaries::new();
+        callee_summaries.insert(
+            "identity".to_string(),
+            ReturnReferenceSummary {
+                param_index: 0,
+                kind: BorrowKind::Shared,
+                projection: Some(vec![]),
+            },
+        );
+
+        // Method call, not Function call → conservative even with summary present
+        let analysis = analyze(&mir, &callee_summaries);
+        assert!(
+            analysis.return_reference_summary.is_none(),
+            "indirect (Method) call should not compose return summary"
+        );
+    }
+
+    #[test]
+    fn test_call_composition_chain() {
+        // Two-deep: param _1 → call "inner"(_1) → _3, call "outer"(_3) → _4, return _4
+        // inner: param_index=0, kind=Shared, projection=Some([])
+        // outer: param_index=0, kind=Exclusive, projection=Some([])
+        // Result: param_index=0 (traces to caller's param), kind=Exclusive (outer dictates)
+        let mir = MirFunction {
+            name: "caller".to_string(),
+            blocks: vec![
+                BasicBlock {
+                    id: BasicBlockId(0),
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                        ),
+                        span: span(),
+                        point: Point(0),
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Function(
+                                "inner".to_string(),
+                            )),
+                            args: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                            destination: Place::Local(SlotId(3)),
+                            next: BasicBlockId(1),
+                        },
+                        span: span(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(1),
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Nop,
+                        span: span(),
+                        point: Point(1),
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Function(
+                                "outer".to_string(),
+                            )),
+                            args: vec![Operand::Copy(Place::Local(SlotId(3)))],
+                            destination: Place::Local(SlotId(4)),
+                            next: BasicBlockId(2),
+                        },
+                        span: span(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(2),
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(4)))),
+                        ),
+                        span: span(),
+                        point: Point(2),
+                    }],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Return,
+                        span: span(),
+                    },
+                },
+            ],
+            num_locals: 5,
+            param_slots: vec![SlotId(1)],
+            param_reference_kinds: vec![Some(BorrowKind::Shared)],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+        };
+
+        let mut callee_summaries = CalleeSummaries::new();
+        callee_summaries.insert(
+            "inner".to_string(),
+            ReturnReferenceSummary {
+                param_index: 0,
+                kind: BorrowKind::Shared,
+                projection: Some(vec![]),
+            },
+        );
+        callee_summaries.insert(
+            "outer".to_string(),
+            ReturnReferenceSummary {
+                param_index: 0,
+                kind: BorrowKind::Exclusive,
+                projection: Some(vec![]),
+            },
+        );
+
+        let analysis = analyze(&mir, &callee_summaries);
+        assert!(
+            analysis.return_reference_summary.is_some(),
+            "chained composition should produce return reference summary"
+        );
+        let summary = analysis.return_reference_summary.unwrap();
+        assert_eq!(summary.param_index, 0, "should trace to outermost param");
+        assert_eq!(
+            summary.kind,
+            BorrowKind::Exclusive,
+            "outer callee dictates the kind"
         );
     }
 }

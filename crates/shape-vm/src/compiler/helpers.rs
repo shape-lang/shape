@@ -1677,7 +1677,8 @@ impl BytecodeCompiler {
             return None;
         }
 
-        crate::mir::solver::analyze(&lowering.mir)
+        let callee_summaries = self.build_callee_summaries(None, &lowering.all_local_names);
+        crate::mir::solver::analyze(&lowering.mir, &callee_summaries)
             .return_reference_summary
             .map(Into::into)
     }

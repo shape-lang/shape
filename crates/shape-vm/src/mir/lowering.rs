@@ -7,7 +7,7 @@ use super::types::*;
 use crate::mir::analysis::MutabilityError;
 use shape_ast::ast::{self, Expr, Span, Spanned, Statement};
 use shape_runtime::closure::EnvironmentAnalyzer;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy)]
 struct MirLoopContext {
@@ -109,6 +109,9 @@ pub struct MirLoweringResult {
     pub binding_infos: Vec<LoweredBindingInfo>,
     /// Reverse map from field index → field name (inverted from `field_indices`).
     pub field_names: HashMap<FieldIdx, String>,
+    /// All named locals (params + bindings), excluding `__mir_*` temporaries.
+    /// Used by callee summary filtering to detect local-name shadows.
+    pub all_local_names: HashSet<String>,
 }
 
 impl MirBuilder {
@@ -452,6 +455,12 @@ impl MirBuilder {
 
         let had_fallbacks = !self.fallback_spans.is_empty();
         let fallback_spans = self.fallback_spans;
+        let all_local_names: HashSet<String> = self
+            .locals
+            .iter()
+            .filter(|l| !l.name.starts_with("__mir_"))
+            .map(|l| l.name.clone())
+            .collect();
 
         MirLoweringResult {
             mir: MirFunction {
@@ -467,6 +476,7 @@ impl MirBuilder {
             fallback_spans,
             binding_infos,
             field_names,
+            all_local_names,
         }
     }
 }
@@ -3123,7 +3133,7 @@ mod tests {
             Statement::Return(Some(Expr::Identifier("shared".to_string(), span())), span()),
         ];
         let mir = lower_function("test", &[], &body, span());
-        let analysis = solver::analyze(&mir);
+        let analysis = solver::analyze(&mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3201,7 +3211,7 @@ mod tests {
             ),
         ];
         let mir = lower_function("test", &[], &body, span());
-        let analysis = solver::analyze(&mir);
+        let analysis = solver::analyze(&mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "disjoint field borrows should not conflict, got {:?}",
@@ -3248,7 +3258,7 @@ mod tests {
             Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let mir = lower_function("test", &[], &body, span());
-        let analysis = solver::analyze(&mir);
+        let analysis = solver::analyze(&mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3302,7 +3312,7 @@ mod tests {
             Statement::Expression(Expr::Identifier("exclusive".to_string(), span()), span()),
         ];
         let mir = lower_function("test", &[], &body, span());
-        let analysis = solver::analyze(&mir);
+        let analysis = solver::analyze(&mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3356,7 +3366,7 @@ mod tests {
             Statement::Return(Some(Expr::Identifier("alias".to_string(), span())), span()),
         ];
         let mir = lower_function("test", &[], &body, span());
-        let analysis = solver::analyze(&mir);
+        let analysis = solver::analyze(&mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3382,7 +3392,7 @@ mod tests {
             "array literals with ref elements should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local array ref storage should now be accepted, got {:?}",
@@ -3406,7 +3416,7 @@ mod tests {
             "indirect array ref storage should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local indirect array ref storage should now be accepted, got {:?}",
@@ -3429,7 +3439,7 @@ mod tests {
             "object literals with ref fields should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local object ref storage should now be accepted, got {:?}",
@@ -3453,7 +3463,7 @@ mod tests {
             "indirect object ref storage should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local indirect object ref storage should now be accepted, got {:?}",
@@ -3476,7 +3486,7 @@ mod tests {
             "struct literals with ref fields should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local struct ref storage should now be accepted, got {:?}",
@@ -3500,7 +3510,7 @@ mod tests {
             "indirect struct ref storage should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local indirect struct ref storage should now be accepted, got {:?}",
@@ -3523,7 +3533,7 @@ mod tests {
             "enum tuple payloads with ref values should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local enum tuple ref storage should now be accepted, got {:?}",
@@ -3547,7 +3557,7 @@ mod tests {
             "indirect enum tuple ref storage should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local indirect enum tuple ref storage should now be accepted, got {:?}",
@@ -3570,7 +3580,7 @@ mod tests {
             "enum struct payloads with ref values should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local enum struct ref storage should now be accepted, got {:?}",
@@ -3594,7 +3604,7 @@ mod tests {
             "indirect enum struct ref storage should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local indirect enum struct ref storage should now be accepted, got {:?}",
@@ -3643,7 +3653,7 @@ mod tests {
             ),
         ];
         let mir = lower_function("test", &[], &body, span());
-        let analysis = solver::analyze(&mir);
+        let analysis = solver::analyze(&mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3674,7 +3684,7 @@ mod tests {
             "while-expression lowering should stay in the supported subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3705,7 +3715,7 @@ mod tests {
             "for-expression lowering should stay in the supported subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3736,7 +3746,7 @@ mod tests {
             "loop-expression break lowering should stay in the supported subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3764,7 +3774,7 @@ mod tests {
             "continue inside a while-expression body should stay supported"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "continue-only control flow should not introduce borrow errors, got {:?}",
@@ -3795,7 +3805,7 @@ mod tests {
             "simple literal/wildcard match lowering should stay supported"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3823,7 +3833,7 @@ mod tests {
             "identifier/guard match lowering should stay supported"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "simple guarded identifier matches should stay clean, got {:?}",
@@ -3854,7 +3864,7 @@ mod tests {
             "array-pattern match lowering should stay supported"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3888,7 +3898,7 @@ mod tests {
             "object-pattern match lowering should stay supported"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3923,7 +3933,7 @@ mod tests {
             "constructor-pattern match lowering should stay supported"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3950,7 +3960,7 @@ mod tests {
             !lowering.had_fallbacks,
             "array destructuring declarations should stay supported"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -3977,7 +3987,7 @@ mod tests {
             !lowering.had_fallbacks,
             "array destructuring parameters should stay supported"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4061,7 +4071,7 @@ mod tests {
             !lowering.had_fallbacks,
             "destructuring assignments should stay supported"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4088,7 +4098,7 @@ mod tests {
             !lowering.had_fallbacks,
             "rest destructuring should stay supported"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4115,7 +4125,7 @@ mod tests {
             !lowering.had_fallbacks,
             "decomposition patterns should stay supported"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4491,7 +4501,7 @@ mod tests {
             !lowering.had_fallbacks,
             "simple assignment expressions should stay in the supported MIR subset"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4563,7 +4573,7 @@ mod tests {
             !lowering.had_fallbacks,
             "property assignment expressions should stay in the supported MIR subset"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "disjoint property assignment should stay borrow-clean, got {:?}",
@@ -4588,7 +4598,7 @@ mod tests {
             "property assignment with a reference RHS should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local object-field ref storage should now be accepted, got {:?}",
@@ -4614,7 +4624,7 @@ mod tests {
             "property assignment with an indirect reference RHS should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local indirect object-field ref storage should now be accepted, got {:?}",
@@ -4639,7 +4649,7 @@ mod tests {
             "index assignment with a reference RHS should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local array-element ref storage should now be accepted, got {:?}",
@@ -4665,7 +4675,7 @@ mod tests {
             "index assignment with an indirect reference RHS should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "local indirect array-element ref storage should now be accepted, got {:?}",
@@ -4737,7 +4747,7 @@ mod tests {
             !lowering.had_fallbacks,
             "block expressions with simple local bindings should stay in the supported MIR subset"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4799,7 +4809,7 @@ mod tests {
             !lowering.had_fallbacks,
             "let expressions with simple bindings should stay in the supported MIR subset"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4876,7 +4886,7 @@ mod tests {
             !lowering.had_fallbacks,
             "if expressions with simple block branches should stay in the supported MIR subset"
         );
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "simple branch-local borrows should stay borrow-clean here, got {:?}",
@@ -4899,7 +4909,7 @@ mod tests {
             "async let with direct ref capture should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4928,7 +4938,7 @@ mod tests {
             "async let block bodies should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -4955,7 +4965,7 @@ mod tests {
             "shared-ref async let should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             !analysis
                 .errors
@@ -4984,7 +4994,7 @@ mod tests {
             "join branches should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -5013,7 +5023,7 @@ mod tests {
             "async scope with supported async forms should stay in the MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "shared async-scope captures should stay borrow-clean, got {:?}",
@@ -5037,7 +5047,7 @@ mod tests {
             "closure creation should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "non-escaping closure ref capture should now be accepted, got {:?}",
@@ -5061,7 +5071,7 @@ mod tests {
             "returned local array with ref should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -5089,7 +5099,7 @@ mod tests {
             "returned closure with ref capture should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -5115,7 +5125,7 @@ mod tests {
             "owned-value closure capture should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis.errors.is_empty(),
             "owned-value closure capture should stay borrow-clean, got {:?}",
@@ -5140,7 +5150,7 @@ mod tests {
             "list comprehensions should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors
@@ -5168,7 +5178,7 @@ mod tests {
             "from-query expressions should stay in the supported MIR subset"
         );
 
-        let analysis = solver::analyze(&lowering.mir);
+        let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(
             analysis
                 .errors

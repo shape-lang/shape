@@ -223,7 +223,12 @@ impl BytecodeCompiler {
             &effective_def.body,
             effective_def.name_span,
         );
-        let mut mir_analysis = crate::mir::solver::analyze(&mir_lowering.mir);
+        let callee_summaries = self.build_callee_summaries(
+            Some(&effective_def.name),
+            &mir_lowering.all_local_names,
+        );
+        let mut mir_analysis =
+            crate::mir::solver::analyze(&mir_lowering.mir, &callee_summaries);
         mir_analysis.mutability_errors =
             crate::mir::lowering::compute_mutability_errors(&mir_lowering);
         crate::mir::repair::attach_repairs(&mut mir_analysis, &mir_lowering.mir);
@@ -279,14 +284,6 @@ impl BytecodeCompiler {
             };
 
             let storage_plan = crate::mir::storage_planning::plan_storage(&planner_input);
-
-            // Post-solve relaxation: remove ReferenceStoredIn* errors when the
-            // container slot is Local (never escapes the function).
-            crate::mir::solver::relax_local_container_errors(
-                &mut mir_analysis.errors,
-                &storage_plan,
-                &mir_lowering.mir,
-            );
 
             self.mir_storage_plans
                 .insert(effective_def.name.clone(), storage_plan);
@@ -366,11 +363,16 @@ impl BytecodeCompiler {
         }
 
         // Extract and store borrow summary for interprocedural alias checking.
-        let borrow_summary =
-            crate::mir::solver::extract_borrow_summary(&mir_lowering.mir);
-        if !borrow_summary.conflict_pairs.is_empty() {
+        let borrow_summary = crate::mir::solver::extract_borrow_summary(
+            &mir_lowering.mir,
+            mir_analysis.return_reference_summary.clone(),
+        );
+        if !borrow_summary.conflict_pairs.is_empty() || borrow_summary.return_summary.is_some() {
             self.function_borrow_summaries
                 .insert(effective_def.name.clone(), borrow_summary);
+        } else {
+            self.function_borrow_summaries
+                .remove(&effective_def.name);
         }
 
         // Interprocedural alias checking: scan call sites in this function's MIR
@@ -594,6 +596,43 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Build callee return-reference summaries for interprocedural composition.
+    ///
+    /// Only includes names that are confirmed direct global function calls.
+    /// Excludes names that shadow globals: locals, captures, module bindings,
+    /// and the function being compiled (prevents stale self-summary).
+    ///
+    /// This mirrors the bytecode compiler's call resolution order
+    /// (function_calls.rs:514-516): locals → captures → module bindings → globals.
+    pub(crate) fn build_callee_summaries(
+        &self,
+        exclude_name: Option<&str>,
+        mir_local_names: &std::collections::HashSet<String>,
+    ) -> crate::mir::solver::CalleeSummaries {
+        self.function_borrow_summaries
+            .iter()
+            .filter_map(|(name, summary)| {
+                if exclude_name == Some(name.as_str()) {
+                    return None;
+                }
+                // Mirror call resolution: locals → captures → module bindings → globals
+                if mir_local_names.contains(name.as_str()) {
+                    return None;
+                }
+                if self.mutable_closure_captures.contains_key(name.as_str()) {
+                    return None;
+                }
+                if self.resolve_scoped_module_binding_name(name).is_some() {
+                    return None;
+                }
+                summary
+                    .return_summary
+                    .as_ref()
+                    .map(|s| (name.clone(), s.clone()))
+            })
+            .collect()
+    }
+
     /// Check call sites in a function's MIR for interprocedural alias conflicts.
     /// Returns errors for each call where the same variable is passed to multiple
     /// parameters that the callee's borrow summary says must not alias.
@@ -761,7 +800,8 @@ impl BytecodeCompiler {
             &body,
             Self::synthetic_item_sequence_span(items),
         );
-        let mut analysis = crate::mir::solver::analyze(&lowering.mir);
+        let callee_summaries = self.build_callee_summaries(None, &lowering.all_local_names);
+        let mut analysis = crate::mir::solver::analyze(&lowering.mir, &callee_summaries);
         analysis.mutability_errors = crate::mir::lowering::compute_mutability_errors(&lowering);
         crate::mir::repair::attach_repairs(&mut analysis, &lowering.mir);
 
@@ -7489,6 +7529,86 @@ mod tests {
         assert!(
             !summary.conflict_pairs.is_empty(),
             "touch should have conflict pairs: mutated param 0 vs read param 1"
+        );
+    }
+
+    // =========================================================================
+    // Composable return reference summary integration tests
+    // =========================================================================
+
+    #[test]
+    fn test_composable_return_reference_summary() {
+        // fn identity(&x) { x }
+        // fn wrapper(&y) { identity(y) }
+        // wrapper should have return_summary tracing to param 0
+        let code = r#"
+fn identity(&x) { x }
+fn wrapper(&y) { identity(y) }
+"#;
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        // Register both functions first (two-pass)
+        for item in &program.items {
+            if let Item::Function(func, _) = item {
+                compiler.register_function(func).expect("register");
+            }
+        }
+        // Compile in order: identity first, then wrapper
+        for item in &program.items {
+            if let Item::Function(func, _) = item {
+                compiler.compile_function(func).expect("compile");
+            }
+        }
+
+        let summary = compiler
+            .function_borrow_summaries
+            .get("wrapper")
+            .expect("wrapper should have a borrow summary");
+        assert!(
+            summary.return_summary.is_some(),
+            "wrapper should have a return_summary from composed identity call"
+        );
+        let ret = summary.return_summary.as_ref().unwrap();
+        assert_eq!(ret.param_index, 0, "should trace to wrapper's param 0");
+    }
+
+    #[test]
+    fn test_composable_return_summary_local_shadow_conservative() {
+        // Global fn foo(&x) { x }, then bar defines local closure `foo` that
+        // shadows the global. The call `foo(y)` in bar should NOT get composed
+        // return summary from global foo.
+        let code = r#"
+fn foo(&x) { x }
+fn bar(&y) {
+    let foo = |z| { z }
+    foo(y)
+}
+"#;
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        for item in &program.items {
+            if let Item::Function(func, _) = item {
+                compiler.register_function(func).expect("register");
+            }
+        }
+        for item in &program.items {
+            if let Item::Function(func, _) = item {
+                compiler.compile_function(func).expect("compile");
+            }
+        }
+
+        // bar should NOT have a composed return summary from global foo,
+        // because the local closure `foo` shadows it
+        let has_composed = compiler
+            .function_borrow_summaries
+            .get("bar")
+            .and_then(|s| s.return_summary.as_ref())
+            .is_some();
+        assert!(
+            !has_composed,
+            "local shadow should prevent composition with global foo"
         );
     }
 }

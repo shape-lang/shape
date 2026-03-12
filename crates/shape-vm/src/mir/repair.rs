@@ -250,7 +250,7 @@ fn verify_repair(
     let modified_mir = apply_repair_to_mir(repair, error, mir);
 
     // Re-run the solver on the modified MIR
-    let analysis = solver::analyze(&modified_mir);
+    let analysis = solver::analyze(&modified_mir, &Default::default());
 
     // Check if the specific error is gone
     !analysis.errors.iter().any(|e| {

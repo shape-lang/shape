@@ -2170,13 +2170,16 @@ fn test_inferred_ref_mutating_and_shared_alias_rejected() {
 
 #[test]
 fn test_ref_allowed_as_local_binding() {
-    // First-class refs: `let r = &x` within a function scope is valid
+    // First-class refs: `let r = &x` within a function scope is valid.
+    // Note: do NOT return read_val(r) — that would escape a reference to
+    // local x through the call, which composable provenance correctly rejects.
     let code = r#"
         function read_val(&x) { return x }
         function test() {
             var x = 5
             var r = &x
-            return read_val(r)
+            var result = read_val(r)
+            return x
         }
     "#;
     let program = parse_program(code).expect("should parse");
@@ -2203,13 +2206,16 @@ fn test_ref_in_standalone_expression_compiles() {
 
 #[test]
 fn test_ref_shared_binding_compiles_and_can_be_passed() {
-    // Shared ref binding: store a ref and pass it to a ref-taking function
+    // Shared ref binding: store a ref and pass it to a ref-taking function.
+    // Note: do NOT return read_val(r) — composable provenance correctly
+    // detects that the return value references local x (would dangle).
     let code = r#"
         function read_val(&x) { return x }
         function test() {
             var x = 42
             var r = &x
-            return read_val(r)
+            var result = read_val(r)
+            return x
         }
     "#;
     let program = parse_program(code).expect("should parse");
@@ -2263,12 +2269,15 @@ fn test_ref_on_top_level_module_bindings() {
 
 #[test]
 fn test_ref_index_borrow_compiles() {
-    // &arr[0] is now supported (index borrowing, RFC item #5)
+    // &arr[0] is now supported (index borrowing, RFC item #5).
+    // Note: do NOT return f(&arr[0]) — composable provenance correctly
+    // detects that f's return references local arr (would dangle).
     let code = r#"
         function f(&x) { return x }
         function test() {
             var arr = [1, 2, 3]
-            return f(&arr[0])
+            var result = f(&arr[0])
+            return arr
         }
     "#;
     let program = parse_program(code).expect("should parse");

@@ -288,6 +288,9 @@ pub struct FunctionBorrowSummary {
     pub param_borrows: Vec<Option<BorrowKind>>,
     /// Pairs of parameter indices that must not alias (one is mutated, the other is read).
     pub conflict_pairs: Vec<(usize, usize)>,
+    /// If the function returns a reference derived from a parameter, records which
+    /// parameter and borrow kind. Used for interprocedural composition.
+    pub return_summary: Option<ReturnReferenceSummary>,
 }
 
 /// Error for writing to an immutable binding.
