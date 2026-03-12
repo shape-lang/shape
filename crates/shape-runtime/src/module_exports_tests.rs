@@ -300,3 +300,135 @@ fn test_internal_export_hidden_from_public_surface() {
     assert!(!module.is_export_public_surface("__internal", false));
     assert!(!module.is_export_public_surface("__internal", true));
 }
+
+// -- Permission checking tests --
+
+#[test]
+fn test_check_permission_allows_when_no_permissions_set() {
+    let ctx = test_ctx();
+    // When granted_permissions is None, all permissions are allowed
+    assert!(check_permission(&ctx, shape_abi_v1::Permission::FsRead).is_ok());
+    assert!(check_permission(&ctx, shape_abi_v1::Permission::NetConnect).is_ok());
+    assert!(check_permission(&ctx, shape_abi_v1::Permission::Process).is_ok());
+}
+
+#[test]
+fn test_check_permission_denies_when_not_granted() {
+    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
+    let mut perms = shape_abi_v1::PermissionSet::pure();
+    perms.insert(shape_abi_v1::Permission::FsRead);
+    let ctx = ModuleContext {
+        schemas: registry,
+        invoke_callable: None,
+        raw_invoker: None,
+        function_hashes: None,
+        vm_state: None,
+        granted_permissions: Some(perms),
+        scope_constraints: None,
+        set_pending_resume: None,
+        set_pending_frame_resume: None,
+    };
+    assert!(check_permission(&ctx, shape_abi_v1::Permission::FsRead).is_ok());
+    assert!(check_permission(&ctx, shape_abi_v1::Permission::FsWrite).is_err());
+    assert!(check_permission(&ctx, shape_abi_v1::Permission::NetConnect).is_err());
+}
+
+#[test]
+fn test_check_fs_permission_enforces_scope_constraints() {
+    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
+    let mut perms = shape_abi_v1::PermissionSet::pure();
+    perms.insert(shape_abi_v1::Permission::FsRead);
+    let constraints = shape_abi_v1::ScopeConstraints {
+        allowed_paths: vec!["/data/**".to_string(), "/tmp/*".to_string()],
+        ..Default::default()
+    };
+    let ctx = ModuleContext {
+        schemas: registry,
+        invoke_callable: None,
+        raw_invoker: None,
+        function_hashes: None,
+        vm_state: None,
+        granted_permissions: Some(perms),
+        scope_constraints: Some(constraints),
+        set_pending_resume: None,
+        set_pending_frame_resume: None,
+    };
+
+    // Allowed paths
+    assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/data/file.txt").is_ok());
+    assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/tmp/scratch").is_ok());
+
+    // Denied paths
+    assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/etc/passwd").is_err());
+    assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/home/user/file").is_err());
+}
+
+#[test]
+fn test_check_fs_permission_allows_all_when_no_constraints() {
+    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
+    let mut perms = shape_abi_v1::PermissionSet::pure();
+    perms.insert(shape_abi_v1::Permission::FsRead);
+    let ctx = ModuleContext {
+        schemas: registry,
+        invoke_callable: None,
+        raw_invoker: None,
+        function_hashes: None,
+        vm_state: None,
+        granted_permissions: Some(perms),
+        scope_constraints: None,
+        set_pending_resume: None,
+        set_pending_frame_resume: None,
+    };
+
+    assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/any/path").is_ok());
+}
+
+#[test]
+fn test_check_net_permission_enforces_scope_constraints() {
+    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
+    let mut perms = shape_abi_v1::PermissionSet::pure();
+    perms.insert(shape_abi_v1::Permission::NetConnect);
+    let constraints = shape_abi_v1::ScopeConstraints {
+        allowed_hosts: vec!["api.example.com".to_string(), "*.trusted.io".to_string()],
+        ..Default::default()
+    };
+    let ctx = ModuleContext {
+        schemas: registry,
+        invoke_callable: None,
+        raw_invoker: None,
+        function_hashes: None,
+        vm_state: None,
+        granted_permissions: Some(perms),
+        scope_constraints: Some(constraints),
+        set_pending_resume: None,
+        set_pending_frame_resume: None,
+    };
+
+    // Allowed hosts
+    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "api.example.com:443").is_ok());
+    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "sub.trusted.io:8080").is_ok());
+
+    // Denied hosts
+    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "evil.com:80").is_err());
+    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "other.example.com:443").is_err());
+}
+
+#[test]
+fn test_check_net_permission_allows_all_when_no_constraints() {
+    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
+    let mut perms = shape_abi_v1::PermissionSet::pure();
+    perms.insert(shape_abi_v1::Permission::NetConnect);
+    let ctx = ModuleContext {
+        schemas: registry,
+        invoke_callable: None,
+        raw_invoker: None,
+        function_hashes: None,
+        vm_state: None,
+        granted_permissions: Some(perms),
+        scope_constraints: None,
+        set_pending_resume: None,
+        set_pending_frame_resume: None,
+    };
+
+    assert!(check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "any.host.com:8080").is_ok());
+}

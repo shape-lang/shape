@@ -16,7 +16,8 @@ pub fn create_env_module() -> ModuleExports {
     // env.get(name: string) -> Option<string>
     module.add_function_with_schema(
         "get",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        |args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             let name = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -43,7 +44,8 @@ pub fn create_env_module() -> ModuleExports {
     // env.has(name: string) -> bool
     module.add_function_with_schema(
         "has",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        |args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             let name = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -67,7 +69,8 @@ pub fn create_env_module() -> ModuleExports {
     // env.all() -> HashMap<string, string>
     module.add_function_with_schema(
         "all",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
+        |_args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             let vars: Vec<(String, String)> = std::env::vars().collect();
             let mut keys = Vec::with_capacity(vars.len());
             let mut values = Vec::with_capacity(vars.len());
@@ -89,7 +92,8 @@ pub fn create_env_module() -> ModuleExports {
     // env.args() -> Array<string>
     module.add_function_with_schema(
         "args",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
+        |_args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             let args: Vec<ValueWord> = std::env::args()
                 .map(|a| ValueWord::from_string(Arc::new(a)))
                 .collect();
@@ -105,7 +109,8 @@ pub fn create_env_module() -> ModuleExports {
     // env.cwd() -> string
     module.add_function_with_schema(
         "cwd",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
+        |_args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             let cwd = std::env::current_dir().map_err(|e| format!("env.cwd() failed: {}", e))?;
             let path_str = cwd.to_string_lossy().into_owned();
             Ok(ValueWord::from_string(Arc::new(path_str)))
@@ -120,7 +125,8 @@ pub fn create_env_module() -> ModuleExports {
     // env.os() -> string
     module.add_function_with_schema(
         "os",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
+        |_args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             Ok(ValueWord::from_string(Arc::new(
                 std::env::consts::OS.to_string(),
             )))
@@ -135,7 +141,8 @@ pub fn create_env_module() -> ModuleExports {
     // env.arch() -> string
     module.add_function_with_schema(
         "arch",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
+        |_args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
             Ok(ValueWord::from_string(Arc::new(
                 std::env::consts::ARCH.to_string(),
             )))

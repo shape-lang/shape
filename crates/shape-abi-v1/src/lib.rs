@@ -69,6 +69,8 @@ pub enum PluginType {
     DataSource = 0,
     /// Output sink for alerts and events
     OutputSink = 1,
+    /// Language runtime for polyglot interop (Python, TypeScript, etc.)
+    LanguageRuntime = 2,
 }
 
 /// Capability family exposed by a plugin/module.

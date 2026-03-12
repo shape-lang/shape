@@ -19,11 +19,11 @@ pub fn io_tcp_connect(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
     let addr = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.tcp_connect() requires a string address".to_string())?;
+    crate::module_exports::check_net_permission(ctx, shape_abi_v1::Permission::NetConnect, addr)?;
 
     let stream = std::net::TcpStream::connect(addr)
         .map_err(|e| format!("io.tcp_connect(\"{}\"): {}", addr, e))?;
@@ -39,11 +39,11 @@ pub fn io_tcp_listen(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetListen)?;
     let addr = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.tcp_listen() requires a string address".to_string())?;
+    crate::module_exports::check_net_permission(ctx, shape_abi_v1::Permission::NetListen, addr)?;
 
     let listener = std::net::TcpListener::bind(addr)
         .map_err(|e| format!("io.tcp_listen(\"{}\"): {}", addr, e))?;
@@ -189,11 +189,11 @@ pub fn io_udp_bind(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetListen)?;
     let addr = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.udp_bind() requires a string address".to_string())?;
+    crate::module_exports::check_net_permission(ctx, shape_abi_v1::Permission::NetListen, addr)?;
 
     let socket =
         std::net::UdpSocket::bind(addr).map_err(|e| format!("io.udp_bind(\"{}\"): {}", addr, e))?;

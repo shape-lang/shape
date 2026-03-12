@@ -93,8 +93,9 @@ pub fn io_exec(
 /// Wait for a child process to exit and return its exit code.
 pub fn io_process_wait(
     args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let handle = args
         .first()
         .and_then(|a| a.as_io_handle())
@@ -124,8 +125,9 @@ pub fn io_process_wait(
 /// Kill a running child process.
 pub fn io_process_kill(
     args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let handle = args
         .first()
         .and_then(|a| a.as_io_handle())
@@ -156,8 +158,9 @@ pub fn io_process_kill(
 /// extracts the stdin pipe internally.
 pub fn io_process_write(
     args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let handle = args
         .first()
         .and_then(|a| a.as_io_handle())
@@ -202,8 +205,9 @@ pub fn io_process_write(
 /// Read from a child process's stdout. If n is given, read up to n bytes.
 pub fn io_process_read(
     args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let handle = args
         .first()
         .and_then(|a| a.as_io_handle())
@@ -256,8 +260,9 @@ pub fn io_process_read(
 /// Read from a child process's stderr.
 pub fn io_process_read_err(
     args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let handle = args
         .first()
         .and_then(|a| a.as_io_handle())
@@ -312,8 +317,9 @@ pub fn io_process_read_err(
 /// Read a single line from a child process's stdout (including newline).
 pub fn io_process_read_line(
     args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let handle = args
         .first()
         .and_then(|a| a.as_io_handle())
@@ -355,8 +361,9 @@ pub fn io_process_read_line(
 /// Return an IoHandle for the current process's standard input.
 pub fn io_stdin(
     _args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .open("/dev/stdin")
@@ -370,8 +377,9 @@ pub fn io_stdin(
 /// Return an IoHandle for the current process's standard output.
 pub fn io_stdout(
     _args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/stdout")
@@ -385,8 +393,9 @@ pub fn io_stdout(
 /// Return an IoHandle for the current process's standard error.
 pub fn io_stderr(
     _args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/stderr")
@@ -401,8 +410,9 @@ pub fn io_stderr(
 /// reads from the current process's stdin.
 pub fn io_read_line(
     args: &[ValueWord],
-    _ctx: &crate::module_exports::ModuleContext,
+    ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
+    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
     // If a handle argument is provided, read from it
     if let Some(handle) = args.first().and_then(|a| a.as_io_handle()) {
         let mut guard = handle

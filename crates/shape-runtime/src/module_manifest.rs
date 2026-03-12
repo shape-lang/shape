@@ -127,6 +127,37 @@ impl ModuleManifest {
         expected.copy_from_slice(&digest);
         self.manifest_hash == expected
     }
+
+    /// Verify the cryptographic signature on this manifest, if present.
+    ///
+    /// Returns:
+    /// - `Ok(true)` if a valid signature is present
+    /// - `Ok(false)` if no signature is present (unsigned module)
+    /// - `Err(reason)` if a signature is present but invalid
+    ///
+    /// Callers can decide policy: reject unsigned modules, warn, or accept.
+    pub fn verify_signature(&self) -> Result<bool, String> {
+        let sig = match &self.signature {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+
+        // Convert the ModuleSignature to a ModuleSignatureData for verification
+        let sig_data = crate::crypto::ModuleSignatureData {
+            author_key: sig.author_key,
+            signature: sig.signature.clone(),
+            signed_at: sig.signed_at,
+        };
+
+        if sig_data.verify(&self.manifest_hash) {
+            Ok(true)
+        } else {
+            Err(format!(
+                "Invalid signature on manifest '{}' v{}: signature does not match manifest hash",
+                self.name, self.version
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -199,5 +230,55 @@ mod tests {
         assert_eq!(restored.exports.get("run"), Some(&[7u8; 32]));
         assert_eq!(restored.required_permission_bits, 0xFF);
         assert!(restored.verify_integrity());
+    }
+
+    #[test]
+    fn test_verify_signature_unsigned() {
+        let mut m = ModuleManifest::new("unsigned".into(), "1.0.0".into());
+        m.add_export("fn_a".into(), [1u8; 32]);
+        m.finalize();
+        // Unsigned module returns Ok(false)
+        assert_eq!(m.verify_signature(), Ok(false));
+    }
+
+    #[test]
+    fn test_verify_signature_valid() {
+        let mut m = ModuleManifest::new("signed".into(), "1.0.0".into());
+        m.add_export("fn_a".into(), [1u8; 32]);
+        m.finalize();
+
+        // Sign the manifest
+        let sig_data = crate::crypto::signing::sign_manifest_hash(
+            &m.manifest_hash,
+            &[42u8; 32],
+        );
+        m.signature = Some(ModuleSignature {
+            author_key: sig_data.author_key,
+            signature: sig_data.signature,
+            signed_at: sig_data.signed_at,
+        });
+
+        assert_eq!(m.verify_signature(), Ok(true));
+    }
+
+    #[test]
+    fn test_verify_signature_invalid() {
+        let mut m = ModuleManifest::new("badsig".into(), "1.0.0".into());
+        m.add_export("fn_a".into(), [1u8; 32]);
+        m.finalize();
+
+        // Create a signature with wrong hash
+        let wrong_hash = [99u8; 32];
+        let sig_data = crate::crypto::signing::sign_manifest_hash(
+            &wrong_hash,
+            &[42u8; 32],
+        );
+        m.signature = Some(ModuleSignature {
+            author_key: sig_data.author_key,
+            signature: sig_data.signature,
+            signed_at: sig_data.signed_at,
+        });
+
+        assert!(m.verify_signature().is_err());
     }
 }
