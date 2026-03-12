@@ -2026,6 +2026,7 @@ mod tests {
             method: "filter".to_string(),
             args: vec![],
             named_args: vec![],
+            optional: false,
             span: Span::default(),
         };
         let ty = infer_expr_type(&expr);
@@ -2041,6 +2042,7 @@ mod tests {
             method: "sum".to_string(),
             args: vec![],
             named_args: vec![],
+            optional: false,
             span: Span::default(),
         };
         assert_eq!(
@@ -2062,6 +2064,7 @@ mod tests {
             method: "filter".to_string(),
             args: vec![],
             named_args: vec![],
+            optional: false,
             span: Span::default(),
         });
         let reversed = Expr::MethodCall {
@@ -2069,6 +2072,7 @@ mod tests {
             method: "reverse".to_string(),
             args: vec![],
             named_args: vec![],
+            optional: false,
             span: Span::default(),
         };
         let ty = infer_expr_type(&reversed);
@@ -2096,6 +2100,7 @@ mod tests {
             method: "unwrap".to_string(),
             args: vec![],
             named_args: vec![],
+            optional: false,
             span: Span::default(),
         };
         assert_eq!(

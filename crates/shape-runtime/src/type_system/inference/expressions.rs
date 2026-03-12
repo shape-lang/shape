@@ -142,6 +142,7 @@ impl TypeInferenceEngine {
                         method: function.clone(),
                         args: args.clone(),
                         named_args: vec![],
+                        optional: false,
                         span: *span,
                     };
                     self.infer_expr(&synthetic)

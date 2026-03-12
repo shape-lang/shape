@@ -4336,6 +4336,7 @@ mod tests {
                                 span: span(),
                             },
                         )],
+                        optional: false,
                         span: span(),
                     }),
                     ownership: OwnershipModifier::Inferred,
