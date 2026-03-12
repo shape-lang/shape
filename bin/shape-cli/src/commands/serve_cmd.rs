@@ -242,6 +242,7 @@ async fn handle_connection(
                         content_html: None,
                         diagnostics: vec![],
                         metrics: None,
+                        print_output: None,
                     }))
                 } else {
                     let _permit = semaphore
@@ -297,6 +298,7 @@ async fn handle_connection(
                         content_html: None,
                         diagnostics: vec![],
                         metrics: None,
+                        print_output: None,
                     }))
                 } else {
                     let _permit = semaphore.acquire().await
@@ -316,6 +318,7 @@ async fn handle_connection(
                         content_html: None,
                         diagnostics: vec![],
                         metrics: None,
+                        print_output: None,
                     }))
                 } else {
                     let _permit = semaphore.acquire().await
@@ -440,6 +443,7 @@ async fn handle_execute(req: ExecuteRequest, config: &ServeConfig) -> WireMessag
                 wall_time_ms: r.wall_time_ms,
                 memory_bytes_peak: 0,
             }),
+            print_output: None,
         }),
         Ok(Err(err)) => {
             let (message, diagnostics) = format_error(&err);
@@ -453,6 +457,7 @@ async fn handle_execute(req: ExecuteRequest, config: &ServeConfig) -> WireMessag
                 content_html: None,
                 diagnostics,
                 metrics: None,
+                print_output: None,
             })
         }
         Err(join_err) => WireMessage::ExecuteResponse(ExecuteResponse {
@@ -465,6 +470,7 @@ async fn handle_execute(req: ExecuteRequest, config: &ServeConfig) -> WireMessag
             content_html: None,
             diagnostics: vec![],
             metrics: None,
+            print_output: None,
         }),
     }
 }
@@ -516,6 +522,7 @@ async fn handle_execute_file(req: ExecuteFileRequest, config: &ServeConfig) -> W
                 wall_time_ms: r.wall_time_ms,
                 memory_bytes_peak: 0,
             }),
+            print_output: None,
         }),
         Ok(Err(err)) => {
             let (message, diagnostics) = format_error(&err);
@@ -529,6 +536,7 @@ async fn handle_execute_file(req: ExecuteFileRequest, config: &ServeConfig) -> W
                 content_html: None,
                 diagnostics,
                 metrics: None,
+                print_output: None,
             })
         }
         Err(join_err) => WireMessage::ExecuteResponse(ExecuteResponse {
@@ -541,6 +549,7 @@ async fn handle_execute_file(req: ExecuteFileRequest, config: &ServeConfig) -> W
             content_html: None,
             diagnostics: vec![],
             metrics: None,
+            print_output: None,
         }),
     }
 }
@@ -571,6 +580,7 @@ async fn handle_execute_project(req: ExecuteProjectRequest, config: &ServeConfig
                 wall_time_ms: r.wall_time_ms,
                 memory_bytes_peak: 0,
             }),
+            print_output: None,
         }),
         Ok(Err(err)) => {
             let (message, diagnostics) = format_error(&err);
@@ -584,6 +594,7 @@ async fn handle_execute_project(req: ExecuteProjectRequest, config: &ServeConfig
                 content_html: None,
                 diagnostics,
                 metrics: None,
+                print_output: None,
             })
         }
         Err(join_err) => WireMessage::ExecuteResponse(ExecuteResponse {
@@ -596,6 +607,7 @@ async fn handle_execute_project(req: ExecuteProjectRequest, config: &ServeConfig
             content_html: None,
             diagnostics: vec![],
             metrics: None,
+            print_output: None,
         }),
     }
 }
@@ -749,6 +761,7 @@ fn execute_code_in_process(
     _extensions: &[std::path::PathBuf],
     _provider_opts: &ProviderOptions,
 ) -> Result<InProcessResult> {
+    use shape_runtime::output_adapter::SharedCaptureAdapter;
     use std::time::Instant;
 
     let start = Instant::now();
@@ -772,16 +785,20 @@ fn execute_code_in_process(
         Some(code),
     )?;
 
+    // Capture print() output so wire responses include stdout.
+    let capture = SharedCaptureAdapter::new();
+    if let Some(ctx) = engine.runtime.persistent_context_mut() {
+        ctx.set_output_adapter(Box::new(capture.clone()));
+    }
+
     let result = engine.execute(&mut executor, code)?;
 
     let wall_time_ms = start.elapsed().as_millis() as u64;
 
-    // Collect print output — NOT the return value
-    let stdout: String = result
-        .messages
-        .iter()
-        .map(|m| format!("{}\n", m.text))
-        .collect();
+    // Collect print output from adapter
+    let captured_lines = capture.output();
+    let stdout: String = captured_lines.iter().map(|l| format!("{}\n", l)).collect();
+    let printed_content_html = capture.content_html();
 
     Ok(InProcessResult {
         value: result.value,
@@ -791,7 +808,11 @@ fn execute_code_in_process(
             Some(stdout)
         },
         content_terminal: result.content_terminal,
-        content_html: result.content_html,
+        content_html: if printed_content_html.is_empty() {
+            result.content_html
+        } else {
+            Some(printed_content_html.join("\n"))
+        },
         wall_time_ms,
     })
 }
@@ -803,6 +824,7 @@ fn execute_file_in_process(
     _extensions: &[std::path::PathBuf],
     _provider_opts: &ProviderOptions,
 ) -> Result<InProcessResult> {
+    use shape_runtime::output_adapter::SharedCaptureAdapter;
     use std::time::Instant;
 
     let file_path = std::path::Path::new(path);
@@ -838,18 +860,30 @@ fn execute_file_in_process(
         Some(&source),
     )?;
 
+    // Capture print() output so wire responses include stdout.
+    let capture = SharedCaptureAdapter::new();
+    if let Some(ctx) = engine.runtime.persistent_context_mut() {
+        ctx.set_output_adapter(Box::new(capture.clone()));
+    }
+
     let result = engine.execute(&mut executor, &source)?;
 
     let wall_time_ms = start.elapsed().as_millis() as u64;
 
-    let stdout: String = result.messages.iter()
-        .map(|m| format!("{}\n", m.text)).collect();
+    // Collect print output from adapter
+    let captured_lines = capture.output();
+    let stdout: String = captured_lines.iter().map(|l| format!("{}\n", l)).collect();
+    let printed_content_html = capture.content_html();
 
     Ok(InProcessResult {
         value: result.value,
         stdout: if stdout.is_empty() { None } else { Some(stdout) },
         content_terminal: result.content_terminal,
-        content_html: result.content_html,
+        content_html: if printed_content_html.is_empty() {
+            result.content_html
+        } else {
+            Some(printed_content_html.join("\n"))
+        },
         wall_time_ms,
     })
 }

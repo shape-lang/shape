@@ -230,6 +230,9 @@ pub struct ExecuteResponse {
     pub diagnostics: Vec<WireDiagnostic>,
     /// Execution metrics (if available).
     pub metrics: Option<ExecutionMetrics>,
+    /// Structured print output with rendered strings (MsgPack-serialized).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub print_output: Option<Vec<shape_wire::print_result::WirePrintResult>>,
 }
 
 /// Request to validate Shape source code without executing it.
@@ -1895,6 +1898,7 @@ mod tests {
                 wall_time_ms: 3,
                 memory_bytes_peak: 4096,
             }),
+            print_output: None,
         });
         let bytes = shape_wire::encode_message(&msg).expect("encode ExecuteResponse");
         let decoded: WireMessage =

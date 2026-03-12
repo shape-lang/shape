@@ -104,6 +104,12 @@ impl super::ExecutionContext {
         &self.type_schema_registry
     }
 
+    /// Merge additional type schemas into the context's registry.
+    /// Used after compilation to make inline object schemas available for wire serialization.
+    pub fn merge_type_schemas(&mut self, other: TypeSchemaRegistry) {
+        Arc::make_mut(&mut self.type_schema_registry).merge(other);
+    }
+
     // =========================================================================
     // Enum Registry Methods (for sum types)
     // =========================================================================
