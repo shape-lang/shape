@@ -496,6 +496,25 @@ pub unsafe extern "C" fn python_invoke(
             PluginError::Success as i32
         }
         Err(msg) => {
+            // Classify the error to return the most appropriate error code:
+            // - Marshal/serialization failures -> InvalidArgument
+            // - Invalid handle -> InvalidArgument
+            // - pyo3 not enabled -> NotImplemented
+            // - Everything else (Python exceptions, etc.) -> InternalError
+            let error_code = if msg.contains("Failed to deserialize")
+                || msg.contains("Failed to serialize")
+                || msg.contains("Failed to create args tuple")
+                || msg.contains("invalid function handle")
+            {
+                PluginError::InvalidArgument
+            } else if msg.contains("pyo3 feature not enabled")
+                || msg.contains("not implemented")
+            {
+                PluginError::NotImplemented
+            } else {
+                PluginError::InternalError
+            };
+
             // Write error message to output buffer so the host can read it
             let mut err_bytes = msg.into_bytes();
             let len = err_bytes.len();
@@ -505,7 +524,7 @@ pub unsafe extern "C" fn python_invoke(
                 *out_ptr = ptr;
                 *out_len = len;
             }
-            PluginError::NotImplemented as i32
+            error_code as i32
         }
     }
 }

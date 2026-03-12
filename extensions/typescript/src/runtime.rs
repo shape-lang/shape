@@ -38,6 +38,10 @@ pub struct TsRuntime {
     functions: HashMap<usize, CompiledFunction>,
     /// Next handle ID.
     next_id: usize,
+    /// Reusable tokio runtime for async calls. Created once on first async
+    /// invocation and reused for all subsequent calls, avoiding the overhead
+    /// of building a new runtime per call.
+    tokio_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl TsRuntime {
@@ -55,6 +59,7 @@ impl TsRuntime {
             js_runtime,
             functions: HashMap::new(),
             next_id: 1,
+            tokio_runtime: None,
         })
     }
 
@@ -187,10 +192,14 @@ impl TsRuntime {
                 .map_err(|e| format!("TypeScript error in '{}': {}", func_name, e))?;
 
             // For async, we need to poll the event loop to resolve the promise.
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("Failed to create async runtime: {}", e))?;
+            // Lazily create a tokio runtime and cache it so subsequent async
+            // calls reuse the same runtime instead of building a new one each time.
+            let rt = self.tokio_runtime.get_or_insert(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create async runtime: {}", e))?,
+            );
 
             let resolved = rt.block_on(async {
                 let resolved = self.js_runtime.resolve(result);
@@ -485,6 +494,19 @@ pub unsafe extern "C" fn ts_invoke(
             PluginError::Success as i32
         }
         Err(msg) => {
+            // Classify the error to return the most appropriate error code:
+            // - Marshal/serialization failures -> InvalidArgument
+            // - Invalid handle -> InvalidArgument
+            // - Everything else (V8/TS exceptions, etc.) -> InternalError
+            let error_code = if msg.contains("Failed to deserialize")
+                || msg.contains("Failed to serialize")
+                || msg.contains("invalid function handle")
+            {
+                PluginError::InvalidArgument
+            } else {
+                PluginError::InternalError
+            };
+
             // Write error message to output buffer so the host can read it
             let mut err_bytes = msg.into_bytes();
             let len = err_bytes.len();
@@ -494,7 +516,7 @@ pub unsafe extern "C" fn ts_invoke(
                 *out_ptr = ptr;
                 *out_len = len;
             }
-            PluginError::NotImplemented as i32
+            error_code as i32
         }
     }
 }

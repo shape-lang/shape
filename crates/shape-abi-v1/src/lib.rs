@@ -1435,6 +1435,127 @@ pub type GetAbiVersionFn = unsafe extern "C" fn() -> u32;
 // Helper Macros (for plugin authors)
 // ============================================================================
 
+/// Generate the full set of `#[no_mangle]` C ABI exports for a language runtime
+/// extension plugin.
+///
+/// This eliminates the boilerplate that is otherwise duplicated across every
+/// language runtime extension (e.g. `extensions/python/src/lib.rs` and
+/// `extensions/typescript/src/lib.rs`).
+///
+/// # Generated exports
+///
+/// - `shape_plugin_info()` — plugin metadata
+/// - `shape_abi_version()` — ABI version tag
+/// - `shape_capability_manifest()` — declares a single LanguageRuntime capability
+/// - `shape_language_runtime_vtable()` — the VTable itself
+/// - `shape_capability_vtable(contract, len)` — generic vtable dispatch
+///
+/// # Example
+///
+/// ```ignore
+/// shape_abi_v1::language_runtime_plugin! {
+///     name: c"python",
+///     version: c"0.1.0",
+///     description: c"Python language runtime for foreign function blocks",
+///     vtable: {
+///         init: runtime::python_init,
+///         register_types: runtime::python_register_types,
+///         compile: runtime::python_compile,
+///         invoke: runtime::python_invoke,
+///         dispose_function: runtime::python_dispose_function,
+///         language_id: runtime::python_language_id,
+///         get_lsp_config: runtime::python_get_lsp_config,
+///         free_buffer: runtime::python_free_buffer,
+///         drop: runtime::python_drop,
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! language_runtime_plugin {
+    (
+        name: $name:expr,
+        version: $version:expr,
+        description: $description:expr,
+        vtable: {
+            init: $init:expr,
+            register_types: $register_types:expr,
+            compile: $compile:expr,
+            invoke: $invoke:expr,
+            dispose_function: $dispose_function:expr,
+            language_id: $language_id:expr,
+            get_lsp_config: $get_lsp_config:expr,
+            free_buffer: $free_buffer:expr,
+            drop: $drop_fn:expr $(,)?
+        } $(,)?
+    ) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn shape_plugin_info() -> *const $crate::PluginInfo {
+            static INFO: $crate::PluginInfo = $crate::PluginInfo {
+                name: $name.as_ptr(),
+                version: $version.as_ptr(),
+                plugin_type: $crate::PluginType::DataSource,
+                description: $description.as_ptr(),
+            };
+            &INFO
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn shape_abi_version() -> u32 {
+            $crate::ABI_VERSION
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn shape_capability_manifest() -> *const $crate::CapabilityManifest {
+            static CAPABILITIES: [$crate::CapabilityDescriptor; 1] =
+                [$crate::CapabilityDescriptor {
+                    kind: $crate::CapabilityKind::LanguageRuntime,
+                    contract: c"shape.language_runtime".as_ptr(),
+                    version: c"1".as_ptr(),
+                    flags: 0,
+                }];
+            static MANIFEST: $crate::CapabilityManifest = $crate::CapabilityManifest {
+                capabilities: CAPABILITIES.as_ptr(),
+                capabilities_len: CAPABILITIES.len(),
+            };
+            &MANIFEST
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn shape_language_runtime_vtable() -> *const $crate::LanguageRuntimeVTable {
+            static VTABLE: $crate::LanguageRuntimeVTable = $crate::LanguageRuntimeVTable {
+                init: Some($init),
+                register_types: Some($register_types),
+                compile: Some($compile),
+                invoke: Some($invoke),
+                dispose_function: Some($dispose_function),
+                language_id: Some($language_id),
+                get_lsp_config: Some($get_lsp_config),
+                free_buffer: Some($free_buffer),
+                drop: Some($drop_fn),
+                error_model: $crate::ErrorModel::Dynamic,
+            };
+            &VTABLE
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn shape_capability_vtable(
+            contract: *const u8,
+            contract_len: usize,
+        ) -> *const ::std::ffi::c_void {
+            if contract.is_null() {
+                return ::std::ptr::null();
+            }
+            let contract =
+                unsafe { ::std::slice::from_raw_parts(contract, contract_len) };
+            if contract == $crate::CAPABILITY_LANGUAGE_RUNTIME.as_bytes() {
+                shape_language_runtime_vtable() as *const ::std::ffi::c_void
+            } else {
+                ::std::ptr::null()
+            }
+        }
+    };
+}
+
 /// Macro to define a static QueryParam with const strings
 #[macro_export]
 macro_rules! query_param {
