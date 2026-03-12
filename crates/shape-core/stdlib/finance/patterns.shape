@@ -2,10 +2,8 @@
 // This module provides common candlestick pattern definitions
 
 module patterns {
-    // Import types and indicators for pattern analysis
+    // Import types for pattern analysis
     from std::finance::types use { Candle };
-    from std::finance::indicators::moving_averages use { sma };
-    from std::finance::indicators::volatility use { atr };
 
     // Single candle patterns
 
@@ -92,29 +90,41 @@ module patterns {
     // Three candle patterns
 
     pub fn morning_star(candle: Candle) -> boolean {
+        let first_range = candle[-2].high - candle[-2].low;
+        let first_body = abs(candle[-2].close - candle[-2].open);
+        let star_body = abs(candle[-1].close - candle[-1].open);
+        let third_body = abs(candle[0].close - candle[0].open);
+        let midpoint = candle[-2].close + (candle[-2].open - candle[-2].close) / 2.0;
+
         // First candle: long bearish
         return candle[-2].close < candle[-2].open and
-               abs(candle[-2].close - candle[-2].open) > atr(14) * 0.5 and
+               first_body > first_range * 0.5 and
                // Second candle: small body (star)
-               abs(candle[-1].close - candle[-1].open) < atr(14) * 0.2 and
+               star_body < first_body * 0.3 and
                candle[-1].high < candle[-2].low and     // Gap down
                // Third candle: long bullish
                candle[0].close > candle[0].open and
-               abs(candle[0].close - candle[0].open) > atr(14) * 0.5 and
-               candle[0].close > candle[-2].open * 0.5; // Closes at least halfway up first candle
+               third_body > first_range * 0.5 and
+               candle[0].close > midpoint;              // Closes at least halfway up first candle
     }
 
     pub fn evening_star(candle: Candle) -> boolean {
+        let first_range = candle[-2].high - candle[-2].low;
+        let first_body = abs(candle[-2].close - candle[-2].open);
+        let star_body = abs(candle[-1].close - candle[-1].open);
+        let third_body = abs(candle[0].close - candle[0].open);
+        let midpoint = candle[-2].open + (candle[-2].close - candle[-2].open) / 2.0;
+
         // First candle: long bullish
         return candle[-2].close > candle[-2].open and
-               abs(candle[-2].close - candle[-2].open) > atr(14) * 0.5 and
+               first_body > first_range * 0.5 and
                // Second candle: small body (star)
-               abs(candle[-1].close - candle[-1].open) < atr(14) * 0.2 and
+               star_body < first_body * 0.3 and
                candle[-1].low > candle[-2].high and     // Gap up
                // Third candle: long bearish
                candle[0].close < candle[0].open and
-               abs(candle[0].close - candle[0].open) > atr(14) * 0.5 and
-               candle[0].close < candle[-2].close * 0.5; // Closes at least halfway down first candle
+               third_body > first_range * 0.5 and
+               candle[0].close < midpoint;              // Closes at least halfway down first candle
     }
 
     pub fn three_white_soldiers(candle: Candle) -> boolean {
@@ -365,19 +375,23 @@ module patterns {
         let strength = 0;
 
         // Add volume confirmation
-        if (candle[0].volume > sma_volume(candle, 20) * 1.5) {
+        let avg_volume = sma_volume(candle, 20);
+        if (candle[0].volume > avg_volume * 1.5) {
             strength = strength + 20;
         }
 
-        // Add trend confirmation
+        // Add trend confirmation using short vs long lookback averages
+        let short_avg = sma_close(candle, 20);
+        let long_avg = sma_close(candle, 50);
+
         if (pattern_name == "hammer" or pattern_name == "bullish_engulfing" or pattern_name == "morning_star") {
             // Bullish patterns stronger in downtrend
-            if (sma(20) < sma(50)) {
+            if (short_avg < long_avg) {
                 strength = strength + 30;
             }
         } else if (pattern_name == "shooting_star" or pattern_name == "bearish_engulfing" or pattern_name == "evening_star") {
             // Bearish patterns stronger in uptrend
-            if (sma(20) > sma(50)) {
+            if (short_avg > long_avg) {
                 strength = strength + 30;
             }
         }
@@ -389,7 +403,16 @@ module patterns {
         return min(strength, 100);
     }
 
-    // Private helper for volume SMA
+    // Private helper for close price SMA over candle lookback
+    fn sma_close(candle: Candle, period: number) -> number {
+        let sum = 0;
+        for i in range(period) {
+            sum = sum + candle[-i].close;
+        }
+        return sum / period;
+    }
+
+    // Private helper for volume SMA over candle lookback
     fn sma_volume(candle: Candle, period: number) -> number {
         let sum = 0;
         for i in range(period) {

@@ -89,20 +89,18 @@ pub fn zscore(series) {
 // Note: map, filter, reduce are built into the language
 // but can use intrinsics for large arrays:
 
-/// Map `fn` across `array`, switching to an intrinsic parallel path for large inputs.
+/// Map `fn` across `array`.
+///
+/// Uses the sequential `.map()` method.  A parallel intrinsic path is planned
+/// but not yet wired up, so all sizes take the same code path for now.
 pub fn parallel_map(array, fn) {
-    if array.len() > 1000 {
-        __intrinsic_map(array, fn)  // Parallel!
-    } else {
-        array.map(fn)  // Sequential is fine
-    }
+    array.map(fn)
 }
 
-/// Filter `array` with `predicate`, switching to an intrinsic parallel path for large inputs.
+/// Filter `array` with `predicate`.
+///
+/// Uses the sequential `.filter()` method.  A parallel intrinsic path is planned
+/// but not yet wired up, so all sizes take the same code path for now.
 pub fn parallel_filter(array, predicate) {
-    if array.len() > 1000 {
-        __intrinsic_filter(array, predicate)  // Parallel!
-    } else {
-        array.filter(predicate)
-    }
+    array.filter(predicate)
 }
