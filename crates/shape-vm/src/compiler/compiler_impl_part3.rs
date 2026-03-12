@@ -104,6 +104,47 @@ impl BytecodeCompiler {
                     visit_expr!(arg);
                 }
             }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                args,
+                named_args,
+                ..
+            } => {
+                let scoped_name = format!("{}::{}", namespace, function);
+                if let Some(callee_params) = callee_ref_params.get(&scoped_name) {
+                    for (arg_idx, arg) in args.iter().enumerate() {
+                        if !callee_params.get(arg_idx).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        if let Some(caller_param_idx) = Self::ref_param_index_from_arg(
+                            arg,
+                            param_index_by_name,
+                            caller_ref_params,
+                        ) {
+                            edges.push((
+                                caller_name.to_string(),
+                                caller_param_idx,
+                                scoped_name.clone(),
+                                arg_idx,
+                            ));
+                        }
+                    }
+                }
+
+                for arg in args {
+                    visit_expr!(arg);
+                }
+
+                for (_, arg) in named_args {
+                    if let Some(idx) =
+                        Self::ref_param_index_from_arg(arg, param_index_by_name, caller_ref_params)
+                    {
+                        direct_mutates[idx] = true;
+                    }
+                    visit_expr!(arg);
+                }
+            }
             Expr::MethodCall {
                 receiver,
                 args,

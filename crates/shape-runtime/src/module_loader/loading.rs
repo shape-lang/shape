@@ -2,7 +2,9 @@
 //!
 //! Handles parsing module files, compiling AST, and processing exports.
 
-use shape_ast::ast::{ExportItem, ExportStmt, FunctionDef, Item, Program, Span};
+use shape_ast::ast::{
+    AnnotationDef, BuiltinFunctionDecl, ExportItem, ExportStmt, FunctionDef, Item, Program, Span,
+};
 use shape_ast::error::{Result, ShapeError};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,9 +14,12 @@ use super::{Export, Module, ModuleExportKind, ModuleExportSymbol};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScopeSymbolKind {
     Function,
+    BuiltinFunction,
     TypeAlias,
+    BuiltinType,
     Interface,
     Enum,
+    Annotation,
     Value,
 }
 
@@ -22,6 +27,8 @@ enum ScopeSymbolKind {
 #[derive(Debug)]
 pub(super) struct ModuleScope {
     functions: HashMap<String, FunctionDef>,
+    builtin_functions: HashMap<String, BuiltinFunctionDecl>,
+    annotations: HashMap<String, AnnotationDef>,
     type_aliases: HashMap<String, shape_ast::ast::TypeAliasDef>,
     symbols: HashMap<String, (ScopeSymbolKind, Span)>,
 }
@@ -30,6 +37,8 @@ impl ModuleScope {
     fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            builtin_functions: HashMap::new(),
+            annotations: HashMap::new(),
             type_aliases: HashMap::new(),
             symbols: HashMap::new(),
         }
@@ -39,6 +48,12 @@ impl ModuleScope {
         self.symbols
             .insert(name.clone(), (ScopeSymbolKind::Function, span));
         self.functions.insert(name, function);
+    }
+
+    fn add_builtin_function(&mut self, name: String, function: BuiltinFunctionDecl, span: Span) {
+        self.symbols
+            .insert(name.clone(), (ScopeSymbolKind::BuiltinFunction, span));
+        self.builtin_functions.insert(name, function);
     }
 
     fn add_type_alias(
@@ -56,12 +71,26 @@ impl ModuleScope {
         self.symbols.insert(name, (ScopeSymbolKind::Value, span));
     }
 
+    fn add_annotation(&mut self, name: String, annotation: AnnotationDef, span: Span) {
+        self.symbols
+            .insert(name.clone(), (ScopeSymbolKind::Annotation, span));
+        self.annotations.insert(name, annotation);
+    }
+
     fn get_function(&self, name: &str) -> Option<&FunctionDef> {
         self.functions.get(name)
     }
 
+    fn get_builtin_function(&self, name: &str) -> Option<&BuiltinFunctionDecl> {
+        self.builtin_functions.get(name)
+    }
+
     fn get_type_alias(&self, name: &str) -> Option<&shape_ast::ast::TypeAliasDef> {
         self.type_aliases.get(name)
+    }
+
+    fn get_annotation(&self, name: &str) -> Option<&AnnotationDef> {
+        self.annotations.get(name)
     }
 
     fn resolve_kind_and_span(&self, name: &str) -> Option<(ScopeSymbolKind, Span)> {
@@ -82,6 +111,23 @@ fn alias_for_named_type(
     }
 }
 
+fn function_stub_for_builtin(function: &BuiltinFunctionDecl) -> FunctionDef {
+    FunctionDef {
+        name: function.name.clone(),
+        name_span: function.name_span,
+        declaring_module_path: None,
+        doc_comment: function.doc_comment.clone(),
+        type_params: function.type_params.clone(),
+        params: function.params.clone(),
+        return_type: Some(function.return_type.clone()),
+        where_clause: None,
+        body: vec![],
+        annotations: vec![],
+        is_async: false,
+        is_comptime: false,
+    }
+}
+
 fn collect_module_scope(ast: &Program) -> ModuleScope {
     let mut module_scope = ModuleScope::new();
 
@@ -90,6 +136,19 @@ fn collect_module_scope(ast: &Program) -> ModuleScope {
         match item {
             Item::Function(function, span) => {
                 module_scope.add_function(function.name.clone(), function.clone(), *span);
+            }
+            Item::BuiltinFunctionDecl(function, span) => {
+                module_scope.add_builtin_function(function.name.clone(), function.clone(), *span);
+            }
+            Item::BuiltinTypeDecl(type_decl, span) => {
+                let alias =
+                    alias_for_named_type(type_decl.name.clone(), type_decl.type_params.clone());
+                module_scope.add_type_alias(
+                    type_decl.name.clone(),
+                    alias,
+                    ScopeSymbolKind::BuiltinType,
+                    *span,
+                );
             }
             Item::TypeAlias(alias, span) => {
                 module_scope.add_type_alias(
@@ -145,6 +204,9 @@ fn collect_module_scope(ast: &Program) -> ModuleScope {
                     module_scope.add_variable(name.to_string(), *span);
                 }
             }
+            Item::AnnotationDef(annotation, span) => {
+                module_scope.add_annotation(annotation.name.clone(), annotation.clone(), *span);
+            }
             _ => {}
         }
     }
@@ -154,7 +216,9 @@ fn collect_module_scope(ast: &Program) -> ModuleScope {
 
 enum NamedExportResolution<'a> {
     Function(&'a FunctionDef),
+    BuiltinFunction(&'a BuiltinFunctionDecl),
     TypeAlias(&'a shape_ast::ast::TypeAliasDef),
+    Annotation(&'a AnnotationDef),
     Variable,
     Missing,
 }
@@ -162,8 +226,12 @@ enum NamedExportResolution<'a> {
 fn resolve_named_export<'a>(scope: &'a ModuleScope, name: &str) -> NamedExportResolution<'a> {
     if let Some(function) = scope.get_function(name) {
         NamedExportResolution::Function(function)
+    } else if let Some(function) = scope.get_builtin_function(name) {
+        NamedExportResolution::BuiltinFunction(function)
     } else if let Some(alias) = scope.get_type_alias(name) {
         NamedExportResolution::TypeAlias(alias)
+    } else if let Some(annotation) = scope.get_annotation(name) {
+        NamedExportResolution::Annotation(annotation)
     } else if matches!(
         scope.resolve_kind_and_span(name),
         Some((ScopeSymbolKind::Value, _))
@@ -177,9 +245,12 @@ fn resolve_named_export<'a>(scope: &'a ModuleScope, name: &str) -> NamedExportRe
 fn scope_symbol_kind_to_module(kind: ScopeSymbolKind) -> ModuleExportKind {
     match kind {
         ScopeSymbolKind::Function => ModuleExportKind::Function,
+        ScopeSymbolKind::BuiltinFunction => ModuleExportKind::BuiltinFunction,
         ScopeSymbolKind::TypeAlias => ModuleExportKind::TypeAlias,
+        ScopeSymbolKind::BuiltinType => ModuleExportKind::BuiltinType,
         ScopeSymbolKind::Interface => ModuleExportKind::Interface,
         ScopeSymbolKind::Enum => ModuleExportKind::Enum,
+        ScopeSymbolKind::Annotation => ModuleExportKind::Annotation,
         ScopeSymbolKind::Value => ModuleExportKind::Value,
     }
 }
@@ -218,6 +289,16 @@ pub(super) fn process_export_with_scope(
                 Export::Function(Arc::new(function.clone())),
             );
         }
+        ExportItem::BuiltinFunction(function) => {
+            exports.insert(
+                function.name.clone(),
+                Export::Function(Arc::new(function_stub_for_builtin(function))),
+            );
+        }
+        ExportItem::BuiltinType(type_decl) => {
+            let alias = alias_for_named_type(type_decl.name.clone(), type_decl.type_params.clone());
+            exports.insert(type_decl.name.clone(), Export::TypeAlias(Arc::new(alias)));
+        }
 
         ExportItem::TypeAlias(alias) => {
             exports.insert(
@@ -238,10 +319,22 @@ pub(super) fn process_export_with_scope(
                             Export::Function(Arc::new(function.clone())),
                         );
                     }
+                    NamedExportResolution::BuiltinFunction(function) => {
+                        exports.insert(
+                            export_name.clone(),
+                            Export::Function(Arc::new(function_stub_for_builtin(function))),
+                        );
+                    }
                     NamedExportResolution::TypeAlias(alias) => {
                         exports.insert(
                             export_name.clone(),
                             Export::TypeAlias(Arc::new(alias.clone())),
+                        );
+                    }
+                    NamedExportResolution::Annotation(annotation) => {
+                        exports.insert(
+                            export_name.clone(),
+                            Export::Annotation(Arc::new(annotation.clone())),
                         );
                     }
                     NamedExportResolution::Variable => {
@@ -310,6 +403,12 @@ pub(super) fn process_export_with_scope(
             };
             exports.insert(trait_def.name.clone(), Export::TypeAlias(Arc::new(alias)));
         }
+        ExportItem::Annotation(annotation) => {
+            exports.insert(
+                annotation.name.clone(),
+                Export::Annotation(Arc::new(annotation.clone())),
+            );
+        }
         ExportItem::ForeignFunction(function) => {
             exports.insert(
                 function.name.clone(),
@@ -351,6 +450,26 @@ pub(super) fn collect_exported_symbols(ast: &Program) -> Result<Vec<ModuleExport
                     alias: None,
                     kind: ModuleExportKind::Function,
                     span: function.name_span,
+                });
+            }
+            ExportItem::BuiltinFunction(function) => {
+                symbols.push(ModuleExportSymbol {
+                    name: function.name.clone(),
+                    alias: None,
+                    kind: ModuleExportKind::BuiltinFunction,
+                    span: function.name_span,
+                });
+            }
+            ExportItem::BuiltinType(type_decl) => {
+                let span = module_scope
+                    .resolve_kind_and_span(&type_decl.name)
+                    .map(|(_, span)| span)
+                    .unwrap_or_default();
+                symbols.push(ModuleExportSymbol {
+                    name: type_decl.name.clone(),
+                    alias: None,
+                    kind: ModuleExportKind::BuiltinType,
+                    span,
                 });
             }
             ExportItem::TypeAlias(alias) => {
@@ -413,6 +532,14 @@ pub(super) fn collect_exported_symbols(ast: &Program) -> Result<Vec<ModuleExport
                     span,
                 });
             }
+            ExportItem::Annotation(annotation) => {
+                symbols.push(ModuleExportSymbol {
+                    name: annotation.name.clone(),
+                    alias: None,
+                    kind: ModuleExportKind::Annotation,
+                    span: annotation.name_span,
+                });
+            }
             ExportItem::ForeignFunction(function) => {
                 symbols.push(ModuleExportSymbol {
                     name: function.name.clone(),
@@ -425,10 +552,12 @@ pub(super) fn collect_exported_symbols(ast: &Program) -> Result<Vec<ModuleExport
                 for spec in specs {
                     let kind = match resolve_named_export(&module_scope, &spec.name) {
                         NamedExportResolution::Function(_)
+                        | NamedExportResolution::BuiltinFunction(_)
                         | NamedExportResolution::TypeAlias(_) => module_scope
                             .resolve_kind_and_span(&spec.name)
                             .map(|(kind, _)| scope_symbol_kind_to_module(kind))
                             .unwrap_or(ModuleExportKind::TypeAlias),
+                        NamedExportResolution::Annotation(_) => ModuleExportKind::Annotation,
                         NamedExportResolution::Variable => {
                             return Err(ShapeError::ModuleError {
                                 message: format!(

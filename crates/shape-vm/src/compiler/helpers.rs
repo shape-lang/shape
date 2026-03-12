@@ -15,7 +15,10 @@ use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::{BytecodeCompiler, DropKind, FunctionReturnReferenceSummary, ParamPassMode};
+use super::{
+    BuiltinNameResolution, BytecodeCompiler, DropKind, FunctionReturnReferenceSummary,
+    ParamPassMode, ResolutionScope,
+};
 
 pub(super) struct TypedFieldPlace {
     pub root_name: String,
@@ -204,9 +207,15 @@ fn item_uses_identifier(item: &Item, name: &str) -> bool {
                         .body
                         .iter()
                         .any(|stmt| statement_uses_identifier(stmt, name)),
+                    shape_ast::ast::ExportItem::Annotation(annotation_def) => annotation_def
+                        .handlers
+                        .iter()
+                        .any(|handler| expr_uses_identifier(&handler.body, name)),
                     shape_ast::ast::ExportItem::Named(_) => false,
                     shape_ast::ast::ExportItem::TypeAlias(_) => false,
-                    shape_ast::ast::ExportItem::ForeignFunction(_)
+                    shape_ast::ast::ExportItem::BuiltinFunction(_)
+                    | shape_ast::ast::ExportItem::BuiltinType(_)
+                    | shape_ast::ast::ExportItem::ForeignFunction(_)
                     | shape_ast::ast::ExportItem::Struct(_)
                     | shape_ast::ast::ExportItem::Enum(_)
                     | shape_ast::ast::ExportItem::Trait(_)
@@ -266,6 +275,12 @@ fn expr_uses_identifier(expr: &Expr, name: &str) -> bool {
                 || visit_expr!(&assign.value)
         }
         Expr::FunctionCall {
+            args, named_args, ..
+        } => {
+            args.iter().any(|arg| visit_expr!(arg))
+                || named_args.iter().any(|(_, arg)| visit_expr!(arg))
+        }
+        Expr::QualifiedFunctionCall {
             args, named_args, ..
         } => {
             args.iter().any(|arg| visit_expr!(arg))
@@ -661,16 +676,9 @@ impl BytecodeCompiler {
 
     /// Query the MIR storage plan for a specific local slot's storage class.
     /// Returns `None` if no plan exists or the slot is not in the plan.
-    pub(super) fn mir_storage_class_for_slot(
-        &self,
-        slot: u16,
-    ) -> Option<BindingStorageClass> {
+    pub(super) fn mir_storage_class_for_slot(&self, slot: u16) -> Option<BindingStorageClass> {
         self.current_storage_plan()
-            .and_then(|plan| {
-                plan.slot_classes
-                    .get(&crate::mir::SlotId(slot))
-                    .copied()
-            })
+            .and_then(|plan| plan.slot_classes.get(&crate::mir::SlotId(slot)).copied())
     }
 
     /// MIR analysis is always authoritative now (lexical borrow checker removed).
@@ -1168,10 +1176,7 @@ impl BytecodeCompiler {
                     FieldType::Object(name) => name.clone(),
                     _ => return None,
                 };
-                let nested_schema = self
-                    .type_tracker
-                    .schema_registry()
-                    .get(&nested_type_name)?;
+                let nested_schema = self.type_tracker.schema_registry().get(&nested_type_name)?;
                 let nested_field = nested_schema.get_field(property)?;
                 let nested_field_idx = nested_field.index as u16;
                 // For chained borrows, the borrow key uses the root slot + leaf field
@@ -1314,11 +1319,7 @@ impl BytecodeCompiler {
     /// Collect the chain of typed field operands for a property access path.
     /// For `a.b.c`, returns [operand_for_b, operand_for_c].
     /// For `a.b` (flat), returns [operand_for_b].
-    fn collect_property_access_chain(
-        &self,
-        object: &Expr,
-        property: &str,
-    ) -> Vec<Operand> {
+    fn collect_property_access_chain(&self, object: &Expr, property: &str) -> Vec<Operand> {
         let mut chain = Vec::new();
         self.collect_property_chain_inner(object, &mut chain);
         // Add the leaf field operand
@@ -1328,11 +1329,7 @@ impl BytecodeCompiler {
         chain
     }
 
-    fn collect_property_chain_inner(
-        &self,
-        expr: &Expr,
-        chain: &mut Vec<Operand>,
-    ) {
+    fn collect_property_chain_inner(&self, expr: &Expr, chain: &mut Vec<Operand>) {
         if let Expr::PropertyAccess {
             object: inner_object,
             property: inner_property,
@@ -1361,13 +1358,8 @@ impl BytecodeCompiler {
         let (root_operand, is_const) = match object {
             Expr::Identifier(name, _id_span) => {
                 if let Some(local_idx) = self.resolve_local(name) {
-                    (
-                        Operand::Local(local_idx),
-                        self.is_local_const(local_idx),
-                    )
-                } else if let Some(scoped_name) =
-                    self.resolve_scoped_module_binding_name(name)
-                {
+                    (Operand::Local(local_idx), self.is_local_const(local_idx))
+                } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
                     if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
                         (
                             Operand::ModuleBinding(binding_idx),
@@ -1382,10 +1374,7 @@ impl BytecodeCompiler {
                     }
                 } else {
                     return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "Cannot resolve variable '{}' for index reference",
-                            name
-                        ),
+                        message: format!("Cannot resolve variable '{}' for index reference", name),
                         location: Some(self.span_to_source_location(span)),
                     });
                 }
@@ -1404,8 +1393,8 @@ impl BytecodeCompiler {
 
         if mode == BorrowMode::Exclusive && is_const {
             return Err(ShapeError::SemanticError {
-                message:
-                    "Cannot create an exclusive index reference into a const variable".to_string(),
+                message: "Cannot create an exclusive index reference into a const variable"
+                    .to_string(),
                 location: Some(self.span_to_source_location(span)),
             });
         }
@@ -1481,8 +1470,7 @@ impl BytecodeCompiler {
     fn expr_should_preserve_reference_binding(&self, expr: &shape_ast::ast::Expr) -> bool {
         match expr {
             shape_ast::ast::Expr::Reference { .. } => true,
-            shape_ast::ast::Expr::FunctionCall { .. }
-            | shape_ast::ast::Expr::MethodCall { .. } => {
+            shape_ast::ast::Expr::FunctionCall { .. } | shape_ast::ast::Expr::MethodCall { .. } => {
                 self.binding_target_requires_reference_value()
             }
             shape_ast::ast::Expr::Identifier(name, _)
@@ -1808,7 +1796,11 @@ impl BytecodeCompiler {
                 if let Expr::Identifier(name, _) = assign.target.as_ref() {
                     names.insert(name.clone());
                 } else {
-                    self.collect_reference_use_names_from_expr(assign.target.as_ref(), false, names);
+                    self.collect_reference_use_names_from_expr(
+                        assign.target.as_ref(),
+                        false,
+                        names,
+                    );
                 }
                 self.collect_reference_use_names_from_expr(&assign.value, false, names);
             }
@@ -1864,11 +1856,7 @@ impl BytecodeCompiler {
                     names,
                 );
                 if let Some(else_branch) = if_expr.else_branch.as_deref() {
-                    self.collect_reference_use_names_from_expr(
-                        else_branch,
-                        preserve_result,
-                        names,
-                    );
+                    self.collect_reference_use_names_from_expr(else_branch, preserve_result, names);
                 }
             }
             Expr::Match(match_expr, _) => {
@@ -1884,9 +1872,7 @@ impl BytecodeCompiler {
                 for item in &block.items {
                     self.collect_reference_use_names_from_block_item(item, names);
                 }
-                if preserve_result
-                    && let Some(BlockItem::Expression(expr)) = block.items.last()
-                {
+                if preserve_result && let Some(BlockItem::Expression(expr)) = block.items.last() {
                     self.collect_reference_use_names_from_expr(expr, true, names);
                 }
             }
@@ -1970,7 +1956,9 @@ impl BytecodeCompiler {
                 }
                 self.collect_reference_use_names_from_expr(&assign.value, false, names);
             }
-            BlockItem::Statement(stmt) => self.collect_reference_use_names_from_statement(stmt, names),
+            BlockItem::Statement(stmt) => {
+                self.collect_reference_use_names_from_statement(stmt, names)
+            }
             BlockItem::Expression(expr) => {
                 self.collect_reference_use_names_from_expr(expr, false, names);
             }
@@ -2081,7 +2069,9 @@ impl BytecodeCompiler {
             Item::Expression(expr, _) => {
                 self.collect_reference_use_names_from_expr(expr, false, names);
             }
-            Item::Statement(stmt, _) => self.collect_reference_use_names_from_statement(stmt, names),
+            Item::Statement(stmt, _) => {
+                self.collect_reference_use_names_from_statement(stmt, names)
+            }
             Item::Function(func, _) => {
                 for stmt in &func.body {
                     self.collect_reference_use_names_from_statement(stmt, names);
@@ -2542,7 +2532,8 @@ impl BytecodeCompiler {
                         BorrowMode::Shared
                     };
                     if let shape_ast::ast::Expr::Reference { expr, span, .. } = arg {
-                        self.compile_reference_expr(expr, *span, borrow_mode).map(|_| ())
+                        self.compile_reference_expr(expr, *span, borrow_mode)
+                            .map(|_| ())
                     } else {
                         self.compile_implicit_reference_arg(arg, borrow_mode)
                     }
@@ -3129,6 +3120,9 @@ impl BytecodeCompiler {
     }
 
     pub(super) fn resolve_scoped_module_binding_name(&self, name: &str) -> Option<String> {
+        if crate::module_resolution::is_hidden_annotation_import_module_name(name) {
+            return None;
+        }
         if self.module_bindings.contains_key(name) {
             return Some(name.to_string());
         }
@@ -3344,197 +3338,238 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Get built-in function by name
-    pub(super) fn get_builtin_function(&self, name: &str) -> Option<BuiltinFunction> {
-        // Internal builtins are only accessible from stdlib functions.
-        // User code must use the safe wrappers (e.g. std::core::math).
-        // Note: __into_* and __try_into_* are NOT gated — the compiler generates
-        // calls to them for type assertions (x as int, x try as int).
-        if !self.allow_internal_builtins
-            && (name.starts_with("__native_")
-                || name.starts_with("__intrinsic_")
-                || name.starts_with("__json_"))
-        {
-            return None;
-        }
-        match name {
+    pub(super) fn classify_builtin_function(&self, name: &str) -> Option<BuiltinNameResolution> {
+        let builtin = match name {
             // Option type constructor
-            "Some" => Some(BuiltinFunction::SomeCtor),
-            "Ok" => Some(BuiltinFunction::OkCtor),
-            "Err" => Some(BuiltinFunction::ErrCtor),
-            "HashMap" => Some(BuiltinFunction::HashMapCtor),
-            "Set" => Some(BuiltinFunction::SetCtor),
-            "Deque" => Some(BuiltinFunction::DequeCtor),
-            "PriorityQueue" => Some(BuiltinFunction::PriorityQueueCtor),
-            "Mutex" => Some(BuiltinFunction::MutexCtor),
-            "Atomic" => Some(BuiltinFunction::AtomicCtor),
-            "Lazy" => Some(BuiltinFunction::LazyCtor),
-            "Channel" => Some(BuiltinFunction::ChannelCtor),
+            "Some" => BuiltinFunction::SomeCtor,
+            "Ok" => BuiltinFunction::OkCtor,
+            "Err" => BuiltinFunction::ErrCtor,
+            "HashMap" => BuiltinFunction::HashMapCtor,
+            "Set" => BuiltinFunction::SetCtor,
+            "Deque" => BuiltinFunction::DequeCtor,
+            "PriorityQueue" => BuiltinFunction::PriorityQueueCtor,
+            "Mutex" => BuiltinFunction::MutexCtor,
+            "Atomic" => BuiltinFunction::AtomicCtor,
+            "Lazy" => BuiltinFunction::LazyCtor,
+            "Channel" => BuiltinFunction::ChannelCtor,
             // Json navigation helpers
-            "__json_object_get" => Some(BuiltinFunction::JsonObjectGet),
-            "__json_array_at" => Some(BuiltinFunction::JsonArrayAt),
-            "__json_object_keys" => Some(BuiltinFunction::JsonObjectKeys),
-            "__json_array_len" => Some(BuiltinFunction::JsonArrayLen),
-            "__json_object_len" => Some(BuiltinFunction::JsonObjectLen),
-            "__intrinsic_vec_abs" => Some(BuiltinFunction::IntrinsicVecAbs),
-            "__intrinsic_vec_sqrt" => Some(BuiltinFunction::IntrinsicVecSqrt),
-            "__intrinsic_vec_ln" => Some(BuiltinFunction::IntrinsicVecLn),
-            "__intrinsic_vec_exp" => Some(BuiltinFunction::IntrinsicVecExp),
-            "__intrinsic_vec_add" => Some(BuiltinFunction::IntrinsicVecAdd),
-            "__intrinsic_vec_sub" => Some(BuiltinFunction::IntrinsicVecSub),
-            "__intrinsic_vec_mul" => Some(BuiltinFunction::IntrinsicVecMul),
-            "__intrinsic_vec_div" => Some(BuiltinFunction::IntrinsicVecDiv),
-            "__intrinsic_vec_max" => Some(BuiltinFunction::IntrinsicVecMax),
-            "__intrinsic_vec_min" => Some(BuiltinFunction::IntrinsicVecMin),
-            "__intrinsic_vec_select" => Some(BuiltinFunction::IntrinsicVecSelect),
-            "__intrinsic_matmul_vec" => Some(BuiltinFunction::IntrinsicMatMulVec),
-            "__intrinsic_matmul_mat" => Some(BuiltinFunction::IntrinsicMatMulMat),
+            "__json_object_get" => BuiltinFunction::JsonObjectGet,
+            "__json_array_at" => BuiltinFunction::JsonArrayAt,
+            "__json_object_keys" => BuiltinFunction::JsonObjectKeys,
+            "__json_array_len" => BuiltinFunction::JsonArrayLen,
+            "__json_object_len" => BuiltinFunction::JsonObjectLen,
+            "__intrinsic_vec_abs" => BuiltinFunction::IntrinsicVecAbs,
+            "__intrinsic_vec_sqrt" => BuiltinFunction::IntrinsicVecSqrt,
+            "__intrinsic_vec_ln" => BuiltinFunction::IntrinsicVecLn,
+            "__intrinsic_vec_exp" => BuiltinFunction::IntrinsicVecExp,
+            "__intrinsic_vec_add" => BuiltinFunction::IntrinsicVecAdd,
+            "__intrinsic_vec_sub" => BuiltinFunction::IntrinsicVecSub,
+            "__intrinsic_vec_mul" => BuiltinFunction::IntrinsicVecMul,
+            "__intrinsic_vec_div" => BuiltinFunction::IntrinsicVecDiv,
+            "__intrinsic_vec_max" => BuiltinFunction::IntrinsicVecMax,
+            "__intrinsic_vec_min" => BuiltinFunction::IntrinsicVecMin,
+            "__intrinsic_vec_select" => BuiltinFunction::IntrinsicVecSelect,
+            "__intrinsic_matmul_vec" => BuiltinFunction::IntrinsicMatMulVec,
+            "__intrinsic_matmul_mat" => BuiltinFunction::IntrinsicMatMulMat,
 
             // Existing builtins
-            "abs" => Some(BuiltinFunction::Abs),
-            "min" => Some(BuiltinFunction::Min),
-            "max" => Some(BuiltinFunction::Max),
-            "sqrt" => Some(BuiltinFunction::Sqrt),
-            "ln" => Some(BuiltinFunction::Ln),
-            "pow" => Some(BuiltinFunction::Pow),
-            "exp" => Some(BuiltinFunction::Exp),
-            "log" => Some(BuiltinFunction::Log),
-            "floor" => Some(BuiltinFunction::Floor),
-            "ceil" => Some(BuiltinFunction::Ceil),
-            "round" => Some(BuiltinFunction::Round),
-            "sin" => Some(BuiltinFunction::Sin),
-            "cos" => Some(BuiltinFunction::Cos),
-            "tan" => Some(BuiltinFunction::Tan),
-            "asin" => Some(BuiltinFunction::Asin),
-            "acos" => Some(BuiltinFunction::Acos),
-            "atan" => Some(BuiltinFunction::Atan),
-            "stddev" => Some(BuiltinFunction::StdDev),
-            "__intrinsic_map" => Some(BuiltinFunction::Map),
-            "__intrinsic_filter" => Some(BuiltinFunction::Filter),
-            "__intrinsic_reduce" => Some(BuiltinFunction::Reduce),
-            "print" => Some(BuiltinFunction::Print),
-            "format" => Some(BuiltinFunction::Format),
-            "len" | "count" => Some(BuiltinFunction::Len),
+            "abs" => BuiltinFunction::Abs,
+            "min" => BuiltinFunction::Min,
+            "max" => BuiltinFunction::Max,
+            "sqrt" => BuiltinFunction::Sqrt,
+            "ln" => BuiltinFunction::Ln,
+            "pow" => BuiltinFunction::Pow,
+            "exp" => BuiltinFunction::Exp,
+            "log" => BuiltinFunction::Log,
+            "floor" => BuiltinFunction::Floor,
+            "ceil" => BuiltinFunction::Ceil,
+            "round" => BuiltinFunction::Round,
+            "sin" => BuiltinFunction::Sin,
+            "cos" => BuiltinFunction::Cos,
+            "tan" => BuiltinFunction::Tan,
+            "asin" => BuiltinFunction::Asin,
+            "acos" => BuiltinFunction::Acos,
+            "atan" => BuiltinFunction::Atan,
+            "stddev" => BuiltinFunction::StdDev,
+            "__intrinsic_map" => BuiltinFunction::Map,
+            "__intrinsic_filter" => BuiltinFunction::Filter,
+            "__intrinsic_reduce" => BuiltinFunction::Reduce,
+            "print" => BuiltinFunction::Print,
+            "format" => BuiltinFunction::Format,
+            "len" | "count" => BuiltinFunction::Len,
             // "throw" removed: Shape uses Result types
-            "__intrinsic_snapshot" | "snapshot" => Some(BuiltinFunction::Snapshot),
-            "exit" => Some(BuiltinFunction::Exit),
-            "range" => Some(BuiltinFunction::Range),
-            "is_number" | "isNumber" => Some(BuiltinFunction::IsNumber),
-            "is_string" | "isString" => Some(BuiltinFunction::IsString),
-            "is_bool" | "isBool" => Some(BuiltinFunction::IsBool),
-            "is_array" | "isArray" => Some(BuiltinFunction::IsArray),
-            "is_object" | "isObject" => Some(BuiltinFunction::IsObject),
-            "is_data_row" | "isDataRow" => Some(BuiltinFunction::IsDataRow),
-            "to_string" | "toString" => Some(BuiltinFunction::ToString),
-            "to_number" | "toNumber" => Some(BuiltinFunction::ToNumber),
-            "to_bool" | "toBool" => Some(BuiltinFunction::ToBool),
-            "__into_int" => Some(BuiltinFunction::IntoInt),
-            "__into_number" => Some(BuiltinFunction::IntoNumber),
-            "__into_decimal" => Some(BuiltinFunction::IntoDecimal),
-            "__into_bool" => Some(BuiltinFunction::IntoBool),
-            "__into_string" => Some(BuiltinFunction::IntoString),
-            "__try_into_int" => Some(BuiltinFunction::TryIntoInt),
-            "__try_into_number" => Some(BuiltinFunction::TryIntoNumber),
-            "__try_into_decimal" => Some(BuiltinFunction::TryIntoDecimal),
-            "__try_into_bool" => Some(BuiltinFunction::TryIntoBool),
-            "__try_into_string" => Some(BuiltinFunction::TryIntoString),
-            "__native_ptr_size" => Some(BuiltinFunction::NativePtrSize),
-            "__native_ptr_new_cell" => Some(BuiltinFunction::NativePtrNewCell),
-            "__native_ptr_free_cell" => Some(BuiltinFunction::NativePtrFreeCell),
-            "__native_ptr_read_ptr" => Some(BuiltinFunction::NativePtrReadPtr),
-            "__native_ptr_write_ptr" => Some(BuiltinFunction::NativePtrWritePtr),
-            "__native_table_from_arrow_c" => Some(BuiltinFunction::NativeTableFromArrowC),
-            "__native_table_from_arrow_c_typed" => {
-                Some(BuiltinFunction::NativeTableFromArrowCTyped)
-            }
-            "__native_table_bind_type" => Some(BuiltinFunction::NativeTableBindType),
-            "fold" => Some(BuiltinFunction::ControlFold),
+            "__intrinsic_snapshot" | "snapshot" => BuiltinFunction::Snapshot,
+            "exit" => BuiltinFunction::Exit,
+            "range" => BuiltinFunction::Range,
+            "is_number" | "isNumber" => BuiltinFunction::IsNumber,
+            "is_string" | "isString" => BuiltinFunction::IsString,
+            "is_bool" | "isBool" => BuiltinFunction::IsBool,
+            "is_array" | "isArray" => BuiltinFunction::IsArray,
+            "is_object" | "isObject" => BuiltinFunction::IsObject,
+            "is_data_row" | "isDataRow" => BuiltinFunction::IsDataRow,
+            "to_string" | "toString" => BuiltinFunction::ToString,
+            "to_number" | "toNumber" => BuiltinFunction::ToNumber,
+            "to_bool" | "toBool" => BuiltinFunction::ToBool,
+            "__into_int" => BuiltinFunction::IntoInt,
+            "__into_number" => BuiltinFunction::IntoNumber,
+            "__into_decimal" => BuiltinFunction::IntoDecimal,
+            "__into_bool" => BuiltinFunction::IntoBool,
+            "__into_string" => BuiltinFunction::IntoString,
+            "__try_into_int" => BuiltinFunction::TryIntoInt,
+            "__try_into_number" => BuiltinFunction::TryIntoNumber,
+            "__try_into_decimal" => BuiltinFunction::TryIntoDecimal,
+            "__try_into_bool" => BuiltinFunction::TryIntoBool,
+            "__try_into_string" => BuiltinFunction::TryIntoString,
+            "__native_ptr_size" => BuiltinFunction::NativePtrSize,
+            "__native_ptr_new_cell" => BuiltinFunction::NativePtrNewCell,
+            "__native_ptr_free_cell" => BuiltinFunction::NativePtrFreeCell,
+            "__native_ptr_read_ptr" => BuiltinFunction::NativePtrReadPtr,
+            "__native_ptr_write_ptr" => BuiltinFunction::NativePtrWritePtr,
+            "__native_table_from_arrow_c" => BuiltinFunction::NativeTableFromArrowC,
+            "__native_table_from_arrow_c_typed" => BuiltinFunction::NativeTableFromArrowCTyped,
+            "__native_table_bind_type" => BuiltinFunction::NativeTableBindType,
+            "fold" => BuiltinFunction::ControlFold,
 
             // Math intrinsics
-            "__intrinsic_sum" => Some(BuiltinFunction::IntrinsicSum),
-            "__intrinsic_mean" => Some(BuiltinFunction::IntrinsicMean),
-            "__intrinsic_min" => Some(BuiltinFunction::IntrinsicMin),
-            "__intrinsic_max" => Some(BuiltinFunction::IntrinsicMax),
-            "__intrinsic_std" => Some(BuiltinFunction::IntrinsicStd),
-            "__intrinsic_variance" => Some(BuiltinFunction::IntrinsicVariance),
+            "__intrinsic_sum" => BuiltinFunction::IntrinsicSum,
+            "__intrinsic_mean" => BuiltinFunction::IntrinsicMean,
+            "__intrinsic_min" => BuiltinFunction::IntrinsicMin,
+            "__intrinsic_max" => BuiltinFunction::IntrinsicMax,
+            "__intrinsic_std" => BuiltinFunction::IntrinsicStd,
+            "__intrinsic_variance" => BuiltinFunction::IntrinsicVariance,
 
             // Random intrinsics
-            "__intrinsic_random" => Some(BuiltinFunction::IntrinsicRandom),
-            "__intrinsic_random_int" => Some(BuiltinFunction::IntrinsicRandomInt),
-            "__intrinsic_random_seed" => Some(BuiltinFunction::IntrinsicRandomSeed),
-            "__intrinsic_random_normal" => Some(BuiltinFunction::IntrinsicRandomNormal),
-            "__intrinsic_random_array" => Some(BuiltinFunction::IntrinsicRandomArray),
+            "__intrinsic_random" => BuiltinFunction::IntrinsicRandom,
+            "__intrinsic_random_int" => BuiltinFunction::IntrinsicRandomInt,
+            "__intrinsic_random_seed" => BuiltinFunction::IntrinsicRandomSeed,
+            "__intrinsic_random_normal" => BuiltinFunction::IntrinsicRandomNormal,
+            "__intrinsic_random_array" => BuiltinFunction::IntrinsicRandomArray,
 
             // Distribution intrinsics
-            "__intrinsic_dist_uniform" => Some(BuiltinFunction::IntrinsicDistUniform),
-            "__intrinsic_dist_lognormal" => Some(BuiltinFunction::IntrinsicDistLognormal),
-            "__intrinsic_dist_exponential" => Some(BuiltinFunction::IntrinsicDistExponential),
-            "__intrinsic_dist_poisson" => Some(BuiltinFunction::IntrinsicDistPoisson),
-            "__intrinsic_dist_sample_n" => Some(BuiltinFunction::IntrinsicDistSampleN),
+            "__intrinsic_dist_uniform" => BuiltinFunction::IntrinsicDistUniform,
+            "__intrinsic_dist_lognormal" => BuiltinFunction::IntrinsicDistLognormal,
+            "__intrinsic_dist_exponential" => BuiltinFunction::IntrinsicDistExponential,
+            "__intrinsic_dist_poisson" => BuiltinFunction::IntrinsicDistPoisson,
+            "__intrinsic_dist_sample_n" => BuiltinFunction::IntrinsicDistSampleN,
 
             // Stochastic process intrinsics
-            "__intrinsic_brownian_motion" => Some(BuiltinFunction::IntrinsicBrownianMotion),
-            "__intrinsic_gbm" => Some(BuiltinFunction::IntrinsicGbm),
-            "__intrinsic_ou_process" => Some(BuiltinFunction::IntrinsicOuProcess),
-            "__intrinsic_random_walk" => Some(BuiltinFunction::IntrinsicRandomWalk),
+            "__intrinsic_brownian_motion" => BuiltinFunction::IntrinsicBrownianMotion,
+            "__intrinsic_gbm" => BuiltinFunction::IntrinsicGbm,
+            "__intrinsic_ou_process" => BuiltinFunction::IntrinsicOuProcess,
+            "__intrinsic_random_walk" => BuiltinFunction::IntrinsicRandomWalk,
 
             // Rolling intrinsics
-            "__intrinsic_rolling_sum" => Some(BuiltinFunction::IntrinsicRollingSum),
-            "__intrinsic_rolling_mean" => Some(BuiltinFunction::IntrinsicRollingMean),
-            "__intrinsic_rolling_std" => Some(BuiltinFunction::IntrinsicRollingStd),
-            "__intrinsic_rolling_min" => Some(BuiltinFunction::IntrinsicRollingMin),
-            "__intrinsic_rolling_max" => Some(BuiltinFunction::IntrinsicRollingMax),
-            "__intrinsic_ema" => Some(BuiltinFunction::IntrinsicEma),
-            "__intrinsic_linear_recurrence" => Some(BuiltinFunction::IntrinsicLinearRecurrence),
+            "__intrinsic_rolling_sum" => BuiltinFunction::IntrinsicRollingSum,
+            "__intrinsic_rolling_mean" => BuiltinFunction::IntrinsicRollingMean,
+            "__intrinsic_rolling_std" => BuiltinFunction::IntrinsicRollingStd,
+            "__intrinsic_rolling_min" => BuiltinFunction::IntrinsicRollingMin,
+            "__intrinsic_rolling_max" => BuiltinFunction::IntrinsicRollingMax,
+            "__intrinsic_ema" => BuiltinFunction::IntrinsicEma,
+            "__intrinsic_linear_recurrence" => BuiltinFunction::IntrinsicLinearRecurrence,
 
             // Series intrinsics
-            "__intrinsic_shift" => Some(BuiltinFunction::IntrinsicShift),
-            "__intrinsic_diff" => Some(BuiltinFunction::IntrinsicDiff),
-            "__intrinsic_pct_change" => Some(BuiltinFunction::IntrinsicPctChange),
-            "__intrinsic_fillna" => Some(BuiltinFunction::IntrinsicFillna),
-            "__intrinsic_cumsum" => Some(BuiltinFunction::IntrinsicCumsum),
-            "__intrinsic_cumprod" => Some(BuiltinFunction::IntrinsicCumprod),
-            "__intrinsic_clip" => Some(BuiltinFunction::IntrinsicClip),
+            "__intrinsic_shift" => BuiltinFunction::IntrinsicShift,
+            "__intrinsic_diff" => BuiltinFunction::IntrinsicDiff,
+            "__intrinsic_pct_change" => BuiltinFunction::IntrinsicPctChange,
+            "__intrinsic_fillna" => BuiltinFunction::IntrinsicFillna,
+            "__intrinsic_cumsum" => BuiltinFunction::IntrinsicCumsum,
+            "__intrinsic_cumprod" => BuiltinFunction::IntrinsicCumprod,
+            "__intrinsic_clip" => BuiltinFunction::IntrinsicClip,
 
             // Trigonometric intrinsics (map __intrinsic_ forms to existing builtins)
-            "__intrinsic_sin" => Some(BuiltinFunction::Sin),
-            "__intrinsic_cos" => Some(BuiltinFunction::Cos),
-            "__intrinsic_tan" => Some(BuiltinFunction::Tan),
-            "__intrinsic_asin" => Some(BuiltinFunction::Asin),
-            "__intrinsic_acos" => Some(BuiltinFunction::Acos),
-            "__intrinsic_atan" => Some(BuiltinFunction::Atan),
-            "__intrinsic_atan2" => Some(BuiltinFunction::IntrinsicAtan2),
-            "__intrinsic_sinh" => Some(BuiltinFunction::IntrinsicSinh),
-            "__intrinsic_cosh" => Some(BuiltinFunction::IntrinsicCosh),
-            "__intrinsic_tanh" => Some(BuiltinFunction::IntrinsicTanh),
+            "__intrinsic_sin" => BuiltinFunction::Sin,
+            "__intrinsic_cos" => BuiltinFunction::Cos,
+            "__intrinsic_tan" => BuiltinFunction::Tan,
+            "__intrinsic_asin" => BuiltinFunction::Asin,
+            "__intrinsic_acos" => BuiltinFunction::Acos,
+            "__intrinsic_atan" => BuiltinFunction::Atan,
+            "__intrinsic_atan2" => BuiltinFunction::IntrinsicAtan2,
+            "__intrinsic_sinh" => BuiltinFunction::IntrinsicSinh,
+            "__intrinsic_cosh" => BuiltinFunction::IntrinsicCosh,
+            "__intrinsic_tanh" => BuiltinFunction::IntrinsicTanh,
 
             // Statistical intrinsics
-            "__intrinsic_correlation" => Some(BuiltinFunction::IntrinsicCorrelation),
-            "__intrinsic_covariance" => Some(BuiltinFunction::IntrinsicCovariance),
-            "__intrinsic_percentile" => Some(BuiltinFunction::IntrinsicPercentile),
-            "__intrinsic_median" => Some(BuiltinFunction::IntrinsicMedian),
+            "__intrinsic_correlation" => BuiltinFunction::IntrinsicCorrelation,
+            "__intrinsic_covariance" => BuiltinFunction::IntrinsicCovariance,
+            "__intrinsic_percentile" => BuiltinFunction::IntrinsicPercentile,
+            "__intrinsic_median" => BuiltinFunction::IntrinsicMedian,
 
             // Character code intrinsics
-            "__intrinsic_char_code" => Some(BuiltinFunction::IntrinsicCharCode),
-            "__intrinsic_from_char_code" => Some(BuiltinFunction::IntrinsicFromCharCode),
+            "__intrinsic_char_code" => BuiltinFunction::IntrinsicCharCode,
+            "__intrinsic_from_char_code" => BuiltinFunction::IntrinsicFromCharCode,
 
             // Series access
-            "__intrinsic_series" => Some(BuiltinFunction::IntrinsicSeries),
+            "__intrinsic_series" => BuiltinFunction::IntrinsicSeries,
 
             // Reflection
-            "reflect" => Some(BuiltinFunction::Reflect),
+            "reflect" => BuiltinFunction::Reflect,
 
             // Additional math builtins
-            "sign" => Some(BuiltinFunction::Sign),
-            "gcd" => Some(BuiltinFunction::Gcd),
-            "lcm" => Some(BuiltinFunction::Lcm),
-            "hypot" => Some(BuiltinFunction::Hypot),
-            "clamp" => Some(BuiltinFunction::Clamp),
-            "isNaN" | "is_nan" => Some(BuiltinFunction::IsNaN),
-            "isFinite" | "is_finite" => Some(BuiltinFunction::IsFinite),
+            "sign" => BuiltinFunction::Sign,
+            "gcd" => BuiltinFunction::Gcd,
+            "lcm" => BuiltinFunction::Lcm,
+            "hypot" => BuiltinFunction::Hypot,
+            "clamp" => BuiltinFunction::Clamp,
+            "isNaN" | "is_nan" => BuiltinFunction::IsNaN,
+            "isFinite" | "is_finite" => BuiltinFunction::IsFinite,
+            _ => return None,
+        };
 
-            _ => None,
-        }
+        let scope = match name {
+            "Some" | "Ok" | "Err" => ResolutionScope::TypeAssociated,
+            "print" => ResolutionScope::Prelude,
+            _ if Self::is_internal_intrinsic_name(name) => ResolutionScope::InternalIntrinsic,
+            _ => ResolutionScope::ModuleBinding,
+        };
+
+        Some(match scope {
+            ResolutionScope::InternalIntrinsic => {
+                BuiltinNameResolution::InternalOnly { builtin, scope }
+            }
+            _ => BuiltinNameResolution::Surface { builtin, scope },
+        })
+    }
+
+    pub(super) fn is_internal_intrinsic_name(name: &str) -> bool {
+        name.starts_with("__native_")
+            || name.starts_with("__intrinsic_")
+            || name.starts_with("__json_")
+    }
+
+    pub(super) const fn variable_scope_summary() -> &'static str {
+        "Variable names resolve from local scope and module scope."
+    }
+
+    pub(super) const fn function_scope_summary() -> &'static str {
+        "Function names resolve from module scope, explicit imports, type-associated scope, and the implicit prelude."
+    }
+
+    pub(super) fn undefined_variable_message(&self, name: &str) -> String {
+        format!(
+            "Undefined variable: {}. {}",
+            name,
+            Self::variable_scope_summary()
+        )
+    }
+
+    pub(super) fn undefined_function_message(&self, name: &str) -> String {
+        format!(
+            "Undefined function: {}. {}",
+            name,
+            Self::function_scope_summary()
+        )
+    }
+
+    pub(super) fn internal_intrinsic_error_message(
+        &self,
+        name: &str,
+        resolution: BuiltinNameResolution,
+    ) -> String {
+        format!(
+            "'{}' resolves to {} and is not available from ordinary user code. Internal intrinsics are reserved for std::* implementations and compiler-generated code.",
+            name,
+            resolution.scope().label()
+        )
     }
 
     /// Check if a builtin function requires arg count

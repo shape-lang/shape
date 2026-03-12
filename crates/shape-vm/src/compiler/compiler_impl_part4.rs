@@ -126,6 +126,71 @@ impl BytecodeCompiler {
         hints
     }
 
+    pub(crate) fn resolve_compiled_annotation_name(
+        &self,
+        annotation: &shape_ast::ast::Annotation,
+    ) -> Option<String> {
+        self.resolve_compiled_annotation_name_str(&annotation.name)
+    }
+
+    pub(crate) fn resolve_compiled_annotation_name_str(&self, name: &str) -> Option<String> {
+        if self.program.compiled_annotations.contains_key(name) {
+            return Some(name.to_string());
+        }
+
+        if name.contains("::") {
+            return None;
+        }
+
+        for module_path in self.module_scope_stack.iter().rev() {
+            let scoped = Self::qualify_module_symbol(module_path, name);
+            if self.program.compiled_annotations.contains_key(&scoped) {
+                return Some(scoped);
+            }
+        }
+
+        if let Some(imported) = self.imported_annotations.get(name) {
+            let hidden_name =
+                Self::qualify_module_symbol(&imported.hidden_module_name, &imported.original_name);
+            if self.program.compiled_annotations.contains_key(&hidden_name) {
+                return Some(hidden_name);
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn lookup_compiled_annotation(
+        &self,
+        annotation: &shape_ast::ast::Annotation,
+    ) -> Option<(String, crate::bytecode::CompiledAnnotation)> {
+        let resolved_name = self.resolve_compiled_annotation_name(annotation)?;
+        let compiled = self.program.compiled_annotations.get(&resolved_name)?.clone();
+        Some((resolved_name, compiled))
+    }
+
+    pub(crate) fn annotation_matches_compiled_name(
+        &self,
+        annotation: &shape_ast::ast::Annotation,
+        compiled_name: &str,
+    ) -> bool {
+        self.resolve_compiled_annotation_name(annotation)
+            .as_deref()
+            == Some(compiled_name)
+    }
+
+    pub(crate) fn annotation_args_for_compiled_name(
+        &self,
+        annotations: &[shape_ast::ast::Annotation],
+        compiled_name: &str,
+    ) -> Vec<shape_ast::ast::Expr> {
+        annotations
+            .iter()
+            .find(|annotation| self.annotation_matches_compiled_name(annotation, compiled_name))
+            .map(|annotation| annotation.args.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn is_definition_annotation_target(
         target_kind: shape_ast::ast::functions::AnnotationTargetKind,
     ) -> bool {
@@ -144,7 +209,7 @@ impl BytecodeCompiler {
         target_kind: shape_ast::ast::functions::AnnotationTargetKind,
         fallback_span: shape_ast::ast::Span,
     ) -> Result<()> {
-        let Some(compiled) = self.program.compiled_annotations.get(&ann.name) else {
+        let Some((_, compiled)) = self.lookup_compiled_annotation(ann) else {
             let span = if ann.span == shape_ast::ast::Span::DUMMY {
                 fallback_span
             } else {
@@ -214,19 +279,11 @@ impl BytecodeCompiler {
         // proven reliable in the compiler execution path.
         let mut known_bindings: Vec<String> = self.module_bindings.keys().cloned().collect();
         let namespace_bindings = Self::collect_namespace_import_bindings(&analysis_program);
+        self.module_scope_sources
+            .extend(Self::collect_import_module_scope_sources(&analysis_program));
         known_bindings.extend(namespace_bindings.iter().cloned());
         self.module_namespace_bindings
             .extend(namespace_bindings.into_iter());
-        // Auto-register extension module names as implicit namespace bindings
-        // so that `regex.is_match(...)` works without a `use regex` statement.
-        if let Some(ref registry) = self.extension_registry {
-            for ext in registry.iter() {
-                if !self.module_namespace_bindings.contains(&ext.name) {
-                    self.module_namespace_bindings.insert(ext.name.clone());
-                    known_bindings.push(ext.name.clone());
-                }
-            }
-        }
         for namespace in self.module_namespace_bindings.clone() {
             let binding_idx = self.get_or_create_module_binding(&namespace);
             self.register_extension_module_schema(&namespace);

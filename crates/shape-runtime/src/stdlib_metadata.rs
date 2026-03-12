@@ -117,12 +117,26 @@ impl StdlibMetadata {
                                 program.docs.comment_for_span(*span),
                             ));
                         }
+                        shape_ast::ast::ExportItem::BuiltinFunction(func) => {
+                            intrinsic_functions.push(Self::builtin_function_to_info(
+                                func,
+                                module_path,
+                                program.docs.comment_for_span(*span),
+                            ));
+                        }
+                        shape_ast::ast::ExportItem::BuiltinType(type_decl) => {
+                            intrinsic_types.push(Self::builtin_type_to_info(
+                                type_decl,
+                                program.docs.comment_for_span(*span),
+                            ));
+                        }
                         shape_ast::ast::ExportItem::TypeAlias(_) => {}
                         shape_ast::ast::ExportItem::Named(_) => {}
                         shape_ast::ast::ExportItem::Enum(_) => {}
                         shape_ast::ast::ExportItem::Struct(_) => {}
                         shape_ast::ast::ExportItem::Interface(_) => {}
                         shape_ast::ast::ExportItem::Trait(_) => {}
+                        shape_ast::ast::ExportItem::Annotation(_) => {}
                         shape_ast::ast::ExportItem::ForeignFunction(_) => {
                             // Foreign functions are not stdlib intrinsics
                         }

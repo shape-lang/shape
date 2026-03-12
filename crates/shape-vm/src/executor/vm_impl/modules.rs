@@ -189,7 +189,13 @@ impl VirtualMachine {
                 .program
                 .module_binding_names
                 .iter()
-                .position(|n| n == &module_name);
+                .position(|binding_name| {
+                    binding_name == &module_name
+                        || binding_name
+                            == &crate::compiler::BytecodeCompiler::hidden_native_module_binding_name(
+                                &module_name,
+                            )
+                });
 
             if let Some(idx) = binding_idx {
                 let mut obj = HashMap::new();

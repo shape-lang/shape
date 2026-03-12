@@ -203,6 +203,36 @@ fn collect_items(
                         *span,
                     ));
                 }
+                ExportItem::BuiltinFunction(function) => {
+                    docs.push(DocItem {
+                        kind: DocItemKind::Function,
+                        name: join_path(module_path, &function.name),
+                        doc: doc_text_from_span(program, *span),
+                        signature: Some(format_builtin_signature(function)),
+                        type_params: format_type_params(&function.type_params),
+                        params: function
+                            .params
+                            .iter()
+                            .map(|param| DocParam {
+                                name: param.simple_name().unwrap_or("_").to_string(),
+                                type_name: param
+                                    .type_annotation
+                                    .as_ref()
+                                    .map(format_type_annotation),
+                                description: program
+                                    .docs
+                                    .comment_for_span(*span)
+                                    .and_then(|doc| {
+                                        doc.param_doc(param.simple_name().unwrap_or("_"))
+                                    })
+                                    .map(str::to_string),
+                                default_value: None,
+                            })
+                            .collect(),
+                        return_type: Some(format_type_annotation(&function.return_type)),
+                        children: Vec::new(),
+                    });
+                }
                 ExportItem::ForeignFunction(function) => {
                     docs.push(DocItem {
                         kind: DocItemKind::Function,
@@ -281,6 +311,19 @@ fn collect_items(
                         children: Vec::new(),
                     });
                 }
+                ExportItem::BuiltinType(ty) => {
+                    docs.push(DocItem {
+                        kind: DocItemKind::Type,
+                        name: join_path(module_path, &ty.name),
+                        doc: doc_text_from_span(program, *span),
+                        signature: Some(format!("builtin type {}", ty.name)),
+                        type_params: format_type_params(&ty.type_params),
+                        params: Vec::new(),
+                        return_type: None,
+                        children: Vec::new(),
+                    });
+                }
+                ExportItem::Annotation(_) => {}
                 ExportItem::Named(_) => {}
             },
             _ => {}

@@ -59,7 +59,7 @@ impl BundleCompiler {
         if !dependency_paths.is_empty() {
             loader.set_dependency_paths(dependency_paths);
         }
-        let known_bindings = crate::stdlib::core_binding_names();
+        let known_bindings = Vec::new();
         let native_resolution_context =
             shape_runtime::native_resolution::resolve_native_dependencies_for_project(
                 project,
@@ -279,20 +279,46 @@ fn resolve_and_inline_imports(
     ast: &mut shape_ast::Program,
     loader: &mut shape_runtime::module_loader::ModuleLoader,
 ) -> std::collections::HashSet<String> {
-    use shape_ast::ast::{ImportItems, Item};
-    // MED-24 fix: Use per-module inlined-name tracking (matching
-    // `append_imported_module_items`) so the same module can be imported
-    // with different named filters across multiple import statements,
-    // including transitive imports from inlined modules.
-    let mut inlined_names: HashMap<String, Option<HashSet<String>>> = HashMap::new();
+    use shape_ast::ast::{ImportItems, Item, ModuleDecl, Span};
+
+    fn namespace_binding_name(import_stmt: &shape_ast::ast::ImportStmt) -> String {
+        match &import_stmt.items {
+            ImportItems::Namespace { name, alias } => {
+                alias.clone().unwrap_or_else(|| name.clone())
+            }
+            ImportItems::Named(_) => unreachable!("expected namespace import"),
+        }
+    }
+
+    fn strip_import_items(items: Vec<Item>) -> Vec<Item> {
+        items.into_iter()
+            .filter(|item| !matches!(item, Item::Import(..)))
+            .collect()
+    }
+
+    fn build_namespace_module_item(local_name: String, items: Vec<Item>) -> Item {
+        Item::Module(
+            ModuleDecl {
+                name: local_name,
+                name_span: Span::DUMMY,
+                doc_comment: None,
+                annotations: Vec::new(),
+                items,
+            },
+            Span::DUMMY,
+        )
+    }
+
+    let mut inlined_names: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut wrapped_namespace_modules: HashSet<(String, String)> = HashSet::new();
     let mut stdlib_names = std::collections::HashSet::new();
 
     loop {
         let mut module_items = Vec::new();
         let mut found_new = false;
 
-        // Merge named filters per module path for this iteration.
-        let mut merged: HashMap<String, Option<HashSet<String>>> = HashMap::new();
+        let mut merged_named: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut namespace_requests = Vec::new();
 
         for item in ast.items.iter() {
             let Item::Import(import_stmt, _) = item else {
@@ -302,51 +328,57 @@ fn resolve_and_inline_imports(
             if module_path.is_empty() {
                 continue;
             }
-            // If we already inlined everything (wildcard) from this module, skip.
-            if matches!(inlined_names.get(module_path), Some(None)) {
-                continue;
-            }
 
-            let named_filter: Option<HashSet<String>> = match &import_stmt.items {
-                ImportItems::Named(specs) => Some(specs.iter().map(|s| s.name.clone()).collect()),
-                ImportItems::Namespace { .. } => None,
-            };
-
-            let new_filter = match &named_filter {
-                None => {
-                    if matches!(inlined_names.get(module_path), Some(None)) {
-                        continue;
+            match &import_stmt.items {
+                ImportItems::Namespace { .. } => {
+                    let local_name = namespace_binding_name(import_stmt);
+                    if wrapped_namespace_modules
+                        .insert((module_path.to_string(), local_name.clone()))
+                    {
+                        namespace_requests.push((module_path.to_string(), local_name));
                     }
-                    None
                 }
-                Some(names) => {
-                    let mut new_names = names.clone();
-                    if let Some(Some(already)) = inlined_names.get(module_path) {
-                        new_names.retain(|n| !already.contains(n));
-                    }
-                    if new_names.is_empty() {
-                        continue;
-                    }
-                    Some(new_names)
-                }
-            };
-
-            let entry = merged
-                .entry(module_path.to_string())
-                .or_insert_with(|| Some(HashSet::new()));
-            match new_filter {
-                None => {
-                    *entry = None;
-                }
-                Some(ref new) => {
-                    if let Some(existing) = entry {
-                        existing.extend(new.iter().cloned());
+                ImportItems::Named(specs) => {
+                    let entry = merged_named
+                        .entry(module_path.to_string())
+                        .or_default();
+                    let already = inlined_names.get(module_path);
+                    for spec in specs {
+                        if already.is_some_and(|names| names.contains(&spec.name)) {
+                            continue;
+                        }
+                        entry.insert(spec.name.clone());
                     }
                 }
             }
         }
 
-        for (module_path, merged_filter) in &merged {
+        for (module_path, local_name) in namespace_requests {
+            let is_std = module_path.starts_with("std::");
+            let _ = loader.load_module(&module_path);
+
+            if let Some(module) = loader.get_module(&module_path) {
+                let mut nested_program = module.ast.clone();
+                stdlib_names.extend(resolve_and_inline_imports(&mut nested_program, loader));
+                let nested_items = strip_import_items(nested_program.items);
+                if !nested_items.is_empty() {
+                    if is_std {
+                        stdlib_names.extend(
+                            crate::module_resolution::collect_function_names_from_items(
+                                &nested_items,
+                            ),
+                        );
+                    }
+                    module_items.push(build_namespace_module_item(local_name, nested_items));
+                    found_new = true;
+                }
+            }
+        }
+
+        for (module_path, names) in &merged_named {
+            if names.is_empty() {
+                continue;
+            }
             found_new = true;
             let is_std = module_path.starts_with("std::");
 
@@ -359,25 +391,16 @@ fn resolve_and_inline_imports(
                         crate::module_resolution::collect_function_names_from_items(&items),
                     );
                 }
-                if let Some(names) = merged_filter {
-                    let names_ref: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
-                    for ast_item in items {
-                        if should_include_item(&ast_item, &names_ref) {
-                            module_items.push(ast_item);
-                        }
+                let names_ref: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+                for ast_item in items {
+                    if should_include_item(&ast_item, &names_ref) {
+                        module_items.push(ast_item);
                     }
-                    let entry = inlined_names
-                        .entry(module_path.clone())
-                        .or_insert_with(|| Some(HashSet::new()));
-                    if let Some(existing) = entry {
-                        existing.extend(names.iter().cloned());
-                    }
-                } else {
-                    module_items.extend(items);
-                    inlined_names.insert(module_path.clone(), None);
                 }
-            } else {
-                inlined_names.insert(module_path.clone(), None);
+                inlined_names
+                    .entry(module_path.clone())
+                    .or_default()
+                    .extend(names.iter().cloned());
             }
         }
 
@@ -664,6 +687,12 @@ fn collect_export_names(program: &shape_ast::ast::Program) -> Vec<String> {
                 shape_ast::ast::ExportItem::Function(func) => {
                     names.push(func.name.clone());
                 }
+                shape_ast::ast::ExportItem::BuiltinFunction(func) => {
+                    names.push(func.name.clone());
+                }
+                shape_ast::ast::ExportItem::BuiltinType(ty) => {
+                    names.push(ty.name.clone());
+                }
                 shape_ast::ast::ExportItem::Named(specs) => {
                     for spec in specs {
                         names.push(spec.alias.clone().unwrap_or_else(|| spec.name.clone()));
@@ -683,6 +712,9 @@ fn collect_export_names(program: &shape_ast::ast::Program) -> Vec<String> {
                 }
                 shape_ast::ast::ExportItem::Trait(t) => {
                     names.push(t.name.clone());
+                }
+                shape_ast::ast::ExportItem::Annotation(annotation) => {
+                    names.push(annotation.name.clone());
                 }
                 shape_ast::ast::ExportItem::ForeignFunction(f) => {
                     names.push(f.name.clone());

@@ -42,6 +42,7 @@ fn get_expr_span(expr: &Expr) -> Option<Span> {
         Expr::BinaryOp { span, .. }
         | Expr::UnaryOp { span, .. }
         | Expr::FunctionCall { span, .. }
+        | Expr::QualifiedFunctionCall { span, .. }
         | Expr::MethodCall { span, .. }
         | Expr::PropertyAccess { span, .. }
         | Expr::IndexAccess { span, .. }
@@ -158,12 +159,7 @@ impl BytecodeCompiler {
         target: &Expr,
         target_kind: shape_ast::ast::functions::AnnotationTargetKind,
     ) -> Result<bool> {
-        if let Some(compiled) = self
-            .program
-            .compiled_annotations
-            .get(&annotation.name)
-            .cloned()
-        {
+        if let Some((_, compiled)) = self.lookup_compiled_annotation(annotation) {
             let handlers = [
                 compiled.comptime_pre_handler,
                 compiled.comptime_post_handler,
@@ -837,10 +833,7 @@ impl BytecodeCompiler {
         self.last_expr_reference_result
     }
 
-    pub(super) fn restore_last_expr_reference_result(
-        &mut self,
-        result: ExprReferenceResult,
-    ) {
+    pub(super) fn restore_last_expr_reference_result(&mut self, result: ExprReferenceResult) {
         self.last_expr_reference_result = result;
     }
 
@@ -848,11 +841,7 @@ impl BytecodeCompiler {
         self.last_expr_reference_result = ExprReferenceResult::default();
     }
 
-    pub(super) fn set_last_expr_reference_result(
-        &mut self,
-        mode: BorrowMode,
-        auto_deref: bool,
-    ) {
+    pub(super) fn set_last_expr_reference_result(&mut self, mode: BorrowMode, auto_deref: bool) {
         self.last_expr_reference_result = ExprReferenceResult {
             raw_mode: Some(mode),
             auto_deref_mode: auto_deref.then_some(mode),
@@ -863,9 +852,7 @@ impl BytecodeCompiler {
         self.last_expr_reference_result.raw_mode
     }
 
-    pub(super) fn merge_reference_results(
-        results: &[ExprReferenceResult],
-    ) -> ExprReferenceResult {
+    pub(super) fn merge_reference_results(results: &[ExprReferenceResult]) -> ExprReferenceResult {
         let Some(first) = results.first().copied() else {
             return ExprReferenceResult::default();
         };
@@ -920,10 +907,19 @@ impl BytecodeCompiler {
         self.clear_last_expr_reference_result();
 
         let result = match expr {
-            Expr::Identifier(name, span) => self.compile_expr_identifier_preserving_refs(name, *span),
+            Expr::Identifier(name, span) => {
+                self.compile_expr_identifier_preserving_refs(name, *span)
+            }
             Expr::FunctionCall {
                 name, args, span, ..
             } => self.compile_expr_function_call(name, args, *span),
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                args,
+                span,
+                ..
+            } => self.compile_expr_qualified_function_call(namespace, function, args, *span),
             Expr::MethodCall {
                 receiver,
                 method,
@@ -1048,6 +1044,13 @@ impl BytecodeCompiler {
             Expr::FunctionCall {
                 name, args, span, ..
             } => self.compile_expr_function_call(name, args, *span),
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                args,
+                span,
+                ..
+            } => self.compile_expr_qualified_function_call(namespace, function, args, *span),
             Expr::MethodCall {
                 receiver,
                 method,

@@ -52,8 +52,7 @@ impl BytecodeCompiler {
                 if let Some(local_idx) = self.resolve_local(captured) {
                     let escapes_direct_borrow = self.ref_locals.contains(&local_idx)
                         && !self.inferred_ref_locals.contains(&local_idx);
-                    let escapes_reference_value =
-                        self.reference_value_locals.contains(&local_idx);
+                    let escapes_reference_value = self.reference_value_locals.contains(&local_idx);
                     if escapes_direct_borrow || escapes_reference_value {
                         return Err(ShapeError::SemanticError {
                             message: format!(
@@ -222,14 +221,9 @@ impl BytecodeCompiler {
                     // skip for Reference (handled above), box for Direct/Deferred
                     // since mutable capture needs heap indirection.
                     !matches!(plan_class, BindingStorageClass::Reference)
-                } else if let Some((_, _, semantics)) =
-                    self.binding_semantics_for_name(captured)
-                {
+                } else if let Some((_, _, semantics)) = self.binding_semantics_for_name(captured) {
                     // Fallback to type-tracker semantics
-                    !matches!(
-                        semantics.storage_class,
-                        BindingStorageClass::Reference
-                    )
+                    !matches!(semantics.storage_class, BindingStorageClass::Reference)
                 } else {
                     true // no plan available, use legacy behavior (always box)
                 };

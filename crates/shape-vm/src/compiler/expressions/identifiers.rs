@@ -45,7 +45,7 @@ impl BytecodeCompiler {
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
                 ShapeError::RuntimeError {
-                    message: format!("Undefined variable: {}", name),
+                    message: self.undefined_variable_message(name),
                     location: Some(self.span_to_source_location(span)),
                 }
             })?;
@@ -173,13 +173,11 @@ impl BytecodeCompiler {
                 //
                 // Consult the MIR storage plan first (authoritative when available),
                 // then fall back to type-tracker semantics for non-function contexts.
-                let storage_class = self
-                    .mir_storage_class_for_slot(local_idx)
-                    .or_else(|| {
-                        self.type_tracker
-                            .get_local_binding_semantics(local_idx)
-                            .map(|s| s.storage_class)
-                    });
+                let storage_class = self.mir_storage_class_for_slot(local_idx).or_else(|| {
+                    self.type_tracker
+                        .get_local_binding_semantics(local_idx)
+                        .map(|s| s.storage_class)
+                });
 
                 if self.boxed_locals.contains(name)
                     && matches!(
@@ -235,7 +233,7 @@ impl BytecodeCompiler {
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
                 ShapeError::RuntimeError {
-                    message: format!("Undefined variable: {}", name),
+                    message: self.undefined_variable_message(name),
                     location: Some(self.span_to_source_location(span)),
                 }
             })?;
@@ -340,7 +338,7 @@ impl BytecodeCompiler {
         } else {
             // Collect available names for "Did you mean?" suggestion
             let available = self.collect_available_names();
-            let mut message = format!("Undefined variable: {}", name);
+            let mut message = self.undefined_variable_message(name);
             if let Some(suggestion) = suggest_variable(name, &available) {
                 message.push_str(&format!(". {}", suggestion));
             }

@@ -117,7 +117,7 @@ mod extension_integration_tests {
         );
         module.add_shape_artifact(
             "myext",
-            Some("pub fn connect() { myext.__connect() }".to_string()),
+            Some("use myext\npub fn connect() { myext::__connect() }".to_string()),
             None,
         );
 
@@ -125,11 +125,11 @@ mod extension_integration_tests {
         executor.register_extension(module);
         let loader = shape_runtime::module_loader::ModuleLoader::new();
         executor.set_module_loader(loader);
-        executor.resolve_file_imports_from_source("use myext\nmyext.connect()", None);
+        executor.resolve_file_imports_from_source("use myext\nmyext::connect()", None);
 
         let mut engine = ShapeEngine::new().expect("engine");
         let result = engine
-            .execute(&mut executor, "use myext\nmyext.connect()")
+            .execute(&mut executor, "use myext\nmyext::connect()")
             .expect("execution should succeed");
 
         assert_eq!(result.value.as_number(), Some(7.0));
@@ -159,7 +159,7 @@ pub @force_int() fn connect(const uri) { 1 }
         let loader = shape_runtime::module_loader::ModuleLoader::new();
         executor.set_module_loader(loader);
 
-        let source = "use myext\nmyext.connect(\"myext://x\")";
+        let source = "use myext\nmyext::connect(\"myext://x\")";
         executor.resolve_file_imports_from_source(source, None);
 
         let program = shape_ast::parser::parse_program(source).expect("parse");
@@ -193,11 +193,12 @@ pub @force_int() fn connect(const uri) { 1 }
             "myext",
             Some(
                 r#"
+use myext
 annotation db_schema() {
   targets: [function]
   comptime post(target, ctx) {
     set param uri: string
-    set return (myext.__connect_codegen(uri))
+    set return (myext::__connect_codegen(uri))
   }
 }
 pub @db_schema() fn connect(const uri) { 1 }
@@ -212,7 +213,7 @@ pub @db_schema() fn connect(const uri) { 1 }
         let loader = shape_runtime::module_loader::ModuleLoader::new();
         executor.set_module_loader(loader);
 
-        let source = "use myext\nmyext.connect(\"myext://x\")";
+        let source = "use myext\nmyext::connect(\"myext://x\")";
         executor.resolve_file_imports_from_source(source, None);
 
         let program = shape_ast::parser::parse_program(source).expect("parse");
@@ -246,8 +247,9 @@ pub @db_schema() fn connect(const uri) { 1 }
             "myext",
             Some(
                 r#"
+use myext
 comptime fn schema_for(uri) {
-  myext.__connect_codegen(uri)
+  myext::__connect_codegen(uri)
 }
 
 annotation db_schema() {
@@ -269,7 +271,7 @@ pub @db_schema() fn connect(const uri) { 1 }
         let loader = shape_runtime::module_loader::ModuleLoader::new();
         executor.set_module_loader(loader);
 
-        let source = "use myext\nmyext.connect(\"myext://x\")";
+        let source = "use myext\nmyext::connect(\"myext://x\")";
         executor.resolve_file_imports_from_source(source, None);
 
         let program = shape_ast::parser::parse_program(source).expect("parse");
@@ -309,14 +311,15 @@ pub @db_schema() fn connect(const uri) { 1 }
             "myext",
             Some(
                 r#"
+use myext
 annotation db_schema() {
   targets: [function]
   comptime post(target, ctx) {
     set param uri: string
-    set return (myext.__connect_codegen(uri))
+    set return (myext::__connect_codegen(uri))
   }
 }
-pub @db_schema() fn connect(const uri: string) { myext.__connect(uri) }
+pub @db_schema() fn connect(const uri: string) { myext::__connect(uri) }
 "#
                 .to_string(),
             ),
@@ -330,7 +333,7 @@ pub @db_schema() fn connect(const uri: string) { myext.__connect(uri) }
 
         let source = r#"
 use myext
-let conn = myext.connect("myext://x")
+let conn = myext::connect("myext://x")
 let rows = conn.candles().filter(|u| u.open >= 18)
 "#;
         executor.resolve_file_imports_from_source(source, None);
@@ -379,4 +382,3 @@ let rows = conn.candles().filter(|u| u.open >= 18)
 // =========================================================================
 // Full Loop Integration Tests: CSV Load → Simulate → Display
 // =========================================================================
-

@@ -24,8 +24,10 @@ impl BytecodeCompiler {
             let mut ref_borrow = None;
             if let Some(value) = &let_expr.value {
                 let saved_pending_variable_name = self.pending_variable_name.clone();
-                self.pending_variable_name =
-                    let_expr.pattern.as_simple_name().map(|name| name.to_string());
+                self.pending_variable_name = let_expr
+                    .pattern
+                    .as_simple_name()
+                    .map(|name| name.to_string());
                 let compile_result = self.compile_expr_for_reference_binding(value);
                 self.pending_variable_name = saved_pending_variable_name;
                 ref_borrow = compile_result?;

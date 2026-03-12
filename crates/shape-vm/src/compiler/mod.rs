@@ -28,7 +28,7 @@ pub(crate) struct ExprReferenceResult {
 /// A borrow place key used for encoding borrow targets in codegen.
 pub type BorrowPlace = u32;
 use crate::bytecode::{
-    BytecodeProgram, Constant, FunctionBlob, FunctionHash, Instruction, OpCode,
+    BuiltinFunction, BytecodeProgram, Constant, FunctionBlob, FunctionHash, Instruction, OpCode,
     Program as ContentAddressedProgram,
 };
 use crate::type_tracking::{TypeTracker, VariableTypeInfo};
@@ -75,6 +75,76 @@ pub(crate) struct ImportedSymbol {
     pub original_name: String,
     /// Module path the symbol was imported from
     pub module_path: String,
+}
+
+/// Imported annotation binding routed through a hidden synthetic module.
+#[derive(Debug, Clone)]
+pub(crate) struct ImportedAnnotationSymbol {
+    /// Original annotation name in the source module.
+    pub original_name: String,
+    /// Source module path the annotation was imported from.
+    pub module_path: String,
+    /// Hidden synthetic module name that owns the compiled annotation scope.
+    pub hidden_module_name: String,
+}
+
+/// Module-scoped builtin function declaration with a runtime source module.
+#[derive(Debug, Clone)]
+pub(crate) struct ModuleBuiltinFunction {
+    /// The callable name as exported by the runtime/native module.
+    pub export_name: String,
+    /// Original source module path that provides the runtime implementation.
+    pub source_module_path: String,
+}
+
+/// Compiler-internal scope taxonomy for name resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum ResolutionScope {
+    Local,
+    ModuleBinding,
+    NamedImport,
+    NamespaceImport,
+    TypeAssociated,
+    Prelude,
+    SyntaxReserved,
+    InternalIntrinsic,
+}
+
+impl ResolutionScope {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Local => "local scope",
+            Self::ModuleBinding => "module scope",
+            Self::NamedImport => "named import scope",
+            Self::NamespaceImport => "namespace import scope",
+            Self::TypeAssociated => "type-associated scope",
+            Self::Prelude => "implicit prelude scope",
+            Self::SyntaxReserved => "syntax-reserved scope",
+            Self::InternalIntrinsic => "internal intrinsic scope",
+        }
+    }
+}
+
+/// Builtin lookup result annotated with the scope class it currently belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinNameResolution {
+    Surface {
+        builtin: BuiltinFunction,
+        scope: ResolutionScope,
+    },
+    InternalOnly {
+        builtin: BuiltinFunction,
+        scope: ResolutionScope,
+    },
+}
+
+impl BuiltinNameResolution {
+    pub(crate) const fn scope(self) -> ResolutionScope {
+        match self {
+            Self::Surface { scope, .. } | Self::InternalOnly { scope, .. } => scope,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -481,8 +551,7 @@ pub struct BytecodeCompiler {
         HashMap<u16, FunctionReturnReferenceSummary>,
 
     /// Named functions that safely return one reference parameter unchanged.
-    pub(crate) function_return_reference_summaries:
-        HashMap<String, FunctionReturnReferenceSummary>,
+    pub(crate) function_return_reference_summaries: HashMap<String, FunctionReturnReferenceSummary>,
 
     /// The return-reference summary of the function currently being compiled, if any.
     pub(crate) current_function_return_reference_summary: Option<FunctionReturnReferenceSummary>,
@@ -508,9 +577,17 @@ pub struct BytecodeCompiler {
 
     /// Imported symbols: local_name -> ImportedSymbol
     pub(crate) imported_names: HashMap<String, ImportedSymbol>,
+    /// Imported annotations: local_name -> ImportedAnnotationSymbol
+    pub(crate) imported_annotations: HashMap<String, ImportedAnnotationSymbol>,
+    /// Qualified builtin function declarations available as module-scoped callables.
+    pub(crate) module_builtin_functions: HashMap<String, ModuleBuiltinFunction>,
     /// Module namespace bindings introduced by `use module.path`.
     /// Used to avoid UFCS rewrites for module calls like `duckdb.connect(...)`.
     pub(crate) module_namespace_bindings: HashSet<String>,
+    /// Imported synthetic/local module path -> original source module path.
+    /// Used when code inside a wrapper module needs to dispatch to native exports
+    /// from the underlying source module.
+    pub(crate) module_scope_sources: HashMap<String, String>,
     /// Active lexical module scope stack while compiling `mod Name { ... }`.
     pub(crate) module_scope_stack: Vec<String>,
 
@@ -735,7 +812,8 @@ pub struct BytecodeCompiler {
     /// Per-function mapping from AST spans to MIR program points.
     /// Used to bridge the bytecode compiler (which knows AST spans) to
     /// MIR ownership decisions (which are keyed by `Point`).
-    pub(crate) mir_span_to_point: HashMap<String, HashMap<shape_ast::ast::Span, crate::mir::types::Point>>,
+    pub(crate) mir_span_to_point:
+        HashMap<String, HashMap<shape_ast::ast::Span, crate::mir::types::Point>>,
 
     /// Field-level definite-initialization and liveness analyses for compiled functions.
     pub(crate) mir_field_analyses: HashMap<String, crate::mir::FieldAnalysis>,

@@ -1702,6 +1702,16 @@ impl<'a> Visitor for TokenCollector<'a> {
                     }
                 }
             }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                span,
+                ..
+            } => {
+                let (line, _) = offset_to_line_col(self.source, span.start);
+                self.add_ident_token(namespace, 0, 0, line);
+                self.add_ident_token(function, 4, 0, line);
+            }
             Expr::EnumConstructor {
                 enum_name,
                 variant,

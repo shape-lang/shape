@@ -100,8 +100,10 @@ impl BytecodeCompiler {
                 shape_ast::ast::BlockItem::VariableDecl(var_decl) => {
                     if let Some(init_expr) = &var_decl.value {
                         let saved_pending_variable_name = self.pending_variable_name.clone();
-                        self.pending_variable_name =
-                            var_decl.pattern.as_identifier().map(|name| name.to_string());
+                        self.pending_variable_name = var_decl
+                            .pattern
+                            .as_identifier()
+                            .map(|name| name.to_string());
                         let compile_result = self.compile_expr_for_reference_binding(init_expr);
                         self.pending_variable_name = saved_pending_variable_name;
                         let ref_borrow = compile_result?;
@@ -229,8 +231,10 @@ impl BytecodeCompiler {
                     }
 
                     let saved_pending_variable_name = self.pending_variable_name.clone();
-                    self.pending_variable_name =
-                        assignment.pattern.as_identifier().map(|name| name.to_string());
+                    self.pending_variable_name = assignment
+                        .pattern
+                        .as_identifier()
+                        .map(|name| name.to_string());
                     let compile_result = self.compile_expr_for_reference_binding(&assignment.value);
                     self.pending_variable_name = saved_pending_variable_name;
                     let ref_borrow = compile_result?;

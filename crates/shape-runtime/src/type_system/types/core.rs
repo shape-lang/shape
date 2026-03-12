@@ -411,9 +411,7 @@ impl SemanticType {
             }
             // References: convert to the inner type for inference purposes.
             // The reference wrapper is tracked separately by the compiler.
-            SemanticType::Ref(inner) | SemanticType::RefMut(inner) => {
-                inner.to_inference_type()
-            }
+            SemanticType::Ref(inner) | SemanticType::RefMut(inner) => inner.to_inference_type(),
         }
     }
 }

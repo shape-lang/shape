@@ -438,6 +438,9 @@ impl Runtime {
                         shape_ast::ast::ImportItems::Named(imports) => {
                             for import_spec in imports {
                                 if let Some(export) = module.exports.get(&import_spec.name) {
+                                    if import_spec.is_annotation {
+                                        continue;
+                                    }
                                     let var_name =
                                         import_spec.alias.as_ref().unwrap_or(&import_spec.name);
                                     match export {
@@ -476,6 +479,9 @@ impl Runtime {
                         shape_ast::ast::ExportItem::Function(_) => {
                             // Function exports are registered by the VM
                         }
+                        shape_ast::ast::ExportItem::BuiltinFunction(_)
+                        | shape_ast::ast::ExportItem::BuiltinType(_)
+                        | shape_ast::ast::ExportItem::Annotation(_) => {}
                         shape_ast::ast::ExportItem::Named(specs) => {
                             for spec in specs {
                                 if let Ok(value) = ctx.get_variable(&spec.name) {

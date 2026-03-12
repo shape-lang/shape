@@ -40,6 +40,9 @@ pub fn parse_annotation(pair: Pair<Rule>) -> Result<Annotation> {
 
     for inner_pair in pair.into_inner() {
         match inner_pair.as_rule() {
+            Rule::annotation_ref => {
+                name = inner_pair.as_str().to_string();
+            }
             Rule::annotation_name | Rule::ident => {
                 name = inner_pair.as_str().to_string();
             }

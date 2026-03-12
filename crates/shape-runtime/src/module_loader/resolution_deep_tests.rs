@@ -1346,10 +1346,12 @@ pub fn gamma() { 3 }
                 shape_ast::ast::ImportSpec {
                     name: "alpha".to_string(),
                     alias: None,
+                    is_annotation: false,
                 },
                 shape_ast::ast::ImportSpec {
                     name: "beta".to_string(),
                     alias: Some("b".to_string()),
+                    is_annotation: false,
                 },
             ]),
         };
@@ -1383,6 +1385,7 @@ pub fn gamma() { 3 }
             items: shape_ast::ast::ImportItems::Named(vec![shape_ast::ast::ImportSpec {
                 name: "does_not_exist".to_string(),
                 alias: None,
+                is_annotation: false,
             }]),
         };
 

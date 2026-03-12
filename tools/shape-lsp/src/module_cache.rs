@@ -374,9 +374,12 @@ fn map_module_export_kind(kind: shape_runtime::module_loader::ModuleExportKind) 
     use shape_runtime::module_loader::ModuleExportKind as RuntimeKind;
     match kind {
         RuntimeKind::Function => SymbolKind::Function,
+        RuntimeKind::BuiltinFunction => SymbolKind::Function,
         RuntimeKind::TypeAlias => SymbolKind::TypeAlias,
+        RuntimeKind::BuiltinType => SymbolKind::TypeAlias,
         RuntimeKind::Interface => SymbolKind::Interface,
         RuntimeKind::Enum => SymbolKind::Enum,
+        RuntimeKind::Annotation => SymbolKind::Annotation,
         RuntimeKind::Value => SymbolKind::Variable,
     }
 }

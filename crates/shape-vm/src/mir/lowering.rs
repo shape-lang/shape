@@ -1992,6 +1992,29 @@ fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotId {
             let func_op = Operand::Constant(MirConstant::Function(name.clone()));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
+        Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            args,
+            named_args,
+            ..
+        } => {
+            let mut arg_ops = Vec::with_capacity(args.len() + named_args.len());
+            arg_ops.extend(
+                args.iter()
+                    .map(|arg| lower_expr_as_moved_operand(builder, arg)),
+            );
+            arg_ops.extend(
+                named_args
+                    .iter()
+                    .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)),
+            );
+            let func_op = Operand::Constant(MirConstant::Function(format!(
+                "{}::{}",
+                namespace, function
+            )));
+            builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
+        }
         Expr::EnumConstructor { payload, .. } => match payload {
             ast::EnumConstructorPayload::Unit => {
                 assign_none(builder, temp, span);

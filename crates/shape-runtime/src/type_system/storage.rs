@@ -161,9 +161,7 @@ impl StorageType {
             }
 
             // References — stored as heap pointers (TAG_REF in NaN-boxed rep)
-            SemanticType::Ref(inner) | SemanticType::RefMut(inner) => {
-                Self::from_semantic(inner)
-            }
+            SemanticType::Ref(inner) | SemanticType::RefMut(inner) => Self::from_semantic(inner),
 
             // Special — truly unknown types
             SemanticType::Never | SemanticType::Void => StorageType::Dynamic,

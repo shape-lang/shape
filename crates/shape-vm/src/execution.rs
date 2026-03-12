@@ -382,14 +382,9 @@ impl BytecodeExecutor {
         let runtime = engine.get_runtime_mut();
 
         let known_bindings: Vec<String> = if let Some(ctx) = runtime.persistent_context() {
-            let names = ctx.root_scope_binding_names();
-            if names.is_empty() {
-                crate::stdlib::core_binding_names()
-            } else {
-                names
-            }
+            ctx.root_scope_binding_names()
         } else {
-            crate::stdlib::core_binding_names()
+            Vec::new()
         };
 
         Self::extract_and_store_format_hints(program, runtime.persistent_context_mut());

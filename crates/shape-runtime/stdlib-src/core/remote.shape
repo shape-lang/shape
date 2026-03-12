@@ -40,7 +40,7 @@
 ///     Err(e) => print(f"Failed: {e}")
 /// }
 /// ```
-builtin fn execute(addr: string, code: string) -> Result<HashMap<string, _>, string>;
+pub builtin fn execute(addr: string, code: string) -> Result<HashMap<string, _>, string>;
 
 /// Ping a remote Shape server to check connectivity and get server info.
 ///
@@ -61,7 +61,7 @@ builtin fn execute(addr: string, code: string) -> Result<HashMap<string, _>, str
 ///     Err(e) => print(f"Server down: {e}")
 /// }
 /// ```
-builtin fn ping(addr: string) -> Result<HashMap<string, _>, string>;
+pub builtin fn ping(addr: string) -> Result<HashMap<string, _>, string>;
 
 /// Call a function on a remote Shape server by reference.
 ///
@@ -95,11 +95,11 @@ builtin fn __call(addr: string, fn_ref: _, args: Array<_>) -> Result<_, string>;
 ///
 /// let result = compute([1, 2, 3])
 /// ```
-annotation remote(addr) {
+pub annotation remote(addr) {
     targets: [function]
     before(args, ctx) {
         let target = ctx["__impl"] ?? args[0]
-        let result = remote.__call(addr, target, args)
+        let result = __call(addr, target, args)
         { result: result }
     }
 }

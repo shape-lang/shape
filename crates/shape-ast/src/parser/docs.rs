@@ -406,6 +406,26 @@ impl DocCollector {
                     );
                     self.collect_type_params(&path, function.type_params.as_deref());
                 }
+                ExportItem::BuiltinFunction(function) => {
+                    let path = join_path(module_path, &function.name);
+                    self.attach_comment(
+                        DocTargetKind::Function,
+                        path.clone(),
+                        *span,
+                        function.doc_comment.as_ref(),
+                    );
+                    self.collect_type_params(&path, function.type_params.as_deref());
+                }
+                ExportItem::BuiltinType(ty) => {
+                    let path = join_path(module_path, &ty.name);
+                    self.attach_comment(
+                        DocTargetKind::TypeAlias,
+                        path.clone(),
+                        *span,
+                        ty.doc_comment.as_ref(),
+                    );
+                    self.collect_type_params(&path, ty.type_params.as_deref());
+                }
                 ExportItem::ForeignFunction(function) => {
                     let path = join_path(module_path, &function.name);
                     self.attach_comment(
@@ -446,6 +466,15 @@ impl DocCollector {
                 ExportItem::Trait(trait_def) => {
                     let path = join_path(module_path, &trait_def.name);
                     self.collect_trait(&path, *span, trait_def.doc_comment.as_ref(), trait_def);
+                }
+                ExportItem::Annotation(annotation_def) => {
+                    let path = join_path(module_path, &annotation_def.name);
+                    self.attach_comment(
+                        DocTargetKind::Annotation,
+                        path,
+                        *span,
+                        annotation_def.doc_comment.as_ref(),
+                    );
                 }
                 ExportItem::Named(_) => {}
             },

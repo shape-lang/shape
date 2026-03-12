@@ -465,6 +465,16 @@ impl EnvironmentAnalyzer {
                     self.analyze_expr(arg);
                 }
             }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                args,
+                ..
+            } => {
+                self.check_variable_reference(namespace);
+                for arg in args {
+                    self.analyze_expr(arg);
+                }
+            }
             Expr::EnumConstructor { payload, .. } => {
                 use shape_ast::ast::EnumConstructorPayload;
                 match payload {

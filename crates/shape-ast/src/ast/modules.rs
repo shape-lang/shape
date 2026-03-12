@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::DocComment;
-use super::functions::{Annotation, ForeignFunctionDef, FunctionDef};
+use super::functions::{Annotation, AnnotationDef, ForeignFunctionDef, FunctionDef};
 use super::program::Item;
+use super::program::{BuiltinFunctionDecl, BuiltinTypeDecl};
 use super::span::Span;
 use super::types::{EnumDef, InterfaceDef, StructTypeDef, TraitDef};
 
@@ -26,6 +27,8 @@ pub enum ImportItems {
 pub struct ImportSpec {
     pub name: String,
     pub alias: Option<String>,
+    #[serde(default)]
+    pub is_annotation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +44,10 @@ pub struct ExportStmt {
 pub enum ExportItem {
     /// pub fn name(...) { ... }
     Function(FunctionDef),
+    /// pub builtin fn name(...) -> ReturnType;
+    BuiltinFunction(BuiltinFunctionDecl),
+    /// pub builtin type Name;
+    BuiltinType(BuiltinTypeDecl),
     /// pub type Name = Type;
     TypeAlias(super::types::TypeAliasDef),
     /// pub { name1, name2 as alias }
@@ -53,6 +60,8 @@ pub enum ExportItem {
     Interface(InterfaceDef),
     /// pub trait Name { ... }
     Trait(TraitDef),
+    /// pub annotation name(...) { ... }
+    Annotation(AnnotationDef),
     /// pub fn python name(...) { ... }
     ForeignFunction(ForeignFunctionDef),
 }

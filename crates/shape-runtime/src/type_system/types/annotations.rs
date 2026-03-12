@@ -267,9 +267,7 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
             // TypeAnnotation variant yet; the compiler tracks ref-ness separately.
             semantic_to_annotation(inner)
         }
-        SemanticType::RefMut(inner) => {
-            semantic_to_annotation(inner)
-        }
+        SemanticType::RefMut(inner) => semantic_to_annotation(inner),
     }
 }
 

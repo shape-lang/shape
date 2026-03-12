@@ -87,6 +87,14 @@ pub enum Expr {
         named_args: Vec<(String, Expr)>,
         span: Span,
     },
+    /// Qualified namespace call: module::function(args)
+    QualifiedFunctionCall {
+        namespace: String,
+        function: String,
+        args: Vec<Expr>,
+        named_args: Vec<(String, Expr)>,
+        span: Span,
+    },
     /// Enum constructor: Enum::Variant, Enum::Variant(...), Enum::Variant { ... }
     EnumConstructor {
         enum_name: String,
@@ -314,6 +322,7 @@ impl Spanned for Expr {
             Expr::FuzzyComparison { span, .. } => *span,
             Expr::UnaryOp { span, .. } => *span,
             Expr::FunctionCall { span, .. } => *span,
+            Expr::QualifiedFunctionCall { span, .. } => *span,
             Expr::EnumConstructor { span, .. } => *span,
             Expr::TimeRef(_, span) => *span,
             Expr::DateTime(_, span) => *span,

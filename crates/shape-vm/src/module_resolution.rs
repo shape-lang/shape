@@ -6,10 +6,177 @@
 use crate::configuration::BytecodeExecutor;
 
 use shape_ast::Program;
-use shape_ast::ast::{DestructurePattern, ExportItem, Item};
+use shape_ast::ast::{DestructurePattern, ExportItem, Item, ModuleDecl, Span};
 use shape_ast::error::Result;
 use shape_ast::parser::parse_program;
-use shape_runtime::module_loader::ModuleCode;
+use shape_runtime::module_loader::{ModuleCode, ModuleExportKind};
+
+#[derive(Debug, Clone)]
+struct ExportTarget {
+    local_name: String,
+    kind: ModuleExportKind,
+}
+
+fn direct_export_target(export_item: &ExportItem) -> Option<(String, ModuleExportKind)> {
+    match export_item {
+        ExportItem::Function(function) => Some((function.name.clone(), ModuleExportKind::Function)),
+        ExportItem::BuiltinFunction(function) => {
+            Some((function.name.clone(), ModuleExportKind::BuiltinFunction))
+        }
+        ExportItem::BuiltinType(type_decl) => {
+            Some((type_decl.name.clone(), ModuleExportKind::BuiltinType))
+        }
+        ExportItem::TypeAlias(alias) => Some((alias.name.clone(), ModuleExportKind::TypeAlias)),
+        ExportItem::Enum(enum_def) => Some((enum_def.name.clone(), ModuleExportKind::Enum)),
+        ExportItem::Struct(struct_def) => {
+            Some((struct_def.name.clone(), ModuleExportKind::TypeAlias))
+        }
+        ExportItem::Interface(interface) => {
+            Some((interface.name.clone(), ModuleExportKind::Interface))
+        }
+        ExportItem::Trait(trait_def) => Some((trait_def.name.clone(), ModuleExportKind::Interface)),
+        ExportItem::Annotation(annotation) => {
+            Some((annotation.name.clone(), ModuleExportKind::Annotation))
+        }
+        ExportItem::ForeignFunction(function) => {
+            Some((function.name.clone(), ModuleExportKind::Function))
+        }
+        ExportItem::Named(_) => None,
+    }
+}
+
+fn collect_export_targets(
+    program: &Program,
+) -> Result<std::collections::HashMap<String, ExportTarget>> {
+    let mut export_kinds = std::collections::HashMap::new();
+    for symbol in shape_runtime::module_loader::collect_exported_symbols(program)? {
+        let export_name = symbol.alias.unwrap_or(symbol.name);
+        export_kinds.insert(export_name, symbol.kind);
+    }
+
+    let mut targets = std::collections::HashMap::new();
+    for item in &program.items {
+        let Item::Export(export, _) = item else {
+            continue;
+        };
+
+        if let Some((name, kind)) = direct_export_target(&export.item) {
+            targets.insert(
+                name.clone(),
+                ExportTarget {
+                    local_name: name,
+                    kind,
+                },
+            );
+            continue;
+        }
+
+        if let ExportItem::Named(specs) = &export.item {
+            for spec in specs {
+                let export_name = spec.alias.clone().unwrap_or_else(|| spec.name.clone());
+                let kind = export_kinds.get(&export_name).copied().ok_or_else(|| {
+                    shape_ast::error::ShapeError::ModuleError {
+                        message: format!(
+                            "Cannot export '{}': not found in module scope",
+                            spec.name
+                        ),
+                        module_path: None,
+                    }
+                })?;
+                targets.insert(
+                    export_name,
+                    ExportTarget {
+                        local_name: spec.name.clone(),
+                        kind,
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(targets)
+}
+
+fn export_kind_description(kind: ModuleExportKind) -> &'static str {
+    match kind {
+        ModuleExportKind::Function => "a function",
+        ModuleExportKind::BuiltinFunction => "a builtin function",
+        ModuleExportKind::TypeAlias => "a type",
+        ModuleExportKind::BuiltinType => "a builtin type",
+        ModuleExportKind::Interface => "an interface",
+        ModuleExportKind::Enum => "an enum",
+        ModuleExportKind::Annotation => "an annotation",
+        ModuleExportKind::Value => "a value",
+    }
+}
+
+fn validate_import_kind(
+    module_path: &str,
+    import_name: &str,
+    requested_annotation: bool,
+    export_kind: ModuleExportKind,
+) -> Result<()> {
+    match (requested_annotation, export_kind) {
+        (true, ModuleExportKind::Annotation) => Ok(()),
+        (true, other) => Err(shape_ast::error::ShapeError::ModuleError {
+            message: format!(
+                "Module '{}' exports '{}' as {}, not an annotation",
+                module_path,
+                import_name,
+                export_kind_description(other)
+            ),
+            module_path: None,
+        }),
+        (false, ModuleExportKind::Annotation) => Err(shape_ast::error::ShapeError::ModuleError {
+            message: format!(
+                "Module '{}' exports '{}' as an annotation; import it as '@{}'",
+                module_path, import_name, import_name
+            ),
+            module_path: None,
+        }),
+        (false, _) => Ok(()),
+    }
+}
+
+fn namespace_binding_name(import_stmt: &shape_ast::ast::ImportStmt) -> String {
+    match &import_stmt.items {
+        shape_ast::ast::ImportItems::Namespace { name, alias } => {
+            alias.clone().unwrap_or_else(|| name.clone())
+        }
+        shape_ast::ast::ImportItems::Named(_) => unreachable!("expected namespace import"),
+    }
+}
+
+pub(crate) fn hidden_annotation_import_module_name(module_path: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    module_path.hash(&mut hasher);
+    format!("__annimport__{:016x}", hasher.finish())
+}
+
+pub(crate) fn is_hidden_annotation_import_module_name(name: &str) -> bool {
+    name.starts_with("__annimport__")
+}
+
+fn strip_import_items(items: Vec<Item>) -> Vec<Item> {
+    items.into_iter()
+        .filter(|item| !matches!(item, Item::Import(..)))
+        .collect()
+}
+
+fn build_namespace_module_item(local_name: String, items: Vec<Item>) -> Item {
+    Item::Module(
+        ModuleDecl {
+            name: local_name,
+            name_span: Span::DUMMY,
+            doc_comment: None,
+            annotations: Vec::new(),
+            items,
+        },
+        Span::DUMMY,
+    )
+}
 
 /// Check whether an AST item's name is in the given set of imported names.
 /// Items without a clear name (Impl, Extend, Import) are always included
@@ -19,19 +186,25 @@ pub(crate) fn should_include_item(item: &Item, names: &std::collections::HashSet
         Item::Function(func_def, _) => names.contains(func_def.name.as_str()),
         Item::Export(export, _) => match &export.item {
             ExportItem::Function(f) => names.contains(f.name.as_str()),
+            ExportItem::BuiltinFunction(f) => names.contains(f.name.as_str()),
+            ExportItem::BuiltinType(t) => names.contains(t.name.as_str()),
             ExportItem::Enum(e) => names.contains(e.name.as_str()),
             ExportItem::Struct(s) => names.contains(s.name.as_str()),
             ExportItem::Trait(t) => names.contains(t.name.as_str()),
             ExportItem::TypeAlias(a) => names.contains(a.name.as_str()),
             ExportItem::Interface(i) => names.contains(i.name.as_str()),
+            ExportItem::Annotation(a) => names.contains(a.name.as_str()),
             ExportItem::ForeignFunction(f) => names.contains(f.name.as_str()),
             ExportItem::Named(specs) => specs.iter().any(|s| names.contains(s.name.as_str())),
         },
+        Item::BuiltinFunctionDecl(def, _) => names.contains(def.name.as_str()),
+        Item::BuiltinTypeDecl(def, _) => names.contains(def.name.as_str()),
         Item::StructType(def, _) => names.contains(def.name.as_str()),
         Item::Enum(def, _) => names.contains(def.name.as_str()),
         Item::Trait(def, _) => names.contains(def.name.as_str()),
         Item::TypeAlias(def, _) => names.contains(def.name.as_str()),
         Item::Interface(def, _) => names.contains(def.name.as_str()),
+        Item::AnnotationDef(def, _) => names.contains(def.name.as_str()),
         Item::VariableDecl(decl, _) => {
             if let DestructurePattern::Identifier(name, _) = &decl.pattern {
                 names.contains(name.as_str())
@@ -57,8 +230,13 @@ pub(crate) fn collect_function_names_from_items(
             Item::Function(func_def, _) => {
                 names.insert(func_def.name.clone());
             }
+            Item::BuiltinFunctionDecl(function, _) => {
+                names.insert(function.name.clone());
+            }
             Item::Export(export, _) => {
                 if let ExportItem::Function(f) = &export.item {
+                    names.insert(f.name.clone());
+                } else if let ExportItem::BuiltinFunction(f) = &export.item {
                     names.insert(f.name.clone());
                 } else if let ExportItem::ForeignFunction(f) = &export.item {
                     names.insert(f.name.clone());
@@ -82,9 +260,24 @@ pub(crate) fn collect_available_names_from_items(
             Item::Function(func_def, _) => {
                 names.insert(func_def.name.clone());
             }
+            Item::BuiltinFunctionDecl(function, _) => {
+                names.insert(function.name.clone());
+            }
+            Item::BuiltinTypeDecl(type_decl, _) => {
+                names.insert(type_decl.name.clone());
+            }
+            Item::AnnotationDef(annotation, _) => {
+                names.insert(annotation.name.clone());
+            }
             Item::Export(export, _) => match &export.item {
                 ExportItem::Function(f) => {
                     names.insert(f.name.clone());
+                }
+                ExportItem::BuiltinFunction(f) => {
+                    names.insert(f.name.clone());
+                }
+                ExportItem::BuiltinType(t) => {
+                    names.insert(t.name.clone());
                 }
                 ExportItem::ForeignFunction(f) => {
                     names.insert(f.name.clone());
@@ -103,6 +296,9 @@ pub(crate) fn collect_available_names_from_items(
                 }
                 ExportItem::Interface(i) => {
                     names.insert(i.name.clone());
+                }
+                ExportItem::Annotation(a) => {
+                    names.insert(a.name.clone());
                 }
                 ExportItem::Named(specs) => {
                     for s in specs {
@@ -417,12 +613,19 @@ impl BytecodeExecutor {
         program: &mut Program,
     ) -> Result<std::collections::HashSet<String>> {
         use shape_ast::ast::ImportItems;
-        // Track which specific names have been inlined from each module path.
-        // For namespace (wildcard) imports, the path is stored with None (= all items).
+        // Track which specific named imports have already been materialized.
         let mut inlined_names: std::collections::HashMap<
             String,
-            Option<std::collections::HashSet<String>>,
+            std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
+        // Namespace imports are materialized as synthetic `module { ... }` items,
+        // keyed by (resolved module path, local binding name).
+        let mut wrapped_namespace_modules: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        // Named annotation imports are materialized as hidden synthetic modules,
+        // keyed by their source module path.
+        let mut wrapped_annotation_modules: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut stdlib_names = std::collections::HashSet::new();
 
         loop {
@@ -430,13 +633,11 @@ impl BytecodeExecutor {
             let mut found_new = false;
 
             // Collect import statements, merging named filters per module path.
-            // A module path that was previously inlined with a wildcard import
-            // needs no further processing. Named imports only need to resolve
-            // names not yet inlined.
-            let mut merged: std::collections::HashMap<
+            let mut merged_named: std::collections::HashMap<
                 String,
-                Option<std::collections::HashSet<String>>,
+                std::collections::HashMap<String, bool>,
             > = std::collections::HashMap::new();
+            let mut namespace_requests = Vec::new();
 
             for item in program.items.iter() {
                 let Item::Import(import_stmt, _) = item else {
@@ -447,70 +648,53 @@ impl BytecodeExecutor {
                     continue;
                 }
 
-                // If this path was already fully inlined (wildcard), skip
-                if matches!(inlined_names.get(module_path), Some(None)) {
-                    continue;
-                }
-
-                let named_filter: Option<std::collections::HashSet<String>> =
-                    match &import_stmt.items {
-                        ImportItems::Named(specs) => {
-                            Some(specs.iter().map(|s| s.name.clone()).collect())
+                match &import_stmt.items {
+                    ImportItems::Namespace { .. } => {
+                        let local_name = namespace_binding_name(import_stmt);
+                        if wrapped_namespace_modules
+                            .insert((module_path.to_string(), local_name.clone()))
+                        {
+                            namespace_requests.push((module_path.to_string(), local_name));
                         }
-                        ImportItems::Namespace { .. } => None,
-                    };
-
-                // Filter out already-inlined names
-                let new_filter = match &named_filter {
-                    None => {
-                        // Wildcard import — only new if not previously wildcarded
-                        if matches!(inlined_names.get(module_path), Some(None)) {
-                            continue;
-                        }
-                        None
                     }
-                    Some(names) => {
-                        let mut new_names = names.clone();
-                        if let Some(Some(already)) = inlined_names.get(module_path) {
-                            new_names.retain(|n| !already.contains(n));
+                    ImportItems::Named(specs) => {
+                        let entry = merged_named
+                            .entry(module_path.to_string())
+                            .or_default();
+                        let already = inlined_names.get(module_path);
+                        for spec in specs {
+                            if already.is_some_and(|names| names.contains(&spec.name)) {
+                                continue;
+                            }
+                            if let Some(existing_is_annotation) = entry.get(&spec.name) {
+                                if *existing_is_annotation != spec.is_annotation {
+                                    return Err(shape_ast::error::ShapeError::ModuleError {
+                                        message: format!(
+                                            "Import '{}' from '{}' was requested both as a regular symbol and as an annotation",
+                                            spec.name, module_path
+                                        ),
+                                        module_path: None,
+                                    });
+                                }
+                            } else {
+                                entry.insert(spec.name.clone(), spec.is_annotation);
+                            }
                         }
-                        if new_names.is_empty() {
-                            continue;
-                        }
-                        Some(new_names)
-                    }
-                };
-
-                // Merge into this iteration's work
-                let entry = merged
-                    .entry(module_path.to_string())
-                    .or_insert_with(|| Some(std::collections::HashSet::new()));
-                match new_filter {
-                    None => {
-                        // Upgrade to wildcard
-                        *entry = None;
-                    }
-                    Some(ref new) => {
-                        if let Some(existing) = entry {
-                            existing.extend(new.iter().cloned());
-                        }
-                        // If entry is None (wildcard), keep it
                     }
                 }
             }
 
-            for (module_path, merged_filter) in &merged {
-                found_new = true;
+            for (module_path, local_name) in namespace_requests {
                 let is_std = module_path.starts_with("std::");
 
                 // Try loading the module
-                let ast_items: Option<Vec<Item>> = if let Some(loader) = self.module_loader.as_mut()
+                let ast_program: Option<Program> = if let Some(loader) = self.module_loader.as_mut()
                 {
-                    if let Some(module) = loader.get_module(module_path) {
-                        Some(module.ast.items.clone())
+                    if let Some(module) = loader.get_module(&module_path) {
+                        Some(module.ast.clone())
                     } else {
-                        match loader.load_module(module_path) {
-                            Ok(module) => Some(module.ast.items.clone()),
+                        match loader.load_module(&module_path) {
+                            Ok(module) => Some(module.ast.clone()),
                             Err(_) => {
                                 // Module not found on disk — check if it's a native
                                 // extension module (json, file, io, state, etc.) which
@@ -522,7 +706,7 @@ impl BytecodeExecutor {
                                 } else {
                                     // Re-attempt to produce the original error
                                     let loader = self.module_loader.as_mut().unwrap();
-                                    Some(loader.load_module(module_path)?.ast.items.clone())
+                                    Some(loader.load_module(&module_path)?.ast.clone())
                                 }
                             }
                         }
@@ -531,63 +715,137 @@ impl BytecodeExecutor {
                     None
                 };
 
-                let ast_items = match ast_items {
-                    Some(items) => Some(items),
+                let ast_program = match ast_program {
+                    Some(program) => Some(program),
                     None => match self.virtual_modules.get(module_path.as_str()) {
-                        Some(source) => Some(parse_program(source)?.items),
+                        Some(source) => Some(parse_program(source)?),
                         None => None,
                     },
                 };
 
-                if let Some(items) = ast_items {
-                    if is_std {
-                        stdlib_names.extend(collect_function_names_from_items(&items));
-                    }
-                    // MED-9: Validate that all requested import names exist in the module.
-                    if let Some(names) = merged_filter {
-                        let available = collect_available_names_from_items(&items);
-                        let missing: Vec<&String> = names
-                            .iter()
-                            .filter(|n| !available.contains(n.as_str()))
-                            .collect();
-                        if !missing.is_empty() {
-                            let mut missing_sorted: Vec<&str> =
-                                missing.iter().map(|s| s.as_str()).collect();
-                            missing_sorted.sort();
-                            return Err(shape_ast::error::ShapeError::ModuleError {
-                                message: format!(
-                                    "Module '{}' does not export: {}",
-                                    module_path,
-                                    missing_sorted.join(", ")
-                                ),
-                                module_path: None,
-                            });
+                if let Some(ast) = ast_program {
+                    let mut nested_program = ast;
+                    self.append_imported_module_items(&mut nested_program)?;
+                    let nested_items = strip_import_items(nested_program.items);
+                    if !nested_items.is_empty() {
+                        if is_std {
+                            stdlib_names.extend(collect_function_names_from_items(&nested_items));
                         }
+                        module_items.push(build_namespace_module_item(local_name, nested_items));
+                        found_new = true;
                     }
-                    if let Some(names) = merged_filter {
-                        let names_ref: std::collections::HashSet<&str> =
-                            names.iter().map(|s| s.as_str()).collect();
-                        for ast_item in items {
-                            if should_include_item(&ast_item, &names_ref) {
-                                module_items.push(ast_item);
+                }
+            }
+
+            for (module_path, requested_exports) in &merged_named {
+                if requested_exports.is_empty() {
+                    continue;
+                }
+
+                let is_std = module_path.starts_with("std::");
+
+                // Try loading the module
+                let ast_program: Option<Program> = if let Some(loader) = self.module_loader.as_mut()
+                {
+                    if let Some(module) = loader.get_module(module_path) {
+                        Some(module.ast.clone())
+                    } else {
+                        match loader.load_module(module_path) {
+                            Ok(module) => Some(module.ast.clone()),
+                            Err(_) => {
+                                let is_extension =
+                                    self.extensions.iter().any(|ext| ext.name == *module_path);
+                                if is_extension {
+                                    None
+                                } else {
+                                    let loader = self.module_loader.as_mut().unwrap();
+                                    Some(loader.load_module(module_path)?.ast.clone())
+                                }
                             }
                         }
-                        // Record inlined names
-                        let entry = inlined_names
-                            .entry(module_path.clone())
-                            .or_insert_with(|| Some(std::collections::HashSet::new()));
-                        if let Some(existing) = entry {
-                            existing.extend(names.iter().cloned());
-                        }
-                    } else {
-                        module_items.extend(items);
-                        // Record as fully inlined
-                        inlined_names.insert(module_path.clone(), None);
                     }
                 } else {
-                    // No AST items (native extension module) — mark as fully
-                    // inlined so the fixed-point loop doesn't revisit it.
-                    inlined_names.insert(module_path.clone(), None);
+                    None
+                };
+
+                let ast_program = match ast_program {
+                    Some(program) => Some(program),
+                    None => match self.virtual_modules.get(module_path.as_str()) {
+                        Some(source) => Some(parse_program(source)?),
+                        None => None,
+                    },
+                };
+
+                if let Some(ast) = ast_program {
+                    if is_std {
+                        stdlib_names.extend(collect_function_names_from_items(&ast.items));
+                    }
+                    let export_targets = collect_export_targets(&ast)?;
+                    let mut requested_regular_local_names = std::collections::HashSet::new();
+                    let mut inlined_export_names = std::collections::HashSet::new();
+                    let mut needs_annotation_scope = false;
+                    let mut missing = Vec::new();
+                    for (name, requested_annotation) in requested_exports {
+                        match export_targets.get(name) {
+                            Some(target) => {
+                                validate_import_kind(
+                                    module_path,
+                                    name,
+                                    *requested_annotation,
+                                    target.kind,
+                                )?;
+                                if *requested_annotation {
+                                    needs_annotation_scope = true;
+                                } else {
+                                    requested_regular_local_names.insert(target.local_name.clone());
+                                }
+                                inlined_export_names.insert(name.clone());
+                            }
+                            None => missing.push(name.clone()),
+                        }
+                    }
+                    if !missing.is_empty() {
+                        let mut missing_sorted: Vec<&str> =
+                            missing.iter().map(|s| s.as_str()).collect();
+                        missing_sorted.sort();
+                        return Err(shape_ast::error::ShapeError::ModuleError {
+                            message: format!(
+                                "Module '{}' does not export: {}",
+                                module_path,
+                                missing_sorted.join(", ")
+                            ),
+                            module_path: None,
+                        });
+                    }
+                    if needs_annotation_scope
+                        && wrapped_annotation_modules.insert(module_path.clone())
+                    {
+                        let mut nested_program = ast.clone();
+                        self.append_imported_module_items(&mut nested_program)?;
+                        let nested_items = strip_import_items(nested_program.items);
+                        if !nested_items.is_empty() {
+                            let hidden_name = hidden_annotation_import_module_name(module_path);
+                            module_items.push(build_namespace_module_item(hidden_name, nested_items));
+                            found_new = true;
+                        }
+                    }
+                    if !requested_regular_local_names.is_empty() {
+                        let names_ref: std::collections::HashSet<&str> =
+                            requested_regular_local_names
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect();
+                        for ast_item in ast.items {
+                            if should_include_item(&ast_item, &names_ref) {
+                                module_items.push(ast_item);
+                                found_new = true;
+                            }
+                        }
+                    }
+                    inlined_names
+                        .entry(module_path.clone())
+                        .or_default()
+                        .extend(inlined_export_names);
                 }
             }
 
@@ -632,6 +890,21 @@ impl BytecodeExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::VMConfig;
+    use crate::compiler::BytecodeCompiler;
+    use crate::executor::VirtualMachine;
+
+    fn compile_program_with_imports(
+        executor: &mut crate::configuration::BytecodeExecutor,
+        source: &str,
+    ) -> shape_ast::error::Result<crate::bytecode::BytecodeProgram> {
+        let mut program = shape_ast::parser::parse_program(source)?;
+        let stdlib_names = prepend_prelude_items(&mut program);
+        executor.append_imported_module_items(&mut program)?;
+        let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
+        compiler.compile(&program)
+    }
 
     #[test]
     fn test_prepend_prelude_items_injects_definitions() {
@@ -848,5 +1121,202 @@ alpha() + beta() + gamma()
             "gamma should be inlined, got: {:?}",
             fn_names
         );
+    }
+
+    #[test]
+    fn test_named_import_rejects_annotation_without_at_prefix() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            tmp.path().join("annmod.shape"),
+            r#"
+pub annotation remote(addr) {
+    metadata() { return { addr: addr }; }
+}
+"#,
+        )
+        .expect("write annmod.shape");
+
+        let source = r#"
+from annmod use { remote }
+"#;
+        let mut executor = crate::configuration::BytecodeExecutor::new();
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        loader.add_module_path(tmp.path().to_path_buf());
+        executor.set_module_loader(loader);
+        let mut program = shape_ast::parser::parse_program(source).expect("parse");
+        let result = executor.append_imported_module_items(&mut program);
+        let err = result.expect_err("annotation import without @ should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("import it as '@remote'"),
+            "expected explicit annotation import guidance, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_named_import_mixed_builtin_function_and_annotation_inlines_exported_items() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            tmp.path().join("toolkit.shape"),
+            r#"
+pub builtin fn execute(addr: string, code: string) -> string;
+pub annotation remote(addr) {
+    metadata() { return { addr: addr }; }
+}
+"#,
+        )
+        .expect("write toolkit.shape");
+
+        let source = r#"
+from toolkit use { execute, @remote }
+"#;
+        let mut executor = crate::configuration::BytecodeExecutor::new();
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        loader.add_module_path(tmp.path().to_path_buf());
+        executor.set_module_loader(loader);
+        let mut program = shape_ast::parser::parse_program(source).expect("parse");
+        executor
+            .append_imported_module_items(&mut program)
+            .expect("mixed builtin + annotation import should resolve");
+
+        let mut saw_execute = false;
+        let mut saw_hidden_annotation_module = false;
+        for item in &program.items {
+            match item {
+                Item::Export(export, _) => match &export.item {
+                    ExportItem::BuiltinFunction(function) if function.name == "execute" => {
+                        saw_execute = true;
+                    }
+                    _ => {}
+                },
+                Item::Module(module, _) => {
+                    if module.name == hidden_annotation_import_module_name("toolkit") {
+                        saw_hidden_annotation_module = module.items.iter().any(|nested| {
+                            matches!(
+                                nested,
+                                Item::Export(export, _)
+                                    if matches!(
+                                        &export.item,
+                                        ExportItem::Annotation(annotation)
+                                            if annotation.name == "remote"
+                                    )
+                            ) || matches!(
+                                nested,
+                                Item::AnnotationDef(annotation, _) if annotation.name == "remote"
+                            )
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_execute, "expected execute builtin export to be inlined");
+        assert!(
+            saw_hidden_annotation_module,
+            "expected remote annotation to be materialized inside a hidden module"
+        );
+    }
+
+    #[test]
+    fn test_namespace_import_wraps_loaded_module_without_top_level_function_leakage() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mod_dir = tmp.path().join("mymod");
+        std::fs::create_dir_all(&mod_dir).expect("create module dir");
+        std::fs::write(
+            mod_dir.join("index.shape"),
+            r#"
+pub fn alpha() -> int { 1 }
+pub fn beta() -> int { alpha() + 1 }
+"#,
+        )
+        .expect("write index.shape");
+
+        let source = r#"
+use mymod
+let marker = 1
+"#;
+        let mut executor = crate::configuration::BytecodeExecutor::new();
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        loader.add_module_path(tmp.path().to_path_buf());
+        executor.set_module_loader(loader);
+        let mut program = shape_ast::parser::parse_program(source).expect("parse");
+        executor
+            .append_imported_module_items(&mut program)
+            .expect("namespace import should resolve");
+
+        let top_level_function_names: Vec<String> = program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(func, _) => Some(func.name.clone()),
+                Item::Export(export, _) => match &export.item {
+                    ExportItem::Function(func) => Some(func.name.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !top_level_function_names.contains(&"alpha".to_string()),
+            "namespace import should not leak bare functions into caller scope: {:?}",
+            top_level_function_names
+        );
+        assert!(
+            program.items.iter().any(|item| {
+                matches!(item, Item::Module(module, _) if module.name == "mymod")
+            }),
+            "expected a synthetic module wrapper for namespace import"
+        );
+    }
+
+    #[test]
+    fn test_namespace_import_rejects_bare_calls_but_keeps_namespace_calls_working() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mod_dir = tmp.path().join("mymod");
+        std::fs::create_dir_all(&mod_dir).expect("create module dir");
+        std::fs::write(
+            mod_dir.join("index.shape"),
+            r#"
+pub fn alpha() -> int { 1 }
+pub fn beta() -> int { alpha() + 1 }
+"#,
+        )
+        .expect("write index.shape");
+
+        let mut executor = crate::configuration::BytecodeExecutor::new();
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        loader.add_module_path(tmp.path().to_path_buf());
+        executor.set_module_loader(loader);
+
+        let bare_err = compile_program_with_imports(
+            &mut executor,
+            r#"
+use mymod
+alpha()
+"#,
+        )
+        .expect_err("bare call should fail after namespace import");
+        let bare_msg = bare_err.to_string();
+        assert!(
+            bare_msg.contains("alpha"),
+            "expected missing bare function diagnostic, got: {}",
+            bare_msg
+        );
+
+        let bytecode = compile_program_with_imports(
+            &mut executor,
+            r#"
+use mymod
+mymod::beta()
+"#,
+        )
+        .expect("namespace call should compile");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        let result = vm.execute(None).expect("execute");
+        let number = result.as_number_coerce().expect("numeric result");
+        assert_eq!(number, 2.0);
     }
 }

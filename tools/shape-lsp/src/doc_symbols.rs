@@ -346,6 +346,22 @@ fn collect_export_symbols(
                 function.type_params.as_deref(),
             );
         }
+        ExportItem::BuiltinFunction(function) => {
+            push_symbol(
+                out,
+                DocTargetKind::BuiltinFunction,
+                module_prefix,
+                join_path(path_prefix, &function.name),
+                span,
+            );
+            push_type_params(
+                out,
+                module_prefix,
+                path_prefix,
+                &function.name,
+                function.type_params.as_deref(),
+            );
+        }
         ExportItem::ForeignFunction(function) => {
             push_symbol(
                 out,
@@ -376,6 +392,22 @@ fn collect_export_symbols(
                 path_prefix,
                 &alias.name,
                 alias.type_params.as_deref(),
+            );
+        }
+        ExportItem::BuiltinType(ty) => {
+            push_symbol(
+                out,
+                DocTargetKind::BuiltinType,
+                module_prefix,
+                join_path(path_prefix, &ty.name),
+                span,
+            );
+            push_type_params(
+                out,
+                module_prefix,
+                path_prefix,
+                &ty.name,
+                ty.type_params.as_deref(),
             );
         }
         ExportItem::Struct(struct_def) => {
@@ -469,6 +501,15 @@ fn collect_export_symbols(
                     member.span(),
                 );
             }
+        }
+        ExportItem::Annotation(annotation_def) => {
+            push_symbol(
+                out,
+                DocTargetKind::Annotation,
+                module_prefix,
+                join_path(path_prefix, &annotation_def.name),
+                span,
+            );
         }
         ExportItem::Named(_) => {}
     }
@@ -714,6 +755,12 @@ fn export_owner(export: &shape_ast::ast::ExportStmt) -> DocOwner {
             function.type_params.as_deref(),
             function.return_type.as_ref(),
         ),
+        ExportItem::BuiltinFunction(function) => callable_owner(
+            DocTargetKind::BuiltinFunction,
+            &function.params,
+            function.type_params.as_deref(),
+            Some(&function.return_type),
+        ),
         ExportItem::ForeignFunction(function) => callable_owner(
             DocTargetKind::ForeignFunction,
             &function.params,
@@ -722,6 +769,9 @@ fn export_owner(export: &shape_ast::ast::ExportStmt) -> DocOwner {
         ),
         ExportItem::TypeAlias(alias) => {
             type_owner(DocTargetKind::TypeAlias, alias.type_params.as_deref())
+        }
+        ExportItem::BuiltinType(ty) => {
+            type_owner(DocTargetKind::BuiltinType, ty.type_params.as_deref())
         }
         ExportItem::Struct(struct_def) => {
             type_owner(DocTargetKind::Struct, struct_def.type_params.as_deref())
@@ -735,6 +785,12 @@ fn export_owner(export: &shape_ast::ast::ExportStmt) -> DocOwner {
         ExportItem::Trait(trait_def) => {
             type_owner(DocTargetKind::Trait, trait_def.type_params.as_deref())
         }
+        ExportItem::Annotation(annotation_def) => callable_owner(
+            DocTargetKind::Annotation,
+            &annotation_def.params,
+            None,
+            None,
+        ),
         ExportItem::Named(_) => DocOwner::default(),
     }
 }

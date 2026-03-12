@@ -15,6 +15,42 @@ impl BytecodeCompiler {
         bindings
     }
 
+    pub(super) fn collect_import_module_scope_sources(program: &Program) -> HashMap<String, String> {
+        use shape_ast::ast::{ImportItems, Item};
+
+        let mut sources = HashMap::new();
+        for item in &program.items {
+            let Item::Import(import_stmt, _) = item else {
+                continue;
+            };
+            let runtime_module_name = super::BytecodeCompiler::extract_module_name(&import_stmt.from);
+            if runtime_module_name.is_empty() {
+                continue;
+            }
+
+            match &import_stmt.items {
+                ImportItems::Namespace { name, alias } => {
+                    let local_name = alias.clone().unwrap_or_else(|| name.clone());
+                    sources
+                        .entry(local_name)
+                        .or_insert_with(|| runtime_module_name.to_string());
+                }
+                ImportItems::Named(specs) => {
+                    if specs.iter().any(|spec| spec.is_annotation) {
+                        let hidden_module_name =
+                            crate::module_resolution::hidden_annotation_import_module_name(
+                                &import_stmt.from,
+                            );
+                        sources
+                            .entry(hidden_module_name)
+                            .or_insert_with(|| runtime_module_name.to_string());
+                    }
+                }
+            }
+        }
+        sources
+    }
+
     pub fn new() -> Self {
         Self {
             program: BytecodeProgram::new(),
@@ -45,7 +81,10 @@ impl BytecodeCompiler {
             source_text: None,
             source_lines: Vec::new(),
             imported_names: HashMap::new(),
+            imported_annotations: HashMap::new(),
+            module_builtin_functions: HashMap::new(),
             module_namespace_bindings: HashSet::new(),
+            module_scope_sources: HashMap::new(),
             module_scope_stack: Vec::new(),
             known_exports: HashMap::new(),
             function_arity_bounds: HashMap::new(),

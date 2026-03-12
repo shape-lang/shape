@@ -305,6 +305,7 @@ fn parse_primary_expr_inner(pair: Pair<Rule>) -> Result<Expr> {
                 })?;
             Ok(Expr::PatternRef(name_pair.as_str().to_string(), span))
         }
+        Rule::qualified_function_call_expr => parse_qualified_function_call_expr(pair),
         Rule::enum_constructor_expr => parse_enum_constructor_expr(pair),
         Rule::ident => Ok(Expr::Identifier(pair.as_str().to_string(), span)),
         Rule::expression => parse_expression(pair),
@@ -355,6 +356,32 @@ fn parse_primary_expr_inner(pair: Pair<Rule>) -> Result<Expr> {
             location: None,
         }),
     }
+}
+
+fn parse_qualified_function_call_expr(pair: Pair<Rule>) -> Result<Expr> {
+    let span = pair_span(&pair);
+    let pair_loc = pair_location(&pair);
+    let mut inner = pair.into_inner();
+
+    let path_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+        message: "expected qualified call target".to_string(),
+        location: Some(pair_loc.clone()),
+    })?;
+    let (namespace, function) = parse_enum_variant_path(path_pair)?;
+
+    let call_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+        message: "expected argument list after qualified call target".to_string(),
+        location: Some(pair_loc),
+    })?;
+    let (args, named_args) = super::functions::parse_arg_list(call_pair)?;
+
+    Ok(Expr::QualifiedFunctionCall {
+        namespace,
+        function,
+        args,
+        named_args,
+        span,
+    })
 }
 
 /// Parse Some expression: Some(value) constructor for Option type

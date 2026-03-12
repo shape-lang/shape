@@ -11,7 +11,7 @@ use shape_runtime::type_system::{BuiltinTypes, Type};
 use shape_value::ValueWord;
 use std::sync::Arc;
 
-use super::super::BytecodeCompiler;
+use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
 
 /// Map a return type name string to a NumericType.
 fn return_type_to_numeric(type_name: &str) -> Option<NumericType> {
@@ -215,6 +215,73 @@ fn const_expr_fingerprint(expr: &Expr) -> Option<String> {
 }
 
 impl BytecodeCompiler {
+    pub(crate) fn hidden_native_module_binding_name(module_path: &str) -> String {
+        format!("__imported_module__::{}", module_path)
+    }
+
+    fn ensure_hidden_native_module_binding(&mut self, module_path: &str) -> String {
+        let binding_name = Self::hidden_native_module_binding_name(module_path);
+        if !self.module_bindings.contains_key(&binding_name) {
+            let binding_idx = self.get_or_create_module_binding(&binding_name);
+            self.register_extension_module_schema(module_path);
+            let module_schema_name = format!("__mod_{}", module_path);
+            if self
+                .type_tracker
+                .schema_registry()
+                .get(&module_schema_name)
+                .is_some()
+            {
+                self.set_module_binding_type_info(binding_idx, &module_schema_name);
+            }
+        }
+        binding_name
+    }
+
+    fn compile_module_builtin_function_call(
+        &mut self,
+        builtin_decl: &ModuleBuiltinFunction,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<()> {
+        if !self.is_native_module_export(
+            &builtin_decl.source_module_path,
+            &builtin_decl.export_name,
+        ) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "builtin function '{}' has no runtime implementation in module '{}'",
+                    builtin_decl.export_name, builtin_decl.source_module_path
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+        let binding_name = self.ensure_hidden_native_module_binding(&builtin_decl.source_module_path);
+        self.compile_module_namespace_call_on_binding(
+            &binding_name,
+            &builtin_decl.source_module_path,
+            span,
+            &builtin_decl.export_name,
+            args,
+        )
+    }
+
+    fn resolve_scoped_module_builtin_function(
+        &self,
+        name: &str,
+    ) -> Option<ModuleBuiltinFunction> {
+        if let Some(decl) = self.module_builtin_functions.get(name) {
+            return Some(decl.clone());
+        }
+
+        for module_path in self.module_scope_stack.iter().rev() {
+            let candidate = format!("{}::{}", module_path, name);
+            if let Some(decl) = self.module_builtin_functions.get(&candidate) {
+                return Some(decl.clone());
+            }
+        }
+        None
+    }
+
     fn extract_table_schema_from_annotation(
         &mut self,
         ann: &shape_ast::ast::TypeAnnotation,
@@ -372,10 +439,8 @@ impl BytecodeCompiler {
                     location: None,
                 })?;
         let has_comptime_handlers = template_def.annotations.iter().any(|ann| {
-            self.program
-                .compiled_annotations
-                .get(&ann.name)
-                .map(|compiled| {
+            self.lookup_compiled_annotation(ann)
+                .map(|(_, compiled)| {
                     compiled.comptime_pre_handler.is_some()
                         || compiled.comptime_post_handler.is_some()
                 })
@@ -764,8 +829,29 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
-        // Builtins take precedence - they're optimized Rust implementations
-        if let Some(builtin) = self.get_builtin_function(name) {
+        if let Some(builtin_decl) = self.resolve_scoped_module_builtin_function(name) {
+            return self.compile_module_builtin_function_call(&builtin_decl, args, span);
+        }
+
+        // Builtins take precedence - they're optimized Rust implementations.
+        // Phase 1 keeps the current surface behavior, but distinguishes
+        // surface names from internal-only intrinsics for diagnostics.
+        if let Some(resolution) = self.classify_builtin_function(name) {
+            let builtin = match resolution {
+                BuiltinNameResolution::Surface { builtin, .. } => builtin,
+                BuiltinNameResolution::InternalOnly { builtin, .. }
+                    if self.allow_internal_builtins =>
+                {
+                    builtin
+                }
+                BuiltinNameResolution::InternalOnly { .. } => {
+                    return Err(ShapeError::SemanticError {
+                        message: self.internal_intrinsic_error_message(name, resolution),
+                        location: Some(self.span_to_source_location(span)),
+                    });
+                }
+            };
+
             // Special handling for print with string interpolation
             if builtin == BuiltinFunction::Print {
                 return self.compile_print_with_interpolation(args);
@@ -811,31 +897,15 @@ impl BytecodeCompiler {
 
         // Named import from a native extension module (e.g. `from file use { read_text }`).
         // Native modules have no AST to inline, so the function won't be in program.functions.
-        // Rewrite the call as a module namespace call (e.g. file.read_text(...)).
+        // Keep a private module binding so the imported symbol can dispatch without
+        // implicitly creating a user-visible namespace.
         if let Some(imported) = self.imported_names.get(name).cloned() {
             if self.is_native_module_export(&imported.module_path, &imported.original_name) {
-                // Ensure the module has a namespace binding (auto-create if needed)
-                if !self
-                    .module_namespace_bindings
-                    .contains(&imported.module_path)
-                {
-                    let binding_idx = self.get_or_create_module_binding(&imported.module_path);
-                    self.module_namespace_bindings
-                        .insert(imported.module_path.clone());
-                    self.register_extension_module_schema(&imported.module_path);
-                    let module_schema_name = format!("__mod_{}", imported.module_path);
-                    if self
-                        .type_tracker
-                        .schema_registry()
-                        .get(&module_schema_name)
-                        .is_some()
-                    {
-                        self.set_module_binding_type_info(binding_idx, &module_schema_name);
-                    }
-                }
-                let receiver = Expr::Identifier(imported.module_path.clone(), span);
-                return self.compile_module_namespace_call(
-                    &receiver,
+                let binding_name = self.ensure_hidden_native_module_binding(&imported.module_path);
+                return self.compile_module_namespace_call_on_binding(
+                    &binding_name,
+                    &imported.module_path,
+                    span,
                     &imported.original_name,
                     args,
                 );
@@ -843,13 +913,17 @@ impl BytecodeCompiler {
         }
 
         // Build error message with suggestions
-        let mut message = format!("Undefined function: {}", name);
+        let mut message = self.undefined_function_message(name);
 
         // Try import suggestion first
         if let Some(module_path) = self.suggest_import(name) {
             message = format!(
-                "Unknown function '{}'. Did you mean to import it via '{}'\n\n  from {} use {{ {} }}",
-                name, module_path, module_path, name
+                "Unknown function '{}'. Did you mean to import it via '{}'\n\n  from {} use {{ {} }}\n\n{}",
+                name,
+                module_path,
+                module_path,
+                name,
+                Self::function_scope_summary(),
             );
         } else {
             // Try typo suggestion from available function names
@@ -937,17 +1011,101 @@ impl BytecodeCompiler {
         )
     }
 
-    /// Returns true when the receiver is a module namespace object.
-    ///
-    /// Module receivers must dispatch as function value calls:
-    /// `module.fn(args)` lowers to `CallValue` on the exported function value.
-    fn is_module_namespace_receiver(&self, receiver: &Expr) -> bool {
-        matches!(
-            receiver,
-            Expr::Identifier(name, _)
-                if (name == "__comptime__" && self.allow_internal_comptime_namespace)
-                    || self.module_namespace_bindings.contains(name)
-        )
+    pub(super) fn is_module_namespace_name(&self, name: &str) -> bool {
+        (name == "__comptime__" && self.allow_internal_comptime_namespace)
+            || self.module_namespace_bindings.contains(name)
+    }
+
+    fn compile_type_namespace_builtin_call(
+        &mut self,
+        namespace: &str,
+        function: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<bool> {
+        let builtin = match (namespace, function) {
+            ("DateTime", "now") => Some(BuiltinFunction::DateTimeNow),
+            ("DateTime", "utc") => Some(BuiltinFunction::DateTimeUtc),
+            ("DateTime", "parse") => Some(BuiltinFunction::DateTimeParse),
+            ("DateTime", "from_epoch") => Some(BuiltinFunction::DateTimeFromEpoch),
+            ("DateTime", "from_parts") => Some(BuiltinFunction::DateTimeFromParts),
+            ("DateTime", "from_unix_secs") => Some(BuiltinFunction::DateTimeFromUnixSecs),
+            ("Content", "chart") => Some(BuiltinFunction::ContentChart),
+            ("Content", "text") => Some(BuiltinFunction::ContentTextCtor),
+            ("Content", "table") => Some(BuiltinFunction::ContentTableCtor),
+            ("Content", "code") => Some(BuiltinFunction::ContentCodeCtor),
+            ("Content", "kv") => Some(BuiltinFunction::ContentKvCtor),
+            ("Content", "fragment") => Some(BuiltinFunction::ContentFragmentCtor),
+            _ => None,
+        };
+
+        let Some(builtin) = builtin else {
+            return Ok(false);
+        };
+
+        for arg in args {
+            self.compile_expr_as_value_or_placeholder(arg)?;
+        }
+        let count = self
+            .program
+            .add_constant(Constant::Number(args.len() as f64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(count)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(builtin)),
+        ));
+        self.last_expr_schema = None;
+        self.last_expr_numeric_type = None;
+        self.last_expr_type_info = None;
+        self.clear_last_expr_reference_result();
+        let _ = span;
+        Ok(true)
+    }
+
+    pub(super) fn compile_expr_qualified_function_call(
+        &mut self,
+        namespace: &str,
+        function: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<()> {
+        let scoped_name = format!("{}::{}", namespace, function);
+        if let Some(builtin_decl) = self.module_builtin_functions.get(&scoped_name).cloned() {
+            return self.compile_module_builtin_function_call(&builtin_decl, args, span);
+        }
+        if self.find_function(&scoped_name).is_some() {
+            return self.compile_expr_function_call(&scoped_name, args, span);
+        }
+
+        if self.is_module_namespace_name(namespace) {
+            return self.compile_module_namespace_call(namespace, span, function, args);
+        }
+
+        if self.compile_type_namespace_builtin_call(namespace, function, args, span)? {
+            return Ok(());
+        }
+
+        if let Some(schema) = self.type_tracker.schema_registry().get(namespace)
+            && let Some(enum_info) = schema.get_enum_info()
+            && enum_info.variant_by_name(function).is_some()
+        {
+            return self.compile_expr_enum_constructor(
+                namespace,
+                function,
+                &shape_ast::ast::EnumConstructorPayload::Tuple(args.to_vec()),
+            );
+        }
+
+        Err(ShapeError::RuntimeError {
+            message: format!(
+                "Unknown qualified call '{}::{}'. Module namespace calls require an explicit `use`, and type-associated calls require the type to define that item.",
+                namespace, function
+            ),
+            location: Some(self.span_to_source_location(span)),
+        })
     }
 
     /// Compile a method call expression
@@ -1158,68 +1316,38 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
-        // Removed legacy CSV namespace entrypoint.
-        // Keep this specific to unresolved/module namespace access so local
-        // variables named `csv` can still expose their own `load` method.
-        if method == "load"
-            && let Expr::Identifier(namespace_name, namespace_span) = receiver
-            && namespace_name == "csv"
-            && self.resolve_local(namespace_name).is_none()
-            && !self.mutable_closure_captures.contains_key(namespace_name)
-        {
-            return Err(ShapeError::SemanticError {
-                message: "csv.load(...) has been removed. Use a module-scoped data source API from a configured extension module."
-                    .to_string(),
-                location: Some(self.span_to_source_location(*namespace_span)),
-            });
-        }
+        if let Expr::Identifier(namespace_name, namespace_span) = receiver {
+            if self.is_module_namespace_name(namespace_name)
+                && self.resolve_local(namespace_name).is_none()
+                && !self.mutable_closure_captures.contains_key(namespace_name.as_str())
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Module namespace calls must use `::`. Replace `{}.{}` with `{}::{}(...)`.",
+                        namespace_name, method, namespace_name, method
+                    ),
+                    location: Some(self.span_to_source_location(*namespace_span)),
+                });
+            }
 
-        // Namespace calls (`module.fn(...)`) are function-style dispatch, not methods.
-        if self.is_module_namespace_receiver(receiver) {
-            return self.compile_module_namespace_call(receiver, method, args);
-        }
+            // Removed legacy CSV namespace entrypoint.
+            // Keep this specific to unresolved namespace-like access so local
+            // variables named `csv` can still expose their own `load` method.
+            if method == "load"
+                && namespace_name == "csv"
+                && self.resolve_local(namespace_name).is_none()
+                && !self.mutable_closure_captures.contains_key(namespace_name)
+            {
+                return Err(ShapeError::SemanticError {
+                    message: "csv.load(...) has been removed. Use a module-scoped data source API from a configured extension module."
+                        .to_string(),
+                    location: Some(self.span_to_source_location(*namespace_span)),
+                });
+            }
 
-        // DateTime static constructor methods: DateTime.now(), DateTime.utc(),
-        // DateTime.parse(str), DateTime.from_epoch(ms)
-        if let Expr::Identifier(name, _) = receiver {
-            if name == "DateTime" || name == "Content" {
-                let builtin = match (name.as_str(), method) {
-                    ("DateTime", "now") => Some(BuiltinFunction::DateTimeNow),
-                    ("DateTime", "utc") => Some(BuiltinFunction::DateTimeUtc),
-                    ("DateTime", "parse") => Some(BuiltinFunction::DateTimeParse),
-                    ("DateTime", "from_epoch") => Some(BuiltinFunction::DateTimeFromEpoch),
-                    ("DateTime", "from_parts") => Some(BuiltinFunction::DateTimeFromParts),
-                    ("DateTime", "from_unix_secs") => Some(BuiltinFunction::DateTimeFromUnixSecs),
-                    ("Content", "chart") => Some(BuiltinFunction::ContentChart),
-                    ("Content", "text") => Some(BuiltinFunction::ContentTextCtor),
-                    ("Content", "table") => Some(BuiltinFunction::ContentTableCtor),
-                    ("Content", "code") => Some(BuiltinFunction::ContentCodeCtor),
-                    ("Content", "kv") => Some(BuiltinFunction::ContentKvCtor),
-                    ("Content", "fragment") => Some(BuiltinFunction::ContentFragmentCtor),
-                    _ => None,
-                };
-                if let Some(bf) = builtin {
-                    // Compile arguments (if any) onto the stack
-                    for arg in args {
-                        self.compile_expr_as_value_or_placeholder(arg)?;
-                    }
-                    let count = self
-                        .program
-                        .add_constant(Constant::Number(args.len() as f64));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(count)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::BuiltinCall,
-                        Some(Operand::Builtin(bf)),
-                    ));
-                    self.last_expr_schema = None;
-                    self.last_expr_numeric_type = None;
-                    self.last_expr_type_info = None;
-                    self.clear_last_expr_reference_result();
-                    return Ok(());
-                }
+            if self.compile_type_namespace_builtin_call(namespace_name, method, args, *namespace_span)?
+            {
+                return Ok(());
             }
         }
 
@@ -1501,7 +1629,22 @@ impl BytecodeCompiler {
 
         // Also check built-in intrinsics for UFCS (skip if it's a known built-in method name)
         if !Self::is_known_builtin_method(method) {
-            if let Some(builtin) = self.get_builtin_function(method) {
+            if let Some(resolution) = self.classify_builtin_function(method) {
+                let builtin = match resolution {
+                    BuiltinNameResolution::Surface { builtin, .. } => builtin,
+                    BuiltinNameResolution::InternalOnly { builtin, .. }
+                        if self.allow_internal_builtins =>
+                    {
+                        builtin
+                    }
+                    BuiltinNameResolution::InternalOnly { .. } => {
+                        return Err(ShapeError::SemanticError {
+                            message: self.internal_intrinsic_error_message(method, resolution),
+                            location: Some(self.span_to_source_location(receiver.span())),
+                        });
+                    }
+                };
+
                 // UFCS to builtin: receiver + args already on stack
                 let arg_count = self
                     .program
@@ -1571,17 +1714,28 @@ impl BytecodeCompiler {
 
     fn compile_module_namespace_call(
         &mut self,
-        receiver: &Expr,
+        namespace_name: &str,
+        namespace_span: Span,
         method: &str,
         args: &[Expr],
     ) -> Result<()> {
-        let Expr::Identifier(namespace_name, namespace_span) = receiver else {
-            return Err(ShapeError::SemanticError {
-                message: "module namespace call must use an identifier receiver".to_string(),
-                location: Some(self.span_to_source_location(receiver.span())),
-            });
-        };
+        self.compile_module_namespace_call_on_binding(
+            namespace_name,
+            namespace_name,
+            namespace_span,
+            method,
+            args,
+        )
+    }
 
+    fn compile_module_namespace_call_on_binding(
+        &mut self,
+        binding_name: &str,
+        namespace_name: &str,
+        namespace_span: Span,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<()> {
         // Detect json.parse(text, TypeName) → rewrite to json.__parse_typed(text, schema_id).
         // When the second arg is a type identifier with a registered schema, we compile
         // a typed deserialization call that uses @alias annotations and field types.
@@ -1593,8 +1747,10 @@ impl BytecodeCompiler {
                     let schema_id_expr =
                         Expr::Literal(Literal::Number(target_schema_id as f64), args[1].span());
                     let rewritten_args = vec![args[0].clone(), schema_id_expr];
-                    return self.compile_module_namespace_call(
-                        receiver,
+                    return self.compile_module_namespace_call_on_binding(
+                        binding_name,
+                        namespace_name,
+                        namespace_span,
                         "__parse_typed",
                         &rewritten_args,
                     );
@@ -1605,10 +1761,11 @@ impl BytecodeCompiler {
         // Shape-source module exports (non-native) compile as regular functions.
         // Route namespace calls to direct function dispatch so const-template
         // specialization/comptime handlers run in the same compiler context.
+        let scoped_name = format!("{}::{}", namespace_name, method);
         if !self.is_native_module_export(namespace_name, method)
-            && self.program.functions.iter().any(|f| f.name == method)
+            && self.find_function(&scoped_name).is_some()
         {
-            return self.compile_expr_function_call(method, args, receiver.span());
+            return self.compile_expr_function_call(&scoped_name, args, namespace_span);
         }
 
         if self.is_native_module_export(namespace_name, method)
@@ -1616,23 +1773,41 @@ impl BytecodeCompiler {
         {
             return Err(ShapeError::SemanticError {
                 message: format!(
-                    "module export '{}.{}' is only available in comptime contexts",
+                    "module export '{}::{}' is only available in comptime contexts",
                     namespace_name, method
                 ),
-                location: Some(self.span_to_source_location(*namespace_span)),
+                location: Some(self.span_to_source_location(namespace_span)),
             });
         }
 
-        self.compile_expr(receiver)?;
-        let schema_id = self
-            .last_expr_schema
-            .ok_or_else(|| ShapeError::SemanticError {
-                message: format!(
-                    "module namespace '{}' is not typed. Missing module schema for property '{}'",
-                    namespace_name, method
-                ),
-                location: Some(self.span_to_source_location(*namespace_span)),
-            })?;
+        let binding_idx =
+            *self
+                .module_bindings
+                .get(binding_name)
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "module namespace '{}' is not bound in the current scope",
+                        namespace_name
+                    ),
+                    location: Some(self.span_to_source_location(namespace_span)),
+                })?;
+        self.emit(Instruction::new(
+            OpCode::LoadModuleBinding,
+            Some(Operand::ModuleBinding(binding_idx)),
+        ));
+        self.last_expr_type_info = self.type_tracker.get_binding_type(binding_idx).cloned();
+        self.last_expr_schema = self
+            .last_expr_type_info
+            .as_ref()
+            .and_then(Self::value_schema_from_type_info);
+
+        let schema_id = self.last_expr_schema.ok_or_else(|| ShapeError::SemanticError {
+            message: format!(
+                "module namespace '{}' is not typed. Missing module schema for export '{}'",
+                namespace_name, method
+            ),
+            location: Some(self.span_to_source_location(namespace_span)),
+        })?;
 
         let Some(schema) = self.type_tracker.schema_registry().get_by_id(schema_id) else {
             return Err(ShapeError::SemanticError {
@@ -1640,14 +1815,14 @@ impl BytecodeCompiler {
                     "module namespace '{}' schema id {} is not registered",
                     namespace_name, schema_id
                 ),
-                location: Some(self.span_to_source_location(*namespace_span)),
+                location: Some(self.span_to_source_location(namespace_span)),
             });
         };
 
         let Some(field) = schema.get_field(method) else {
             return Err(ShapeError::SemanticError {
                 message: format!("module '{}' has no export '{}'", namespace_name, method),
-                location: Some(self.span_to_source_location(*namespace_span)),
+                location: Some(self.span_to_source_location(namespace_span)),
             });
         };
 
@@ -1657,7 +1832,7 @@ impl BytecodeCompiler {
                     "module '{}' export metadata exceeds typed-field limits for '{}'",
                     namespace_name, method
                 ),
-                location: Some(self.span_to_source_location(*namespace_span)),
+                location: Some(self.span_to_source_location(namespace_span)),
             });
         }
         let operand = Operand::TypedField {
@@ -1680,12 +1855,12 @@ impl BytecodeCompiler {
         ));
         self.emit(Instruction::simple(OpCode::CallValue));
 
-        let namespace_call_expr = Expr::MethodCall {
-            receiver: Box::new(receiver.clone()),
-            method: method.to_string(),
+        let namespace_call_expr = Expr::QualifiedFunctionCall {
+            namespace: namespace_name.to_string(),
+            function: method.to_string(),
             args: args.to_vec(),
             named_args: vec![],
-            span: receiver.span(),
+            span: namespace_span,
         };
         let inferred = self.infer_expr_type(&namespace_call_expr).ok();
         self.last_expr_type_info = inferred

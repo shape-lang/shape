@@ -125,6 +125,34 @@ impl TypeInferenceEngine {
                 name, args, span, ..
             } => self.infer_function_call(name, args, *span),
 
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                args,
+                span,
+                ..
+            } => {
+                if self.env.lookup(namespace).is_some()
+                    || self.struct_type_defs.contains_key(namespace.as_str())
+                    || self.env.lookup_type_alias(namespace).is_some()
+                    || matches!(namespace.as_str(), "DateTime" | "Content")
+                {
+                    let synthetic = Expr::MethodCall {
+                        receiver: Box::new(Expr::Identifier(namespace.clone(), *span)),
+                        method: function.clone(),
+                        args: args.clone(),
+                        named_args: vec![],
+                        span: *span,
+                    };
+                    self.infer_expr(&synthetic)
+                } else {
+                    for arg in args {
+                        self.infer_expr(arg)?;
+                    }
+                    Ok(Type::Concrete(TypeAnnotation::Reference(namespace.clone())))
+                }
+            }
+
             Expr::EnumConstructor { enum_name, .. } => {
                 Ok(Type::Concrete(TypeAnnotation::Reference(enum_name.clone())))
             }

@@ -347,6 +347,11 @@ impl TypeChecker {
                     self.check_expr(arg);
                 }
             }
+            Expr::QualifiedFunctionCall { args, .. } => {
+                for arg in args {
+                    self.check_expr(arg);
+                }
+            }
             Expr::MethodCall { receiver, args, .. } => {
                 self.check_expr(receiver);
                 for arg in args {

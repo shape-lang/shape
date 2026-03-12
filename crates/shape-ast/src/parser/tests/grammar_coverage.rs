@@ -162,6 +162,7 @@ fn test_import_from_module() {
                     assert_eq!(specs.len(), 1);
                     assert_eq!(specs[0].name, "load");
                     assert_eq!(specs[0].alias, None);
+                    assert!(!specs[0].is_annotation);
                 }
                 other => panic!("Expected Named, got {:?}", other),
             }
@@ -201,6 +202,52 @@ fn test_use_namespace_with_alias() {
             other => panic!("Expected Namespace, got {:?}", other),
         },
         other => panic!("Expected Import item, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_qualified_namespace_call_expr() {
+    let input = r#"
+        use math as m;
+        m::sum([1, 2, 3]);
+    "#;
+    let items = parse_items(input).expect("qualified namespace call should parse");
+    assert_eq!(items.len(), 2);
+    match &items[1] {
+        crate::ast::Item::Statement(crate::ast::Statement::Expression(expr, _), _) => match expr {
+            crate::ast::Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                args,
+                ..
+            } => {
+                assert_eq!(namespace, "m");
+                assert_eq!(function, "sum");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("Expected QualifiedFunctionCall, got {:?}", other),
+        },
+        other => panic!("Expected expression statement, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_namespaced_annotation_ref_parses() {
+    let input = r#"
+        use std::core::remote as worker;
+
+        @worker::remote("worker:9527")
+        fn compute(x) { x + 1 }
+    "#;
+    let items = parse_items(input).expect("namespaced annotation ref should parse");
+    assert_eq!(items.len(), 2);
+    match &items[1] {
+        crate::ast::Item::Function(func, _) => {
+            assert_eq!(func.annotations.len(), 1);
+            assert_eq!(func.annotations[0].name, "worker::remote");
+            assert_eq!(func.annotations[0].args.len(), 1);
+        }
+        other => panic!("Expected function item, got {:?}", other),
     }
 }
 
@@ -333,11 +380,79 @@ fn test_import_from_use_with_alias() {
                     assert_eq!(specs.len(), 1);
                     assert_eq!(specs[0].name, "load");
                     assert_eq!(specs[0].alias, Some("csvLoad".to_string()));
+                    assert!(!specs[0].is_annotation);
                 }
                 other => panic!("Expected Named, got {:?}", other),
             }
         }
         other => panic!("Expected Import item, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_import_from_use_with_annotation_item() {
+    let input = r#"from std::core::remote use { execute, @remote };"#;
+    let items = parse_items(input).expect("mixed import list should parse");
+    assert_eq!(items.len(), 1);
+    match &items[0] {
+        crate::ast::Item::Import(import_stmt, _) => match &import_stmt.items {
+            crate::ast::ImportItems::Named(specs) => {
+                assert_eq!(specs.len(), 2);
+                assert_eq!(specs[0].name, "execute");
+                assert!(!specs[0].is_annotation);
+                assert_eq!(specs[1].name, "remote");
+                assert!(specs[1].is_annotation);
+                assert_eq!(specs[1].alias, None);
+            }
+            other => panic!("Expected Named, got {:?}", other),
+        },
+        other => panic!("Expected Import item, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_import_from_use_with_annotation_alias_rejected() {
+    let input = r#"from std::core::remote use { @remote as worker };"#;
+    let result = parse_items(input);
+    assert!(
+        result.is_err(),
+        "annotation imports should reject aliasing syntax"
+    );
+}
+
+#[test]
+fn test_pub_annotation_export_parses() {
+    let input = r#"
+pub annotation remote(addr) {
+    metadata() { return { addr: addr }; }
+}
+"#;
+    let items = parse_items(input).expect("pub annotation should parse");
+    assert_eq!(items.len(), 1);
+    match &items[0] {
+        crate::ast::Item::Export(export, _) => match &export.item {
+            crate::ast::ExportItem::Annotation(annotation_def) => {
+                assert_eq!(annotation_def.name, "remote");
+            }
+            other => panic!("Expected Annotation export, got {:?}", other),
+        },
+        other => panic!("Expected Export item, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_pub_builtin_function_export_parses() {
+    let input = r#"pub builtin fn execute(addr: string, code: string) -> string;"#;
+    let items = parse_items(input).expect("pub builtin fn should parse");
+    assert_eq!(items.len(), 1);
+    match &items[0] {
+        crate::ast::Item::Export(export, _) => match &export.item {
+            crate::ast::ExportItem::BuiltinFunction(function) => {
+                assert_eq!(function.name, "execute");
+            }
+            other => panic!("Expected BuiltinFunction export, got {:?}", other),
+        },
+        other => panic!("Expected Export item, got {:?}", other),
     }
 }
 

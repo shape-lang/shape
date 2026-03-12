@@ -264,12 +264,19 @@ pub fn walk_item<V: Visitor>(visitor: &mut V, item: &Item) {
         }
         Item::Export(export, _) => match &export.item {
             ExportItem::Function(func) => walk_function(visitor, func),
+            ExportItem::BuiltinFunction(_) => {}
+            ExportItem::BuiltinType(_) => {}
             ExportItem::TypeAlias(_) => {}
             ExportItem::Named(_) => {}
             ExportItem::Enum(_) => {}
             ExportItem::Struct(_) => {}
             ExportItem::Interface(_) => {}
             ExportItem::Trait(_) => {}
+            ExportItem::Annotation(annotation_def) => {
+                for handler in &annotation_def.handlers {
+                    walk_expr(visitor, &handler.body);
+                }
+            }
             ExportItem::ForeignFunction(_) => {} // foreign bodies are opaque
         },
         Item::TypeAlias(_, _) => {}
@@ -618,6 +625,21 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
             }
         }
         Expr::FunctionCall {
+            args,
+            named_args,
+            span,
+            ..
+        } => {
+            if visitor.visit_expr_function_call(expr, *span) {
+                for arg in args {
+                    walk_expr(visitor, arg);
+                }
+                for (_, value) in named_args {
+                    walk_expr(visitor, value);
+                }
+            }
+        }
+        Expr::QualifiedFunctionCall {
             args,
             named_args,
             span,

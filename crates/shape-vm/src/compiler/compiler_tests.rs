@@ -277,7 +277,7 @@ fn test_use_namespace_enables_extension_namespace_access() {
 
     let code = r#"
         use duckdb
-        let conn = duckdb.connect("duckdb://:memory:")
+        let conn = duckdb::connect("duckdb://:memory:")
     "#;
     let program = parse_program(code).unwrap();
     let result = BytecodeCompiler::new()
@@ -299,7 +299,7 @@ fn test_use_hierarchical_namespace_enables_tail_binding() {
 
     let code = r#"
         use std::core::snapshot
-        let snap = snapshot.snapshot()
+        let snap = snapshot::snapshot()
     "#;
     let program = parse_program(code).unwrap();
     let result = BytecodeCompiler::new()
@@ -321,7 +321,7 @@ fn test_use_namespace_alias_enables_access() {
 
     let code = r#"
         use duckdb as db
-        let conn = db.connect("duckdb://:memory:")
+        let conn = db::connect("duckdb://:memory:")
     "#;
     let program = parse_program(code).unwrap();
     let result = BytecodeCompiler::new()
@@ -343,7 +343,7 @@ fn test_use_namespace_still_enables_extension_namespace_access() {
 
     let code = r#"
         use duckdb
-        let conn = duckdb.connect("duckdb://:memory:")
+        let conn = duckdb::connect("duckdb://:memory:")
     "#;
     let program = parse_program(code).unwrap();
     let result = BytecodeCompiler::new()
@@ -370,7 +370,7 @@ fn test_comptime_only_native_export_rejected_in_runtime_context() {
 
     let code = r#"
         use duckdb
-        let conn = duckdb.connect_codegen("duckdb://:memory:")
+        let conn = duckdb::connect_codegen("duckdb://:memory:")
     "#;
     let program = parse_program(code).expect("program should parse");
     let result = BytecodeCompiler::new()
@@ -404,7 +404,7 @@ fn test_comptime_only_native_export_allowed_in_comptime_block() {
         use duckdb
         function test() {
             return comptime {
-                duckdb.connect_codegen("duckdb://:memory:")
+                duckdb::connect_codegen("duckdb://:memory:")
             }
         }
     "#;
@@ -435,7 +435,7 @@ fn test_namespace_import_registers_module_schema_compile_time() {
 
     let code = r#"
         use duckdb
-        let conn = duckdb.connect("duckdb://:memory:")
+        let conn = duckdb::connect("duckdb://:memory:")
     "#;
     let program = parse_program(code).unwrap();
     let bytecode = BytecodeCompiler::new()
@@ -462,7 +462,7 @@ fn test_namespace_import_registers_shape_artifact_exports_compile_time() {
 
     let code = r#"
         use duckdb
-        let conn = duckdb.connect("duckdb://:memory:")
+        let conn = duckdb::connect("duckdb://:memory:")
     "#;
     let program = parse_program(code).unwrap();
     let bytecode = BytecodeCompiler::new()
@@ -486,7 +486,7 @@ fn test_module_namespace_call_lowers_to_callvalue_not_callmethod() {
 
     let code = r#"
         use duckdb
-        let conn = duckdb.connect("duckdb://:memory:")
+        let conn = duckdb::connect("duckdb://:memory:")
     "#;
     let program = parse_program(code).unwrap();
     let bytecode = BytecodeCompiler::new()
@@ -503,6 +503,48 @@ fn test_module_namespace_call_lowers_to_callvalue_not_callmethod() {
         !opcodes.contains(&OpCode::CallMethod),
         "module namespace call should not lower through CallMethod"
     );
+}
+
+#[test]
+fn test_dot_module_namespace_call_is_rejected() {
+    let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
+    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+        Ok(shape_value::ValueWord::none())
+    });
+
+    let code = r#"
+        use duckdb
+        let conn = duckdb.connect("duckdb://:memory:")
+    "#;
+    let program = parse_program(code).unwrap();
+    let result = BytecodeCompiler::new()
+        .with_extensions(vec![ext])
+        .compile(&program);
+    assert!(result.is_err(), "dot-based module namespace calls must fail");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(msg.contains("must use `::`"), "unexpected error: {}", msg);
+}
+
+#[test]
+fn test_local_value_shadowing_namespace_alias_keeps_dot_methods_and_fields() {
+    let mut ext = shape_runtime::module_exports::ModuleExports::new("duckdb");
+    ext.add_function("connect", |_args, _ctx: &shape_runtime::ModuleContext| {
+        Ok(shape_value::ValueWord::none())
+    });
+
+    let code = r#"
+        use duckdb as s
+
+        fn test() {
+            let s = { value: [1, 2, 3] }
+            print(s.value.len())
+        }
+    "#;
+    let program = parse_program(code).unwrap();
+    BytecodeCompiler::new()
+        .with_extensions(vec![ext])
+        .compile(&program)
+        .expect("local values should shadow namespace aliases for dot access");
 }
 
 #[test]

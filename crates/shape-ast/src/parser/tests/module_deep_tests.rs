@@ -134,6 +134,56 @@ fn test_module_import_mixed_aliases_and_plain() {
 }
 
 #[test]
+fn test_module_import_mixed_regular_and_annotation_items() {
+    let result = parse_program("from std::core::remote use { execute, @remote };");
+    assert!(
+        result.is_ok(),
+        "mixed annotation imports should parse: {:?}",
+        result.err()
+    );
+    match &result.unwrap().items[0] {
+        crate::ast::Item::Import(stmt, _) => match &stmt.items {
+            crate::ast::ImportItems::Named(specs) => {
+                assert_eq!(specs.len(), 2);
+                assert_eq!(specs[0].name, "execute");
+                assert!(!specs[0].is_annotation);
+                assert_eq!(specs[1].name, "remote");
+                assert!(specs[1].is_annotation);
+                assert_eq!(specs[1].alias, None);
+            }
+            other => panic!("Expected Named, got {:?}", other),
+        },
+        other => panic!("Expected Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_module_import_annotation_alias_rejected() {
+    let result = parse_program("from std::core::remote use { @remote as worker };");
+    assert!(
+        result.is_err(),
+        "annotation aliasing should be rejected by the grammar"
+    );
+}
+
+#[test]
+fn test_namespaced_annotation_application_parses() {
+    let result = parse_program(
+        r#"
+        use std::core::remote as worker;
+
+        @worker::remote("worker:9527")
+        fn compute(x) { x + 1 }
+    "#,
+    );
+    assert!(
+        result.is_ok(),
+        "namespaced annotation applications should parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn test_module_import_without_semicolon() {
     // Grammar says semicolons are optional on imports
     let result = parse_program("from m use { a }");
@@ -516,6 +566,42 @@ fn test_module_export_pub_struct() {
             assert!(matches!(&export.item, crate::ast::ExportItem::Struct(_)));
         }
         other => panic!("Expected Export with Struct, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_module_export_pub_annotation() {
+    let result = parse_program(
+        r#"
+pub annotation remote(addr) {
+    metadata() { return { addr: addr }; }
+}
+"#,
+    );
+    assert!(result.is_ok(), "pub annotation: {:?}", result.err());
+    match &result.unwrap().items[0] {
+        crate::ast::Item::Export(export, _) => {
+            assert!(matches!(
+                &export.item,
+                crate::ast::ExportItem::Annotation(_)
+            ));
+        }
+        other => panic!("Expected Export with Annotation, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_module_export_pub_builtin_function() {
+    let result = parse_program("pub builtin fn execute(addr: string, code: string) -> string;");
+    assert!(result.is_ok(), "pub builtin fn: {:?}", result.err());
+    match &result.unwrap().items[0] {
+        crate::ast::Item::Export(export, _) => {
+            assert!(matches!(
+                &export.item,
+                crate::ast::ExportItem::BuiltinFunction(_)
+            ));
+        }
+        other => panic!("Expected Export with BuiltinFunction, got {:?}", other),
     }
 }
 

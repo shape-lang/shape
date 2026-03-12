@@ -223,12 +223,9 @@ impl BytecodeCompiler {
             &effective_def.body,
             effective_def.name_span,
         );
-        let callee_summaries = self.build_callee_summaries(
-            Some(&effective_def.name),
-            &mir_lowering.all_local_names,
-        );
-        let mut mir_analysis =
-            crate::mir::solver::analyze(&mir_lowering.mir, &callee_summaries);
+        let callee_summaries =
+            self.build_callee_summaries(Some(&effective_def.name), &mir_lowering.all_local_names);
+        let mut mir_analysis = crate::mir::solver::analyze(&mir_lowering.mir, &callee_summaries);
         mir_analysis.mutability_errors =
             crate::mir::lowering::compute_mutability_errors(&mir_lowering);
         crate::mir::repair::attach_repairs(&mut mir_analysis, &mir_lowering.mir);
@@ -328,7 +325,11 @@ impl BytecodeCompiler {
         // pre-pass (which over-hoists conservatively). Dead fields detected by MIR
         // are excluded from the hoisted list.
         for (slot_id, field_indices) in &field_analysis.hoisted_fields {
-            if let Some(binding) = mir_lowering.binding_infos.iter().find(|b| b.slot == *slot_id) {
+            if let Some(binding) = mir_lowering
+                .binding_infos
+                .iter()
+                .find(|b| b.slot == *slot_id)
+            {
                 let var_name = &binding.name;
                 let field_names: Vec<String> = field_indices
                     .iter()
@@ -371,8 +372,7 @@ impl BytecodeCompiler {
             self.function_borrow_summaries
                 .insert(effective_def.name.clone(), borrow_summary);
         } else {
-            self.function_borrow_summaries
-                .remove(&effective_def.name);
+            self.function_borrow_summaries.remove(&effective_def.name);
         }
 
         // Interprocedural alias checking: scan call sites in this function's MIR
@@ -1122,21 +1122,15 @@ impl BytecodeCompiler {
             .annotations
             .iter()
             .filter_map(|ann| {
-                self.program
-                    .compiled_annotations
-                    .get(&ann.name)
+                self.lookup_compiled_annotation(ann)
+                    .map(|(_, compiled)| compiled)
                     .filter(|c| c.before_handler.is_some() || c.after_handler.is_some())
-                    .cloned()
             })
             .collect();
 
         if let Some(compiled_ann) = foreign_annotations.into_iter().next() {
-            let ann_arg_exprs: Vec<_> = def
-                .annotations
-                .iter()
-                .find(|a| a.name == compiled_ann.name)
-                .map(|a| a.args.clone())
-                .unwrap_or_default();
+            let ann_arg_exprs =
+                self.annotation_args_for_compiled_name(&def.annotations, &compiled_ann.name);
 
             // The foreign stub at func_idx is the impl
             let impl_idx = func_idx as u16;
@@ -1785,7 +1779,7 @@ impl BytecodeCompiler {
         target_id: Option<u16>,
     ) -> Result<()> {
         for ann in annotations {
-            let Some(compiled) = self.program.compiled_annotations.get(&ann.name).cloned() else {
+            let Some((_, compiled)) = self.lookup_compiled_annotation(ann) else {
                 continue;
             };
 
@@ -2010,8 +2004,7 @@ impl BytecodeCompiler {
 
         // Phase 1: comptime pre
         for ann in &annotations {
-            let compiled = self.program.compiled_annotations.get(&ann.name).cloned();
-            if let Some(compiled) = compiled {
+            if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                 if let Some(handler) = compiled.comptime_pre_handler {
                     if self.execute_function_comptime_handler(
                         ann,
@@ -2029,8 +2022,7 @@ impl BytecodeCompiler {
         // Phase 2: comptime post
         if !removed {
             for ann in &annotations {
-                let compiled = self.program.compiled_annotations.get(&ann.name).cloned();
-                if let Some(compiled) = compiled {
+                if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                     if let Some(handler) = compiled.comptime_post_handler {
                         if self.execute_function_comptime_handler(
                             ann,
@@ -2252,6 +2244,21 @@ impl BytecodeCompiler {
                 if name.contains("::") {
                     names.insert(name.clone());
                 }
+                for arg in args {
+                    Self::collect_scoped_names_in_expr(arg, names);
+                }
+                for (_, value) in named_args {
+                    Self::collect_scoped_names_in_expr(value, names);
+                }
+            }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                args,
+                named_args,
+                ..
+            } => {
+                names.insert(format!("{}::{}", namespace, function));
                 for arg in args {
                     Self::collect_scoped_names_in_expr(arg, names);
                 }
@@ -2798,7 +2805,7 @@ impl BytecodeCompiler {
     ) -> Vec<crate::bytecode::CompiledAnnotation> {
         let mut result = Vec::new();
         for ann in &func_def.annotations {
-            if let Some(compiled) = self.program.compiled_annotations.get(&ann.name) {
+            if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                 if compiled.before_handler.is_some() || compiled.after_handler.is_some() {
                     result.push(compiled.clone());
                 }
@@ -2862,12 +2869,8 @@ impl BytecodeCompiler {
             };
 
             // Find the annotation arg expressions from the original function def
-            let ann_arg_exprs = func_def
-                .annotations
-                .iter()
-                .find(|a| a.name == ann.name)
-                .map(|a| a.args.clone())
-                .unwrap_or_default();
+            let ann_arg_exprs =
+                self.annotation_args_for_compiled_name(&func_def.annotations, &ann.name);
 
             // Register the intermediate wrapper function (outermost already registered)
             let wrapper_func_idx = if is_last {
@@ -2925,7 +2928,7 @@ impl BytecodeCompiler {
         let ann = func_def
             .annotations
             .iter()
-            .find(|a| a.name == compiled_ann.name)
+            .find(|a| self.annotation_matches_compiled_name(a, &compiled_ann.name))
             .ok_or_else(|| ShapeError::RuntimeError {
                 message: format!("Annotation '{}' not found on function", compiled_ann.name),
                 location: None,
@@ -5078,7 +5081,7 @@ mod tests {
                 cell
             }
         "#;
-        let mut compiler = BytecodeCompiler::new();
+        let compiler = BytecodeCompiler::new();
         // Do NOT set allow_internal_builtins — simulates user code
         let program = shape_ast::parser::parse_program(code).unwrap();
         let err = compiler
@@ -5086,8 +5089,9 @@ mod tests {
             .expect_err("__native_* should be blocked from user code");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("Undefined function: __native_ptr_new_cell"),
-            "Expected undefined function error, got: {}",
+            msg.contains("'__native_ptr_new_cell' resolves to internal intrinsic scope")
+                && msg.contains("not available from ordinary user code"),
+            "Expected internal-only intrinsic error, got: {}",
             msg
         );
     }
@@ -5106,19 +5110,83 @@ mod tests {
             "#,
                 intrinsic
             );
-            let mut compiler = BytecodeCompiler::new();
+            let compiler = BytecodeCompiler::new();
             let program = shape_ast::parser::parse_program(&code).unwrap();
             let err = compiler
                 .compile(&program)
                 .expect_err(&format!("{} should be blocked from user code", intrinsic));
             let msg = format!("{}", err);
             assert!(
-                msg.contains(&format!("Undefined function: {}", intrinsic)),
-                "Expected undefined function error for {}, got: {}",
+                msg.contains(&format!(
+                    "'{}' resolves to internal intrinsic scope",
+                    intrinsic
+                )) && msg.contains("not available from ordinary user code"),
+                "Expected internal-only intrinsic error for {}, got: {}",
                 intrinsic,
                 msg
             );
         }
+    }
+
+    #[test]
+    fn test_intrinsic_builtin_method_syntax_blocked_from_user_code() {
+        let code = r#"
+            fn test() {
+                [1, 2, 3].__intrinsic_sum()
+            }
+        "#;
+        let compiler = BytecodeCompiler::new();
+        let program = shape_ast::parser::parse_program(code).unwrap();
+        let err = compiler
+            .compile(&program)
+            .expect_err("__intrinsic_* method syntax should be blocked from user code");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("'__intrinsic_sum' resolves to internal intrinsic scope")
+                && msg.contains("not available from ordinary user code"),
+            "Expected internal-only intrinsic method error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_unknown_function_message_mentions_resolution_scopes() {
+        let code = r#"
+            fn test() {
+                totally_unknown_function()
+            }
+        "#;
+        let program = shape_ast::parser::parse_program(code).unwrap();
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("unknown function should fail");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains(
+                "Function names resolve from module scope, explicit imports, type-associated scope, and the implicit prelude."
+            ),
+            "Expected function scope guidance, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_undefined_variable_message_mentions_resolution_scopes() {
+        let code = r#"
+            fn test() {
+                missing_value
+            }
+        "#;
+        let program = shape_ast::parser::parse_program(code).unwrap();
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("unknown variable should fail");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Variable names resolve from local scope and module scope."),
+            "Expected variable scope guidance, got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -5142,8 +5210,9 @@ mod tests {
             .expect_err("user-defined Json.get must not gain __* access");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("Undefined function: __json_object_get"),
-            "Expected undefined internal builtin error, got: {}",
+            msg.contains("'__json_object_get' resolves to internal intrinsic scope")
+                && msg.contains("not available from ordinary user code"),
+            "Expected internal-only intrinsic error, got: {}",
             msg
         );
     }
@@ -7472,8 +7541,7 @@ mod tests {
             "#;
         let program = shape_ast::parser::parse_program(source).expect("parse");
         let mut compiler = BytecodeCompiler::new();
-        let result = compiler
-            .analyze_non_function_items_with_mir("__main__", &program.items);
+        let result = compiler.analyze_non_function_items_with_mir("__main__", &program.items);
 
         assert!(result.is_err(), "expected top-level compile error");
         let err = format!("{:?}", result.unwrap_err());
@@ -7496,8 +7564,7 @@ mod tests {
             "#;
         let program = shape_ast::parser::parse_program(source).expect("parse");
         let mut compiler = BytecodeCompiler::new();
-        let result = compiler
-            .analyze_non_function_items_with_mir("__module__", &program.items);
+        let result = compiler.analyze_non_function_items_with_mir("__module__", &program.items);
 
         assert!(result.is_err(), "expected module-body compile error");
         let err = format!("{:?}", result.unwrap_err());

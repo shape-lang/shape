@@ -72,14 +72,16 @@ module_decl = {
     annotations? ~ "mod" ~ ident ~ "{" ~ (item_or_error ~ ";"?)* ~ "}"
 }
 import_item_list = { import_item ~ ("," ~ import_item)* ~ ","? }
-import_item = { 
-    ident ~ ("as" ~ ident)?   // name or name as alias
-}
+import_item = { annotation_import_item | regular_import_item }
+annotation_import_item = { "@" ~ ident }
+regular_import_item = { ident ~ ("as" ~ ident)? }
 
 pub_item = {
     "pub" ~ foreign_function_def                                     // pub fn python foo() {}
     | "pub" ~ extern_native_function_def                             // pub extern "C" fn foo() -> T from "lib";
     | "pub" ~ native_struct_type_def                                 // pub type C Foo { ... }
+    | "pub" ~ builtin_function_decl                                  // pub builtin fn foo();
+    | "pub" ~ builtin_type_decl                                      // pub builtin type Foo;
     | "pub" ~ function_def                                           // pub fn foo() {}
     | "pub" ~ variable_decl                                          // pub let x = 10;
     | "pub" ~ type_alias_def                                         // pub type X = Y;
@@ -87,6 +89,7 @@ pub_item = {
     | "pub" ~ struct_type_def                                        // pub type Foo { ... }
     | "pub" ~ interface_def                                          // pub interface Foo { ... }
     | "pub" ~ trait_def                                              // pub trait Foo { ... }
+    | "pub" ~ annotation_def                                         // pub annotation name() { ... }
     | "pub" ~ "{" ~ export_spec_list ~ "}" ~ ";"?                   // pub { a, b as c };
 }
 
@@ -352,11 +355,12 @@ where_predicate = {
 annotations = { annotation+ }
 
 annotation = {
-    "@" ~ annotation_name ~ ("(" ~ annotation_args? ~ ")")?
+    "@" ~ annotation_ref ~ ("(" ~ annotation_args? ~ ")")?
 }
 
 // Annotation names can be identifiers OR keywords (like @strategy, @function, @export)
 annotation_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+annotation_ref = @{ annotation_name ~ ("::" ~ annotation_name)* }
 
 annotation_args = {
     expression ~ ("," ~ expression)*
@@ -1169,6 +1173,7 @@ primary_expr = {
     | data_ref
     | time_ref
     | pattern_name
+    | qualified_function_call_expr
     | enum_constructor_expr
     | from_query_expr  // LINQ-style query: from x in arr where ... select ...
     | comptime_for_expr // comptime for — before comptime_block to match "comptime for" first
@@ -1228,6 +1233,7 @@ join_branch = {
 struct_literal = { ident ~ "{" ~ object_fields? ~ "}" }
 
 // Enum constructor: Enum::Variant, Enum::Variant(...), Enum::Variant { ... }
+qualified_function_call_expr = { enum_variant_path ~ function_call }
 enum_constructor_expr = { enum_variant_path ~ (enum_tuple_payload | enum_struct_payload)? }
 enum_variant_path = { ident ~ "::" ~ variant_ident }
 enum_tuple_payload = { "(" ~ arg_list? ~ ")" }

@@ -70,7 +70,7 @@ fn hover_on_module_name_shows_description() {
 
 #[test]
 fn hover_on_module_function_shows_signature() {
-    let code = "mod csv { fn load(path: string) { path } }\nlet df = csv.load(\"/tmp/test.csv\")\n";
+    let code = "mod csv { fn load(path: string) { path } }\nlet df = csv::load(\"/tmp/test.csv\")\n";
     ShapeTest::new(code)
         .at(pos(1, 14))
         .expect_hover_contains("load");
@@ -661,7 +661,7 @@ fn test_lsp_hover_module_name() {
 
 #[test]
 fn test_lsp_hover_module_function() {
-    let code = "mod csv { fn load(path: string) { path } }\nlet df = csv.load(\"test\")\n";
+    let code = "mod csv { fn load(path: string) { path } }\nlet df = csv::load(\"test\")\n";
     ShapeTest::new(code)
         .at(pos(1, 14))
         .expect_hover_contains("load");

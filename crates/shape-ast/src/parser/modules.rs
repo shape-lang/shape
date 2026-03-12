@@ -103,14 +103,43 @@ fn parse_import_item(pair: Pair<Rule>) -> Result<ImportSpec> {
     let pair_loc = pair_location(&pair);
     let mut inner = pair.into_inner();
 
-    let name_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+    let item_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
         message: "expected import item name".to_string(),
-        location: Some(pair_loc),
+        location: Some(pair_loc.clone()),
     })?;
-    let name = name_pair.as_str().to_string();
-    let alias = inner.next().map(|p| p.as_str().to_string());
 
-    Ok(ImportSpec { name, alias })
+    match item_pair.as_rule() {
+        Rule::annotation_import_item => {
+            let mut annotation_inner = item_pair.into_inner();
+            let name_pair = annotation_inner
+                .next()
+                .ok_or_else(|| ShapeError::ParseError {
+                    message: "expected annotation import name".to_string(),
+                    location: Some(pair_loc.clone()),
+                })?;
+            Ok(ImportSpec {
+                name: name_pair.as_str().to_string(),
+                alias: None,
+                is_annotation: true,
+            })
+        }
+        Rule::regular_import_item => {
+            let mut regular_inner = item_pair.into_inner();
+            let name_pair = regular_inner.next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected import item name".to_string(),
+                location: Some(pair_loc.clone()),
+            })?;
+            Ok(ImportSpec {
+                name: name_pair.as_str().to_string(),
+                alias: regular_inner.next().map(|p| p.as_str().to_string()),
+                is_annotation: false,
+            })
+        }
+        _ => Err(ShapeError::ParseError {
+            message: format!("unexpected import item: {:?}", item_pair.as_rule()),
+            location: Some(pair_location(&item_pair)),
+        }),
+    }
 }
 
 /// Parse a pub item (visibility modifier on definitions)
@@ -136,6 +165,12 @@ pub fn parse_export_item(pair: Pair<Rule>) -> Result<ExportStmt> {
             ExportItem::ForeignFunction(functions::parse_extern_native_function_def(next_pair)?)
         }
         Rule::function_def => ExportItem::Function(functions::parse_function_def(next_pair)?),
+        Rule::builtin_function_decl => {
+            ExportItem::BuiltinFunction(functions::parse_builtin_function_decl(next_pair)?)
+        }
+        Rule::builtin_type_decl => {
+            ExportItem::BuiltinType(crate::parser::types::parse_builtin_type_decl(next_pair)?)
+        }
         Rule::type_alias_def => {
             ExportItem::TypeAlias(crate::parser::types::parse_type_alias_def(next_pair)?)
         }
@@ -150,6 +185,9 @@ pub fn parse_export_item(pair: Pair<Rule>) -> Result<ExportStmt> {
             ExportItem::Interface(crate::parser::types::parse_interface_def(next_pair)?)
         }
         Rule::trait_def => ExportItem::Trait(crate::parser::types::parse_trait_def(next_pair)?),
+        Rule::annotation_def => {
+            ExportItem::Annotation(crate::parser::extensions::parse_annotation_def(next_pair)?)
+        }
         Rule::variable_decl => {
             let var_decl = items::parse_variable_decl(next_pair.clone())?;
             match var_decl.pattern.as_identifier() {

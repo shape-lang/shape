@@ -9,7 +9,10 @@ use shape_ast::ast::{
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::{EnumVariantInfo, FieldType};
 
-use super::{BytecodeCompiler, DropKind, ImportedSymbol, ParamPassMode, StructGenericInfo};
+use super::{
+    BytecodeCompiler, DropKind, ImportedAnnotationSymbol, ImportedSymbol, ModuleBuiltinFunction,
+    ParamPassMode, StructGenericInfo,
+};
 
 #[derive(Debug, Clone)]
 struct NativeFieldLayoutSpec {
@@ -19,6 +22,37 @@ struct NativeFieldLayoutSpec {
 }
 
 impl BytecodeCompiler {
+    fn register_builtin_function_decl(
+        &mut self,
+        def: &shape_ast::ast::BuiltinFunctionDecl,
+    ) -> Result<()> {
+        let export_name = def
+            .name
+            .rsplit("::")
+            .next()
+            .unwrap_or(def.name.as_str())
+            .to_string();
+        let source_module_path = if let Some((owner_module, _)) = def.name.rsplit_once("::") {
+            let source = self
+                .module_scope_sources
+                .get(owner_module)
+                .cloned()
+                .unwrap_or_else(|| owner_module.to_string());
+            Self::extract_module_name(&source).to_string()
+        } else {
+            return Ok(());
+        };
+
+        self.module_builtin_functions.insert(
+            def.name.clone(),
+            ModuleBuiltinFunction {
+                export_name,
+                source_module_path,
+            },
+        );
+        Ok(())
+    }
+
     fn emit_comptime_internal_call(
         &mut self,
         method: &str,
@@ -158,6 +192,7 @@ impl BytecodeCompiler {
     pub(super) fn register_item_functions(&mut self, item: &Item) -> Result<()> {
         match item {
             Item::Function(func_def, _) => self.register_function(func_def),
+            Item::BuiltinFunctionDecl(def, _) => self.register_builtin_function_decl(def),
             Item::Module(module_def, _) => {
                 let module_path = self.current_module_path_for(module_def.name.as_str());
                 self.module_scope_stack.push(module_path.clone());
@@ -232,11 +267,15 @@ impl BytecodeCompiler {
             }
             Item::Export(export, _) => match &export.item {
                 ExportItem::Function(func_def) => self.register_function(func_def),
+                ExportItem::BuiltinFunction(def) => self.register_builtin_function_decl(def),
                 ExportItem::Trait(trait_def) => {
                     self.known_traits.insert(trait_def.name.clone());
                     self.trait_defs
                         .insert(trait_def.name.clone(), trait_def.clone());
                     Ok(())
+                }
+                ExportItem::Annotation(annotation_def) => {
+                    self.compile_annotation_def(annotation_def)
                 }
                 ExportItem::ForeignFunction(def) => {
                     // Same registration as Item::ForeignFunction
@@ -539,8 +578,10 @@ impl BytecodeCompiler {
                 let mut ref_borrow = None;
                 let init_err = if let Some(init_expr) = &var_decl.value {
                     let saved_pending_variable_name = self.pending_variable_name.clone();
-                    self.pending_variable_name =
-                        var_decl.pattern.as_identifier().map(|name| name.to_string());
+                    self.pending_variable_name = var_decl
+                        .pattern
+                        .as_identifier()
+                        .map(|name| name.to_string());
                     match self.compile_expr_for_reference_binding(init_expr) {
                         Ok(tracked_borrow) => {
                             ref_borrow = tracked_borrow;
@@ -565,9 +606,10 @@ impl BytecodeCompiler {
                             message:
                                 "[B0003] cannot return or store a reference that outlives its owner"
                                     .to_string(),
-                            location: var_decl.value.as_ref().map(|expr| {
-                                self.span_to_source_location(expr.span())
-                            }),
+                            location: var_decl
+                                .value
+                                .as_ref()
+                                .map(|expr| self.span_to_source_location(expr.span())),
                         });
                     }
                     let binding_idx = self.get_or_create_module_binding(name);
@@ -657,8 +699,10 @@ impl BytecodeCompiler {
                     let mut ref_borrow = None;
                     if let Some(init_expr) = &var_decl.value {
                         let saved_pending_variable_name = self.pending_variable_name.clone();
-                        self.pending_variable_name =
-                            var_decl.pattern.as_identifier().map(|name| name.to_string());
+                        self.pending_variable_name = var_decl
+                            .pattern
+                            .as_identifier()
+                            .map(|name| name.to_string());
                         let compile_result = self.compile_expr_for_reference_binding(init_expr);
                         self.pending_variable_name = saved_pending_variable_name;
                         ref_borrow = compile_result?;
@@ -696,6 +740,9 @@ impl BytecodeCompiler {
                 }
                 match &export.item {
                     ExportItem::Function(func_def) => self.compile_function(func_def)?,
+                    ExportItem::Annotation(annotation_def) => {
+                        self.compile_annotation_def(annotation_def)?;
+                    }
                     ExportItem::Enum(enum_def) => self.register_enum(enum_def)?,
                     ExportItem::Struct(struct_def) => {
                         self.register_struct_type(struct_def, *export_span)?;
@@ -931,6 +978,24 @@ impl BytecodeCompiler {
         match &import_stmt.items {
             ImportItems::Named(specs) => {
                 for spec in specs {
+                    if spec.is_annotation {
+                        let hidden_module_name =
+                            crate::module_resolution::hidden_annotation_import_module_name(
+                                &import_stmt.from,
+                            );
+                        self.module_scope_sources
+                            .entry(hidden_module_name.clone())
+                            .or_insert_with(|| import_stmt.from.clone());
+                        self.imported_annotations.insert(
+                            spec.name.clone(),
+                            ImportedAnnotationSymbol {
+                                original_name: spec.name.clone(),
+                                module_path: import_stmt.from.clone(),
+                                hidden_module_name,
+                            },
+                        );
+                        continue;
+                    }
                     let local_name = spec.alias.as_ref().unwrap_or(&spec.name);
                     // Register as a known import - actual function resolution
                     // happens when the imported module's bytecode is merged
@@ -949,6 +1014,9 @@ impl BytecodeCompiler {
                 let local_name = alias.as_ref().unwrap_or(name);
                 let binding_idx = self.get_or_create_module_binding(local_name);
                 self.module_namespace_bindings.insert(local_name.clone());
+                self.module_scope_sources
+                    .entry(local_name.clone())
+                    .or_insert_with(|| import_stmt.from.clone());
                 let module_path = if import_stmt.from.is_empty() {
                     name.as_str()
                 } else {
@@ -1042,7 +1110,7 @@ impl BytecodeCompiler {
     /// Extract the leaf module name from an import path.
     ///
     /// `"std::file"` → `"file"`, `"file"` → `"file"`, `"std/io"` → `"io"`
-    fn extract_module_name(path: &str) -> &str {
+    pub(super) fn extract_module_name(path: &str) -> &str {
         path.rsplit(|c| c == ':' || c == '/')
             .find(|s| !s.is_empty())
             .unwrap_or(path)
@@ -2533,8 +2601,7 @@ impl BytecodeCompiler {
     ) -> Result<bool> {
         let mut removed = false;
         for ann in &struct_def.annotations {
-            let compiled = self.program.compiled_annotations.get(&ann.name).cloned();
-            if let Some(compiled) = compiled {
+            if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                 let handlers = [
                     compiled.comptime_pre_handler,
                     compiled.comptime_post_handler,
@@ -2603,7 +2670,7 @@ impl BytecodeCompiler {
         }
     }
 
-    fn qualify_module_symbol(module_path: &str, name: &str) -> String {
+    pub(super) fn qualify_module_symbol(module_path: &str, name: &str) -> String {
         format!("{}::{}", module_path, name)
     }
 
@@ -2613,6 +2680,36 @@ impl BytecodeCompiler {
                 let mut qualified = func.clone();
                 qualified.name = Self::qualify_module_symbol(module_path, &func.name);
                 Ok(Item::Function(qualified, *span))
+            }
+            Item::Export(export, span) if export.source_decl.is_none() => {
+                let mut qualified = export.clone();
+                match &mut qualified.item {
+                    ExportItem::Function(func) => {
+                        func.name = Self::qualify_module_symbol(module_path, &func.name);
+                    }
+                    ExportItem::BuiltinFunction(func) => {
+                        func.name = Self::qualify_module_symbol(module_path, &func.name);
+                    }
+                    ExportItem::ForeignFunction(func) => {
+                        func.name = Self::qualify_module_symbol(module_path, &func.name);
+                    }
+                    ExportItem::Annotation(annotation) => {
+                        annotation.name =
+                            Self::qualify_module_symbol(module_path, &annotation.name);
+                    }
+                    _ => {}
+                }
+                Ok(Item::Export(qualified, *span))
+            }
+            Item::BuiltinFunctionDecl(def, span) => {
+                let mut qualified = def.clone();
+                qualified.name = Self::qualify_module_symbol(module_path, &def.name);
+                Ok(Item::BuiltinFunctionDecl(qualified, *span))
+            }
+            Item::AnnotationDef(def, span) => {
+                let mut qualified = def.clone();
+                qualified.name = Self::qualify_module_symbol(module_path, &def.name);
+                Ok(Item::AnnotationDef(qualified, *span))
             }
             Item::VariableDecl(decl, span) => {
                 if decl.kind != VarKind::Const {
@@ -2711,6 +2808,64 @@ impl BytecodeCompiler {
         module_path: &str,
     ) -> Vec<(String, String)> {
         let mut exports = Vec::new();
+        let has_explicit_exports = items.iter().any(|item| matches!(item, Item::Export(..)));
+
+        if has_explicit_exports {
+            for item in items {
+                let Item::Export(export, _) = item else {
+                    continue;
+                };
+                if let Some(ref decl) = export.source_decl {
+                    if let Some(name) = decl.pattern.as_identifier() {
+                        exports.push((
+                            name.to_string(),
+                            Self::qualify_module_symbol(module_path, name),
+                        ));
+                    }
+                }
+                match &export.item {
+                    ExportItem::Function(func) => {
+                        let exported_name = func
+                            .name
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(func.name.as_str())
+                            .to_string();
+                        exports.push((
+                            exported_name.clone(),
+                            Self::qualify_module_symbol(module_path, &exported_name),
+                        ));
+                    }
+                    ExportItem::ForeignFunction(func) => {
+                        let exported_name = func
+                            .name
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(func.name.as_str())
+                            .to_string();
+                        exports.push((
+                            exported_name.clone(),
+                            Self::qualify_module_symbol(module_path, &exported_name),
+                        ));
+                    }
+                    ExportItem::Named(specs) => {
+                        for spec in specs {
+                            let exported_name =
+                                spec.alias.clone().unwrap_or_else(|| spec.name.clone());
+                            exports.push((
+                                exported_name,
+                                Self::qualify_module_symbol(module_path, &spec.name),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            exports.sort_by(|a, b| a.0.cmp(&b.0));
+            exports.dedup_by(|a, b| a.0 == b.0);
+            return exports;
+        }
+
         for item in items {
             match item {
                 Item::Function(func, _) => {
@@ -2865,8 +3020,7 @@ impl BytecodeCompiler {
     ) -> Result<bool> {
         let mut removed = false;
         for ann in &module_def.annotations {
-            let compiled = self.program.compiled_annotations.get(&ann.name).cloned();
-            if let Some(compiled) = compiled {
+            if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                 let handlers = [
                     compiled.comptime_pre_handler,
                     compiled.comptime_post_handler,
@@ -3046,6 +3200,13 @@ impl BytecodeCompiler {
         }
 
         let module_path = self.current_module_path_for(&module_def.name);
+        if let Some(parent_path) = self.module_scope_stack.last().cloned()
+            && let Some(parent_source) = self.module_scope_sources.get(&parent_path).cloned()
+        {
+            self.module_scope_sources
+                .entry(module_path.clone())
+                .or_insert_with(|| format!("{}::{}", parent_source, module_def.name));
+        }
         self.module_scope_stack.push(module_path.clone());
         self.push_module_reference_scope();
 
@@ -3108,7 +3269,9 @@ impl BytecodeCompiler {
         ));
         self.propagate_initializer_type_to_slot(binding_idx, false, false);
 
-        if self.module_scope_stack.len() == 1 {
+        if self.module_scope_stack.len() == 1
+            && !crate::module_resolution::is_hidden_annotation_import_module_name(&module_def.name)
+        {
             self.module_namespace_bindings
                 .insert(module_def.name.clone());
         }
@@ -4267,6 +4430,33 @@ mod tests {
         assert!(
             compiled.after_handler.is_some(),
             "Should have after handler"
+        );
+    }
+
+    #[test]
+    fn test_exported_annotation_def_compiles_handlers() {
+        let code = r#"
+            pub annotation warmup(period) {
+                before(args, ctx) {
+                    args
+                }
+            }
+
+            @warmup(5)
+            fn test() { 42 }
+        "#;
+        let program = parse_program(code).expect("Failed to parse exported annotation def");
+        let bytecode = BytecodeCompiler::new().compile(&program);
+        assert!(
+            bytecode.is_ok(),
+            "Exported annotation def should compile: {:?}",
+            bytecode.err()
+        );
+
+        let bytecode = bytecode.unwrap();
+        assert!(
+            bytecode.compiled_annotations.contains_key("warmup"),
+            "Should have compiled exported 'warmup' annotation"
         );
     }
 

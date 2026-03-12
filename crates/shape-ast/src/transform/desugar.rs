@@ -49,6 +49,9 @@ fn desugar_item(item: &mut Item) {
             | crate::ast::ExportItem::Struct(_)
             | crate::ast::ExportItem::Interface(_)
             | crate::ast::ExportItem::Trait(_)
+            | crate::ast::ExportItem::BuiltinFunction(_)
+            | crate::ast::ExportItem::BuiltinType(_)
+            | crate::ast::ExportItem::Annotation(_)
             | crate::ast::ExportItem::ForeignFunction(_) => {}
         },
         Item::Module(module, _) => {
@@ -209,6 +212,16 @@ fn desugar_expr(expr: &mut Expr) {
         }
         Expr::UnaryOp { operand, .. } => desugar_expr(operand),
         Expr::FunctionCall {
+            args, named_args, ..
+        } => {
+            for arg in args {
+                desugar_expr(arg);
+            }
+            for (_, val) in named_args {
+                desugar_expr(val);
+            }
+        }
+        Expr::QualifiedFunctionCall {
             args, named_args, ..
         } => {
             for arg in args {

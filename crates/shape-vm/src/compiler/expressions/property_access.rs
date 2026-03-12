@@ -82,6 +82,20 @@ impl BytecodeCompiler {
         property: &str,
         optional: bool,
     ) -> Result<()> {
+        if let Expr::Identifier(name, span) = object
+            && self.is_module_namespace_name(name)
+            && self.resolve_local(name).is_none()
+            && !self.mutable_closure_captures.contains_key(name.as_str())
+        {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Module namespace access must use `::`. Replace `{}.{}` with an explicit import or `{}::...` call.",
+                    name, property, name
+                ),
+                location: Some(self.span_to_source_location(*span)),
+            });
+        }
+
         // Check for data[i].field pattern - emit GetDataField for direct column access
         if let Expr::DataRef(data_ref, _) = object {
             // Only optimize single index access with known column

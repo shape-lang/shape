@@ -74,6 +74,9 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
     match expr {
         Expr::Literal(lit, _) => Some(infer_literal_type(lit)),
         Expr::FunctionCall { name, .. } => infer_function_return_type(name),
+        Expr::QualifiedFunctionCall {
+            namespace, function, ..
+        } => infer_function_return_type(&format!("{}::{}", namespace, function)),
         Expr::EnumConstructor { enum_name, .. } => Some(enum_name.clone()),
         Expr::MethodCall {
             receiver, method, ..

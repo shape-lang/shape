@@ -255,11 +255,14 @@ fn attach_item_doc_comment(item: &mut Item, doc_comment: DocComment) {
 fn attach_export_doc_comment(item: &mut ExportItem, doc_comment: DocComment) {
     match item {
         ExportItem::Function(function) => function.doc_comment = Some(doc_comment),
+        ExportItem::BuiltinFunction(function) => function.doc_comment = Some(doc_comment),
+        ExportItem::BuiltinType(ty) => ty.doc_comment = Some(doc_comment),
         ExportItem::TypeAlias(alias) => alias.doc_comment = Some(doc_comment),
         ExportItem::Enum(enum_def) => enum_def.doc_comment = Some(doc_comment),
         ExportItem::Struct(struct_def) => struct_def.doc_comment = Some(doc_comment),
         ExportItem::Interface(interface) => interface.doc_comment = Some(doc_comment),
         ExportItem::Trait(trait_def) => trait_def.doc_comment = Some(doc_comment),
+        ExportItem::Annotation(annotation_def) => annotation_def.doc_comment = Some(doc_comment),
         ExportItem::ForeignFunction(function) => function.doc_comment = Some(doc_comment),
         ExportItem::Named(_) => {}
     }

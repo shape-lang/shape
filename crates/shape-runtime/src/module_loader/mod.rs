@@ -11,7 +11,7 @@ mod resolution_deep_tests;
 mod resolver;
 
 use crate::project::{DependencySpec, ProjectRoot, find_project_root, normalize_package_identity};
-use shape_ast::ast::{FunctionDef, ImportStmt, Program, Span};
+use shape_ast::ast::{AnnotationDef, FunctionDef, ImportStmt, Program, Span};
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::parser::parse_program;
 use shape_value::ValueWord;
@@ -52,6 +52,7 @@ impl Module {
 pub enum Export {
     Function(Arc<FunctionDef>),
     TypeAlias(Arc<shape_ast::ast::TypeAliasDef>),
+    Annotation(Arc<AnnotationDef>),
     Value(ValueWord),
 }
 
@@ -59,9 +60,12 @@ pub enum Export {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleExportKind {
     Function,
+    BuiltinFunction,
     TypeAlias,
+    BuiltinType,
     Interface,
     Enum,
+    Annotation,
     Value,
 }
 
@@ -1364,6 +1368,55 @@ pub enum Side { Buy, Sell }
             .find(|e| e.name == "Side")
             .expect("expected Side export");
         assert_eq!(side.kind, ModuleExportKind::Enum);
+    }
+
+    #[test]
+    fn test_collect_exported_symbols_detects_pub_annotation_and_builtin_exports() {
+        let source = r#"
+pub builtin fn execute(addr: string, code: string) -> string;
+pub builtin type RemoteHandle;
+pub annotation remote(addr) {
+    metadata() { return { addr: addr }; }
+}
+"#;
+        let ast = parse_program(source).unwrap();
+        let exports = collect_exported_symbols(&ast).unwrap();
+
+        let execute = exports
+            .iter()
+            .find(|e| e.name == "execute")
+            .expect("expected execute export");
+        assert_eq!(execute.kind, ModuleExportKind::BuiltinFunction);
+
+        let handle = exports
+            .iter()
+            .find(|e| e.name == "RemoteHandle")
+            .expect("expected RemoteHandle export");
+        assert_eq!(handle.kind, ModuleExportKind::BuiltinType);
+
+        let remote = exports
+            .iter()
+            .find(|e| e.name == "remote")
+            .expect("expected remote annotation export");
+        assert_eq!(remote.kind, ModuleExportKind::Annotation);
+    }
+
+    #[test]
+    fn test_compile_module_exports_annotation() {
+        let source = r#"
+pub annotation remote(addr) {
+    metadata() { return { addr: addr }; }
+}
+"#;
+        let ast = parse_program(source).unwrap();
+        let module = loading::compile_module("test_module", ast).unwrap();
+
+        match module.exports.get("remote") {
+            Some(Export::Annotation(annotation)) => {
+                assert_eq!(annotation.name, "remote");
+            }
+            other => panic!("Expected Annotation export, got: {:?}", other),
+        }
     }
 
     #[test]

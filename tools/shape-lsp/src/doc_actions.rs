@@ -319,6 +319,19 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                         alias.doc_comment.is_some(),
                         alias.type_params.as_deref(),
                     ),
+                    ExportItem::BuiltinFunction(function) => callable_target(
+                        *span,
+                        function.doc_comment.is_some(),
+                        function.type_params.as_deref(),
+                        function
+                            .params
+                            .iter()
+                            .flat_map(|param| param.get_identifiers()),
+                        !matches!(function.return_type, TypeAnnotation::Void),
+                    ),
+                    ExportItem::BuiltinType(ty) => {
+                        type_target(*span, ty.doc_comment.is_some(), ty.type_params.as_deref())
+                    }
                     ExportItem::Struct(struct_def) => type_target(
                         *span,
                         struct_def.doc_comment.is_some(),
@@ -338,6 +351,16 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                         *span,
                         trait_def.doc_comment.is_some(),
                         trait_def.type_params.as_deref(),
+                    ),
+                    ExportItem::Annotation(annotation_def) => callable_target(
+                        *span,
+                        annotation_def.doc_comment.is_some(),
+                        None,
+                        annotation_def
+                            .params
+                            .iter()
+                            .flat_map(|param| param.get_identifiers()),
+                        false,
                     ),
                     ExportItem::Named(_) => continue,
                 });
