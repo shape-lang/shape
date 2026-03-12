@@ -61,6 +61,22 @@ impl std::fmt::Display for FunctionId {
 ///
 /// Using `StringId` instead of a heap-allocated `String` makes
 /// `Operand` (and therefore `Instruction`) `Copy`.
+///
+/// # Current status
+///
+/// `StringId` is used by bytecode instructions (`Operand`) to reference interned strings
+/// in `BytecodeProgram::strings`, and it is fully integrated with the bytecode compiler
+/// and VM executor. However, many runtime paths (e.g. `HeapValue::String`, method dispatch
+/// keys, and serialization) still use `Arc<String>` rather than intern IDs. A crate-level
+/// `InternPool` that maps `StringId <-> &str` would allow these paths to avoid heap
+/// allocation and use O(1) integer comparison instead of string comparison.
+///
+/// TODO: Evaluate adding an `InternPool` struct here (owned by the VM or compilation
+/// context) that bridges the gap between `StringId` in opcodes and `Arc<String>` in
+/// `HeapValue`. Key considerations:
+/// - The pool must be thread-safe if shared across async tasks.
+/// - `HeapValue::String` could hold `StringId` instead of `Arc<String>` for short strings.
+/// - Method registry PHF keys could use `StringId` for faster dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct StringId(pub u32);

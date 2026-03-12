@@ -892,6 +892,62 @@ impl ChannelData {
 // All generated from the single source of truth in define_heap_types!().
 crate::define_heap_types!();
 
+// ── Shared comparison helpers ────────────────────────────────────────────────
+
+/// Cross-type numeric equality: BigInt vs Decimal.
+#[inline]
+fn bigint_decimal_eq(a: &i64, b: &rust_decimal::Decimal) -> bool {
+    rust_decimal::Decimal::from(*a) == *b
+}
+
+/// Cross-type numeric equality: NativeScalar vs BigInt.
+#[inline]
+fn native_scalar_bigint_eq(a: &NativeScalar, b: &i64) -> bool {
+    a.as_i64().is_some_and(|v| v == *b)
+}
+
+/// Cross-type numeric equality: NativeScalar vs Decimal.
+#[inline]
+fn native_scalar_decimal_eq(a: &NativeScalar, b: &rust_decimal::Decimal) -> bool {
+    match a {
+        NativeScalar::F32(v) => {
+            rust_decimal::Decimal::from_f64_retain(*v as f64).is_some_and(|v| v == *b)
+        }
+        _ => a
+            .as_i128()
+            .map(|n| rust_decimal::Decimal::from_i128_with_scale(n, 0))
+            .is_some_and(|to_dec| to_dec == *b),
+    }
+}
+
+/// Cross-type typed array equality: IntArray vs FloatArray (element-wise i64-as-f64).
+#[inline]
+fn int_float_array_eq(
+    ints: &crate::typed_buffer::TypedBuffer<i64>,
+    floats: &crate::typed_buffer::AlignedTypedBuffer,
+) -> bool {
+    ints.len() == floats.len()
+        && ints
+            .iter()
+            .zip(floats.iter())
+            .all(|(x, y)| (*x as f64) == *y)
+}
+
+/// Matrix structural equality (row/col dimensions + element-wise).
+#[inline]
+fn matrix_eq(a: &MatrixData, b: &MatrixData) -> bool {
+    a.rows == b.rows
+        && a.cols == b.cols
+        && a.data.len() == b.data.len()
+        && a.data.iter().zip(b.data.iter()).all(|(x, y)| x == y)
+}
+
+/// NativeView identity comparison.
+#[inline]
+fn native_view_eq(a: &NativeViewData, b: &NativeViewData) -> bool {
+    a.ptr == b.ptr && a.mutable == b.mutable && a.layout.name == b.layout.name
+}
+
 // ── Hand-written methods (complex per-variant logic) ────────────────────────
 
 impl HeapValue {
@@ -912,9 +968,7 @@ impl HeapValue {
             (HeapValue::Ok(a), HeapValue::Ok(b)) => a == b,
             (HeapValue::Err(a), HeapValue::Err(b)) => a == b,
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
-            (HeapValue::NativeView(a), HeapValue::NativeView(b)) => {
-                a.ptr == b.ptr && a.mutable == b.mutable && a.layout.name == b.layout.name
-            }
+            (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
             (HeapValue::Mutex(a), HeapValue::Mutex(b)) => Arc::ptr_eq(&a.inner, &b.inner),
             (HeapValue::Atomic(a), HeapValue::Atomic(b)) => Arc::ptr_eq(&a.inner, &b.inner),
             (HeapValue::Lazy(a), HeapValue::Lazy(b)) => Arc::ptr_eq(&a.value, &b.value),
@@ -936,12 +990,8 @@ impl HeapValue {
             }
             (HeapValue::IntArray(a), HeapValue::IntArray(b)) => a == b,
             (HeapValue::FloatArray(a), HeapValue::FloatArray(b)) => a == b,
-            (HeapValue::IntArray(a), HeapValue::FloatArray(b)) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| (*x as f64) == *y)
-            }
-            (HeapValue::FloatArray(a), HeapValue::IntArray(b)) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| *x == (*y as f64))
-            }
+            (HeapValue::IntArray(a), HeapValue::FloatArray(b)) => int_float_array_eq(a, b),
+            (HeapValue::FloatArray(a), HeapValue::IntArray(b)) => int_float_array_eq(b, a),
             (HeapValue::BoolArray(a), HeapValue::BoolArray(b)) => a == b,
             (HeapValue::I8Array(a), HeapValue::I8Array(b)) => a == b,
             (HeapValue::I16Array(a), HeapValue::I16Array(b)) => a == b,
@@ -951,12 +1001,7 @@ impl HeapValue {
             (HeapValue::U32Array(a), HeapValue::U32Array(b)) => a == b,
             (HeapValue::U64Array(a), HeapValue::U64Array(b)) => a == b,
             (HeapValue::F32Array(a), HeapValue::F32Array(b)) => a == b,
-            (HeapValue::Matrix(a), HeapValue::Matrix(b)) => {
-                a.rows == b.rows
-                    && a.cols == b.cols
-                    && a.data.len() == b.data.len()
-                    && a.data.iter().zip(b.data.iter()).all(|(x, y)| x == y)
-            }
+            (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
             _ => false,
         }
     }
@@ -1013,8 +1058,8 @@ impl HeapValue {
             ) => f1 == f2,
             (HeapValue::Decimal(a), HeapValue::Decimal(b)) => a == b,
             (HeapValue::BigInt(a), HeapValue::BigInt(b)) => a == b,
-            (HeapValue::BigInt(a), HeapValue::Decimal(b)) => rust_decimal::Decimal::from(*a) == *b,
-            (HeapValue::Decimal(a), HeapValue::BigInt(b)) => *a == rust_decimal::Decimal::from(*b),
+            (HeapValue::BigInt(a), HeapValue::Decimal(b)) => bigint_decimal_eq(a, b),
+            (HeapValue::Decimal(a), HeapValue::BigInt(b)) => bigint_decimal_eq(b, a),
             (HeapValue::DataTable(a), HeapValue::DataTable(b)) => Arc::ptr_eq(a, b),
             (
                 HeapValue::TypedTable {
@@ -1106,17 +1151,11 @@ impl HeapValue {
                 a.datetime == b.datetime && a.id == b.id && a.timeframe == b.timeframe
             }
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
-            (HeapValue::NativeView(a), HeapValue::NativeView(b)) => {
-                a.ptr == b.ptr && a.mutable == b.mutable && a.layout.name == b.layout.name
-            }
+            (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
             (HeapValue::IntArray(a), HeapValue::IntArray(b)) => a == b,
             (HeapValue::FloatArray(a), HeapValue::FloatArray(b)) => a == b,
-            (HeapValue::IntArray(a), HeapValue::FloatArray(b)) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| (*x as f64) == *y)
-            }
-            (HeapValue::FloatArray(a), HeapValue::IntArray(b)) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| *x == (*y as f64))
-            }
+            (HeapValue::IntArray(a), HeapValue::FloatArray(b)) => int_float_array_eq(a, b),
+            (HeapValue::FloatArray(a), HeapValue::IntArray(b)) => int_float_array_eq(b, a),
             (HeapValue::BoolArray(a), HeapValue::BoolArray(b)) => a == b,
             (HeapValue::I8Array(a), HeapValue::I8Array(b)) => a == b,
             (HeapValue::I16Array(a), HeapValue::I16Array(b)) => a == b,
@@ -1126,37 +1165,16 @@ impl HeapValue {
             (HeapValue::U32Array(a), HeapValue::U32Array(b)) => a == b,
             (HeapValue::U64Array(a), HeapValue::U64Array(b)) => a == b,
             (HeapValue::F32Array(a), HeapValue::F32Array(b)) => a == b,
-            (HeapValue::Matrix(a), HeapValue::Matrix(b)) => {
-                a.rows == b.rows
-                    && a.cols == b.cols
-                    && a.data.len() == b.data.len()
-                    && a.data.iter().zip(b.data.iter()).all(|(x, y)| x == y)
-            }
+            (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
             // Cross-type numeric
-            (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => {
-                a.as_i64().is_some_and(|v| v == *b)
+            (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => native_scalar_bigint_eq(a, b),
+            (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => native_scalar_bigint_eq(b, a),
+            (HeapValue::NativeScalar(a), HeapValue::Decimal(b)) => {
+                native_scalar_decimal_eq(a, b)
             }
-            (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => {
-                b.as_i64().is_some_and(|v| *a == v)
+            (HeapValue::Decimal(a), HeapValue::NativeScalar(b)) => {
+                native_scalar_decimal_eq(b, a)
             }
-            (HeapValue::NativeScalar(a), HeapValue::Decimal(b)) => match a {
-                NativeScalar::F32(v) => {
-                    rust_decimal::Decimal::from_f64_retain(*v as f64).is_some_and(|v| v == *b)
-                }
-                _ => a
-                    .as_i128()
-                    .map(|n| rust_decimal::Decimal::from_i128_with_scale(n, 0))
-                    .is_some_and(|to_dec| to_dec == *b),
-            },
-            (HeapValue::Decimal(a), HeapValue::NativeScalar(b)) => match b {
-                NativeScalar::F32(v) => {
-                    rust_decimal::Decimal::from_f64_retain(*v as f64).is_some_and(|v| *a == v)
-                }
-                _ => b
-                    .as_i128()
-                    .map(|n| rust_decimal::Decimal::from_i128_with_scale(n, 0))
-                    .is_some_and(|to_dec| *a == to_dec),
-            },
             _ => false,
         }
     }

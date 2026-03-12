@@ -229,11 +229,15 @@ impl HeapHeader {
 }
 
 impl HeapKind {
+    /// The last (highest-numbered) variant in HeapKind.
+    /// IMPORTANT: Update this when adding new HeapKind variants.
+    pub const MAX_VARIANT: Self = HeapKind::ProjectedRef;
+
     /// Convert a u16 discriminant to a HeapKind, returning None if out of range.
     #[inline]
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= HeapKind::F32Array as u16 {
-            // Safety: HeapKind is repr(u8) with contiguous variants from 0..=max.
+        if v <= Self::MAX_VARIANT as u16 {
+            // Safety: HeapKind is repr(u8) with contiguous variants from 0..=MAX_VARIANT.
             // We checked the range, and u16 fits in u8 for valid values.
             Some(unsafe { std::mem::transmute(v as u8) })
         } else {
@@ -247,6 +251,14 @@ impl HeapKind {
         Self::from_u16(v as u16)
     }
 }
+
+/// Static assertion: HeapKind must be repr(u8), i.e. 1 byte.
+const _: () = {
+    assert!(
+        std::mem::size_of::<HeapKind>() == 1,
+        "HeapKind must be repr(u8) — transmute in from_u16 depends on this"
+    );
+};
 
 #[cfg(test)]
 mod tests {
@@ -313,6 +325,24 @@ mod tests {
             HeapKind::from_u16(HeapKind::F32Array as u16),
             Some(HeapKind::F32Array)
         );
+        // Variants added after F32Array must also round-trip
+        assert_eq!(
+            HeapKind::from_u16(HeapKind::Set as u16),
+            Some(HeapKind::Set)
+        );
+        assert_eq!(
+            HeapKind::from_u16(HeapKind::Char as u16),
+            Some(HeapKind::Char)
+        );
+        assert_eq!(
+            HeapKind::from_u16(HeapKind::ProjectedRef as u16),
+            Some(HeapKind::ProjectedRef)
+        );
+        // One past the last variant must return None
+        assert_eq!(
+            HeapKind::from_u16(HeapKind::MAX_VARIANT as u16 + 1),
+            None
+        );
         assert_eq!(HeapKind::from_u16(255), None);
     }
 
@@ -323,7 +353,28 @@ mod tests {
             HeapKind::from_u8(HeapKind::F32Array as u8),
             Some(HeapKind::F32Array)
         );
+        assert_eq!(
+            HeapKind::from_u8(HeapKind::ProjectedRef as u8),
+            Some(HeapKind::ProjectedRef)
+        );
         assert_eq!(HeapKind::from_u8(200), None);
+    }
+
+    /// Validates that every HeapKind discriminant from 0..=MAX_VARIANT round-trips
+    /// through the unsafe transmute in `from_u16`. This catches holes in the enum
+    /// (e.g. if someone inserts a variant mid-enum or reorders them).
+    #[test]
+    fn test_heap_kind_all_variants_roundtrip_through_transmute() {
+        let max = HeapKind::MAX_VARIANT as u16;
+        for i in 0..=max {
+            let kind = HeapKind::from_u16(i)
+                .unwrap_or_else(|| panic!("HeapKind::from_u16({i}) returned None — gap in contiguous repr(u8) enum"));
+            assert_eq!(
+                kind as u16, i,
+                "HeapKind variant at discriminant {i} round-tripped to {}",
+                kind as u16
+            );
+        }
     }
 
     #[test]
