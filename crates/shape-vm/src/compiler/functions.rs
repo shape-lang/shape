@@ -7611,4 +7611,56 @@ fn bar(&y) {
             "local shadow should prevent composition with global foo"
         );
     }
+
+    #[test]
+    fn test_composable_return_summary_module_binding_shadow() {
+        // A module binding named "foo" should prevent composition with a
+        // global function "foo". This exercises the
+        // resolve_scoped_module_binding_name() check in build_callee_summaries().
+        let code = r#"
+fn foo(&x) { x }
+fn bar(&y) { foo(y) }
+"#;
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        for item in &program.items {
+            if let Item::Function(func, _) = item {
+                compiler.register_function(func).expect("register");
+            }
+        }
+        // Compile foo first so it gets a return_summary
+        for item in &program.items {
+            if let Item::Function(func, _) = item {
+                compiler.compile_function(func).expect("compile");
+            }
+        }
+        // Sanity: without module binding shadow, bar DOES get a composed summary
+        assert!(
+            compiler
+                .function_borrow_summaries
+                .get("bar")
+                .and_then(|s| s.return_summary.as_ref())
+                .is_some(),
+            "bar should have composed summary before module binding shadow"
+        );
+
+        // Now simulate a module binding named "foo" and recompile bar.
+        // This mimics `import { foo } from some_module` shadowing global foo.
+        compiler.module_bindings.insert("foo".to_string(), 999);
+        // Re-register and recompile bar
+        if let Item::Function(func, _) = &program.items[1] {
+            compiler.register_function(func).expect("re-register bar");
+            compiler.compile_function(func).expect("recompile bar");
+        }
+        let has_composed = compiler
+            .function_borrow_summaries
+            .get("bar")
+            .and_then(|s| s.return_summary.as_ref())
+            .is_some();
+        assert!(
+            !has_composed,
+            "module binding shadow should prevent composition with global foo"
+        );
+    }
 }
