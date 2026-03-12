@@ -489,7 +489,7 @@ define_opcodes! {
     /// Gte (f64 x f64 -> bool) -- trusted: skips runtime type guard
     GteNumberTrusted = 0xDF, Comparison, pops: 2, pushes: 1;
     /// Lte (f64 x f64 -> bool) -- trusted: skips runtime type guard
-    LteNumberTrusted = 0x9E, Comparison, pops: 2, pushes: 1;
+    LteNumberTrusted = 0xF9, Comparison, pops: 2, pushes: 1;
 
     // ===== Special Operations =====
     /// No operation

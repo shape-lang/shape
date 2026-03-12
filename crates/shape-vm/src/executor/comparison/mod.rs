@@ -10,7 +10,7 @@ use shape_value::{FilterLiteral, FilterNode, FilterOp, NanTag, VMError, ValueWor
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-const EXACT_F64_INT_LIMIT: i128 = 9_007_199_254_740_992;
+use crate::constants::EXACT_F64_INT_LIMIT;
 
 impl VirtualMachine {
     #[inline(always)]
