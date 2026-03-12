@@ -130,6 +130,78 @@ pub fn check_permission(
     Ok(())
 }
 
+/// Check permission and enforce filesystem path scope constraints.
+///
+/// After verifying the base permission (`FsRead`, `FsWrite`, or `FsScoped`),
+/// checks `ScopeConstraints::allowed_paths` when present. If the scope
+/// constraints list paths, the target path must match at least one (prefix
+/// match). An empty `allowed_paths` list means all paths are permitted.
+pub fn check_fs_permission(
+    ctx: &ModuleContext,
+    permission: shape_abi_v1::Permission,
+    path: &str,
+) -> Result<(), String> {
+    check_permission(ctx, permission)?;
+
+    if let Some(ref constraints) = ctx.scope_constraints {
+        if !constraints.allowed_paths.is_empty() {
+            let target = std::path::Path::new(path);
+            let allowed = constraints.allowed_paths.iter().any(|pattern| {
+                // Support glob-style prefix matching: "/data/**" matches
+                // anything under /data/, and "/tmp/*" matches direct children.
+                let pattern = pattern.trim_end_matches("**").trim_end_matches('*');
+                let prefix = std::path::Path::new(pattern.trim_end_matches('/'));
+                target.starts_with(prefix)
+            });
+            if !allowed {
+                return Err(format!(
+                    "Scope constraint denied: path '{}' is not in allowed paths",
+                    path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check permission and enforce network host scope constraints.
+///
+/// After verifying the base permission (`NetConnect`, `NetListen`, or
+/// `NetScoped`), checks `ScopeConstraints::allowed_hosts` when present.
+/// If the scope constraints list hosts, the target address must match at
+/// least one (supports `host:port` and `*.domain.com` wildcards).
+pub fn check_net_permission(
+    ctx: &ModuleContext,
+    permission: shape_abi_v1::Permission,
+    address: &str,
+) -> Result<(), String> {
+    check_permission(ctx, permission)?;
+
+    if let Some(ref constraints) = ctx.scope_constraints {
+        if !constraints.allowed_hosts.is_empty() {
+            // Extract host (and optional port) from the address.
+            let target_host = address.split(':').next().unwrap_or(address);
+            let allowed = constraints.allowed_hosts.iter().any(|pattern| {
+                let pattern_host = pattern.split(':').next().unwrap_or(pattern);
+                // Wildcard: *.example.com matches sub.example.com
+                if let Some(suffix) = pattern_host.strip_prefix("*.") {
+                    target_host.ends_with(suffix) && target_host.len() > suffix.len()
+                } else {
+                    // Exact host match (port part is ignored for scope check)
+                    target_host == pattern_host
+                }
+            });
+            if !allowed {
+                return Err(format!(
+                    "Scope constraint denied: address '{}' is not in allowed hosts",
+                    address
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A module function callable from Shape (synchronous).
 ///
 /// Takes a slice of ValueWord arguments plus a `ModuleContext` that provides

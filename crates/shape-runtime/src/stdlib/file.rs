@@ -26,11 +26,17 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
         let fs = Arc::clone(&fs);
         module.add_function_with_schema(
             "read_text",
-            move |args: &[ValueWord], _ctx: &ModuleContext| {
+            move |args: &[ValueWord], ctx: &ModuleContext| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
                     .ok_or_else(|| "file.read_text() requires a path string".to_string())?;
+
+                crate::module_exports::check_fs_permission(
+                    ctx,
+                    shape_abi_v1::Permission::FsRead,
+                    path_str,
+                )?;
 
                 let bytes = fs
                     .read(Path::new(path_str))
@@ -60,11 +66,17 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
         let fs = Arc::clone(&fs);
         module.add_function_with_schema(
             "write_text",
-            move |args: &[ValueWord], _ctx: &ModuleContext| {
+            move |args: &[ValueWord], ctx: &ModuleContext| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
                     .ok_or_else(|| "file.write_text() requires a path string".to_string())?;
+
+                crate::module_exports::check_fs_permission(
+                    ctx,
+                    shape_abi_v1::Permission::FsWrite,
+                    path_str,
+                )?;
 
                 let content = args
                     .get(1)
@@ -104,11 +116,17 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
         let fs = Arc::clone(&fs);
         module.add_function_with_schema(
             "read_lines",
-            move |args: &[ValueWord], _ctx: &ModuleContext| {
+            move |args: &[ValueWord], ctx: &ModuleContext| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
                     .ok_or_else(|| "file.read_lines() requires a path string".to_string())?;
+
+                crate::module_exports::check_fs_permission(
+                    ctx,
+                    shape_abi_v1::Permission::FsRead,
+                    path_str,
+                )?;
 
                 let bytes = fs
                     .read(Path::new(path_str))
@@ -143,11 +161,17 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
         let fs = Arc::clone(&fs);
         module.add_function_with_schema(
             "append",
-            move |args: &[ValueWord], _ctx: &ModuleContext| {
+            move |args: &[ValueWord], ctx: &ModuleContext| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
                     .ok_or_else(|| "file.append() requires a path string".to_string())?;
+
+                crate::module_exports::check_fs_permission(
+                    ctx,
+                    shape_abi_v1::Permission::FsWrite,
+                    path_str,
+                )?;
 
                 let content = args
                     .get(1)
@@ -188,11 +212,17 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
         let fs = Arc::clone(&fs);
         module.add_function_with_schema(
             "read_bytes",
-            move |args: &[ValueWord], _ctx: &ModuleContext| {
+            move |args: &[ValueWord], ctx: &ModuleContext| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
                     .ok_or_else(|| "file.read_bytes() requires a path string".to_string())?;
+
+                crate::module_exports::check_fs_permission(
+                    ctx,
+                    shape_abi_v1::Permission::FsRead,
+                    path_str,
+                )?;
 
                 let bytes = fs
                     .read(Path::new(path_str))
@@ -225,11 +255,17 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
         let fs = Arc::clone(&fs);
         module.add_function_with_schema(
             "write_bytes",
-            move |args: &[ValueWord], _ctx: &ModuleContext| {
+            move |args: &[ValueWord], ctx: &ModuleContext| {
                 let path_str = args
                     .first()
                     .and_then(|a| a.as_str())
                     .ok_or_else(|| "file.write_bytes() requires a path string".to_string())?;
+
+                crate::module_exports::check_fs_permission(
+                    ctx,
+                    shape_abi_v1::Permission::FsWrite,
+                    path_str,
+                )?;
 
                 let arr = args
                     .get(1)

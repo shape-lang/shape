@@ -307,7 +307,8 @@ pub fn create_crypto_module() -> ModuleExports {
     // crypto.random_bytes(n: int) -> string
     module.add_function_with_schema(
         "random_bytes",
-        |args: &[ValueWord], _ctx: &ModuleContext| {
+        |args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Random)?;
             use rand::RngCore;
 
             let n = args
@@ -339,7 +340,8 @@ pub fn create_crypto_module() -> ModuleExports {
     // crypto.ed25519_generate_keypair() -> object
     module.add_function_with_schema(
         "ed25519_generate_keypair",
-        |_args: &[ValueWord], _ctx: &ModuleContext| {
+        |_args: &[ValueWord], ctx: &ModuleContext| {
+            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Random)?;
             use rand::RngCore;
 
             let mut secret = [0u8; 32];

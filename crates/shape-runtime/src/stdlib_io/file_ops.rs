@@ -45,15 +45,15 @@ pub fn io_open(
         .unwrap_or("r")
         .to_string();
 
-    // Permission check depends on the mode
+    // Permission check depends on the mode (with scope constraints)
     match mode.as_str() {
-        "r" => crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?,
+        "r" => crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, &path)?,
         "w" | "a" => {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsWrite)?
+            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, &path)?
         }
         "rw" => {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsWrite)?;
+            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, &path)?;
+            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, &path)?;
         }
         _ => {} // invalid mode will be caught below
     }
@@ -263,11 +263,11 @@ pub fn io_exists(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.exists() requires a string path".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
     Ok(ValueWord::from_bool(std::path::Path::new(path).exists()))
 }
 
@@ -276,11 +276,11 @@ pub fn io_stat(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.stat() requires a string path".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
 
     let metadata = std::fs::metadata(path).map_err(|e| format!("io.stat(\"{}\"): {}", path, e))?;
 
@@ -313,11 +313,11 @@ pub fn io_is_file(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.is_file() requires a string path".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
     Ok(ValueWord::from_bool(std::path::Path::new(path).is_file()))
 }
 
@@ -326,11 +326,11 @@ pub fn io_is_dir(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.is_dir() requires a string path".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
     Ok(ValueWord::from_bool(std::path::Path::new(path).is_dir()))
 }
 
@@ -339,11 +339,11 @@ pub fn io_mkdir(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsWrite)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.mkdir() requires a string path".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, path)?;
 
     let recursive = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
 
@@ -360,11 +360,11 @@ pub fn io_remove(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsWrite)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.remove() requires a string path".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, path)?;
 
     let p = std::path::Path::new(path);
     if p.is_dir() {
@@ -380,7 +380,6 @@ pub fn io_rename(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsWrite)?;
     let old = args
         .first()
         .and_then(|a| a.as_str())
@@ -389,6 +388,9 @@ pub fn io_rename(
         .get(1)
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.rename() requires new path as second argument".to_string())?;
+    // Both old and new paths need write permission
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, old)?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, new)?;
 
     std::fs::rename(old, new).map_err(|e| format!("io.rename(\"{}\", \"{}\"): {}", old, new, e))?;
     Ok(ValueWord::unit())
@@ -399,11 +401,11 @@ pub fn io_read_dir(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.read_dir() requires a string path".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
 
     let entries: Vec<ValueWord> = std::fs::read_dir(path)
         .map_err(|e| format!("io.read_dir(\"{}\"): {}", path, e))?
@@ -424,11 +426,11 @@ pub fn io_read_gzip(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.read_gzip() requires a string path argument".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
 
     let file =
         std::fs::File::open(path).map_err(|e| format!("io.read_gzip(\"{}\"): {}", path, e))?;
@@ -449,11 +451,11 @@ pub fn io_write_gzip(
     args: &[ValueWord],
     ctx: &crate::module_exports::ModuleContext,
 ) -> Result<ValueWord, String> {
-    crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsWrite)?;
     let path = args
         .first()
         .and_then(|a| a.as_str())
         .ok_or_else(|| "io.write_gzip() requires a string path argument".to_string())?;
+    crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, path)?;
 
     let data = args
         .get(1)
