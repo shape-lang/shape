@@ -172,7 +172,7 @@ pub @force_int() fn connect(const uri) { 1 }
         let has_specialization = bytecode
             .expanded_function_defs
             .keys()
-            .any(|name| name.starts_with("connect__const_"));
+            .any(|name| name.contains("connect__const_"));
         assert!(
             has_specialization,
             "namespace call should trigger const specialization for imported module function"
@@ -226,7 +226,7 @@ pub @db_schema() fn connect(const uri) { 1 }
         let has_specialization = bytecode
             .expanded_function_defs
             .keys()
-            .any(|name| name.starts_with("connect__const_"));
+            .any(|name| name.contains("connect__const_"));
         assert!(
             has_specialization,
             "namespace call should trigger const specialization for set-return-expr handler"
@@ -284,7 +284,7 @@ pub @db_schema() fn connect(const uri) { 1 }
         let has_specialization = bytecode
             .expanded_function_defs
             .keys()
-            .any(|name| name.starts_with("connect__const_"));
+            .any(|name| name.contains("connect__const_"));
         assert!(
             has_specialization,
             "comptime helper function should be callable from annotation handler"

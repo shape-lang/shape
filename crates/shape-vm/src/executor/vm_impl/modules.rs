@@ -184,17 +184,23 @@ impl VirtualMachine {
             .collect();
 
         for (module_name, sync_exports, async_exports, source_exports) in module_data {
-            // Find the module_binding index for this module name
+            // Find the module_binding index for this module name.
+            // Prefer the hidden native binding (`__imported_module__::X`) when it exists,
+            // so that compiled artifact code referencing the hidden binding gets the
+            // native module object. The plain binding is filled by the compiled module
+            // declaration at runtime.
+            let hidden_name =
+                crate::compiler::BytecodeCompiler::hidden_native_module_binding_name(&module_name);
             let binding_idx = self
                 .program
                 .module_binding_names
                 .iter()
-                .position(|binding_name| {
-                    binding_name == &module_name
-                        || binding_name
-                            == &crate::compiler::BytecodeCompiler::hidden_native_module_binding_name(
-                                &module_name,
-                            )
+                .position(|binding_name| binding_name == &hidden_name)
+                .or_else(|| {
+                    self.program
+                        .module_binding_names
+                        .iter()
+                        .position(|binding_name| binding_name == &module_name)
                 });
 
             if let Some(idx) = binding_idx {

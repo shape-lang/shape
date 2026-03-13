@@ -438,6 +438,15 @@ impl BytecodeCompiler {
                     ),
                     location: None,
                 })?;
+        // For module-scoped functions (e.g. myext::connect), temporarily push
+        // the module path so annotation name resolution can find annotations
+        // that were compiled within that module (e.g. myext::force_int).
+        let module_prefix = name
+            .rsplit_once("::")
+            .map(|(prefix, _)| prefix.to_string());
+        if let Some(ref prefix) = module_prefix {
+            self.module_scope_stack.push(prefix.clone());
+        }
         let has_comptime_handlers = template_def.annotations.iter().any(|ann| {
             self.lookup_compiled_annotation(ann)
                 .map(|(_, compiled)| {
@@ -446,6 +455,9 @@ impl BytecodeCompiler {
                 })
                 .unwrap_or(false)
         });
+        if module_prefix.is_some() {
+            self.module_scope_stack.pop();
+        }
         if !has_comptime_handlers {
             return Ok(None);
         }
@@ -534,7 +546,16 @@ impl BytecodeCompiler {
         self.const_specializations
             .insert(specialization_key, specialization_idx);
 
-        if let Err(err) = self.compile_function(&specialized_def) {
+        // Push module scope for the specialization so annotation resolution
+        // can find annotations defined in the original function's module.
+        if let Some(ref prefix) = module_prefix {
+            self.module_scope_stack.push(prefix.clone());
+        }
+        let compile_result = self.compile_function(&specialized_def);
+        if module_prefix.is_some() {
+            self.module_scope_stack.pop();
+        }
+        if let Err(err) = compile_result {
             self.specialization_const_bindings
                 .remove(&specialization_name);
             return Err(err);
@@ -1780,10 +1801,19 @@ impl BytecodeCompiler {
             });
         }
 
+        // For native module exports, use a hidden binding so that the native
+        // module object is not clobbered when a Shape artifact module with the
+        // same name is compiled (the module decl overwrites the regular binding).
+        let effective_binding_name = if self.is_native_module_export(namespace_name, method) {
+            self.ensure_hidden_native_module_binding(namespace_name)
+        } else {
+            binding_name.to_string()
+        };
+
         let binding_idx =
             *self
                 .module_bindings
-                .get(binding_name)
+                .get(&effective_binding_name)
                 .ok_or_else(|| ShapeError::SemanticError {
                     message: format!(
                         "module namespace '{}' is not bound in the current scope",

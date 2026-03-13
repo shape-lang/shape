@@ -402,6 +402,19 @@ impl BytecodeCompiler {
             .collect();
         let mut comptime_helpers = self.collect_comptime_helpers();
         comptime_helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
+        // For module-scoped helpers (e.g. "myext::schema_for"), add a bare-name
+        // alias so that handler code written inside the module can call them
+        // without qualification (e.g. "schema_for(uri)").
+        let bare_aliases: Vec<_> = comptime_helpers
+            .iter()
+            .filter_map(|def| {
+                let (_, bare) = def.name.rsplit_once("::")?;
+                let mut alias = def.clone();
+                alias.name = bare.to_string();
+                Some(alias)
+            })
+            .collect();
+        comptime_helpers.extend(bare_aliases);
         comptime_helpers.sort_by(|a, b| a.name.cmp(&b.name));
         comptime_helpers.dedup_by(|a, b| a.name == b.name);
 
@@ -440,8 +453,17 @@ impl BytecodeCompiler {
             if !visited.insert(name.clone()) {
                 continue;
             }
-            let Some(def) = self.function_defs.get(&name) else {
-                continue;
+            let def = if let Some(d) = self.function_defs.get(&name) {
+                d.clone()
+            } else {
+                // Try module-scoped lookup: for bare names like "schema_for",
+                // check "module::schema_for" using the current module scope stack.
+                let found = self.module_scope_stack.iter().rev().find_map(|module| {
+                    let scoped = Self::qualify_module_symbol(module, &name);
+                    self.function_defs.get(&scoped).cloned()
+                });
+                let Some(d) = found else { continue };
+                d
             };
             helpers.push(def.clone());
             for stmt in &def.body {
