@@ -650,8 +650,11 @@ impl BytecodeExecutor {
                                 // Module not found on disk — check if it's a native
                                 // extension module (json, file, io, state, etc.) which
                                 // has no Shape source and is handled at runtime.
+                                // Compare both full path and last segment (e.g. "crypto"
+                                // matches "std::core::crypto").
+                                let short_name = module_path.rsplit("::").next().unwrap_or(&module_path);
                                 let is_extension =
-                                    self.extensions.iter().any(|ext| ext.name == *module_path);
+                                    self.extensions.iter().any(|ext| ext.name == *module_path || ext.name == short_name);
                                 if is_extension {
                                     None
                                 } else {
@@ -715,8 +718,9 @@ impl BytecodeExecutor {
                         match loader.load_module(module_path) {
                             Ok(module) => Some(module.ast.clone()),
                             Err(_) => {
+                                let short_name = module_path.rsplit("::").next().unwrap_or(module_path);
                                 let is_extension =
-                                    self.extensions.iter().any(|ext| ext.name == *module_path);
+                                    self.extensions.iter().any(|ext| ext.name == *module_path || ext.name == short_name);
                                 if is_extension {
                                     None
                                 } else {

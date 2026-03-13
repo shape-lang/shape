@@ -32,6 +32,13 @@ pub struct BytecodeExecutor {
     /// Module loader for resolving file-based imports.
     /// When set, imports that don't match virtual modules are resolved via the loader.
     pub(crate) module_loader: Option<shape_runtime::module_loader::ModuleLoader>,
+    /// Optional permission set for compile-time capability checking.
+    /// When set, the compiler will deny imports that require permissions
+    /// not present in this set.
+    pub(crate) permission_set: Option<shape_abi_v1::PermissionSet>,
+    /// When true, the compiler allows `__intrinsic_*` calls from user code.
+    /// Used by test helpers that inline stdlib source as top-level code.
+    pub allow_internal_builtins: bool,
 }
 
 impl Default for BytecodeExecutor {
@@ -53,6 +60,8 @@ impl BytecodeExecutor {
             native_resolution_context: None,
             root_package_key: None,
             module_loader: None,
+            permission_set: None,
+            allow_internal_builtins: false,
         };
         executor.register_stdlib_modules();
 
@@ -232,6 +241,14 @@ impl BytecodeExecutor {
     pub fn clear_native_resolution_context(&mut self) {
         self.native_resolution_context = None;
         self.root_package_key = None;
+    }
+
+    /// Set the permission set for compile-time capability checking.
+    ///
+    /// When set, the compiler will deny imports that require permissions
+    /// not present in this set. Pass `None` to disable checking (default).
+    pub fn set_permission_set(&mut self, permissions: Option<shape_abi_v1::PermissionSet>) {
+        self.permission_set = permissions;
     }
 }
 
