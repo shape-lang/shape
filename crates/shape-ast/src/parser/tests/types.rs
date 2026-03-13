@@ -539,19 +539,29 @@ fn test_enum_constructor_expressions() {
                     ..
                 } => {
                     assert_eq!(enum_name, "Signal");
-                    assert!(variant == "Buy" || variant == "Limit" || variant == "Market");
+                    assert!(variant == "Buy" || variant == "Limit");
                     match (variant.as_str(), payload) {
                         ("Buy", crate::ast::EnumConstructorPayload::Unit) => {}
                         ("Limit", crate::ast::EnumConstructorPayload::Struct(fields)) => {
                             assert_eq!(fields.len(), 2);
                         }
-                        ("Market", crate::ast::EnumConstructorPayload::Tuple(fields)) => {
-                            assert_eq!(fields.len(), 2);
-                        }
                         _ => panic!("Unexpected payload for variant {}", variant),
                     }
                 }
-                other => panic!("Expected EnumConstructor, got {:?}", other),
+                // The parser can't distinguish tuple enum constructors from
+                // qualified function calls without type information, so
+                // Signal::Market(1, 2) parses as a QualifiedFunctionCall.
+                crate::ast::Expr::QualifiedFunctionCall {
+                    namespace,
+                    function,
+                    args,
+                    ..
+                } => {
+                    assert_eq!(namespace, "Signal");
+                    assert_eq!(function, "Market");
+                    assert_eq!(args.len(), 2);
+                }
+                other => panic!("Expected EnumConstructor or QualifiedFunctionCall, got {:?}", other),
             }
         }
     }
