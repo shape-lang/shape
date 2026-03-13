@@ -2646,7 +2646,7 @@ fn plus_one(x: int) -> int {
   x + 1
 }
 
-bridge.invoke_once(plus_one)
+bridge::invoke_once(plus_one)
 "#;
 
     let program = shape_ast::parser::parse_program(source).expect("parse");

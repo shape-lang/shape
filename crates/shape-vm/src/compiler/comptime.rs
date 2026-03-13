@@ -112,12 +112,11 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                 .map(|i| Expr::Identifier(format!("arg{}", i), Span::DUMMY))
                 .collect();
 
-            let body_expr = Expr::MethodCall {
-                receiver: Box::new(Expr::Identifier("__comptime__".to_string(), Span::DUMMY)),
-                method: (*target_method).to_string(),
+            let body_expr = Expr::QualifiedFunctionCall {
+                namespace: "__comptime__".to_string(),
+                function: (*target_method).to_string(),
                 args,
                 named_args: Vec::new(),
-                optional: false,
                 span: Span::DUMMY,
             };
 
@@ -1019,11 +1018,11 @@ mod tests {
         );
 
         // Parse a program that imports and calls the extension.
-        // Extension modules are available as module_bindings (e.g., mock_db.get_schema()).
+        // Extension modules are available as module_bindings (e.g., mock_db::get_schema()).
         // We need to register "mock_db" as a module_binding in the compiled program.
         let code = r#"
             use mock_db
-            mock_db.get_schema()
+            mock_db::get_schema()
         "#;
         let program = shape_ast::parser::parse_program(code).expect("parse");
 

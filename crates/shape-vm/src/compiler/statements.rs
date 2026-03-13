@@ -59,12 +59,11 @@ impl BytecodeCompiler {
         args: Vec<Expr>,
         span: Span,
     ) -> Result<()> {
-        let call = Expr::MethodCall {
-            receiver: Box::new(Expr::Identifier("__comptime__".to_string(), span)),
-            method: method.to_string(),
+        let call = Expr::QualifiedFunctionCall {
+            namespace: "__comptime__".to_string(),
+            function: method.to_string(),
             args,
             named_args: Vec::new(),
-            optional: false,
             span,
         };
         let prev = self.allow_internal_comptime_namespace;
@@ -845,7 +844,7 @@ impl BytecodeCompiler {
                     for (field_name, expr) in overrides {
                         let value = match expr {
                             Expr::Literal(Literal::Number(n), _) => ValueWord::from_f64(*n),
-                            Expr::Literal(Literal::Int(n), _) => ValueWord::from_f64(*n as f64),
+                            Expr::Literal(Literal::Int(n), _) => ValueWord::from_i64(*n),
                             Expr::Literal(Literal::String(s), _) => {
                                 ValueWord::from_string(Arc::new(s.clone()))
                             }
@@ -2099,7 +2098,7 @@ impl BytecodeCompiler {
                 let value = match default_expr {
                     Expr::Literal(Literal::Number(n), _) => shape_value::ValueWord::from_f64(*n),
                     Expr::Literal(Literal::Int(n), _) => {
-                        shape_value::ValueWord::from_f64(*n as f64)
+                        shape_value::ValueWord::from_i64(*n)
                     }
                     Expr::Literal(Literal::String(s), _) => {
                         shape_value::ValueWord::from_string(std::sync::Arc::new(s.clone()))
@@ -4168,7 +4167,7 @@ mod tests {
                     BASE * 2
                 }
             }
-            math.twice()
+            math::twice()
         "#;
 
         let program = parse_program(code).expect("Failed to parse");
@@ -4201,7 +4200,7 @@ mod tests {
             @synth_module()
             mod demo {}
 
-            demo.plus_two()
+            demo::plus_two()
         "#;
 
         let program = parse_program(code).expect("Failed to parse");
@@ -4230,7 +4229,7 @@ mod tests {
                 }
             }
 
-            demo.plus_two()
+            demo::plus_two()
         "#;
 
         let program = parse_program(code).expect("Failed to parse");
@@ -4263,7 +4262,7 @@ mod tests {
                 }
             }
 
-            demo.plus_two()
+            demo::plus_two()
         "#;
 
         let program = parse_program(code).expect("Failed to parse");
