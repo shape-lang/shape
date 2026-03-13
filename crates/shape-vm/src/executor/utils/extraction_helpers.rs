@@ -5,6 +5,47 @@
 
 use shape_value::{ArrayView, VMError, ValueWord};
 
+// ─── Arg-count and type-mismatch helpers ─────────────────────────────
+
+/// Check that `args` has at least `min` elements (receiver + arguments).
+///
+/// Returns `Ok(())` on success or a `VMError::RuntimeError` like
+/// `"Set.add requires an argument"` on failure.
+///
+/// `method_label` should be the human-readable method name used in the
+/// error message (e.g. `"Set.add"`).
+/// `hint` describes what is missing (e.g. `"an argument"`,
+/// `"a function argument"`, `"exactly 5 arguments"`).
+#[inline]
+pub(crate) fn check_arg_count(
+    args: &[ValueWord],
+    min: usize,
+    method_label: &str,
+    hint: &str,
+) -> Result<(), VMError> {
+    if args.len() < min {
+        Err(VMError::RuntimeError(format!(
+            "{} requires {}",
+            method_label, hint
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Produce a `VMError::RuntimeError` of the form
+/// `"<method> called on non-<expected_type> value"`.
+///
+/// This consolidates the ~77 occurrences of that pattern across the
+/// collection method handlers.
+#[inline]
+pub(crate) fn type_mismatch_error(method_name: &str, expected_type: &str) -> VMError {
+    VMError::RuntimeError(format!(
+        "{} called on non-{} value",
+        method_name, expected_type
+    ))
+}
+
 /// Extract a unified array view from the first element of `args`.
 /// Handles all array variants: generic Array, IntArray, FloatArray, BoolArray.
 #[inline]

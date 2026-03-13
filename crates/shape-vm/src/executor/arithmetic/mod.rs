@@ -207,8 +207,19 @@ impl VirtualMachine {
         }
     }
 
+    /// Dispatch a numeric binary operation with zero-check on the divisor.
+    ///
+    /// Shared implementation for div and mod: handles Int/Float/Decimal domain
+    /// dispatch, zero-check, int/float cross-coercion, and decimal promotion.
     #[inline(always)]
-    fn numeric_div_result(a: &ValueWord, b: &ValueWord) -> Result<Option<ValueWord>, VMError> {
+    fn dispatch_numeric_binary_with_zero_check(
+        a: &ValueWord,
+        b: &ValueWord,
+        op_name: &str,
+        int_op: impl FnOnce(i128, i128) -> Option<i128>,
+        float_op: impl Fn(f64, f64) -> f64,
+        decimal_op: impl FnOnce(rust_decimal::Decimal, rust_decimal::Decimal) -> rust_decimal::Decimal,
+    ) -> Result<Option<ValueWord>, VMError> {
         let a_num = match Self::numeric_domain(a) {
             Some(v) => v,
             None => return Ok(None),
@@ -222,53 +233,51 @@ impl VirtualMachine {
                 if bi == 0 {
                     return Err(VMError::DivisionByZero);
                 }
-                let out = ai
-                    .checked_div(bi)
-                    .ok_or_else(|| VMError::RuntimeError("Integer overflow in '/'".into()))?;
-                Self::integer_result_boxed(out, "/").map(Some)
+                let out = int_op(ai, bi)
+                    .ok_or_else(|| VMError::RuntimeError(format!("Integer overflow in '{}'", op_name)))?;
+                Self::integer_result_boxed(out, op_name).map(Some)
             }
             (NumericDomain::Float(af), NumericDomain::Float(bf)) => {
                 if bf == 0.0 {
                     return Err(VMError::DivisionByZero);
                 }
-                Ok(Some(ValueWord::from_f64(af / bf)))
+                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
             }
             (NumericDomain::Int(ai), NumericDomain::Float(bf)) => {
                 if bf == 0.0 {
                     return Err(VMError::DivisionByZero);
                 }
                 let af = Self::arith_i128_to_lossless_f64(ai)
-                    .ok_or_else(|| cannot_apply_without_cast("/", ai))?;
-                Ok(Some(ValueWord::from_f64(af / bf)))
+                    .ok_or_else(|| cannot_apply_without_cast(op_name, ai))?;
+                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
             }
             (NumericDomain::Float(af), NumericDomain::Int(bi)) => {
                 let bf = Self::arith_i128_to_lossless_f64(bi)
-                    .ok_or_else(|| cannot_apply_without_cast("/", bi))?;
+                    .ok_or_else(|| cannot_apply_without_cast(op_name, bi))?;
                 if bf == 0.0 {
                     return Err(VMError::DivisionByZero);
                 }
-                Ok(Some(ValueWord::from_f64(af / bf)))
+                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
             }
-            // Decimal division
             (NumericDomain::Decimal(ad), NumericDomain::Decimal(bd)) => {
                 if bd.is_zero() {
                     return Err(VMError::DivisionByZero);
                 }
-                Ok(Some(ValueWord::from_decimal(ad / bd)))
+                Ok(Some(ValueWord::from_decimal(decimal_op(ad, bd))))
             }
             (NumericDomain::Decimal(ad), NumericDomain::Int(bi)) => {
                 let bd = rust_decimal::Decimal::from_i128_with_scale(bi, 0);
                 if bd.is_zero() {
                     return Err(VMError::DivisionByZero);
                 }
-                Ok(Some(ValueWord::from_decimal(ad / bd)))
+                Ok(Some(ValueWord::from_decimal(decimal_op(ad, bd))))
             }
             (NumericDomain::Int(ai), NumericDomain::Decimal(bd)) => {
                 if bd.is_zero() {
                     return Err(VMError::DivisionByZero);
                 }
                 let ad = rust_decimal::Decimal::from_i128_with_scale(ai, 0);
-                Ok(Some(ValueWord::from_decimal(ad / bd)))
+                Ok(Some(ValueWord::from_decimal(decimal_op(ad, bd))))
             }
             (NumericDomain::Decimal(ad), NumericDomain::Float(bf)) => {
                 if bf == 0.0 {
@@ -276,7 +285,7 @@ impl VirtualMachine {
                 }
                 use rust_decimal::prelude::ToPrimitive;
                 let af = ad.to_f64().unwrap_or(0.0);
-                Ok(Some(ValueWord::from_f64(af / bf)))
+                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
             }
             (NumericDomain::Float(af), NumericDomain::Decimal(bd)) => {
                 use rust_decimal::prelude::ToPrimitive;
@@ -284,91 +293,29 @@ impl VirtualMachine {
                 if bf == 0.0 {
                     return Err(VMError::DivisionByZero);
                 }
-                Ok(Some(ValueWord::from_f64(af / bf)))
+                Ok(Some(ValueWord::from_f64(float_op(af, bf))))
             }
         }
     }
 
     #[inline(always)]
+    fn numeric_div_result(a: &ValueWord, b: &ValueWord) -> Result<Option<ValueWord>, VMError> {
+        Self::dispatch_numeric_binary_with_zero_check(
+            a, b, "/",
+            |a, b| a.checked_div(b),
+            |a, b| a / b,
+            |a, b| a / b,
+        )
+    }
+
+    #[inline(always)]
     fn numeric_mod_result(a: &ValueWord, b: &ValueWord) -> Result<Option<ValueWord>, VMError> {
-        let a_num = match Self::numeric_domain(a) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let b_num = match Self::numeric_domain(b) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        match (a_num, b_num) {
-            (NumericDomain::Int(ai), NumericDomain::Int(bi)) => {
-                if bi == 0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                let out = ai
-                    .checked_rem(bi)
-                    .ok_or_else(|| VMError::RuntimeError("Integer overflow in '%'".into()))?;
-                Self::integer_result_boxed(out, "%").map(Some)
-            }
-            (NumericDomain::Float(af), NumericDomain::Float(bf)) => {
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_f64(af % bf)))
-            }
-            (NumericDomain::Int(ai), NumericDomain::Float(bf)) => {
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                let af = Self::arith_i128_to_lossless_f64(ai)
-                    .ok_or_else(|| cannot_apply_without_cast("%", ai))?;
-                Ok(Some(ValueWord::from_f64(af % bf)))
-            }
-            (NumericDomain::Float(af), NumericDomain::Int(bi)) => {
-                let bf = Self::arith_i128_to_lossless_f64(bi)
-                    .ok_or_else(|| cannot_apply_without_cast("%", bi))?;
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_f64(af % bf)))
-            }
-            // Decimal modulo
-            (NumericDomain::Decimal(ad), NumericDomain::Decimal(bd)) => {
-                if bd.is_zero() {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_decimal(ad % bd)))
-            }
-            (NumericDomain::Decimal(ad), NumericDomain::Int(bi)) => {
-                let bd = rust_decimal::Decimal::from_i128_with_scale(bi, 0);
-                if bd.is_zero() {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_decimal(ad % bd)))
-            }
-            (NumericDomain::Int(ai), NumericDomain::Decimal(bd)) => {
-                if bd.is_zero() {
-                    return Err(VMError::DivisionByZero);
-                }
-                let ad = rust_decimal::Decimal::from_i128_with_scale(ai, 0);
-                Ok(Some(ValueWord::from_decimal(ad % bd)))
-            }
-            (NumericDomain::Decimal(ad), NumericDomain::Float(bf)) => {
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                use rust_decimal::prelude::ToPrimitive;
-                let af = ad.to_f64().unwrap_or(0.0);
-                Ok(Some(ValueWord::from_f64(af % bf)))
-            }
-            (NumericDomain::Float(af), NumericDomain::Decimal(bd)) => {
-                use rust_decimal::prelude::ToPrimitive;
-                let bf = bd.to_f64().unwrap_or(0.0);
-                if bf == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                Ok(Some(ValueWord::from_f64(af % bf)))
-            }
-        }
+        Self::dispatch_numeric_binary_with_zero_check(
+            a, b, "%",
+            |a, b| a.checked_rem(b),
+            |a, b| a % b,
+            |a, b| a % b,
+        )
     }
 
     #[inline(always)]
@@ -762,140 +709,8 @@ impl VirtualMachine {
         Ok(())
     }
 
-    // ---------------------------------------------------------------
-    // Trusted typed opcodes (compiler-proved types, no runtime guard)
-    // ---------------------------------------------------------------
-
-    /// Execute trusted arithmetic opcodes. These skip all runtime type checks
-    /// because the compiler has proved both operands have matching types via
-    /// StorageHint analysis. In debug builds, debug_assert guards still fire.
-    #[inline(always)]
-    pub(in crate::executor) fn exec_trusted_arithmetic(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
-        if let Some(ref mut metrics) = self.metrics {
-            metrics.record_trusted_op();
-        }
-        use OpCode::*;
-        match instruction.opcode {
-            AddIntTrusted => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                debug_assert!(
-                    a.is_i64() && b.is_i64(),
-                    "Trusted AddInt invariant violated"
-                );
-                let ai = unsafe { a.as_i64_unchecked() };
-                let bi = unsafe { b.as_i64_unchecked() };
-                match ai.checked_add(bi) {
-                    Some(result) if fits_i48(result) => {
-                        self.push_vw(ValueWord::from_i64(result))?
-                    }
-                    _ => self.push_vw(ValueWord::from_f64(ai as f64 + bi as f64))?,
-                }
-            }
-            SubIntTrusted => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                debug_assert!(
-                    a.is_i64() && b.is_i64(),
-                    "Trusted SubInt invariant violated"
-                );
-                let ai = unsafe { a.as_i64_unchecked() };
-                let bi = unsafe { b.as_i64_unchecked() };
-                match ai.checked_sub(bi) {
-                    Some(result) if fits_i48(result) => {
-                        self.push_vw(ValueWord::from_i64(result))?
-                    }
-                    _ => self.push_vw(ValueWord::from_f64(ai as f64 - bi as f64))?,
-                }
-            }
-            MulIntTrusted => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                debug_assert!(
-                    a.is_i64() && b.is_i64(),
-                    "Trusted MulInt invariant violated"
-                );
-                let ai = unsafe { a.as_i64_unchecked() };
-                let bi = unsafe { b.as_i64_unchecked() };
-                match ai.checked_mul(bi) {
-                    Some(result) if fits_i48(result) => {
-                        self.push_vw(ValueWord::from_i64(result))?
-                    }
-                    _ => self.push_vw(ValueWord::from_f64(ai as f64 * bi as f64))?,
-                }
-            }
-            DivIntTrusted => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                debug_assert!(
-                    a.is_i64() && b.is_i64(),
-                    "Trusted DivInt invariant violated"
-                );
-                let bi = unsafe { b.as_i64_unchecked() };
-                if bi == 0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                let ai = unsafe { a.as_i64_unchecked() };
-                self.push_vw(ValueWord::from_i64(ai / bi))?;
-            }
-            AddNumberTrusted => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                debug_assert!(
-                    a.as_number_coerce().is_some() && b.as_number_coerce().is_some(),
-                    "Trusted AddNumber invariant violated"
-                );
-                self.push_vw(ValueWord::from_f64(unsafe {
-                    a.as_f64_unchecked() + b.as_f64_unchecked()
-                }))?;
-            }
-            SubNumberTrusted => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                debug_assert!(
-                    a.as_number_coerce().is_some() && b.as_number_coerce().is_some(),
-                    "Trusted SubNumber invariant violated"
-                );
-                self.push_vw(ValueWord::from_f64(unsafe {
-                    a.as_f64_unchecked() - b.as_f64_unchecked()
-                }))?;
-            }
-            MulNumberTrusted => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                debug_assert!(
-                    a.as_number_coerce().is_some() && b.as_number_coerce().is_some(),
-                    "Trusted MulNumber invariant violated"
-                );
-                self.push_vw(ValueWord::from_f64(unsafe {
-                    a.as_f64_unchecked() * b.as_f64_unchecked()
-                }))?;
-            }
-            DivNumberTrusted => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                debug_assert!(
-                    a.as_number_coerce().is_some() && b.as_number_coerce().is_some(),
-                    "Trusted DivNumber invariant violated"
-                );
-                let divisor = unsafe { b.as_f64_unchecked() };
-                if divisor == 0.0 {
-                    return Err(VMError::DivisionByZero);
-                }
-                self.push_vw(ValueWord::from_f64(
-                    unsafe { a.as_f64_unchecked() } / divisor,
-                ))?;
-            }
-            _ => unreachable!(
-                "exec_trusted_arithmetic called with non-trusted opcode: {:?}",
-                instruction.opcode
-            ),
-        }
-        Ok(())
-    }
+    // NOTE: exec_trusted_arithmetic was removed — trusted arithmetic opcodes
+    // (AddIntTrusted, etc.) were consolidated into the typed variants.
 
     // ---------------------------------------------------------------
     // Compact typed opcodes (ABI-stable, width-parameterised)
@@ -1198,6 +1013,51 @@ impl VirtualMachine {
         }
     }
 
+    /// Try the arithmetic IC fast path for a binary operation.
+    ///
+    /// If the feedback vector shows a monomorphic I48+I48 or F64+F64 pattern
+    /// and the stack values match, execute the operation directly without
+    /// going through the full generic dispatch. Returns `Some(())` on hit
+    /// (result already pushed), `None` on miss.
+    #[inline(always)]
+    fn try_arithmetic_ic_fast_path(
+        &mut self,
+        i48_op: unsafe fn(&ValueWord, &ValueWord) -> ValueWord,
+        f64_op: fn(f64, f64) -> f64,
+    ) -> Result<Option<()>, VMError> {
+        use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
+        use shape_value::NanTag;
+
+        let hint = arithmetic_ic_check(self, self.ip);
+        if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {
+            let b = &self.stack[self.sp - 1];
+            let a = &self.stack[self.sp - 2];
+            if a.is_i64() && b.is_i64() {
+                let result = unsafe { i48_op(a, b) };
+                self.sp -= 2;
+                let ip = self.ip;
+                if let Some(fv) = self.current_feedback_vector() {
+                    fv.record_arithmetic(ip, NanTag::I48 as u8, NanTag::I48 as u8);
+                }
+                self.push_vw(result)?;
+                return Ok(Some(()));
+            }
+        } else if hint == ArithmeticIcHint::BothF64 && self.sp >= 2 {
+            let b = &self.stack[self.sp - 1];
+            let a = &self.stack[self.sp - 2];
+            if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+                self.sp -= 2;
+                let ip = self.ip;
+                if let Some(fv) = self.current_feedback_vector() {
+                    fv.record_arithmetic(ip, NanTag::F64 as u8, NanTag::F64 as u8);
+                }
+                self.push_vw(ValueWord::from_f64(f64_op(af, bf)))?;
+                return Ok(Some(()));
+            }
+        }
+        Ok(None)
+    }
+
     #[inline(always)]
     pub(in crate::executor) fn exec_arithmetic(
         &mut self,
@@ -1207,40 +1067,12 @@ impl VirtualMachine {
         match instruction.opcode {
             Add => {
                 use shape_value::NanTag;
-                // IC fast path: if monomorphic I48+I48 or F64+F64, try typed fast path
-                // before the full generic dispatch.
-                {
-                    use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
-                    let hint = arithmetic_ic_check(self, self.ip);
-                    if hint == ArithmeticIcHint::BothI48 {
-                        // Peek at stack top two values without popping
-                        if self.sp >= 2 {
-                            let b = &self.stack[self.sp - 1];
-                            let a = &self.stack[self.sp - 2];
-                            if a.is_i64() && b.is_i64() {
-                                let result = unsafe { ValueWord::add_i64(a, b) };
-                                self.sp -= 2;
-                                let ip = self.ip;
-                                if let Some(fv) = self.current_feedback_vector() {
-                                    fv.record_arithmetic(ip, NanTag::I48 as u8, NanTag::I48 as u8);
-                                }
-                                return self.push_vw(result);
-                            }
-                        }
-                    } else if hint == ArithmeticIcHint::BothF64 {
-                        if self.sp >= 2 {
-                            let b = &self.stack[self.sp - 1];
-                            let a = &self.stack[self.sp - 2];
-                            if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
-                                self.sp -= 2;
-                                let ip = self.ip;
-                                if let Some(fv) = self.current_feedback_vector() {
-                                    fv.record_arithmetic(ip, NanTag::F64 as u8, NanTag::F64 as u8);
-                                }
-                                return self.push_vw(ValueWord::from_f64(af + bf));
-                            }
-                        }
-                    }
+                // IC fast path for Add
+                if self.try_arithmetic_ic_fast_path(
+                    ValueWord::add_i64,
+                    |a, b| a + b,
+                )?.is_some() {
+                    return Ok(());
                 }
                 // Generic path: pop, unwrap annotations, full dispatch.
                 let b_nb = unwrap_annotated(self.pop_vw()?);
@@ -1730,33 +1562,11 @@ impl VirtualMachine {
             Sub => {
                 use shape_value::NanTag;
                 // IC fast path for Sub
-                {
-                    use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
-                    let hint = arithmetic_ic_check(self, self.ip);
-                    if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {
-                        let b = &self.stack[self.sp - 1];
-                        let a = &self.stack[self.sp - 2];
-                        if a.is_i64() && b.is_i64() {
-                            let result = unsafe { ValueWord::sub_i64(a, b) };
-                            self.sp -= 2;
-                            let ip = self.ip;
-                            if let Some(fv) = self.current_feedback_vector() {
-                                fv.record_arithmetic(ip, NanTag::I48 as u8, NanTag::I48 as u8);
-                            }
-                            return self.push_vw(result);
-                        }
-                    } else if hint == ArithmeticIcHint::BothF64 && self.sp >= 2 {
-                        let b = &self.stack[self.sp - 1];
-                        let a = &self.stack[self.sp - 2];
-                        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
-                            self.sp -= 2;
-                            let ip = self.ip;
-                            if let Some(fv) = self.current_feedback_vector() {
-                                fv.record_arithmetic(ip, NanTag::F64 as u8, NanTag::F64 as u8);
-                            }
-                            return self.push_vw(ValueWord::from_f64(af - bf));
-                        }
-                    }
+                if self.try_arithmetic_ic_fast_path(
+                    ValueWord::sub_i64,
+                    |a, b| a - b,
+                )?.is_some() {
+                    return Ok(());
                 }
                 let b_nb = unwrap_annotated(self.pop_vw()?);
                 let a_nb = unwrap_annotated(self.pop_vw()?);
@@ -1990,33 +1800,11 @@ impl VirtualMachine {
             Mul => {
                 use shape_value::NanTag;
                 // IC fast path for Mul
-                {
-                    use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
-                    let hint = arithmetic_ic_check(self, self.ip);
-                    if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {
-                        let b = &self.stack[self.sp - 1];
-                        let a = &self.stack[self.sp - 2];
-                        if a.is_i64() && b.is_i64() {
-                            let result = unsafe { ValueWord::mul_i64(a, b) };
-                            self.sp -= 2;
-                            let ip = self.ip;
-                            if let Some(fv) = self.current_feedback_vector() {
-                                fv.record_arithmetic(ip, NanTag::I48 as u8, NanTag::I48 as u8);
-                            }
-                            return self.push_vw(result);
-                        }
-                    } else if hint == ArithmeticIcHint::BothF64 && self.sp >= 2 {
-                        let b = &self.stack[self.sp - 1];
-                        let a = &self.stack[self.sp - 2];
-                        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
-                            self.sp -= 2;
-                            let ip = self.ip;
-                            if let Some(fv) = self.current_feedback_vector() {
-                                fv.record_arithmetic(ip, NanTag::F64 as u8, NanTag::F64 as u8);
-                            }
-                            return self.push_vw(ValueWord::from_f64(af * bf));
-                        }
-                    }
+                if self.try_arithmetic_ic_fast_path(
+                    ValueWord::mul_i64,
+                    |a, b| a * b,
+                )?.is_some() {
+                    return Ok(());
                 }
                 let b_nb = unwrap_annotated(self.pop_vw()?);
                 let a_nb = unwrap_annotated(self.pop_vw()?);

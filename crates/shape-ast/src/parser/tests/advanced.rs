@@ -665,7 +665,7 @@ pub @warmup(period * 3) fn adx(high, low, close, period = 14) {
 #[test]
 fn test_parse_trend_file_full() {
     // Read the actual trend.shape file
-    let content = include_str!("../../../../shape-core/stdlib/finance/indicators/trend.shape");
+    let content = include_str!("../../../../shape-runtime/stdlib-src/finance/indicators/trend.shape");
     let result = parse_program_helper(content);
     assert!(
         result.is_ok(),

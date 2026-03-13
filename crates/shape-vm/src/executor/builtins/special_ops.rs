@@ -831,34 +831,6 @@ impl VirtualMachine {
         }
     }
 
-    /// Extract field name→value map from a typed object row.
-    fn extract_row_field_names(
-        &self,
-        row: &ValueWord,
-    ) -> Result<std::collections::HashMap<String, ValueWord>, VMError> {
-        use crate::executor::objects::object_creation::read_slot_nb;
-
-        if let Some((schema_id, slots, heap_mask)) = row.as_typed_object() {
-            let sid = schema_id as u32;
-            if let Some(schema) = self.lookup_schema(sid) {
-                let mut map = std::collections::HashMap::with_capacity(schema.fields.len());
-                for field_def in &schema.fields {
-                    let val = read_slot_nb(
-                        slots,
-                        field_def.index as usize,
-                        heap_mask,
-                        Some(&field_def.field_type),
-                    );
-                    map.insert(field_def.name.clone(), val);
-                }
-                return Ok(map);
-            }
-        }
-        // Fall back to runtime schema
-        shape_runtime::type_schema::typed_object_to_hashmap_nb(row)
-            .ok_or_else(|| VMError::RuntimeError("Cannot extract fields from row".to_string()))
-    }
-
     /// Extract fields from a row (uses VM schema or runtime fallback).
     fn extract_row_fields(
         &self,
@@ -883,6 +855,15 @@ impl VirtualMachine {
             }
         }
         shape_runtime::type_schema::typed_object_to_hashmap_nb(row)
+    }
+
+    /// Extract field name→value map from a typed object row (error on failure).
+    fn extract_row_field_names(
+        &self,
+        row: &ValueWord,
+    ) -> Result<std::collections::HashMap<String, ValueWord>, VMError> {
+        self.extract_row_fields(row)
+            .ok_or_else(|| VMError::RuntimeError("Cannot extract fields from row".to_string()))
     }
 
     /// ControlFold: Fold operation with accumulator

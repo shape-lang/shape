@@ -1,14 +1,29 @@
 //! Bidirectional Type Checking
 //!
 //! Implements bidirectional type checking for improved type inference,
-//! especially for function expressions and higher-order functions where expected
-//! types can guide parameter type inference.
+//! especially for closure expressions passed to higher-order functions
+//! where the expected parameter types can be propagated inward.
 //!
 //! ## Check Modes
 //!
-//! - `Infer`: No expected type, purely synthesize
-//! - `Check(Type)`: Check against expected type
-//! - `Synth(Type)`: Synthesize with hint (soft constraint)
+//! - **`Infer`** -- No expected type; purely synthesise from the expression.
+//! - **`Check(Type)`** -- Hard constraint: the expression *must* have this
+//!   type. Emitted for explicitly annotated bindings and return positions.
+//!   A mismatch is a type error.
+//! - **`Synth(Type)`** -- Soft hint: the expression is *expected* to have
+//!   this type but may refine it. Used when propagating closure parameter
+//!   types inferred from generic method signatures (e.g. the element type
+//!   `T` from `Vec<T>.map(fn(T) -> U) -> Vec<U>`).
+//!
+//! ## Flow
+//!
+//! `check_expr` dispatches on the mode:
+//! - `Infer` falls through to `infer_expr` (pure synthesis).
+//! - `Check` calls `check_against`, which infers the expression and then
+//!   emits an equality constraint between inferred and expected types.
+//! - `Synth` calls `synthesize_with_hint`, which infers the expression,
+//!   emits the constraint, and returns the inferred type (not the hint)
+//!   so downstream inference stays precise.
 
 use super::TypeInferenceEngine;
 use crate::type_system::*;
@@ -202,7 +217,7 @@ impl TypeInferenceEngine {
             } else if let Some(ann) = &param.type_annotation {
                 Type::Concrete(ann.clone())
             } else {
-                Type::Variable(TypeVar::fresh())
+                Type::fresh_var()
             };
 
             // Define all identifiers from the pattern
@@ -237,7 +252,7 @@ impl TypeInferenceEngine {
                 } else if let Some(ann) = &p.type_annotation {
                     Type::Concrete(ann.clone())
                 } else {
-                    Type::Variable(TypeVar::fresh())
+                    Type::fresh_var()
                 }
             })
             .collect();
@@ -263,7 +278,7 @@ impl TypeInferenceEngine {
             let param_type = if let Some(ann) = &param.type_annotation {
                 Type::Concrete(ann.clone())
             } else {
-                Type::Variable(TypeVar::fresh())
+                Type::fresh_var()
             };
 
             // Define all identifiers from the pattern

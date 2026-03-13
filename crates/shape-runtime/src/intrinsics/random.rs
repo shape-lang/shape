@@ -16,7 +16,10 @@ thread_local! {
 }
 
 /// Access the shared thread-local RNG.
-pub(crate) fn with_rng<F, R>(f: F) -> R
+///
+/// Public so that shape-vm can share the same RNG state when delegating
+/// random/distribution/stochastic intrinsics to the runtime.
+pub fn with_rng<F, R>(f: F) -> R
 where
     F: FnOnce(&mut ChaCha8Rng) -> R,
 {

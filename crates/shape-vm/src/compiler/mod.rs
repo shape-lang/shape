@@ -46,7 +46,11 @@ pub(crate) mod comptime_target;
 mod control_flow;
 mod expressions;
 mod functions;
+mod functions_annotations;
+mod functions_foreign;
 mod helpers;
+mod helpers_binding;
+mod helpers_reference;
 mod literals;
 mod loops;
 mod patterns;
@@ -825,10 +829,8 @@ impl Default for BytecodeCompiler {
     }
 }
 
-mod compiler_impl_part1;
-mod compiler_impl_part2;
-mod compiler_impl_part3;
-mod compiler_impl_part4;
+mod compiler_impl_initialization;
+mod compiler_impl_reference_model;
 
 /// Infer effective reference parameters and mutation behavior without compiling bytecode.
 ///

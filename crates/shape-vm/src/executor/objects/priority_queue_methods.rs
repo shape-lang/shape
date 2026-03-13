@@ -3,6 +3,7 @@
 //! Methods: push, pop, peek, size, len, length, isEmpty, toArray
 
 use crate::executor::VirtualMachine;
+use crate::executor::utils::extraction_helpers::{check_arg_count, type_mismatch_error};
 use shape_runtime::context::ExecutionContext;
 use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
@@ -13,11 +14,7 @@ pub fn handle_push(
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "PriorityQueue.push requires an argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "PriorityQueue.push", "an argument")?;
     let item = args[1].clone();
 
     if let Some(data) = args[0].as_priority_queue_mut() {
@@ -32,9 +29,7 @@ pub fn handle_push(
         vm.push_vw(ValueWord::from_priority_queue(new_data.items))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "push called on non-PriorityQueue".to_string(),
-        ))
+        Err(type_mismatch_error("push", "PriorityQueue"))
     }
 }
 
@@ -60,9 +55,7 @@ pub fn handle_pop(
         }
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "pop called on non-PriorityQueue".to_string(),
-        ))
+        Err(type_mismatch_error("pop", "PriorityQueue"))
     }
 }
 
@@ -79,9 +72,7 @@ pub fn handle_peek(
         }
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "peek called on non-PriorityQueue".to_string(),
-        ))
+        Err(type_mismatch_error("peek", "PriorityQueue"))
     }
 }
 
@@ -95,9 +86,7 @@ pub fn handle_size(
         vm.push_vw(ValueWord::from_i64(data.items.len() as i64))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "size called on non-PriorityQueue".to_string(),
-        ))
+        Err(type_mismatch_error("size", "PriorityQueue"))
     }
 }
 
@@ -111,9 +100,7 @@ pub fn handle_is_empty(
         vm.push_vw(ValueWord::from_bool(data.items.is_empty()))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "isEmpty called on non-PriorityQueue".to_string(),
-        ))
+        Err(type_mismatch_error("isEmpty", "PriorityQueue"))
     }
 }
 
@@ -128,9 +115,7 @@ pub fn handle_to_array(
         vm.push_vw(ValueWord::from_array(Arc::new(arr)))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "toArray called on non-PriorityQueue".to_string(),
-        ))
+        Err(type_mismatch_error("toArray", "PriorityQueue"))
     }
 }
 
@@ -149,8 +134,6 @@ pub fn handle_to_sorted_array(
         vm.push_vw(ValueWord::from_array(Arc::new(sorted)))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "toSortedArray called on non-PriorityQueue".to_string(),
-        ))
+        Err(type_mismatch_error("toSortedArray", "PriorityQueue"))
     }
 }

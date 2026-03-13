@@ -267,69 +267,9 @@ pub(super) fn typed_opcode_for(op: &BinaryOp, nt: NumericType) -> Option<OpCode>
     }
 }
 
-/// Const dispatch table for trusted arithmetic opcodes.
-/// Only Int and Number have trusted variants (4 ops x 2 types).
-/// Indexed by [arith_op_index][0=Int, 1=Number], Decimal/Mod/Pow have no trusted variants.
-const TRUSTED_ARITH: [[Option<OpCode>; 2]; 4] = [
-    [Some(OpCode::AddIntTrusted), Some(OpCode::AddNumberTrusted)],
-    [Some(OpCode::SubIntTrusted), Some(OpCode::SubNumberTrusted)],
-    [Some(OpCode::MulIntTrusted), Some(OpCode::MulNumberTrusted)],
-    [Some(OpCode::DivIntTrusted), Some(OpCode::DivNumberTrusted)],
-];
-
-/// Const dispatch table for trusted comparison opcodes.
-/// Only Int and Number have trusted variants (4 ops x 2 types).
-/// Indexed by [cmp_op_index][0=Int, 1=Number]: Gt=0, Lt=1, Gte=2, Lte=3
-const TRUSTED_CMP: [[Option<OpCode>; 2]; 4] = [
-    [Some(OpCode::GtIntTrusted), Some(OpCode::GtNumberTrusted)],
-    [Some(OpCode::LtIntTrusted), Some(OpCode::LtNumberTrusted)],
-    [Some(OpCode::GteIntTrusted), Some(OpCode::GteNumberTrusted)],
-    [Some(OpCode::LteIntTrusted), Some(OpCode::LteNumberTrusted)],
-];
-
-/// Attempt to upgrade a typed opcode to its trusted variant.
-///
-/// Returns `Some(trusted_opcode)` if both operand storage hints prove the
-/// types match the opcode's expected type. Add/Sub/Mul/Div and ordered
-/// comparisons (Gt/Lt/Gte/Lte) for Int and Number have trusted variants.
-pub(super) fn try_trusted_opcode(
-    op: &BinaryOp,
-    nt: NumericType,
-    lhs_hint: StorageHint,
-    rhs_hint: StorageHint,
-) -> Option<OpCode> {
-    // Determine table and row for the operation
-    let (table, row) = match op {
-        BinaryOp::Add => (&TRUSTED_ARITH[..], 0),
-        BinaryOp::Sub => (&TRUSTED_ARITH[..], 1),
-        BinaryOp::Mul => (&TRUSTED_ARITH[..], 2),
-        BinaryOp::Div => (&TRUSTED_ARITH[..], 3),
-        BinaryOp::Greater => (&TRUSTED_CMP[..], 0),
-        BinaryOp::Less => (&TRUSTED_CMP[..], 1),
-        BinaryOp::GreaterEq => (&TRUSTED_CMP[..], 2),
-        BinaryOp::LessEq => (&TRUSTED_CMP[..], 3),
-        _ => return None,
-    };
-
-    // Check that both operand hints match the expected type
-    match nt {
-        NumericType::Int | NumericType::IntWidth(_) => {
-            if lhs_hint.is_default_int_family() && rhs_hint.is_default_int_family() {
-                table[row][0]
-            } else {
-                None
-            }
-        }
-        NumericType::Number => {
-            if lhs_hint.is_float_family() && rhs_hint.is_float_family() {
-                table[row][1]
-            } else {
-                None
-            }
-        }
-        NumericType::Decimal => None, // No trusted variants for Decimal
-    }
-}
+// NOTE: Trusted arithmetic/comparison opcodes (TRUSTED_ARITH, TRUSTED_CMP,
+// try_trusted_opcode) have been removed. The typed opcodes (AddInt, GtInt, etc.)
+// are sufficient — they already provide zero-dispatch execution.
 
 #[cfg(test)]
 mod tests {

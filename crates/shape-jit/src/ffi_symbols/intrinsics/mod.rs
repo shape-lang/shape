@@ -6,25 +6,8 @@ use crate::context::JITContext;
 use crate::jit_array::JitArray;
 use crate::nan_boxing::*;
 
-/// Extract a &[f64] slice from column reference bits.
-/// Returns None if not a valid column reference.
-unsafe fn extract_column(bits: u64) -> Option<&'static [f64]> {
-    if !is_column_ref(bits) {
-        return None;
-    }
-    let (ptr, len) = unsafe { unbox_column_ref(bits) };
-    if ptr.is_null() || len == 0 {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts(ptr, len) })
-}
-
-/// Return the result of a column operation as a new boxed column reference.
-fn box_column_result(data: Vec<f64>) -> u64 {
-    let len = data.len();
-    let leaked = Box::leak(data.into_boxed_slice());
-    box_column_ref(leaked.as_ptr(), len)
-}
+// extract_column and box_column_result are imported via `use crate::nan_boxing::*`
+// from the shared definitions in nan_boxing.rs.
 
 /// Intrinsic sum: compute sum of all values in a column.
 pub extern "C" fn jit_intrinsic_sum(series_bits: u64) -> u64 {

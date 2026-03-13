@@ -4,6 +4,7 @@
 //! forEach, map, filter, union, intersection, difference
 
 use crate::executor::VirtualMachine;
+use crate::executor::utils::extraction_helpers::{check_arg_count, type_mismatch_error};
 use shape_runtime::context::ExecutionContext;
 use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
@@ -14,11 +15,7 @@ pub fn handle_add(
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.add requires an argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.add", "an argument")?;
     let item = args[1].clone();
 
     // Mutable fast-path
@@ -36,7 +33,7 @@ pub fn handle_add(
         vm.push_vw(ValueWord::from_set(items))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError("add called on non-Set".to_string()))
+        Err(type_mismatch_error("add", "Set"))
     }
 }
 
@@ -46,16 +43,12 @@ pub fn handle_has(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.has requires an argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.has", "an argument")?;
     if let Some(data) = args[0].as_set() {
         vm.push_vw(ValueWord::from_bool(data.contains(&args[1])))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError("has called on non-Set".to_string()))
+        Err(type_mismatch_error("has", "Set"))
     }
 }
 
@@ -65,11 +58,7 @@ pub fn handle_delete(
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.delete requires an argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.delete", "an argument")?;
     let item = args[1].clone();
 
     if let Some(data) = args[0].as_set_mut() {
@@ -85,9 +74,7 @@ pub fn handle_delete(
         vm.push_vw(ValueWord::from_set(items))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "delete called on non-Set".to_string(),
-        ))
+        Err(type_mismatch_error("delete", "Set"))
     }
 }
 
@@ -101,7 +88,7 @@ pub fn handle_size(
         vm.push_vw(ValueWord::from_i64(data.items.len() as i64))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError("size called on non-Set".to_string()))
+        Err(type_mismatch_error("size", "Set"))
     }
 }
 
@@ -115,9 +102,7 @@ pub fn handle_is_empty(
         vm.push_vw(ValueWord::from_bool(data.items.is_empty()))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "isEmpty called on non-Set".to_string(),
-        ))
+        Err(type_mismatch_error("isEmpty", "Set"))
     }
 }
 
@@ -132,9 +117,7 @@ pub fn handle_to_array(
         vm.push_vw(ValueWord::from_array(Arc::new(arr)))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "toArray called on non-Set".to_string(),
-        ))
+        Err(type_mismatch_error("toArray", "Set"))
     }
 }
 
@@ -144,11 +127,7 @@ pub fn handle_for_each(
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.forEach requires a function argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.forEach", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
 
@@ -160,9 +139,7 @@ pub fn handle_for_each(
         vm.push_vw(ValueWord::unit())?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "forEach called on non-Set".to_string(),
-        ))
+        Err(type_mismatch_error("forEach", "Set"))
     }
 }
 
@@ -172,11 +149,7 @@ pub fn handle_map(
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.map requires a function argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.map", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
 
@@ -191,7 +164,7 @@ pub fn handle_map(
         vm.push_vw(ValueWord::from_set(new_items))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError("map called on non-Set".to_string()))
+        Err(type_mismatch_error("map", "Set"))
     }
 }
 
@@ -201,11 +174,7 @@ pub fn handle_filter(
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.filter requires a function argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.filter", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
 
@@ -222,9 +191,7 @@ pub fn handle_filter(
         vm.push_vw(ValueWord::from_set(new_items))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "filter called on non-Set".to_string(),
-        ))
+        Err(type_mismatch_error("filter", "Set"))
     }
 }
 
@@ -234,14 +201,10 @@ pub fn handle_union(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.union requires a Set argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.union", "a Set argument")?;
     let a = args[0]
         .as_set()
-        .ok_or_else(|| VMError::RuntimeError("union called on non-Set".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("union", "Set"))?;
     let b = args[1]
         .as_set()
         .ok_or_else(|| VMError::RuntimeError("Set.union requires a Set argument".to_string()))?;
@@ -260,14 +223,10 @@ pub fn handle_intersection(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.intersection requires a Set argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.intersection", "a Set argument")?;
     let a = args[0]
         .as_set()
-        .ok_or_else(|| VMError::RuntimeError("intersection called on non-Set".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("intersection", "Set"))?;
     let b = args[1].as_set().ok_or_else(|| {
         VMError::RuntimeError("Set.intersection requires a Set argument".to_string())
     })?;
@@ -288,14 +247,10 @@ pub fn handle_difference(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Set.difference requires a Set argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "Set.difference", "a Set argument")?;
     let a = args[0]
         .as_set()
-        .ok_or_else(|| VMError::RuntimeError("difference called on non-Set".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("difference", "Set"))?;
     let b = args[1].as_set().ok_or_else(|| {
         VMError::RuntimeError("Set.difference requires a Set argument".to_string())
     })?;

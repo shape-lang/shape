@@ -282,17 +282,13 @@ define_opcodes! {
     /// Check if iterator done
     IterDone = 0x75, Loop, pops: 1, pushes: 1;
 
-    // ===== Pattern and Comparison Operations =====
-    /// Pattern match (generic pattern matching, not domain-specific)
-    Pattern = 0x83, Builtin, pops: 0, pushes: 0;
-    /// Call method on value (series.mean(), etc.)
+    // ===== Method Call =====
+    /// Call method on value (array.map(), string.len(), etc.)
     CallMethod = 0x88, Builtin, pops: 0, pushes: 0;
     /// Push timeframe context
     PushTimeframe = 0x89, Builtin, pops: 1, pushes: 0;
     /// Pop timeframe context
     PopTimeframe = 0x8A, Builtin, pops: 0, pushes: 0;
-    /// Execute simulation with config object on stack (generic state simulation)
-    RunSimulation = 0x8B, Builtin, pops: 0, pushes: 0;
 
     // ===== Built-in Functions =====
     /// Call built-in function
@@ -447,23 +443,9 @@ define_opcodes! {
     /// Call Drop::drop on the value at the top of stack (async)
     DropCallAsync = 0xC9, Trait, pops: 1, pushes: 0;
 
-    // ===== Trusted Arithmetic (compiler-proved types, zero guard) =====
-    /// Add (int x int -> int) -- trusted: skips runtime type guard
-    AddIntTrusted = 0xCA, Arithmetic, pops: 2, pushes: 1;
-    /// Sub (int x int -> int) -- trusted: skips runtime type guard
-    SubIntTrusted = 0xCB, Arithmetic, pops: 2, pushes: 1;
-    /// Mul (int x int -> int) -- trusted: skips runtime type guard
-    MulIntTrusted = 0xCC, Arithmetic, pops: 2, pushes: 1;
-    /// Div (int x int -> int) -- trusted: skips runtime type guard
-    DivIntTrusted = 0xCD, Arithmetic, pops: 2, pushes: 1;
-    /// Add (f64 x f64 -> f64) -- trusted: skips runtime type guard
-    AddNumberTrusted = 0xCE, Arithmetic, pops: 2, pushes: 1;
-    /// Sub (f64 x f64 -> f64) -- trusted: skips runtime type guard
-    SubNumberTrusted = 0xCF, Arithmetic, pops: 2, pushes: 1;
-    /// Mul (f64 x f64 -> f64) -- trusted: skips runtime type guard
-    MulNumberTrusted = 0xD5, Arithmetic, pops: 2, pushes: 1;
-    /// Div (f64 x f64 -> f64) -- trusted: skips runtime type guard
-    DivNumberTrusted = 0xD6, Arithmetic, pops: 2, pushes: 1;
+    // NOTE: Trusted arithmetic opcodes (0xCA-0xCF, 0xD5-0xD6) were removed.
+    // They were functionally identical to the typed variants (AddInt, etc.)
+    // in release builds. The typed opcodes already skip runtime dispatch.
 
     // ===== Trusted Variable Operations (compiler-proved types, zero guard) =====
     /// LoadLocal (trusted) -- skips tag validation, reads slot directly
@@ -473,23 +455,9 @@ define_opcodes! {
     /// JumpIfFalse (trusted) -- condition is known bool, direct bool check
     JumpIfFalseTrusted = 0xD8, Control, pops: 1, pushes: 0;
 
-    // ===== Trusted Comparison (compiler-proved types, zero guard) =====
-    /// Gt (int x int -> bool) -- trusted: skips runtime type guard
-    GtIntTrusted = 0xD9, Comparison, pops: 2, pushes: 1;
-    /// Lt (int x int -> bool) -- trusted: skips runtime type guard
-    LtIntTrusted = 0xDA, Comparison, pops: 2, pushes: 1;
-    /// Gte (int x int -> bool) -- trusted: skips runtime type guard
-    GteIntTrusted = 0xDB, Comparison, pops: 2, pushes: 1;
-    /// Lte (int x int -> bool) -- trusted: skips runtime type guard
-    LteIntTrusted = 0xDC, Comparison, pops: 2, pushes: 1;
-    /// Gt (f64 x f64 -> bool) -- trusted: skips runtime type guard
-    GtNumberTrusted = 0xDD, Comparison, pops: 2, pushes: 1;
-    /// Lt (f64 x f64 -> bool) -- trusted: skips runtime type guard
-    LtNumberTrusted = 0xDE, Comparison, pops: 2, pushes: 1;
-    /// Gte (f64 x f64 -> bool) -- trusted: skips runtime type guard
-    GteNumberTrusted = 0xDF, Comparison, pops: 2, pushes: 1;
-    /// Lte (f64 x f64 -> bool) -- trusted: skips runtime type guard
-    LteNumberTrusted = 0xF9, Comparison, pops: 2, pushes: 1;
+    // NOTE: Trusted comparison opcodes (0xD9-0xDF, 0xF9) were removed.
+    // They were functionally identical to the typed variants (GtInt, etc.)
+    // in release builds. The typed opcodes already skip runtime dispatch.
 
     // ===== Special Operations =====
     /// No operation
@@ -534,24 +502,7 @@ impl OpCode {
     pub const fn is_trusted(self) -> bool {
         matches!(
             self,
-            OpCode::AddIntTrusted
-                | OpCode::SubIntTrusted
-                | OpCode::MulIntTrusted
-                | OpCode::DivIntTrusted
-                | OpCode::AddNumberTrusted
-                | OpCode::SubNumberTrusted
-                | OpCode::MulNumberTrusted
-                | OpCode::DivNumberTrusted
-                | OpCode::LoadLocalTrusted
-                | OpCode::JumpIfFalseTrusted
-                | OpCode::GtIntTrusted
-                | OpCode::LtIntTrusted
-                | OpCode::GteIntTrusted
-                | OpCode::LteIntTrusted
-                | OpCode::GtNumberTrusted
-                | OpCode::LtNumberTrusted
-                | OpCode::GteNumberTrusted
-                | OpCode::LteNumberTrusted
+            OpCode::LoadLocalTrusted | OpCode::JumpIfFalseTrusted
         )
     }
 
@@ -562,22 +513,6 @@ impl OpCode {
     /// bytecode post-processing.
     pub const fn guarded_variant(self) -> Option<OpCode> {
         match self {
-            OpCode::AddIntTrusted => Some(OpCode::AddInt),
-            OpCode::SubIntTrusted => Some(OpCode::SubInt),
-            OpCode::MulIntTrusted => Some(OpCode::MulInt),
-            OpCode::DivIntTrusted => Some(OpCode::DivInt),
-            OpCode::AddNumberTrusted => Some(OpCode::AddNumber),
-            OpCode::SubNumberTrusted => Some(OpCode::SubNumber),
-            OpCode::MulNumberTrusted => Some(OpCode::MulNumber),
-            OpCode::DivNumberTrusted => Some(OpCode::DivNumber),
-            OpCode::GtIntTrusted => Some(OpCode::GtInt),
-            OpCode::LtIntTrusted => Some(OpCode::LtInt),
-            OpCode::GteIntTrusted => Some(OpCode::GteInt),
-            OpCode::LteIntTrusted => Some(OpCode::LteInt),
-            OpCode::GtNumberTrusted => Some(OpCode::GtNumber),
-            OpCode::LtNumberTrusted => Some(OpCode::LtNumber),
-            OpCode::GteNumberTrusted => Some(OpCode::GteNumber),
-            OpCode::LteNumberTrusted => Some(OpCode::LteNumber),
             OpCode::LoadLocalTrusted => Some(OpCode::LoadLocal),
             OpCode::JumpIfFalseTrusted => Some(OpCode::JumpIfFalse),
             _ => None,
@@ -587,22 +522,6 @@ impl OpCode {
     /// Map a guarded typed opcode to its trusted variant (if one exists).
     pub const fn trusted_variant(self) -> Option<OpCode> {
         match self {
-            OpCode::AddInt => Some(OpCode::AddIntTrusted),
-            OpCode::SubInt => Some(OpCode::SubIntTrusted),
-            OpCode::MulInt => Some(OpCode::MulIntTrusted),
-            OpCode::DivInt => Some(OpCode::DivIntTrusted),
-            OpCode::AddNumber => Some(OpCode::AddNumberTrusted),
-            OpCode::SubNumber => Some(OpCode::SubNumberTrusted),
-            OpCode::MulNumber => Some(OpCode::MulNumberTrusted),
-            OpCode::DivNumber => Some(OpCode::DivNumberTrusted),
-            OpCode::GtInt => Some(OpCode::GtIntTrusted),
-            OpCode::LtInt => Some(OpCode::LtIntTrusted),
-            OpCode::GteInt => Some(OpCode::GteIntTrusted),
-            OpCode::LteInt => Some(OpCode::LteIntTrusted),
-            OpCode::GtNumber => Some(OpCode::GtNumberTrusted),
-            OpCode::LtNumber => Some(OpCode::LtNumberTrusted),
-            OpCode::GteNumber => Some(OpCode::GteNumberTrusted),
-            OpCode::LteNumber => Some(OpCode::LteNumberTrusted),
             OpCode::LoadLocal => Some(OpCode::LoadLocalTrusted),
             OpCode::JumpIfFalse => Some(OpCode::JumpIfFalseTrusted),
             _ => None,

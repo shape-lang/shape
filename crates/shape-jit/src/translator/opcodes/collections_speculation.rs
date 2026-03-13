@@ -75,8 +75,6 @@ fn is_unknown_stack_effect(op: OpCode) -> bool {
             | OpCode::CallValue
             | OpCode::CallMethod
             | OpCode::BuiltinCall
-            | OpCode::Pattern
-            | OpCode::RunSimulation
             | OpCode::DynMethodCall
             | OpCode::CallForeign
     )

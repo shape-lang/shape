@@ -427,17 +427,8 @@ impl VirtualMachine {
                 return self.exec_typed_arithmetic(instruction);
             }
 
-            // Trusted arithmetic (compiler-proved types, no runtime guard)
-            AddIntTrusted | SubIntTrusted | MulIntTrusted | DivIntTrusted | AddNumberTrusted
-            | SubNumberTrusted | MulNumberTrusted | DivNumberTrusted => {
-                return self.exec_trusted_arithmetic(instruction);
-            }
-
-            // Trusted comparison (compiler-proved types, no runtime guard)
-            GtIntTrusted | LtIntTrusted | GteIntTrusted | LteIntTrusted | GtNumberTrusted
-            | LtNumberTrusted | GteNumberTrusted | LteNumberTrusted => {
-                return self.exec_typed_comparison(instruction);
-            }
+            // NOTE: Trusted arithmetic/comparison opcodes removed — the typed
+            // variants (AddInt, GtInt, etc.) already provide zero-dispatch execution.
 
             // Compact typed arithmetic (width-parameterised, ABI-stable)
             AddTyped | SubTyped | MulTyped | DivTyped | ModTyped | CmpTyped => {
@@ -541,12 +532,6 @@ impl VirtualMachine {
                 return self.op_call_method(instruction, ctx);
             }
 
-            // Reserved opcodes — defined for forward compatibility but not yet implemented.
-            Pattern => {
-                return Err(VMError::NotImplemented(
-                    "Opcode 'Pattern' is reserved but not yet implemented".into(),
-                ));
-            }
             PushTimeframe => {
                 return Err(VMError::NotImplemented(
                     "Opcode 'PushTimeframe' is reserved but not yet implemented".into(),
@@ -555,11 +540,6 @@ impl VirtualMachine {
             PopTimeframe => {
                 return Err(VMError::NotImplemented(
                     "Opcode 'PopTimeframe' is reserved but not yet implemented".into(),
-                ));
-            }
-            RunSimulation => {
-                return Err(VMError::NotImplemented(
-                    "Opcode 'RunSimulation' is reserved but not yet implemented".into(),
                 ));
             }
 
@@ -607,7 +587,15 @@ impl VirtualMachine {
                                 });
                             }
                             _ => {
-                                // Non-future suspensions continue for now
+                                // Non-future suspensions (NextBar, Timer, AnyEvent) cannot be
+                                // resumed by the host via future_id. Drain any open async scopes
+                                // to prevent leaked task tracking, then continue execution.
+                                while let Some(mut scope_tasks) = self.async_scope_stack.pop() {
+                                    scope_tasks.reverse();
+                                    for task_id in scope_tasks {
+                                        self.task_scheduler.cancel(task_id);
+                                    }
+                                }
                                 return Ok(());
                             }
                         }

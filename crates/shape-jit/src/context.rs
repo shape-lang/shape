@@ -30,6 +30,51 @@ pub const STACK_PTR_OFFSET: i32 = 6208; // 2112 + (512 * 8)
 pub const GC_SAFEPOINT_FLAG_PTR_OFFSET: i32 = 6328;
 
 // ============================================================================
+// Compile-time layout verification for JITContext
+// ============================================================================
+//
+// These assertions ensure the hardcoded byte offsets above remain in sync with
+// the actual #[repr(C)] struct layout. A mismatch will produce a compile error.
+const _: () = {
+    assert!(
+        std::mem::offset_of!(JITContext, timestamps_ptr) == TIMESTAMPS_PTR_OFFSET as usize,
+        "TIMESTAMPS_PTR_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, column_ptrs) == COLUMN_PTRS_OFFSET as usize,
+        "COLUMN_PTRS_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, column_count) == COLUMN_COUNT_OFFSET as usize,
+        "COLUMN_COUNT_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, row_count) == ROW_COUNT_OFFSET as usize,
+        "ROW_COUNT_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, current_row) == CURRENT_ROW_OFFSET as usize,
+        "CURRENT_ROW_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, locals) == LOCALS_OFFSET as usize,
+        "LOCALS_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, stack) == STACK_OFFSET as usize,
+        "STACK_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, stack_ptr) == STACK_PTR_OFFSET as usize,
+        "STACK_PTR_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, gc_safepoint_flag_ptr) == GC_SAFEPOINT_FLAG_PTR_OFFSET as usize,
+        "GC_SAFEPOINT_FLAG_PTR_OFFSET does not match JITContext layout"
+    );
+};
+
+// ============================================================================
 // Type Aliases
 // ============================================================================
 

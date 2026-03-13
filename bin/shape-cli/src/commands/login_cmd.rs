@@ -1,24 +1,18 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
+use crate::config::{self, DEFAULT_REGISTRY, mask_token, validate_token_format};
 use crate::registry_client::{Credentials, RegistryClient};
-
-const DEFAULT_REGISTRY: &str = "https://pkg.shape-lang.dev";
 
 /// `shape login` -- authenticate with the package registry.
 ///
-/// Stores the API token in `~/.shape/credentials.json` (mode 0600).
+/// Stores the API token in the credentials file (mode 0600).
 /// The token is validated against the registry before saving.
 pub async fn run_login(token: String, registry: Option<String>) -> Result<()> {
     let registry_url = registry.unwrap_or_else(|| DEFAULT_REGISTRY.to_string());
 
-    // Basic token format validation
+    // Token format validation
     let token = token.trim().to_string();
-    if token.is_empty() {
-        anyhow::bail!("API token must not be empty");
-    }
-    if token.len() < 8 {
-        anyhow::bail!("API token is too short (minimum 8 characters)");
-    }
+    validate_token_format(&token).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Validate the token against the registry by making a test request
     let client = RegistryClient::new(Some(registry_url.clone())).with_token(token.clone());
@@ -29,6 +23,9 @@ pub async fn run_login(token: String, registry: Option<String>) -> Result<()> {
         )
     })?;
 
+    // Show masked token once for confirmation
+    eprintln!("Token: {}", mask_token(&token));
+
     // Save credentials
     let credentials = Credentials {
         registry: registry_url.clone(),
@@ -36,8 +33,11 @@ pub async fn run_login(token: String, registry: Option<String>) -> Result<()> {
     };
     RegistryClient::save_credentials(&credentials).map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    let creds_path = config::shape_config_dir()
+        .map(|d| d.join("credentials.json").display().to_string())
+        .unwrap_or_else(|| "~/.shape/credentials.json".to_string());
     eprintln!("Logged in to {}", registry_url);
-    eprintln!("Credentials saved to ~/.shape/credentials.json");
+    eprintln!("Credentials saved to {}", creds_path);
 
     Ok(())
 }
@@ -52,7 +52,7 @@ mod tests {
         let result = rt.block_on(run_login("".to_string(), None));
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("must not be empty"), "got: {}", msg);
+        assert!(msg.contains("empty"), "got: {}", msg);
     }
 
     #[test]
@@ -70,6 +70,15 @@ mod tests {
         let result = rt.block_on(run_login("   ".to_string(), None));
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("must not be empty"), "got: {}", msg);
+        assert!(msg.contains("empty"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_invalid_char_token_rejected() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(run_login("abc!defgh12345678".to_string(), None));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid character"), "got: {}", msg);
     }
 }

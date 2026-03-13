@@ -33,7 +33,7 @@ impl TypeInferenceEngine {
             Literal::ContentString { .. } => BuiltinTypes::string(),
             Literal::Bool(_) => BuiltinTypes::boolean(),
             // `None` is polymorphic: Option<T> for fresh T.
-            Literal::None => Self::wrap_in_option(Type::Variable(TypeVar::fresh())),
+            Literal::None => Self::wrap_in_option(Type::fresh_var()),
             Literal::Unit => Type::Concrete(TypeAnnotation::Basic("()".to_string())),
             Literal::Timeframe(_) => Type::Concrete(TypeAnnotation::Basic("timeframe".to_string())),
         })
@@ -447,7 +447,7 @@ impl TypeInferenceEngine {
                 // Pipe operator - left is piped into right (which should be a function)
                 // Result type is determined by the right side's return type
                 // For now, return a new type variable that will be resolved later
-                Ok(Type::Variable(TypeVar::fresh()))
+                Ok(Type::fresh_var())
             }
         }
     }

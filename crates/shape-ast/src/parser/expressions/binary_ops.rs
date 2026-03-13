@@ -17,24 +17,35 @@ use crate::error::{Result, ShapeError};
 use crate::parser::{Rule, pair_location};
 use pest::iterators::Pair;
 
-/// Parse pipe expression (a |> b |> c)
-/// Pipes the left value into the right function
-pub fn parse_pipe_expr(pair: Pair<Rule>) -> Result<Expr> {
+// ---------------------------------------------------------------------------
+// Generic helpers
+// ---------------------------------------------------------------------------
+
+/// Parse a left-associative binary chain: `first (op second)*`.
+///
+/// The Pest rule emits a flat list of children that are all the same sub-rule
+/// (the operators are implicit).  `parse_child` is called for every child and
+/// `op` is the `BinaryOp` that joins them.
+fn parse_binary_chain(
+    pair: Pair<Rule>,
+    error_ctx: &str,
+    op: BinaryOp,
+    parse_child: fn(Pair<Rule>) -> Result<Expr>,
+) -> Result<Expr> {
     let span = pair_span(&pair);
     let pair_loc = pair_location(&pair);
     let mut inner = pair.into_inner();
     let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression in pipe".to_string(),
+        message: format!("expected expression in {}", error_ctx),
         location: Some(pair_loc),
     })?;
-    let mut left = parse_ternary_expr(first)?;
+    let mut left = parse_child(first)?;
 
-    // Chain pipe operations: left |> right |> more
-    for ternary_pair in inner {
-        let right = parse_ternary_expr(ternary_pair)?;
+    for child in inner {
+        let right = parse_child(child)?;
         left = Expr::BinaryOp {
             left: Box::new(left),
-            op: BinaryOp::Pipe,
+            op,
             right: Box::new(right),
             span,
         };
@@ -43,8 +54,128 @@ pub fn parse_pipe_expr(pair: Pair<Rule>) -> Result<Expr> {
     Ok(left)
 }
 
+/// Parse an expression that uses string-position-based operator extraction.
+///
+/// This covers `additive_expr`, `shift_expr`, and `multiplicative_expr` where
+/// the Pest grammar emits only the operand sub-rules (no explicit operator
+/// pairs) and the operators must be recovered from the raw source text between
+/// operand spans.
+fn parse_positional_op_chain(
+    pair: Pair<Rule>,
+    error_ctx: &str,
+    parse_child: fn(Pair<Rule>) -> Result<Expr>,
+    resolve_op: fn(&str) -> Result<BinaryOp>,
+) -> Result<Expr> {
+    let span = pair_span(&pair);
+    let expr_str = pair.as_str();
+    let inner_pairs: Vec<_> = pair.into_inner().collect();
+
+    if inner_pairs.is_empty() {
+        return Err(ShapeError::ParseError {
+            message: format!("Empty {} expression", error_ctx),
+            location: None,
+        });
+    }
+
+    let mut left = parse_child(inner_pairs[0].clone())?;
+
+    if inner_pairs.len() == 1 {
+        return Ok(left);
+    }
+
+    let mut current_pos = inner_pairs[0].as_str().len();
+
+    for i in 1..inner_pairs.len() {
+        let expr_start = expr_str[current_pos..]
+            .find(inner_pairs[i].as_str())
+            .ok_or_else(|| ShapeError::ParseError {
+                message: "Cannot find expression in string".to_string(),
+                location: None,
+            })?;
+        let op_str = expr_str[current_pos..current_pos + expr_start].trim();
+        let op = resolve_op(op_str)?;
+        let right = parse_child(inner_pairs[i].clone())?;
+
+        left = Expr::BinaryOp {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+            span,
+        };
+
+        current_pos += expr_start + inner_pairs[i].as_str().len();
+    }
+
+    Ok(left)
+}
+
+// ---------------------------------------------------------------------------
+// Precedence-level dispatch helpers (range / no-range)
+// ---------------------------------------------------------------------------
+
+/// The precedence chain is:
+///
+///   null_coalesce -> context -> or -> and -> bitwise_or -> bitwise_xor
+///     -> bitwise_and -> comparison -> [range ->] additive -> shift
+///     -> multiplicative -> exponential -> unary
+///
+/// The only difference between the range and no-range chains is that
+/// comparison delegates to `parse_range_expr` (which then delegates to
+/// additive) when ranges are allowed, and directly to `parse_additive_expr`
+/// when they are not.
+
+fn select_null_coalesce(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_null_coalesce_expr } else { parse_null_coalesce_expr_no_range }
+}
+fn child_of_null_coalesce(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_context_expr } else { parse_context_expr_no_range }
+}
+fn child_of_context(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_or_expr } else { parse_or_expr_no_range }
+}
+fn child_of_or(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_and_expr } else { parse_and_expr_no_range }
+}
+fn child_of_and(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_bitwise_or_expr } else { parse_bitwise_or_expr_no_range }
+}
+fn child_of_bitwise_or(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_bitwise_xor_expr } else { parse_bitwise_xor_expr_no_range }
+}
+fn child_of_bitwise_xor(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_bitwise_and_expr } else { parse_bitwise_and_expr_no_range }
+}
+fn child_of_bitwise_and(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_comparison_expr } else { parse_comparison_expr_no_range }
+}
+fn child_of_comparison(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
+    if allow_range { parse_range_expr } else { parse_additive_expr }
+}
+
+// ---------------------------------------------------------------------------
+// Pipe (not duplicated -- ranges are allowed in pipe context)
+// ---------------------------------------------------------------------------
+
+/// Parse pipe expression (a |> b |> c)
+/// Pipes the left value into the right function
+pub fn parse_pipe_expr(pair: Pair<Rule>) -> Result<Expr> {
+    parse_binary_chain(pair, "pipe", BinaryOp::Pipe, parse_ternary_expr)
+}
+
+// ---------------------------------------------------------------------------
+// Ternary (condition ? then : else)
+// ---------------------------------------------------------------------------
+
 /// Parse ternary expression (condition ? then : else)
 pub fn parse_ternary_expr(pair: Pair<Rule>) -> Result<Expr> {
+    parse_ternary_impl(pair, true)
+}
+
+fn parse_ternary_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
+    parse_ternary_impl(pair, false)
+}
+
+fn parse_ternary_impl(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
     let span = pair_span(&pair);
     let pair_loc = pair_location(&pair);
     let mut inner = pair.into_inner();
@@ -52,11 +183,9 @@ pub fn parse_ternary_expr(pair: Pair<Rule>) -> Result<Expr> {
         message: "expected condition expression in ternary".to_string(),
         location: Some(pair_loc.clone()),
     })?;
-    let condition_expr = parse_null_coalesce_expr(condition_pair)?;
+    let condition_expr = (select_null_coalesce(allow_range))(condition_pair)?;
 
-    // Check if we have a ternary operator
     if let Some(then_pair) = inner.next() {
-        // We have ? expr : expr
         let then_expr = parse_ternary_branch(then_pair)?;
         let else_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
             message: "expected else expression after ':' in ternary".to_string(),
@@ -73,7 +202,6 @@ pub fn parse_ternary_expr(pair: Pair<Rule>) -> Result<Expr> {
             span,
         ))
     } else {
-        // No ternary, just return the null_coalesce_expr
         Ok(condition_expr)
     }
 }
@@ -97,40 +225,10 @@ fn parse_ternary_branch(pair: Pair<Rule>) -> Result<Expr> {
     }
 }
 
-/// Parse ternary expression in no-range context (used inside ternary branches
-/// for right-associative nesting: `a ? b : c ? d : e`).
-fn parse_ternary_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let condition_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected condition expression in ternary".to_string(),
-        location: Some(pair_loc.clone()),
-    })?;
-    let condition_expr = parse_null_coalesce_expr_no_range(condition_pair)?;
+// ---------------------------------------------------------------------------
+// Assignment (target = value, target += value)
+// ---------------------------------------------------------------------------
 
-    if let Some(then_pair) = inner.next() {
-        let then_expr = parse_ternary_branch(then_pair)?;
-        let else_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-            message: "expected else expression after ':' in ternary".to_string(),
-            location: Some(pair_loc),
-        })?;
-        let else_expr = parse_ternary_branch(else_pair)?;
-
-        Ok(Expr::If(
-            Box::new(IfExpr {
-                condition: Box::new(condition_expr),
-                then_branch: Box::new(then_expr),
-                else_branch: Some(Box::new(else_expr)),
-            }),
-            span,
-        ))
-    } else {
-        Ok(condition_expr)
-    }
-}
-
-/// Map compound assignment operator string to BinaryOp
 fn compound_op_to_binary(op_str: &str) -> Option<BinaryOp> {
     match op_str {
         "+=" => Some(BinaryOp::Add),
@@ -150,6 +248,14 @@ fn compound_op_to_binary(op_str: &str) -> Option<BinaryOp> {
 
 /// Parse assignment expression (target = value or target += value)
 pub fn parse_assignment_expr(pair: Pair<Rule>) -> Result<Expr> {
+    parse_assignment_impl(pair, true)
+}
+
+fn parse_assignment_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
+    parse_assignment_impl(pair, false)
+}
+
+fn parse_assignment_impl(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
     let span = pair_span(&pair);
     let pair_loc = pair_location(&pair);
     let mut inner = pair.into_inner();
@@ -158,8 +264,13 @@ pub fn parse_assignment_expr(pair: Pair<Rule>) -> Result<Expr> {
         location: Some(pair_loc.clone()),
     })?;
 
+    let recurse: fn(Pair<Rule>) -> Result<Expr> = if allow_range {
+        parse_assignment_expr
+    } else {
+        parse_assignment_expr_no_range
+    };
+
     if let Some(second) = inner.next() {
-        // Check if second pair is a compound_assign_op
         if second.as_rule() == Rule::compound_assign_op {
             let target = super::primary::parse_postfix_expr(first)?;
             if !matches!(
@@ -180,8 +291,7 @@ pub fn parse_assignment_expr(pair: Pair<Rule>) -> Result<Expr> {
                 message: "expected value after compound assignment".to_string(),
                 location: None,
             })?;
-            let value = parse_assignment_expr(value_pair)?;
-            // Desugar: x += v → x = x + v
+            let value = recurse(value_pair)?;
             let desugared = Expr::BinaryOp {
                 left: Box::new(target.clone()),
                 op: bin_op,
@@ -196,7 +306,6 @@ pub fn parse_assignment_expr(pair: Pair<Rule>) -> Result<Expr> {
                 span,
             ))
         } else if second.as_rule() == Rule::assign_op {
-            // Plain assignment: target assign_op value
             let target = super::primary::parse_postfix_expr(first)?;
             if !matches!(
                 target,
@@ -211,7 +320,7 @@ pub fn parse_assignment_expr(pair: Pair<Rule>) -> Result<Expr> {
                 message: "expected value after assignment".to_string(),
                 location: None,
             })?;
-            let value = parse_assignment_expr(value_pair)?;
+            let value = recurse(value_pair)?;
             Ok(Expr::Assign(
                 Box::new(AssignExpr {
                     target: Box::new(target),
@@ -219,168 +328,70 @@ pub fn parse_assignment_expr(pair: Pair<Rule>) -> Result<Expr> {
                 }),
                 span,
             ))
-        } else {
-            // Fallback: parse as pipe expression
+        } else if allow_range {
             match first.as_rule() {
                 Rule::pipe_expr => parse_pipe_expr(first),
                 Rule::ternary_expr => parse_ternary_expr(first),
                 _ => parse_pipe_expr(first),
             }
+        } else {
+            (select_null_coalesce(false))(first)
         }
-    } else {
-        // Check if this is a pipe_expr rule
+    } else if allow_range {
         match first.as_rule() {
             Rule::pipe_expr => parse_pipe_expr(first),
             Rule::ternary_expr => parse_ternary_expr(first),
             _ => parse_pipe_expr(first),
         }
-    }
-}
-
-fn parse_assignment_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc.clone()),
-    })?;
-
-    if let Some(second) = inner.next() {
-        if second.as_rule() == Rule::compound_assign_op {
-            let target = super::primary::parse_postfix_expr(first)?;
-            if !matches!(
-                target,
-                Expr::Identifier(_, _) | Expr::PropertyAccess { .. } | Expr::IndexAccess { .. }
-            ) {
-                return Err(ShapeError::ParseError {
-                    message: "invalid assignment target".to_string(),
-                    location: Some(pair_loc),
-                });
-            }
-            let bin_op =
-                compound_op_to_binary(second.as_str()).ok_or_else(|| ShapeError::ParseError {
-                    message: format!("Unknown compound operator: {}", second.as_str()),
-                    location: None,
-                })?;
-            let value_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-                message: "expected value after compound assignment".to_string(),
-                location: None,
-            })?;
-            let value = parse_assignment_expr_no_range(value_pair)?;
-            let desugared = Expr::BinaryOp {
-                left: Box::new(target.clone()),
-                op: bin_op,
-                right: Box::new(value),
-                span,
-            };
-            Ok(Expr::Assign(
-                Box::new(AssignExpr {
-                    target: Box::new(target),
-                    value: Box::new(desugared),
-                }),
-                span,
-            ))
-        } else if second.as_rule() == Rule::assign_op {
-            // Plain assignment: target assign_op value
-            let target = super::primary::parse_postfix_expr(first)?;
-            if !matches!(
-                target,
-                Expr::Identifier(_, _) | Expr::PropertyAccess { .. } | Expr::IndexAccess { .. }
-            ) {
-                return Err(ShapeError::ParseError {
-                    message: "invalid assignment target".to_string(),
-                    location: Some(pair_loc),
-                });
-            }
-            let value_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-                message: "expected value after assignment".to_string(),
-                location: None,
-            })?;
-            let value = parse_assignment_expr_no_range(value_pair)?;
-            Ok(Expr::Assign(
-                Box::new(AssignExpr {
-                    target: Box::new(target),
-                    value: Box::new(value),
-                }),
-                span,
-            ))
-        } else {
-            // Fallback: parse as null coalesce expression
-            parse_null_coalesce_expr_no_range(first)
-        }
     } else {
-        parse_null_coalesce_expr_no_range(first)
+        (select_null_coalesce(false))(first)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Null coalescing (a ?? b)
+// ---------------------------------------------------------------------------
 
 /// Parse null coalescing expression (a ?? b)
 pub fn parse_null_coalesce_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression in null coalesce".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_context_expr(first)?;
-
-    for context_expr in inner {
-        let right = parse_context_expr(context_expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::NullCoalesce,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "null coalesce", BinaryOp::NullCoalesce, child_of_null_coalesce(true))
 }
 
 fn parse_null_coalesce_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_context_expr_no_range(first)?;
-
-    for context_expr in inner {
-        let right = parse_context_expr_no_range(context_expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::NullCoalesce,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "null coalesce", BinaryOp::NullCoalesce, child_of_null_coalesce(false))
 }
+
+// ---------------------------------------------------------------------------
+// Error context (a !! b) -- special TryOperator handling
+// ---------------------------------------------------------------------------
 
 /// Parse error context expression (lhs !! rhs).
 pub fn parse_context_expr(pair: Pair<Rule>) -> Result<Expr> {
+    parse_context_impl(pair, true)
+}
+
+fn parse_context_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
+    parse_context_impl(pair, false)
+}
+
+fn parse_context_impl(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
     let span = pair_span(&pair);
     let pair_loc = pair_location(&pair);
+    let parse_child = child_of_context(allow_range);
     let mut inner = pair.into_inner();
     let first = inner.next().ok_or_else(|| ShapeError::ParseError {
         message: "expected expression in error context".to_string(),
         location: Some(pair_loc),
     })?;
-    let mut left = parse_or_expr(first)?;
+    let mut left = parse_child(first)?;
 
     for or_expr in inner {
         let rhs_source = or_expr.as_str().trim().to_string();
-        let right = parse_or_expr(or_expr)?;
+        let right = parse_child(or_expr)?;
         let is_grouped_rhs = rhs_source.starts_with('(') && rhs_source.ends_with(')');
 
         match right {
             Expr::TryOperator(inner_try, try_span) if !is_grouped_rhs => {
-                // Ergonomic special-case: `lhs !! rhs?` means `(lhs !! rhs)?`.
-                // Use explicit parentheses for `lhs !! (rhs?)`.
                 let context_expr = Expr::BinaryOp {
                     left: Box::new(left),
                     op: BinaryOp::ErrorContext,
@@ -403,320 +414,87 @@ pub fn parse_context_expr(pair: Pair<Rule>) -> Result<Expr> {
     Ok(left)
 }
 
-fn parse_context_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_or_expr_no_range(first)?;
-
-    for or_expr in inner {
-        let rhs_source = or_expr.as_str().trim().to_string();
-        let right = parse_or_expr_no_range(or_expr)?;
-        let is_grouped_rhs = rhs_source.starts_with('(') && rhs_source.ends_with(')');
-
-        match right {
-            Expr::TryOperator(inner_try, try_span) if !is_grouped_rhs => {
-                // Keep context + try ergonomic in ternary branches too.
-                let context_expr = Expr::BinaryOp {
-                    left: Box::new(left),
-                    op: BinaryOp::ErrorContext,
-                    right: inner_try,
-                    span,
-                };
-                left = Expr::TryOperator(Box::new(context_expr), try_span);
-            }
-            right => {
-                left = Expr::BinaryOp {
-                    left: Box::new(left),
-                    op: BinaryOp::ErrorContext,
-                    right: Box::new(right),
-                    span,
-                };
-            }
-        }
-    }
-
-    Ok(left)
-}
+// ---------------------------------------------------------------------------
+// Logical OR / AND, Bitwise OR / XOR / AND
+// ---------------------------------------------------------------------------
 
 /// Parse logical OR expression (a || b)
 pub fn parse_or_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression in logical OR".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_and_expr(first)?;
-
-    for and_expr in inner {
-        let right = parse_and_expr(and_expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::Or,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "logical OR", BinaryOp::Or, child_of_or(true))
 }
-
 fn parse_or_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_and_expr_no_range(first)?;
-
-    for and_expr in inner {
-        let right = parse_and_expr_no_range(and_expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::Or,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "logical OR", BinaryOp::Or, child_of_or(false))
 }
 
 /// Parse logical AND expression (a && b)
 pub fn parse_and_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression in logical AND".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_bitwise_or_expr(first)?;
-
-    for expr in inner {
-        let right = parse_bitwise_or_expr(expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::And,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "logical AND", BinaryOp::And, child_of_and(true))
 }
-
 fn parse_and_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_bitwise_or_expr_no_range(first)?;
-
-    for expr in inner {
-        let right = parse_bitwise_or_expr_no_range(expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::And,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "logical AND", BinaryOp::And, child_of_and(false))
 }
 
 /// Parse bitwise OR expression (a | b)
 fn parse_bitwise_or_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression in bitwise OR".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_bitwise_xor_expr(first)?;
-
-    for expr in inner {
-        let right = parse_bitwise_xor_expr(expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::BitOr,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "bitwise OR", BinaryOp::BitOr, child_of_bitwise_or(true))
 }
-
 fn parse_bitwise_or_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_bitwise_xor_expr_no_range(first)?;
-
-    for expr in inner {
-        let right = parse_bitwise_xor_expr_no_range(expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::BitOr,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "bitwise OR", BinaryOp::BitOr, child_of_bitwise_or(false))
 }
 
 /// Parse bitwise XOR expression (a ^ b)
 fn parse_bitwise_xor_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression in bitwise XOR".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_bitwise_and_expr(first)?;
-
-    for expr in inner {
-        let right = parse_bitwise_and_expr(expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::BitXor,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "bitwise XOR", BinaryOp::BitXor, child_of_bitwise_xor(true))
 }
-
 fn parse_bitwise_xor_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_bitwise_and_expr_no_range(first)?;
-
-    for expr in inner {
-        let right = parse_bitwise_and_expr_no_range(expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::BitXor,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "bitwise XOR", BinaryOp::BitXor, child_of_bitwise_xor(false))
 }
 
 /// Parse bitwise AND expression (a & b)
 fn parse_bitwise_and_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression in bitwise AND".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_comparison_expr(first)?;
-
-    for expr in inner {
-        let right = parse_comparison_expr(expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::BitAnd,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "bitwise AND", BinaryOp::BitAnd, child_of_bitwise_and(true))
 }
-
 fn parse_bitwise_and_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_comparison_expr_no_range(first)?;
-
-    for expr in inner {
-        let right = parse_comparison_expr_no_range(expr)?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: BinaryOp::BitAnd,
-            right: Box::new(right),
-            span,
-        };
-    }
-
-    Ok(left)
+    parse_binary_chain(pair, "bitwise AND", BinaryOp::BitAnd, child_of_bitwise_and(false))
 }
+
+// ---------------------------------------------------------------------------
+// Comparison (>, <, >=, <=, ==, !=, ~=, ~>, ~<, is)
+// ---------------------------------------------------------------------------
 
 /// Parse comparison expression (a > b, a == b, etc.)
 pub fn parse_comparison_expr(pair: Pair<Rule>) -> Result<Expr> {
+    parse_comparison_impl(pair, true)
+}
+
+fn parse_comparison_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
+    parse_comparison_impl(pair, false)
+}
+
+fn parse_comparison_impl(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
     let span = pair_span(&pair);
     let pair_loc = pair_location(&pair);
+    let parse_child = child_of_comparison(allow_range);
     let mut inner = pair.into_inner();
     let first = inner.next().ok_or_else(|| ShapeError::ParseError {
         message: "expected expression in comparison".to_string(),
         location: Some(pair_loc),
     })?;
-    let mut left = parse_range_expr(first)?;
+    let mut left = parse_child(first)?;
 
     for tail in inner {
-        left = apply_comparison_tail(left, tail, span, parse_range_expr)?;
+        left = apply_comparison_tail(left, tail, span, parse_child)?;
     }
 
     Ok(left)
 }
 
-fn parse_comparison_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression".to_string(),
-        location: Some(pair_loc),
-    })?;
-    let mut left = parse_additive_expr(first)?;
-
-    for tail in inner {
-        left = apply_comparison_tail(left, tail, span, parse_additive_expr)?;
-    }
-
-    Ok(left)
-}
-
-fn apply_comparison_tail<F>(left: Expr, tail: Pair<Rule>, span: Span, parse_rhs: F) -> Result<Expr>
-where
-    F: Fn(Pair<Rule>) -> Result<Expr>,
-{
+fn apply_comparison_tail(
+    left: Expr,
+    tail: Pair<Rule>,
+    span: Span,
+    parse_rhs: fn(Pair<Rule>) -> Result<Expr>,
+) -> Result<Expr> {
     let mut tail_inner = tail.into_inner();
     let first = tail_inner.next().ok_or_else(|| ShapeError::ParseError {
         message: "Empty comparison tail".to_string(),
@@ -725,7 +503,6 @@ where
 
     match first.as_rule() {
         Rule::fuzzy_comparison_tail | Rule::fuzzy_comparison_tail_no_range => {
-            // Parse fuzzy_comparison_tail: fuzzy_op ~ range_expr ~ within_clause?
             let mut fuzzy_inner = first.into_inner();
 
             let fuzzy_op_pair = fuzzy_inner.next().ok_or_else(|| ShapeError::ParseError {
@@ -740,11 +517,9 @@ where
             })?;
             let right = parse_rhs(rhs_pair)?;
 
-            // Parse optional within_clause
             let tolerance = if let Some(within_clause) = fuzzy_inner.next() {
                 parse_within_clause(within_clause)?
             } else {
-                // Default to 2% tolerance if no explicit tolerance specified
                 FuzzyTolerance::Percentage(0.02)
             };
 
@@ -813,118 +588,18 @@ fn parse_tolerance_spec(pair: Pair<Rule>) -> Result<FuzzyTolerance> {
     let text = pair.as_str().trim();
 
     if text.ends_with('%') {
-        // Percentage tolerance: "2%" or "0.5%"
         let num_str = text.trim_end_matches('%');
         let value: f64 = num_str.parse().map_err(|_| ShapeError::ParseError {
             message: format!("Invalid tolerance percentage: {}", text),
             location: None,
         })?;
-        // Convert percentage to fraction (e.g., 2% -> 0.02)
         Ok(FuzzyTolerance::Percentage(value / 100.0))
     } else {
-        // Absolute tolerance: "0.02" or "5"
         let value: f64 = text.parse().map_err(|_| ShapeError::ParseError {
             message: format!("Invalid tolerance value: {}", text),
             location: None,
         })?;
         Ok(FuzzyTolerance::Absolute(value))
-    }
-}
-
-/// Parse range expression (a..b)
-/// Parse a range expression with Rust-style syntax
-/// Supports: start..end, start..=end, ..end, ..=end, start.., ..
-pub fn parse_range_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner().peekable();
-
-    // Check if first token is a range_op (for ..end, ..=end, or .. forms)
-    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected expression in range".to_string(),
-        location: Some(pair_loc.clone()),
-    })?;
-
-    match first.as_rule() {
-        Rule::range_op => {
-            // Forms: ..end, ..=end, or .. (full range)
-            let kind = parse_range_op(&first);
-            if let Some(end_pair) = inner.next() {
-                // ..end or ..=end
-                let end = parse_additive_expr(end_pair)?;
-                Ok(Expr::Range {
-                    start: None,
-                    end: Some(Box::new(end)),
-                    kind,
-                    span,
-                })
-            } else {
-                // Full range: ..
-                Ok(Expr::Range {
-                    start: None,
-                    end: None,
-                    kind,
-                    span,
-                })
-            }
-        }
-        Rule::additive_expr => {
-            // Forms: start..end, start..=end, start.., or just expr
-            let start = parse_additive_expr(first)?;
-
-            if let Some(next) = inner.next() {
-                match next.as_rule() {
-                    Rule::range_op => {
-                        // start..end or start..=end or start..
-                        let kind = parse_range_op(&next);
-                        if let Some(end_pair) = inner.next() {
-                            // start..end or start..=end
-                            let end = parse_additive_expr(end_pair)?;
-                            Ok(Expr::Range {
-                                start: Some(Box::new(start)),
-                                end: Some(Box::new(end)),
-                                kind,
-                                span,
-                            })
-                        } else {
-                            // start.. (range from)
-                            Ok(Expr::Range {
-                                start: Some(Box::new(start)),
-                                end: None,
-                                kind,
-                                span,
-                            })
-                        }
-                    }
-                    _ => {
-                        // Unexpected token after start expression
-                        Err(ShapeError::ParseError {
-                            message: format!(
-                                "unexpected token in range expression: {:?}",
-                                next.as_rule()
-                            ),
-                            location: Some(pair_loc),
-                        })
-                    }
-                }
-            } else {
-                // Just a single expression (not a range)
-                Ok(start)
-            }
-        }
-        _ => {
-            // Try to parse as additive_expr anyway (fallback)
-            parse_additive_expr(first)
-        }
-    }
-}
-
-/// Parse range operator and return RangeKind
-fn parse_range_op(pair: &Pair<Rule>) -> RangeKind {
-    if pair.as_str() == "..=" {
-        RangeKind::Inclusive
-    } else {
-        RangeKind::Exclusive
     }
 }
 
@@ -947,185 +622,134 @@ pub fn parse_comparison_op(pair: Pair<Rule>) -> Result<BinaryOp> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Range (a..b, a..=b, ..b, ..=b, a.., ..)
+// ---------------------------------------------------------------------------
+
+/// Parse a range expression with Rust-style syntax.
+/// Supports: start..end, start..=end, ..end, ..=end, start.., ..
+pub fn parse_range_expr(pair: Pair<Rule>) -> Result<Expr> {
+    let span = pair_span(&pair);
+    let pair_loc = pair_location(&pair);
+    let mut inner = pair.into_inner().peekable();
+
+    let first = inner.next().ok_or_else(|| ShapeError::ParseError {
+        message: "expected expression in range".to_string(),
+        location: Some(pair_loc.clone()),
+    })?;
+
+    match first.as_rule() {
+        Rule::range_op => {
+            let kind = parse_range_op(&first);
+            if let Some(end_pair) = inner.next() {
+                let end = parse_additive_expr(end_pair)?;
+                Ok(Expr::Range { start: None, end: Some(Box::new(end)), kind, span })
+            } else {
+                Ok(Expr::Range { start: None, end: None, kind, span })
+            }
+        }
+        Rule::additive_expr => {
+            let start = parse_additive_expr(first)?;
+            if let Some(next) = inner.next() {
+                match next.as_rule() {
+                    Rule::range_op => {
+                        let kind = parse_range_op(&next);
+                        if let Some(end_pair) = inner.next() {
+                            let end = parse_additive_expr(end_pair)?;
+                            Ok(Expr::Range {
+                                start: Some(Box::new(start)),
+                                end: Some(Box::new(end)),
+                                kind,
+                                span,
+                            })
+                        } else {
+                            Ok(Expr::Range {
+                                start: Some(Box::new(start)),
+                                end: None,
+                                kind,
+                                span,
+                            })
+                        }
+                    }
+                    _ => Err(ShapeError::ParseError {
+                        message: format!(
+                            "unexpected token in range expression: {:?}",
+                            next.as_rule()
+                        ),
+                        location: Some(pair_loc),
+                    }),
+                }
+            } else {
+                Ok(start)
+            }
+        }
+        _ => parse_additive_expr(first),
+    }
+}
+
+fn parse_range_op(pair: &Pair<Rule>) -> RangeKind {
+    if pair.as_str() == "..=" { RangeKind::Inclusive } else { RangeKind::Exclusive }
+}
+
+// ---------------------------------------------------------------------------
+// Additive / Shift / Multiplicative (positional-op-chain pattern)
+// ---------------------------------------------------------------------------
+
+fn resolve_additive_op(op_str: &str) -> Result<BinaryOp> {
+    match op_str {
+        "+" => Ok(BinaryOp::Add),
+        "-" => Ok(BinaryOp::Sub),
+        _ => Err(ShapeError::ParseError {
+            message: format!("Unknown additive operator: '{}'", op_str),
+            location: None,
+        }),
+    }
+}
+
+fn resolve_shift_op(op_str: &str) -> Result<BinaryOp> {
+    match op_str {
+        "<<" => Ok(BinaryOp::BitShl),
+        ">>" => Ok(BinaryOp::BitShr),
+        _ => Err(ShapeError::ParseError {
+            message: format!("Unknown shift operator: '{}'", op_str),
+            location: None,
+        }),
+    }
+}
+
+fn resolve_multiplicative_op(op_str: &str) -> Result<BinaryOp> {
+    match op_str {
+        "*" => Ok(BinaryOp::Mul),
+        "/" => Ok(BinaryOp::Div),
+        "%" => Ok(BinaryOp::Mod),
+        _ => Err(ShapeError::ParseError {
+            message: format!("Unknown multiplicative operator: '{}'", op_str),
+            location: None,
+        }),
+    }
+}
+
 /// Parse additive expression (a + b, a - b)
 pub fn parse_additive_expr(pair: Pair<Rule>) -> Result<Expr> {
-    // In Pest, the entire additive_expr contains the full string
-    // We need to parse it by extracting operators from the original string
-    let span = pair_span(&pair);
-    let expr_str = pair.as_str();
-    let inner_pairs: Vec<_> = pair.into_inner().collect();
-
-    if inner_pairs.is_empty() {
-        return Err(ShapeError::ParseError {
-            message: "Empty additive expression".to_string(),
-            location: None,
-        });
-    }
-
-    // Parse the first shift expression
-    let mut left = parse_shift_expr(inner_pairs[0].clone())?;
-
-    // If there's only one pair, no operators
-    if inner_pairs.len() == 1 {
-        return Ok(left);
-    }
-
-    // For expressions with operators, we need to find operators in the original string
-    // between the shift expressions
-    let mut current_pos = inner_pairs[0].as_str().len();
-
-    for i in 1..inner_pairs.len() {
-        // Find the operator between previous and current expression
-        let expr_start = expr_str[current_pos..]
-            .find(inner_pairs[i].as_str())
-            .ok_or_else(|| ShapeError::ParseError {
-                message: "Cannot find expression in string".to_string(),
-                location: None,
-            })?;
-        let op_str = expr_str[current_pos..current_pos + expr_start].trim();
-
-        let right = parse_shift_expr(inner_pairs[i].clone())?;
-
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: match op_str {
-                "+" => BinaryOp::Add,
-                "-" => BinaryOp::Sub,
-                _ => {
-                    return Err(ShapeError::ParseError {
-                        message: format!("Unknown additive operator: '{}'", op_str),
-                        location: None,
-                    });
-                }
-            },
-            right: Box::new(right),
-            span,
-        };
-
-        current_pos += expr_start + inner_pairs[i].as_str().len();
-    }
-
-    Ok(left)
+    parse_positional_op_chain(pair, "additive", parse_shift_expr, resolve_additive_op)
 }
 
 /// Parse shift expression (a << b, a >> b)
 pub fn parse_shift_expr(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let expr_str = pair.as_str();
-    let inner_pairs: Vec<_> = pair.into_inner().collect();
-
-    if inner_pairs.is_empty() {
-        return Err(ShapeError::ParseError {
-            message: "Empty shift expression".to_string(),
-            location: None,
-        });
-    }
-
-    let mut left = parse_multiplicative_expr(inner_pairs[0].clone())?;
-
-    if inner_pairs.len() == 1 {
-        return Ok(left);
-    }
-
-    let mut current_pos = inner_pairs[0].as_str().len();
-
-    for i in 1..inner_pairs.len() {
-        let expr_start = expr_str[current_pos..]
-            .find(inner_pairs[i].as_str())
-            .ok_or_else(|| ShapeError::ParseError {
-                message: "Cannot find expression in string".to_string(),
-                location: None,
-            })?;
-        let op_str = expr_str[current_pos..current_pos + expr_start].trim();
-
-        let right = parse_multiplicative_expr(inner_pairs[i].clone())?;
-
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: match op_str {
-                "<<" => BinaryOp::BitShl,
-                ">>" => BinaryOp::BitShr,
-                _ => {
-                    return Err(ShapeError::ParseError {
-                        message: format!("Unknown shift operator: '{}'", op_str),
-                        location: None,
-                    });
-                }
-            },
-            right: Box::new(right),
-            span,
-        };
-
-        current_pos += expr_start + inner_pairs[i].as_str().len();
-    }
-
-    Ok(left)
+    parse_positional_op_chain(pair, "shift", parse_multiplicative_expr, resolve_shift_op)
 }
 
 /// Parse multiplicative expression (a * b, a / b, a % b)
 pub fn parse_multiplicative_expr(pair: Pair<Rule>) -> Result<Expr> {
-    // Similar to additive_expr, we need to extract operators from the original string
-    let span = pair_span(&pair);
-    let expr_str = pair.as_str();
-    let inner_pairs: Vec<_> = pair.into_inner().collect();
-
-    if inner_pairs.is_empty() {
-        return Err(ShapeError::ParseError {
-            message: "Empty multiplicative expression".to_string(),
-            location: None,
-        });
-    }
-
-    // Parse the first exponential expression
-    let mut left = parse_exponential_expr(inner_pairs[0].clone())?;
-
-    // If there's only one pair, no operators
-    if inner_pairs.len() == 1 {
-        return Ok(left);
-    }
-
-    // For expressions with operators, we need to find operators in the original string
-    // between the unary expressions
-    let mut current_pos = inner_pairs[0].as_str().len();
-
-    for i in 1..inner_pairs.len() {
-        // Find the operator between previous and current expression
-        let expr_start = expr_str[current_pos..]
-            .find(inner_pairs[i].as_str())
-            .ok_or_else(|| ShapeError::ParseError {
-                message: "Cannot find expression in string".to_string(),
-                location: None,
-            })?;
-        let op_str = expr_str[current_pos..current_pos + expr_start].trim();
-
-        let right = parse_exponential_expr(inner_pairs[i].clone())?;
-
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op: match op_str {
-                "*" => BinaryOp::Mul,
-                "/" => BinaryOp::Div,
-                "%" => BinaryOp::Mod,
-                _ => {
-                    return Err(ShapeError::ParseError {
-                        message: format!("Unknown multiplicative operator: '{}'", op_str),
-                        location: None,
-                    });
-                }
-            },
-            right: Box::new(right),
-            span,
-        };
-
-        current_pos += expr_start + inner_pairs[i].as_str().len();
-    }
-
-    Ok(left)
+    parse_positional_op_chain(pair, "multiplicative", parse_exponential_expr, resolve_multiplicative_op)
 }
+
+// ---------------------------------------------------------------------------
+// Exponential (right-associative: a ** b ** c = a ** (b ** c))
+// ---------------------------------------------------------------------------
 
 /// Parse exponential expression (a ** b)
 pub fn parse_exponential_expr(pair: Pair<Rule>) -> Result<Expr> {
-    // Exponentiation is right-associative, so we need to parse differently
     let span = pair_span(&pair);
     let inner_pairs: Vec<_> = pair.into_inner().collect();
 
@@ -1136,21 +760,17 @@ pub fn parse_exponential_expr(pair: Pair<Rule>) -> Result<Expr> {
         });
     }
 
-    // Parse all unary expressions
     let mut exprs: Vec<Expr> = Vec::new();
     for p in inner_pairs {
         exprs.push(parse_unary_expr(p)?);
     }
 
-    // If there's only one expression, return it
     if exprs.len() == 1 {
         return Ok(exprs.into_iter().next().unwrap());
     }
 
-    // For right-associative parsing, we build from right to left
-    // Example: a ** b ** c should be parsed as a ** (b ** c)
-    let mut result = exprs.pop().unwrap(); // Start with the rightmost expression
-
+    // Right-associative: a ** b ** c = a ** (b ** c)
+    let mut result = exprs.pop().unwrap();
     while let Some(left_expr) = exprs.pop() {
         result = Expr::BinaryOp {
             left: Box::new(left_expr),
@@ -1162,6 +782,10 @@ pub fn parse_exponential_expr(pair: Pair<Rule>) -> Result<Expr> {
 
     Ok(result)
 }
+
+// ---------------------------------------------------------------------------
+// Unary (!a, -a, ~a, &a, &mut a)
+// ---------------------------------------------------------------------------
 
 /// Parse unary expression (!a, -a)
 pub fn parse_unary_expr(pair: Pair<Rule>) -> Result<Expr> {
@@ -1186,7 +810,6 @@ pub fn parse_unary_expr(pair: Pair<Rule>) -> Result<Expr> {
                     is_mutable = true;
                 }
                 _ => {
-                    // The postfix_expr (the referenced expression)
                     expr_pair = Some(child);
                 }
             }
@@ -1203,7 +826,6 @@ pub fn parse_unary_expr(pair: Pair<Rule>) -> Result<Expr> {
         });
     }
 
-    // Check if this unary expression starts with an operator
     if pair_str.starts_with('!') {
         Ok(Expr::UnaryOp {
             op: UnaryOp::Not,
@@ -1220,7 +842,6 @@ pub fn parse_unary_expr(pair: Pair<Rule>) -> Result<Expr> {
         let operand = parse_unary_expr(first)?;
         // Fold negation into typed integer literals so that `-128i8` parses
         // as a single `TypedInt(-128, I8)` instead of `Neg(TypedInt(128, I8))`.
-        // Without this, 128i8 would be out of range and rejected at parse time.
         match &operand {
             Expr::Literal(Literal::TypedInt(value, width), lit_span) => {
                 let neg = value.wrapping_neg();
@@ -1242,7 +863,6 @@ pub fn parse_unary_expr(pair: Pair<Rule>) -> Result<Expr> {
             span,
         })
     } else {
-        // No unary operator, parse as postfix expression
         super::primary::parse_postfix_expr(first)
     }
 }

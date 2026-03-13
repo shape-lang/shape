@@ -116,20 +116,12 @@ pub fn plan_loops(
                     | OpCode::DivInt
                     | OpCode::ModInt
                     | OpCode::PowInt
-                    | OpCode::AddIntTrusted
-                    | OpCode::SubIntTrusted
-                    | OpCode::MulIntTrusted
-                    | OpCode::DivIntTrusted
                     | OpCode::AddNumber
                     | OpCode::SubNumber
                     | OpCode::MulNumber
                     | OpCode::DivNumber
                     | OpCode::ModNumber
                     | OpCode::PowNumber
-                    | OpCode::AddNumberTrusted
-                    | OpCode::SubNumberTrusted
-                    | OpCode::MulNumberTrusted
-                    | OpCode::DivNumberTrusted
             ) {
                 numeric_ops += 1;
             }

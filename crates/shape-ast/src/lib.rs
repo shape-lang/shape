@@ -7,6 +7,7 @@ pub mod data;
 pub mod error;
 pub mod int_width;
 pub mod interpolation;
+pub mod module_utils;
 pub mod parser;
 pub mod transform;
 

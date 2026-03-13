@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod full_loop_tests {
     use super::*;
+    use crate::BytecodeExecutor;
     use shape_runtime::engine::ShapeEngine;
 
     /// Execute a Shape program through the full engine pipeline.

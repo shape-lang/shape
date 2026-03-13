@@ -45,8 +45,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         let is_typed = self.emit_is_heap_kind(obj, HK_TYPED_OBJECT);
 
         // Extract alloc_ptr for use in the fast path below
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(obj, payload_mask);
+        let alloc_ptr = self.emit_payload_ptr(obj);
 
         // Control flow blocks
         let fast_block = self.builder.create_block();
@@ -61,9 +60,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         self.builder.switch_to_block(fast_block);
         self.builder.seal_block(fast_block);
         // alloc_ptr + 8 = JitAlloc.data (which is *const u8 to TypedObject)
-        let obj_ptr = self.builder.ins().load(
+        let obj_ptr = self.emit_trusted_load(
             types::I64,
-            MemFlags::trusted(),
             alloc_ptr,
             JIT_ALLOC_DATA_OFFSET as i32,
         );
@@ -136,8 +134,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         let is_typed = self.emit_is_heap_kind(obj, HK_TYPED_OBJECT);
 
         // Extract alloc_ptr for use in the fast path below
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(obj, payload_mask);
+        let alloc_ptr = self.emit_payload_ptr(obj);
 
         // Control flow blocks
         let fast_block = self.builder.create_block();
@@ -151,9 +148,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         // Fast path: load TypedObject pointer from JitAlloc.data, then store field
         self.builder.switch_to_block(fast_block);
         self.builder.seal_block(fast_block);
-        let obj_ptr = self.builder.ins().load(
+        let obj_ptr = self.emit_trusted_load(
             types::I64,
-            MemFlags::trusted(),
             alloc_ptr,
             JIT_ALLOC_DATA_OFFSET as i32,
         );
@@ -226,12 +222,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
         // Store each field value at the appropriate offset
         // TypedObject layout: 8-byte header + fields at offsets 0, 8, 16, etc.
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(obj, payload_mask);
+        let alloc_ptr = self.emit_payload_ptr(obj);
         // Load TypedObject raw pointer from JitAlloc.data
-        let typed_ptr = self.builder.ins().load(
+        let typed_ptr = self.emit_trusted_load(
             types::I64,
-            MemFlags::trusted(),
             alloc_ptr,
             JIT_ALLOC_DATA_OFFSET as i32,
         );

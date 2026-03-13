@@ -4,6 +4,7 @@
 //! in Shape that have interior mutability. No user-definable interior mutability exists.
 
 use crate::executor::VirtualMachine;
+use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
@@ -22,7 +23,7 @@ pub fn handle_mutex_lock(
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("lock() called on non-mutex value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("lock()", "mutex"))?;
     match heap {
         HeapValue::Mutex(data) => {
             let guard = data
@@ -32,9 +33,7 @@ pub fn handle_mutex_lock(
             vm.push_vw(guard.clone())?;
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "lock() called on non-mutex value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("lock()", "mutex")),
     }
 }
 
@@ -48,7 +47,7 @@ pub fn handle_mutex_try_lock(
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("try_lock() called on non-mutex value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("try_lock()", "mutex"))?;
     match heap {
         HeapValue::Mutex(data) => {
             match data.inner.try_lock() {
@@ -57,9 +56,7 @@ pub fn handle_mutex_try_lock(
             }
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "try_lock() called on non-mutex value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("try_lock()", "mutex")),
     }
 }
 
@@ -73,7 +70,7 @@ pub fn handle_mutex_set(
     let new_value = args.get(1).cloned().unwrap_or_else(ValueWord::none);
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("set() called on non-mutex value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("set()", "mutex"))?;
     match heap {
         HeapValue::Mutex(data) => {
             let mut guard = data
@@ -84,9 +81,7 @@ pub fn handle_mutex_set(
             vm.push_vw(ValueWord::none())?;
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "set() called on non-mutex value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("set()", "mutex")),
     }
 }
 
@@ -103,16 +98,14 @@ pub fn handle_atomic_load(
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("load() called on non-atomic value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("load()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
             let val = data.inner.load(Ordering::SeqCst);
             vm.push_vw(ValueWord::from_i64(val))?;
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "load() called on non-atomic value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("load()", "atomic")),
     }
 }
 
@@ -126,16 +119,14 @@ pub fn handle_atomic_store(
     let new_val = args.get(1).and_then(|nb| nb.as_i64()).unwrap_or(0);
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("store() called on non-atomic value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("store()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
             data.inner.store(new_val, Ordering::SeqCst);
             vm.push_vw(ValueWord::none())?;
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "store() called on non-atomic value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("store()", "atomic")),
     }
 }
 
@@ -147,18 +138,16 @@ pub fn handle_atomic_fetch_add(
 ) -> Result<(), VMError> {
     let receiver = &args[0];
     let delta = args.get(1).and_then(|nb| nb.as_i64()).unwrap_or(0);
-    let heap = receiver.as_heap_ref().ok_or_else(|| {
-        VMError::RuntimeError("fetch_add() called on non-atomic value".to_string())
-    })?;
+    let heap = receiver
+        .as_heap_ref()
+        .ok_or_else(|| type_mismatch_error("fetch_add()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
             let prev = data.inner.fetch_add(delta, Ordering::SeqCst);
             vm.push_vw(ValueWord::from_i64(prev))?;
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "fetch_add() called on non-atomic value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("fetch_add()", "atomic")),
     }
 }
 
@@ -170,18 +159,16 @@ pub fn handle_atomic_fetch_sub(
 ) -> Result<(), VMError> {
     let receiver = &args[0];
     let delta = args.get(1).and_then(|nb| nb.as_i64()).unwrap_or(0);
-    let heap = receiver.as_heap_ref().ok_or_else(|| {
-        VMError::RuntimeError("fetch_sub() called on non-atomic value".to_string())
-    })?;
+    let heap = receiver
+        .as_heap_ref()
+        .ok_or_else(|| type_mismatch_error("fetch_sub()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
             let prev = data.inner.fetch_sub(delta, Ordering::SeqCst);
             vm.push_vw(ValueWord::from_i64(prev))?;
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "fetch_sub() called on non-atomic value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("fetch_sub()", "atomic")),
     }
 }
 
@@ -195,9 +182,9 @@ pub fn handle_atomic_compare_exchange(
     let receiver = &args[0];
     let expected = args.get(1).and_then(|nb| nb.as_i64()).unwrap_or(0);
     let new_val = args.get(2).and_then(|nb| nb.as_i64()).unwrap_or(0);
-    let heap = receiver.as_heap_ref().ok_or_else(|| {
-        VMError::RuntimeError("compare_exchange() called on non-atomic value".to_string())
-    })?;
+    let heap = receiver
+        .as_heap_ref()
+        .ok_or_else(|| type_mismatch_error("compare_exchange()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
             match data
@@ -208,9 +195,7 @@ pub fn handle_atomic_compare_exchange(
             }
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "compare_exchange() called on non-atomic value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("compare_exchange()", "atomic")),
     }
 }
 
@@ -227,7 +212,7 @@ pub fn handle_lazy_get(
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("get() called on non-lazy value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("get()", "lazy"))?;
     match heap {
         HeapValue::Lazy(data) => {
             // Check if already initialized
@@ -272,9 +257,7 @@ pub fn handle_lazy_get(
             vm.push_vw(result)?;
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "get() called on non-lazy value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("get()", "lazy")),
     }
 }
 
@@ -285,17 +268,15 @@ pub fn handle_lazy_is_initialized(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
     let receiver = &args[0];
-    let heap = receiver.as_heap_ref().ok_or_else(|| {
-        VMError::RuntimeError("is_initialized() called on non-lazy value".to_string())
-    })?;
+    let heap = receiver
+        .as_heap_ref()
+        .ok_or_else(|| type_mismatch_error("is_initialized()", "lazy"))?;
     match heap {
         HeapValue::Lazy(data) => {
             let initialized = data.is_initialized();
             vm.push_vw(ValueWord::from_bool(initialized))?;
             Ok(())
         }
-        _ => Err(VMError::RuntimeError(
-            "is_initialized() called on non-lazy value".to_string(),
-        )),
+        _ => Err(type_mismatch_error("is_initialized()", "lazy")),
     }
 }

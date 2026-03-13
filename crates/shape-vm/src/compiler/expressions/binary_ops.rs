@@ -11,7 +11,7 @@ use super::super::BytecodeCompiler;
 use super::numeric_ops::{
     CoercionPlan, apply_coercion, inferred_type_to_numeric, is_function_type,
     is_ordered_comparison, is_strict_arithmetic, is_type_numeric, plan_coercion,
-    try_trusted_opcode, type_display_name, typed_opcode_for,
+    type_display_name, typed_opcode_for,
 };
 
 /// Map a strict arithmetic BinaryOp to its operator trait name, if one exists.
@@ -238,13 +238,7 @@ impl BytecodeCompiler {
         }
 
         let result_type = apply_coercion(self, plan);
-        if let Some(guarded_opcode) = typed_opcode_for(op, result_type) {
-            // Try to upgrade to trusted variant if both operand hints are known
-            let opcode = if let (Some(lh), Some(rh)) = (lhs_hint, rhs_hint) {
-                try_trusted_opcode(op, result_type, lh, rh).unwrap_or(guarded_opcode)
-            } else {
-                guarded_opcode
-            };
+        if let Some(opcode) = typed_opcode_for(op, result_type) {
             // Compact typed opcodes (AddTyped, etc.) need Width operand
             if let NumericType::IntWidth(w) = result_type {
                 self.emit(Instruction::new(

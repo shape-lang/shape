@@ -7,17 +7,41 @@
 //! **Single source of truth**: This solver produces `BorrowAnalysis`, which is
 //! consumed by the compiler, LSP, and diagnostic engine. No consumer re-derives results.
 //!
-//! Input relations (populated from MIR):
-//!   loan_issued_at(Loan, Point)       — a borrow was created
-//!   cfg_edge(Point, Point)            — control flow between points
-//!   invalidates(Point, Loan)          — an action invalidates a loan
-//!   use_of_loan(Loan, Point)          — a loan is used (the ref is read/used)
+//! ## The Datafrog pattern
 //!
-//! Derived relations (Datafrog fixpoint):
-//!   loan_live_at(Loan, Point)         — a loan is still active
-//!   error(Point, Loan, Loan)          — two conflicting loans are simultaneously active
+//! [Datafrog](https://crates.io/crates/datafrog) is a lightweight Datalog engine
+//! that computes fixed points over monotone relations. The pattern used here is:
 //!
-//! Additional analyses:
+//! 1. **Define input relations** — static facts extracted from MIR that never
+//!    change during iteration (e.g. `cfg_edge`, `invalidates`).
+//! 2. **Define derived variables** — monotonically-growing sets computed by
+//!    Datafrog's iteration engine (e.g. `loan_live_at`).
+//! 3. **Seed** the derived variable with initial facts (each loan is live at
+//!    its issuance point).
+//! 4. **Express rules** as `from_leapjoin` calls inside a `while iteration.changed()`
+//!    loop. Each rule joins a derived variable against input relations and
+//!    produces new tuples. Datafrog deduplicates and tracks whether any new
+//!    tuples were added (the `changed()` check).
+//! 5. **Convergence**: Because all relations are sets of tuples and rules only
+//!    add (never remove), the iteration terminates when no new tuples are
+//!    produced — the monotone fixed point.
+//! 6. **Post-processing**: After convergence, the derived relation is
+//!    `.complete()`-d into a frozen `Relation` and scanned for error conditions.
+//!
+//! ## Input relations (populated from MIR)
+//!
+//!   - `loan_issued_at(Loan, Point)` — a borrow was created
+//!   - `cfg_edge(Point, Point)` — control flow between points
+//!   - `invalidates(Point, Loan)` — an action invalidates a loan
+//!   - `use_of_loan(Loan, Point)` — a loan is used (the ref is read/used)
+//!
+//! ## Derived relations (Datafrog fixpoint)
+//!
+//!   - `loan_live_at(Loan, Point)` — a loan is still active
+//!   - `error(Point, Loan, Loan)` — two conflicting loans are simultaneously active
+//!
+//! ## Additional analyses
+//!
 //! - **Post-solve relaxation**: `solve()` skips `ReferenceStoredIn*` errors
 //!   when the container slot's `EscapeStatus` is `Local` (never escapes).
 //! - **Interprocedural summaries**: `extract_borrow_summary()` derives per-function

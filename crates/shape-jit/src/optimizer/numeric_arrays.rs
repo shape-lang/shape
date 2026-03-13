@@ -50,18 +50,10 @@ fn is_typed_int_consumer(op: OpCode) -> bool {
             | OpCode::DivInt
             | OpCode::ModInt
             | OpCode::PowInt
-            | OpCode::AddIntTrusted
-            | OpCode::SubIntTrusted
-            | OpCode::MulIntTrusted
-            | OpCode::DivIntTrusted
             | OpCode::GtInt
             | OpCode::LtInt
             | OpCode::GteInt
             | OpCode::LteInt
-            | OpCode::GtIntTrusted
-            | OpCode::LtIntTrusted
-            | OpCode::GteIntTrusted
-            | OpCode::LteIntTrusted
             | OpCode::EqInt
             | OpCode::NeqInt
     )
@@ -76,18 +68,10 @@ fn is_typed_float_consumer(op: OpCode) -> bool {
             | OpCode::DivNumber
             | OpCode::ModNumber
             | OpCode::PowNumber
-            | OpCode::AddNumberTrusted
-            | OpCode::SubNumberTrusted
-            | OpCode::MulNumberTrusted
-            | OpCode::DivNumberTrusted
             | OpCode::GtNumber
             | OpCode::LtNumber
             | OpCode::GteNumber
             | OpCode::LteNumber
-            | OpCode::GtNumberTrusted
-            | OpCode::LtNumberTrusted
-            | OpCode::GteNumberTrusted
-            | OpCode::LteNumberTrusted
             | OpCode::EqNumber
             | OpCode::NeqNumber
     )
@@ -127,20 +111,12 @@ fn is_comparison_consumer(op: OpCode) -> bool {
             | OpCode::LtInt
             | OpCode::GteInt
             | OpCode::LteInt
-            | OpCode::GtIntTrusted
-            | OpCode::LtIntTrusted
-            | OpCode::GteIntTrusted
-            | OpCode::LteIntTrusted
             | OpCode::EqInt
             | OpCode::NeqInt
             | OpCode::GtNumber
             | OpCode::LtNumber
             | OpCode::GteNumber
             | OpCode::LteNumber
-            | OpCode::GtNumberTrusted
-            | OpCode::LtNumberTrusted
-            | OpCode::GteNumberTrusted
-            | OpCode::LteNumberTrusted
             | OpCode::EqNumber
             | OpCode::NeqNumber
             | OpCode::GtDecimal
@@ -157,8 +133,6 @@ fn is_unknown_stack_effect(op: OpCode) -> bool {
             | OpCode::CallValue
             | OpCode::CallMethod
             | OpCode::BuiltinCall
-            | OpCode::Pattern
-            | OpCode::RunSimulation
             | OpCode::DynMethodCall
             | OpCode::CallForeign
     )
@@ -191,20 +165,12 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::DivInt
         | OpCode::ModInt
         | OpCode::PowInt
-        | OpCode::AddIntTrusted
-        | OpCode::SubIntTrusted
-        | OpCode::MulIntTrusted
-        | OpCode::DivIntTrusted
         | OpCode::AddNumber
         | OpCode::SubNumber
         | OpCode::MulNumber
         | OpCode::DivNumber
         | OpCode::ModNumber
         | OpCode::PowNumber
-        | OpCode::AddNumberTrusted
-        | OpCode::SubNumberTrusted
-        | OpCode::MulNumberTrusted
-        | OpCode::DivNumberTrusted
         | OpCode::Gt
         | OpCode::Lt
         | OpCode::Gte
@@ -215,18 +181,10 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::LtInt
         | OpCode::GteInt
         | OpCode::LteInt
-        | OpCode::GtIntTrusted
-        | OpCode::LtIntTrusted
-        | OpCode::GteIntTrusted
-        | OpCode::LteIntTrusted
         | OpCode::GtNumber
         | OpCode::LtNumber
         | OpCode::GteNumber
         | OpCode::LteNumber
-        | OpCode::GtNumberTrusted
-        | OpCode::LtNumberTrusted
-        | OpCode::GteNumberTrusted
-        | OpCode::LteNumberTrusted
         | OpCode::EqInt
         | OpCode::EqNumber
         | OpCode::NeqInt
@@ -301,20 +259,12 @@ fn local_init_kind(
             | OpCode::SubInt
             | OpCode::MulInt
             | OpCode::DivInt
-            | OpCode::ModInt
-            | OpCode::AddIntTrusted
-            | OpCode::SubIntTrusted
-            | OpCode::MulIntTrusted
-            | OpCode::DivIntTrusted => Some(NumericKind::Int),
+            | OpCode::ModInt => Some(NumericKind::Int),
             OpCode::AddNumber
             | OpCode::SubNumber
             | OpCode::MulNumber
             | OpCode::DivNumber
-            | OpCode::ModNumber
-            | OpCode::AddNumberTrusted
-            | OpCode::SubNumberTrusted
-            | OpCode::MulNumberTrusted
-            | OpCode::DivNumberTrusted => Some(NumericKind::Float),
+            | OpCode::ModNumber => Some(NumericKind::Float),
             _ => None,
         };
     }
@@ -392,19 +342,11 @@ fn generic_consumer_kind(program: &BytecodeProgram, op_idx: usize) -> NumericKin
             | OpCode::MulInt
             | OpCode::DivInt
             | OpCode::ModInt
-            | OpCode::AddIntTrusted
-            | OpCode::SubIntTrusted
-            | OpCode::MulIntTrusted
-            | OpCode::DivIntTrusted
             | OpCode::AddNumber
             | OpCode::SubNumber
             | OpCode::MulNumber
             | OpCode::DivNumber
             | OpCode::ModNumber
-            | OpCode::AddNumberTrusted
-            | OpCode::SubNumberTrusted
-            | OpCode::MulNumberTrusted
-            | OpCode::DivNumberTrusted
             | OpCode::LoadModuleBinding
             | OpCode::Dup
             | OpCode::Swap => {}

@@ -77,26 +77,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::ModDecimal
             | OpCode::PowDecimal => self.compile_decimal_arith(instr.opcode),
 
-            // Trusted arithmetic (compiler-proved types, no runtime guard — same JIT path)
-            OpCode::AddIntTrusted
-            | OpCode::SubIntTrusted
-            | OpCode::MulIntTrusted
-            | OpCode::DivIntTrusted => self.compile_int_arith(instr.opcode),
-            OpCode::AddNumberTrusted
-            | OpCode::SubNumberTrusted
-            | OpCode::MulNumberTrusted
-            | OpCode::DivNumberTrusted => self.compile_float_arith(instr.opcode),
-
-            // Trusted comparisons (compiler-proved types — same JIT path as guarded)
-            OpCode::GtIntTrusted
-            | OpCode::LtIntTrusted
-            | OpCode::GteIntTrusted
-            | OpCode::LteIntTrusted => self.compile_int_cmp(instr.opcode),
-            OpCode::GtNumberTrusted
-            | OpCode::LtNumberTrusted
-            | OpCode::GteNumberTrusted
-            | OpCode::LteNumberTrusted => self.compile_float_cmp(instr.opcode),
-
             // Comparisons (generic)
             OpCode::Gt => self.compile_gt(),
             OpCode::Lt => self.compile_lt(),
@@ -194,15 +174,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             OpCode::TryUnwrap => self.compile_try_unwrap(),
             OpCode::UnwrapOption => self.compile_unwrap_option(),
 
-            // Pattern matching — dispatch via generic FFI to VM pattern matcher.
-            // Bytecode: pops pattern + value, pushes bool result.
-            OpCode::Pattern => self.compile_opcode_via_generic_ffi(instr.opcode, 2, true),
-
             // Timeframe context — fire-and-forget FFI calls (pops 0 or 1, pushes 0)
             OpCode::PushTimeframe => self.compile_opcode_via_generic_ffi(instr.opcode, 1, false),
             OpCode::PopTimeframe => self.compile_opcode_via_generic_ffi(instr.opcode, 0, false),
-
-            OpCode::RunSimulation => self.compile_run_simulation(),
             OpCode::TypeCheck => self.compile_type_check(instr),
             // Return opcodes
             OpCode::Return => self.compile_return(),

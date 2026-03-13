@@ -236,20 +236,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::DivInt
             | OpCode::ModInt
             | OpCode::PowInt
-            | OpCode::AddIntTrusted
-            | OpCode::SubIntTrusted
-            | OpCode::MulIntTrusted
-            | OpCode::DivIntTrusted
             | OpCode::AddNumber
             | OpCode::SubNumber
             | OpCode::MulNumber
             | OpCode::DivNumber
             | OpCode::ModNumber
             | OpCode::PowNumber
-            | OpCode::AddNumberTrusted
-            | OpCode::SubNumberTrusted
-            | OpCode::MulNumberTrusted
-            | OpCode::DivNumberTrusted
             | OpCode::Gt
             | OpCode::Lt
             | OpCode::Gte
@@ -262,20 +254,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::LteInt
             | OpCode::EqInt
             | OpCode::NeqInt
-            | OpCode::GtIntTrusted
-            | OpCode::LtIntTrusted
-            | OpCode::GteIntTrusted
-            | OpCode::LteIntTrusted
             | OpCode::GtNumber
             | OpCode::LtNumber
             | OpCode::GteNumber
             | OpCode::LteNumber
             | OpCode::EqNumber
             | OpCode::NeqNumber
-            | OpCode::GtNumberTrusted
-            | OpCode::LtNumberTrusted
-            | OpCode::GteNumberTrusted
-            | OpCode::LteNumberTrusted
             | OpCode::GetProp => (2, 1),
             // Stack manipulation
             OpCode::Dup => (1, 2),
@@ -630,12 +614,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         if self.stack_len() >= 2 {
             let b = self.stack_pop().unwrap();
             let a = self.stack_pop().unwrap();
-            let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-            let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
             let a_true = self.is_truthy(a);
             let b_true = self.is_truthy(b);
             let both = self.builder.ins().band(a_true, b_true);
-            let result = self.builder.ins().select(both, true_val, false_val);
+            let result = self.emit_boxed_bool_from_i1(both);
             self.stack_push(result);
         }
         Ok(())
@@ -645,12 +627,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         if self.stack_len() >= 2 {
             let b = self.stack_pop().unwrap();
             let a = self.stack_pop().unwrap();
-            let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-            let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
             let a_true = self.is_truthy(a);
             let b_true = self.is_truthy(b);
             let either = self.builder.ins().bor(a_true, b_true);
-            let result = self.builder.ins().select(either, true_val, false_val);
+            let result = self.emit_boxed_bool_from_i1(either);
             self.stack_push(result);
         }
         Ok(())
@@ -658,9 +638,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
     pub(crate) fn compile_not(&mut self) -> Result<(), String> {
         if let Some(a) = self.stack_pop() {
+            let is_true = self.is_truthy(a);
+            // Not: invert the boolean — true_val when NOT truthy (is_true==0)
             let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
             let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
-            let is_true = self.is_truthy(a);
             let result = self.builder.ins().select(is_true, false_val, true_val);
             self.stack_push(result);
         }
@@ -776,15 +757,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// both operands are raw i64, uses native integer ops (iadd, isub, imul)
     /// for ~3x lower latency than the f64 path.
     pub(crate) fn compile_int_arith(&mut self, op: OpCode) -> Result<(), String> {
-        // Map trusted variants to their guarded equivalents — the JIT generates
-        // the same code either way since it operates on typed IR.
-        let op = match op {
-            OpCode::AddIntTrusted => OpCode::AddInt,
-            OpCode::SubIntTrusted => OpCode::SubInt,
-            OpCode::MulIntTrusted => OpCode::MulInt,
-            OpCode::DivIntTrusted => OpCode::DivInt,
-            _ => op,
-        };
         let width_hint = self
             .top_two_integer_result_hint()
             .filter(|hint| hint.is_integer_family() && !hint.is_default_int_family())
@@ -930,15 +902,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// Typed float arithmetic — same as int in NaN-boxing (both are f64).
     /// Compiler guarantees both operands are numbers — unconditionally use fast path.
     pub(crate) fn compile_float_arith(&mut self, op: OpCode) -> Result<(), String> {
-        // Map trusted variants to their guarded equivalents — the JIT generates
-        // the same code either way since it operates on typed IR.
-        let op = match op {
-            OpCode::AddNumberTrusted => OpCode::AddNumber,
-            OpCode::SubNumberTrusted => OpCode::SubNumber,
-            OpCode::MulNumberTrusted => OpCode::MulNumber,
-            OpCode::DivNumberTrusted => OpCode::DivNumber,
-            _ => op,
-        };
         let result_hint = StorageHint::Float64;
 
         match op {
@@ -1009,15 +972,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// When inside an integer-unboxed loop with both operands as raw i64,
     /// uses native icmp for ~3x lower latency than fcmp.
     pub(crate) fn compile_int_cmp(&mut self, op: OpCode) -> Result<(), String> {
-        // Map trusted variants to their guarded equivalents — the JIT generates
-        // the same code either way since it operates on typed IR.
-        let op = match op {
-            OpCode::GtIntTrusted => OpCode::GtInt,
-            OpCode::LtIntTrusted => OpCode::LtInt,
-            OpCode::GteIntTrusted => OpCode::GteInt,
-            OpCode::LteIntTrusted => OpCode::LteInt,
-            _ => op,
-        };
         let width_hint = self
             .top_two_integer_result_hint()
             .filter(|hint| hint.is_integer_family() && !hint.is_default_int_family())
@@ -1071,15 +1025,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
     /// Typed float comparison — direct f64 comparison, no type checks.
     pub(crate) fn compile_float_cmp(&mut self, op: OpCode) -> Result<(), String> {
-        // Map trusted variants to their guarded equivalents — the JIT generates
-        // the same code either way since it operates on typed IR.
-        let op = match op {
-            OpCode::GtNumberTrusted => OpCode::GtNumber,
-            OpCode::LtNumberTrusted => OpCode::LtNumber,
-            OpCode::GteNumberTrusted => OpCode::GteNumber,
-            OpCode::LteNumberTrusted => OpCode::LteNumber,
-            _ => op,
-        };
         let cc = match op {
             OpCode::GtNumber => FloatCC::GreaterThan,
             OpCode::LtNumber => FloatCC::LessThan,

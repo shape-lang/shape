@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-/// Default directory for globally installed extensions: ~/.shape/extensions/
+use crate::config;
+
+/// Default directory for globally installed extensions.
 pub fn default_extensions_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".shape").join("extensions"))
+    config::shape_config_dir().map(|d| d.join("extensions"))
 }
 
 /// Known first-party extensions that follow the shape-ext-<name> convention.
@@ -17,7 +19,7 @@ pub async fn run_ext_install(name: String, version: Option<String>) -> Result<()
     let lib_name = crate_name.replace('-', "_");
     let version_spec = version.as_deref().unwrap_or("*");
 
-    let ext_dir = default_extensions_dir().context("could not determine home directory")?;
+    let ext_dir = default_extensions_dir().context("could not determine config directory")?;
     std::fs::create_dir_all(&ext_dir)?;
 
     println!("Installing extension '{name}' (crate: {crate_name} {version_spec})...");
@@ -53,9 +55,8 @@ path = "lib.rs"
     std::fs::write(build_dir.join("lib.rs"), &lib_rs)?;
 
     // Shared target dir so repeated installs reuse cached deps.
-    let cache_dir = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(".shape")
+    let cache_dir = config::shape_config_dir()
+        .context("could not determine config directory")?
         .join("cache")
         .join("ext-build");
 
@@ -148,7 +149,7 @@ pub async fn run_ext_list() -> Result<()> {
 }
 
 pub async fn run_ext_remove(name: String) -> Result<()> {
-    let ext_dir = default_extensions_dir().context("could not determine home directory")?;
+    let ext_dir = default_extensions_dir().context("could not determine config directory")?;
 
     let lib_name = format!("shape_ext_{name}");
     let so_filename = format!(

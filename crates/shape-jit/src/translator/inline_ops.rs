@@ -23,15 +23,50 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         self.builder.ins().iadd(data_ptr, byte_offset)
     }
 
+    /// Extract the 48-bit payload pointer from a NaN-boxed heap value.
+    ///
+    /// Masks off the tag bits (upper 16 bits) and returns the raw pointer
+    /// value as an i64. This is the common first step for all heap value
+    /// access: `bits & PAYLOAD_MASK`.
     #[inline]
-    fn emit_array_ptr(&mut self, arr_boxed: Value) -> Value {
+    pub(in crate::translator) fn emit_payload_ptr(&mut self, boxed: Value) -> Value {
         let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(arr_boxed, payload_mask);
-        // Skip JitAlloc header to reach the JitArray data.
-        // JitAlloc<T> layout: [kind: u16, _pad: [u8; 6], data: T] — data starts at offset 8.
+        self.builder.ins().band(boxed, payload_mask)
+    }
+
+    /// Extract the JitAlloc data pointer from a NaN-boxed heap value.
+    ///
+    /// Combines `emit_payload_ptr` with adding the JitAlloc header offset
+    /// to skip past the `[kind: u16, _pad: [u8; 6]]` prefix to the data.
+    #[inline]
+    pub(in crate::translator) fn emit_jit_alloc_data_ptr(&mut self, boxed: Value) -> Value {
+        let alloc_ptr = self.emit_payload_ptr(boxed);
         self.builder
             .ins()
             .iadd_imm(alloc_ptr, JIT_ALLOC_DATA_OFFSET as i64)
+    }
+
+    /// Load a value from memory using trusted MemFlags.
+    ///
+    /// Trusted loads are appropriate when the pointer is known valid (e.g.,
+    /// after a heap kind guard or within a bounds-checked array access).
+    #[inline]
+    pub(in crate::translator) fn emit_trusted_load(
+        &mut self,
+        ty: types::Type,
+        ptr: Value,
+        offset: i32,
+    ) -> Value {
+        self.builder
+            .ins()
+            .load(ty, MemFlags::trusted(), ptr, offset)
+    }
+
+    #[inline]
+    fn emit_array_ptr(&mut self, arr_boxed: Value) -> Value {
+        // Skip JitAlloc header to reach the JitArray data.
+        // JitAlloc<T> layout: [kind: u16, _pad: [u8; 6], data: T] — data starts at offset 8.
+        self.emit_jit_alloc_data_ptr(arr_boxed)
     }
 
     #[inline]
@@ -82,8 +117,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             .icmp(IntCC::Equal, upper_bits, tag_base_val);
 
         // Step 2: Speculatively load heap_kind u16 from JitAlloc header
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(val, payload_mask);
+        let alloc_ptr = self.emit_payload_ptr(val);
         let kind_u16 = self
             .builder
             .ins()

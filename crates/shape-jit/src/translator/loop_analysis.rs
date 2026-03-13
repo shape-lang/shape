@@ -372,14 +372,14 @@ fn detect_bound_comparison(
             if let (Some(l1), Some(l2)) = (l1, l2) {
                 if l1 == indvar_slot {
                     let cc = match cmp.opcode {
-                        OpCode::LtInt | OpCode::LtIntTrusted | OpCode::Lt => IntCC::SignedLessThan,
-                        OpCode::LteInt | OpCode::LteIntTrusted | OpCode::Lte => {
+                        OpCode::LtInt | OpCode::Lt => IntCC::SignedLessThan,
+                        OpCode::LteInt | OpCode::Lte => {
                             IntCC::SignedLessThanOrEqual
                         }
-                        OpCode::GtInt | OpCode::GtIntTrusted | OpCode::Gt => {
+                        OpCode::GtInt | OpCode::Gt => {
                             IntCC::SignedGreaterThan
                         }
-                        OpCode::GteInt | OpCode::GteIntTrusted | OpCode::Gte => {
+                        OpCode::GteInt | OpCode::Gte => {
                             IntCC::SignedGreaterThanOrEqual
                         }
                         _ => continue,
@@ -445,19 +445,11 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::MulInt
             | OpCode::DivInt
             | OpCode::ModInt
-            | OpCode::AddIntTrusted
-            | OpCode::SubIntTrusted
-            | OpCode::MulIntTrusted
-            | OpCode::DivIntTrusted
             | OpCode::AddNumber
             | OpCode::SubNumber
             | OpCode::MulNumber
             | OpCode::DivNumber
             | OpCode::ModNumber
-            | OpCode::AddNumberTrusted
-            | OpCode::SubNumberTrusted
-            | OpCode::MulNumberTrusted
-            | OpCode::DivNumberTrusted
             | OpCode::AddDecimal
             | OpCode::SubDecimal
             | OpCode::MulDecimal
@@ -484,18 +476,10 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::LtInt
             | OpCode::GteInt
             | OpCode::LteInt
-            | OpCode::GtIntTrusted
-            | OpCode::LtIntTrusted
-            | OpCode::GteIntTrusted
-            | OpCode::LteIntTrusted
             | OpCode::GtNumber
             | OpCode::LtNumber
             | OpCode::GteNumber
             | OpCode::LteNumber
-            | OpCode::GtNumberTrusted
-            | OpCode::LtNumberTrusted
-            | OpCode::GteNumberTrusted
-            | OpCode::LteNumberTrusted
             | OpCode::EqInt
             | OpCode::EqNumber
             | OpCode::NeqInt
@@ -558,7 +542,6 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::Halt
             | OpCode::Nop
             | OpCode::Debug
-            | OpCode::Pattern
             | OpCode::PushTimeframe
             | OpCode::PopTimeframe
             | OpCode::WrapTypeAnnotation

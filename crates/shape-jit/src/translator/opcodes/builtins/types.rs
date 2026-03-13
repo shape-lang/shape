@@ -22,12 +22,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             BuiltinFunction::IsNumber => {
                 self.stack_pop();
                 if let Some(val) = self.stack_pop() {
-                    let nan_base = self.builder.ins().iconst(types::I64, NAN_BASE as i64);
-                    let masked = self.builder.ins().band(val, nan_base);
-                    let is_num = self.builder.ins().icmp(IntCC::NotEqual, masked, nan_base);
-                    let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-                    let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
-                    let result = self.builder.ins().select(is_num, true_val, false_val);
+                    let is_num = self.is_boxed_number(val);
+                    let result = self.emit_boxed_bool_from_i1(is_num);
                     self.stack_push(result);
                 }
                 true
@@ -49,9 +45,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     let is_true = self.builder.ins().icmp(IntCC::Equal, val, true_tag);
                     let is_false = self.builder.ins().icmp(IntCC::Equal, val, false_tag);
                     let is_bool = self.builder.ins().bor(is_true, is_false);
-                    let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-                    let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
-                    let result = self.builder.ins().select(is_bool, true_val, false_val);
+                    let result = self.emit_boxed_bool_from_i1(is_bool);
                     self.stack_push(result);
                 }
                 true

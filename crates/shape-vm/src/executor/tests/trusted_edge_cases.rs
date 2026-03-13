@@ -4,21 +4,8 @@
 //! numbers, and type transitions that the trusted fast path must handle.
 
 use super::*;
+use super::test_utils::eval_result as eval;
 use shape_value::{VMError, ValueWord};
-
-/// Helper: compile and execute Shape source.
-fn eval(source: &str) -> Result<ValueWord, VMError> {
-    let program = shape_ast::parser::parse_program(source)
-        .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
-    let mut compiler = crate::compiler::BytecodeCompiler::new();
-    compiler.set_source(source);
-    let bytecode = compiler
-        .compile(&program)
-        .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(bytecode);
-    vm.execute(None).map(|nb| nb.clone())
-}
 
 // ── Integer overflow → f64 promotion ────────────────────────────────
 

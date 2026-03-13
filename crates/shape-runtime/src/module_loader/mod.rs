@@ -11,7 +11,7 @@ mod resolution_deep_tests;
 mod resolver;
 
 use crate::project::{DependencySpec, ProjectRoot, find_project_root, normalize_package_identity};
-use shape_ast::ast::{AnnotationDef, FunctionDef, ImportStmt, Program, Span};
+use shape_ast::ast::{AnnotationDef, FunctionDef, ImportStmt, Program};
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::parser::parse_program;
 use shape_value::ValueWord;
@@ -56,35 +56,16 @@ pub enum Export {
     Value(ValueWord),
 }
 
-/// Kind of exported symbol discovered from module source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModuleExportKind {
-    Function,
-    BuiltinFunction,
-    TypeAlias,
-    BuiltinType,
-    Interface,
-    Enum,
-    Annotation,
-    Value,
-}
+// Re-export shared module resolution types from shape-ast so that existing
+// consumers (`shape-vm`, `shape-lsp`, etc.) can continue to import them from
+// `shape_runtime::module_loader::*` without changes.
+pub use shape_ast::module_utils::{ModuleExportKind, ModuleExportSymbol};
 
-/// Exported symbol metadata used by tooling (LSP, analyzers).
-#[derive(Debug, Clone)]
-pub struct ModuleExportSymbol {
-    /// Original symbol name in module scope.
-    pub name: String,
-    /// Alias if exported as `name as alias`.
-    pub alias: Option<String>,
-    /// High-level symbol kind.
-    pub kind: ModuleExportKind,
-    /// Source span for navigation/diagnostics.
-    pub span: Span,
-}
-
-/// Collect exported symbols from a parsed module AST using runtime export semantics.
+/// Collect exported symbols from a parsed module AST.
+///
+/// Delegates to the canonical shared implementation in `shape_ast::module_utils`.
 pub fn collect_exported_symbols(program: &Program) -> Result<Vec<ModuleExportSymbol>> {
-    loading::collect_exported_symbols(program)
+    shape_ast::module_utils::collect_exported_symbols(program)
 }
 
 /// Collect exported function names from module source using canonical

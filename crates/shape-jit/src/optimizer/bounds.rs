@@ -136,7 +136,7 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::Neg
         | OpCode::Not
         | OpCode::Length => (1, 1),
-        // Binary arithmetic/comparison/indexed read (including Trusted variants)
+        // Binary arithmetic/comparison/indexed read
         OpCode::Add
         | OpCode::Sub
         | OpCode::Mul
@@ -149,20 +149,12 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::DivInt
         | OpCode::ModInt
         | OpCode::PowInt
-        | OpCode::AddIntTrusted
-        | OpCode::SubIntTrusted
-        | OpCode::MulIntTrusted
-        | OpCode::DivIntTrusted
         | OpCode::AddNumber
         | OpCode::SubNumber
         | OpCode::MulNumber
         | OpCode::DivNumber
         | OpCode::ModNumber
         | OpCode::PowNumber
-        | OpCode::AddNumberTrusted
-        | OpCode::SubNumberTrusted
-        | OpCode::MulNumberTrusted
-        | OpCode::DivNumberTrusted
         | OpCode::Gt
         | OpCode::Lt
         | OpCode::Gte
@@ -173,18 +165,10 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::LtInt
         | OpCode::GteInt
         | OpCode::LteInt
-        | OpCode::GtIntTrusted
-        | OpCode::LtIntTrusted
-        | OpCode::GteIntTrusted
-        | OpCode::LteIntTrusted
         | OpCode::GtNumber
         | OpCode::LtNumber
         | OpCode::GteNumber
         | OpCode::LteNumber
-        | OpCode::GtNumberTrusted
-        | OpCode::LtNumberTrusted
-        | OpCode::GteNumberTrusted
-        | OpCode::LteNumberTrusted
         | OpCode::EqInt
         | OpCode::EqNumber
         | OpCode::NeqInt
@@ -264,22 +248,14 @@ fn get_prop_array_source(
 fn is_add_op(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Add
-            | OpCode::AddInt
-            | OpCode::AddNumber
-            | OpCode::AddIntTrusted
-            | OpCode::AddNumberTrusted
+        OpCode::Add | OpCode::AddInt | OpCode::AddNumber
     )
 }
 
 fn is_mul_op(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Mul
-            | OpCode::MulInt
-            | OpCode::MulNumber
-            | OpCode::MulIntTrusted
-            | OpCode::MulNumberTrusted
+        OpCode::Mul | OpCode::MulInt | OpCode::MulNumber
     )
 }
 
@@ -413,10 +389,8 @@ fn expr_is_non_negative(
         }
         OpCode::Add
         | OpCode::AddInt
-        | OpCode::AddIntTrusted
         | OpCode::Mul
-        | OpCode::MulInt
-        | OpCode::MulIntTrusted => {
+        | OpCode::MulInt => {
             let Some(rhs_idx) = producer_index_for_stack_pos(program, producer_idx, 0) else {
                 return false;
             };
@@ -425,7 +399,7 @@ fn expr_is_non_negative(
             };
             if matches!(
                 instr.opcode,
-                OpCode::Mul | OpCode::MulInt | OpCode::MulIntTrusted
+                OpCode::Mul | OpCode::MulInt
             ) {
                 let lhs_local = producer_local_slot(program, lhs_idx, 0);
                 let rhs_local = producer_local_slot(program, rhs_idx, 0);
@@ -490,7 +464,7 @@ fn iv_has_non_negative_progress(
         }
         if !matches!(
             arith.opcode,
-            OpCode::Add | OpCode::AddInt | OpCode::AddIntTrusted
+            OpCode::Add | OpCode::AddInt
         ) {
             continue;
         }

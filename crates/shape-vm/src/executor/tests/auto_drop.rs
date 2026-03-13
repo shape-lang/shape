@@ -4,28 +4,9 @@
 //! local variable bindings, and that drop works correctly with early
 //! returns, breaks, nested scopes, etc.
 
-use crate::VMConfig;
 use crate::bytecode::OpCode;
-use crate::compiler::BytecodeCompiler;
-use crate::executor::VirtualMachine;
-use shape_ast::parser::parse_program;
+use crate::executor::tests::test_utils::{compile, eval};
 use shape_value::ValueWord;
-
-/// Compile Shape source code and return the bytecode program.
-fn compile(source: &str) -> crate::bytecode::BytecodeProgram {
-    let program = parse_program(source).expect("parse failed");
-    let mut compiler = BytecodeCompiler::new();
-    compiler.set_source(source);
-    compiler.compile(&program).expect("compile failed")
-}
-
-/// Compile and execute Shape source code, returning the final value.
-fn eval(source: &str) -> ValueWord {
-    let bytecode = compile(source);
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(bytecode);
-    vm.execute(None).expect("execution failed").clone()
-}
 
 #[test]
 fn test_auto_drop_at_scope_exit() {

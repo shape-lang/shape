@@ -87,10 +87,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     | OpCode::MulInt
                     | OpCode::DivInt
                     | OpCode::ModInt
-                    | OpCode::AddIntTrusted
-                    | OpCode::SubIntTrusted
-                    | OpCode::MulIntTrusted
-                    | OpCode::DivIntTrusted
                     | OpCode::Add
                     | OpCode::Sub
                     | OpCode::Mul
@@ -106,10 +102,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     | OpCode::Gte
                     | OpCode::EqInt
                     | OpCode::NeqInt
-                    | OpCode::GtIntTrusted
-                    | OpCode::LtIntTrusted
-                    | OpCode::GteIntTrusted
-                    | OpCode::LteIntTrusted
                     | OpCode::Eq
                     | OpCode::Neq
             )
@@ -128,10 +120,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     | OpCode::MulNumber
                     | OpCode::DivNumber
                     | OpCode::ModNumber
-                    | OpCode::AddNumberTrusted
-                    | OpCode::SubNumberTrusted
-                    | OpCode::MulNumberTrusted
-                    | OpCode::DivNumberTrusted
                     | OpCode::Lt
                     | OpCode::Gt
                     | OpCode::Lte
@@ -142,10 +130,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     | OpCode::GteNumber
                     | OpCode::EqNumber
                     | OpCode::NeqNumber
-                    | OpCode::GtNumberTrusted
-                    | OpCode::LtNumberTrusted
-                    | OpCode::GteNumberTrusted
-                    | OpCode::LteNumberTrusted
                     | OpCode::Eq
                     | OpCode::Neq
             )
@@ -444,10 +428,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     | OpCode::MulInt
                     | OpCode::DivInt
                     | OpCode::ModInt
-                    | OpCode::AddIntTrusted
-                    | OpCode::SubIntTrusted
-                    | OpCode::MulIntTrusted
-                    | OpCode::DivIntTrusted
             )
         };
         let is_generic_op = |op: OpCode| {
@@ -464,10 +444,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     | OpCode::MulNumber
                     | OpCode::DivNumber
                     | OpCode::ModNumber
-                    | OpCode::AddNumberTrusted
-                    | OpCode::SubNumberTrusted
-                    | OpCode::MulNumberTrusted
-                    | OpCode::DivNumberTrusted
             )
         };
         let is_comparison = |op: OpCode| {
@@ -487,14 +463,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     | OpCode::NeqNumber
                     | OpCode::Eq
                     | OpCode::Neq
-                    | OpCode::GtIntTrusted
-                    | OpCode::LtIntTrusted
-                    | OpCode::GteIntTrusted
-                    | OpCode::LteIntTrusted
-                    | OpCode::GtNumberTrusted
-                    | OpCode::LtNumberTrusted
-                    | OpCode::GteNumberTrusted
-                    | OpCode::LteNumberTrusted
             )
         };
 
@@ -608,19 +576,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 | OpCode::MulInt
                 | OpCode::DivInt
                 | OpCode::ModInt
-                | OpCode::AddIntTrusted
-                | OpCode::SubIntTrusted
-                | OpCode::MulIntTrusted
-                | OpCode::DivIntTrusted
                 | OpCode::AddNumber
                 | OpCode::SubNumber
                 | OpCode::MulNumber
                 | OpCode::DivNumber
                 | OpCode::ModNumber
-                | OpCode::AddNumberTrusted
-                | OpCode::SubNumberTrusted
-                | OpCode::MulNumberTrusted
-                | OpCode::DivNumberTrusted
                 | OpCode::LoadModuleBinding
                 | OpCode::Dup
                 | OpCode::Swap => {}
@@ -669,19 +629,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 | OpCode::MulInt
                 | OpCode::DivInt
                 | OpCode::ModInt
-                | OpCode::AddIntTrusted
-                | OpCode::SubIntTrusted
-                | OpCode::MulIntTrusted
-                | OpCode::DivIntTrusted
                 | OpCode::AddNumber
                 | OpCode::SubNumber
                 | OpCode::MulNumber
                 | OpCode::DivNumber
                 | OpCode::ModNumber
-                | OpCode::AddNumberTrusted
-                | OpCode::SubNumberTrusted
-                | OpCode::MulNumberTrusted
-                | OpCode::DivNumberTrusted
                 | OpCode::LoadLocal
                 | OpCode::LoadModuleBinding
                 | OpCode::IntToNumber
@@ -750,20 +702,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     | OpCode::SubInt
                     | OpCode::MulInt
                     | OpCode::DivInt
-                    | OpCode::ModInt
-                    | OpCode::AddIntTrusted
-                    | OpCode::SubIntTrusted
-                    | OpCode::MulIntTrusted
-                    | OpCode::DivIntTrusted => return Some(InitType::Int),
+                    | OpCode::ModInt => return Some(InitType::Int),
                     OpCode::AddNumber
                     | OpCode::SubNumber
                     | OpCode::MulNumber
                     | OpCode::DivNumber
-                    | OpCode::ModNumber
-                    | OpCode::AddNumberTrusted
-                    | OpCode::SubNumberTrusted
-                    | OpCode::MulNumberTrusted
-                    | OpCode::DivNumberTrusted => return Some(InitType::Float),
+                    | OpCode::ModNumber => return Some(InitType::Float),
                     OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Mod => {
                         return match self.generic_const_signal(0, i) {
                             GenericExprSignal::Float => Some(InitType::Float),
@@ -947,31 +891,15 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                         | OpCode::MulInt
                         | OpCode::DivInt
                         | OpCode::ModInt
-                        | OpCode::AddIntTrusted
-                        | OpCode::SubIntTrusted
-                        | OpCode::MulIntTrusted
-                        | OpCode::DivIntTrusted
                         | OpCode::AddNumber
                         | OpCode::SubNumber
                         | OpCode::MulNumber
                         | OpCode::DivNumber
                         | OpCode::ModNumber
-                        | OpCode::AddNumberTrusted
-                        | OpCode::SubNumberTrusted
-                        | OpCode::MulNumberTrusted
-                        | OpCode::DivNumberTrusted
-                        | OpCode::LtIntTrusted
-                        | OpCode::GtIntTrusted
-                        | OpCode::LteIntTrusted
-                        | OpCode::GteIntTrusted
                         | OpCode::LtNumber
                         | OpCode::GtNumber
                         | OpCode::LteNumber
                         | OpCode::GteNumber
-                        | OpCode::LtNumberTrusted
-                        | OpCode::GtNumberTrusted
-                        | OpCode::LteNumberTrusted
-                        | OpCode::GteNumberTrusted
                         | OpCode::GetProp
                         | OpCode::DerefLoad
                         | OpCode::Length
@@ -1077,31 +1005,15 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                         | OpCode::MulInt
                         | OpCode::DivInt
                         | OpCode::ModInt
-                        | OpCode::AddIntTrusted
-                        | OpCode::SubIntTrusted
-                        | OpCode::MulIntTrusted
-                        | OpCode::DivIntTrusted
                         | OpCode::AddNumber
                         | OpCode::SubNumber
                         | OpCode::MulNumber
                         | OpCode::DivNumber
                         | OpCode::ModNumber
-                        | OpCode::AddNumberTrusted
-                        | OpCode::SubNumberTrusted
-                        | OpCode::MulNumberTrusted
-                        | OpCode::DivNumberTrusted
-                        | OpCode::LtIntTrusted
-                        | OpCode::GtIntTrusted
-                        | OpCode::LteIntTrusted
-                        | OpCode::GteIntTrusted
                         | OpCode::LtNumber
                         | OpCode::GtNumber
                         | OpCode::LteNumber
                         | OpCode::GteNumber
-                        | OpCode::LtNumberTrusted
-                        | OpCode::GtNumberTrusted
-                        | OpCode::LteNumberTrusted
-                        | OpCode::GteNumberTrusted
                         | OpCode::GetProp
                         | OpCode::DerefLoad
                         | OpCode::Length

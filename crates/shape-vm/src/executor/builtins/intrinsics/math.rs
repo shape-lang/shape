@@ -1,244 +1,90 @@
-//! Math intrinsics — sum, mean, min, max, variance, std
+//! Math intrinsics — delegates to shape_runtime canonical implementations
+//!
+//! Each function is a thin wrapper that calls the runtime intrinsic with a
+//! temporary ExecutionContext and converts ShapeError to VMError.
 
 use shape_value::{VMError, ValueWord};
-use std::sync::Arc;
 
-use super::{NbIntrinsicResult, nb_extract_f64_data};
+use super::NbIntrinsicResult;
+
+/// Helper: call a runtime intrinsic that takes (&[ValueWord], &mut ExecutionContext)
+/// and convert the error to VMError.
+fn delegate(
+    args: &[ValueWord],
+    func: fn(
+        &[ValueWord],
+        &mut shape_runtime::context::ExecutionContext,
+    ) -> shape_ast::error::Result<ValueWord>,
+) -> NbIntrinsicResult {
+    let mut ctx = shape_runtime::context::ExecutionContext::new_empty();
+    func(args, &mut ctx).map_err(|e| VMError::RuntimeError(format!("{}", e)))
+}
 
 /// Sum of all values in a series or array
 pub fn vm_intrinsic_sum(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "sum() requires 1 argument".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-
-    if data.is_empty() {
-        return Ok(ValueWord::from_f64(0.0));
-    }
-
-    let sum: f64 = data.iter().sum();
-    Ok(ValueWord::from_f64(sum))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_sum)
 }
 
 /// Mean (average) of all values
 pub fn vm_intrinsic_mean(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "mean() requires 1 argument".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-
-    if data.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-
-    let sum: f64 = data.iter().sum();
-    let mean = sum / data.len() as f64;
-    Ok(ValueWord::from_f64(mean))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_mean)
 }
 
 /// Minimum value
 pub fn vm_intrinsic_min(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "min() requires at least 1 argument".to_string(),
-        ));
-    }
-
-    // Handle multi-argument min(a, b, c, ...)
-    if args.len() >= 2 {
-        let mut all_numbers = true;
-        let mut min_val = f64::INFINITY;
-
-        for arg in args {
-            if let Some(n) = arg.as_number_coerce() {
-                min_val = min_val.min(n);
-            } else {
-                all_numbers = false;
-                break;
-            }
-        }
-
-        if all_numbers {
-            return Ok(ValueWord::from_f64(min_val));
-        }
-    }
-
-    // Single argument: series or array
-    let data = nb_extract_f64_data(&args[0])?;
-
-    if data.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-
-    let min = data.iter().copied().fold(f64::INFINITY, f64::min);
-    Ok(ValueWord::from_f64(min))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_min)
 }
 
 /// Maximum value
 pub fn vm_intrinsic_max(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "max() requires at least 1 argument".to_string(),
-        ));
-    }
-
-    // Handle multi-argument max(a, b, c, ...)
-    if args.len() >= 2 {
-        let mut all_numbers = true;
-        let mut max_val = f64::NEG_INFINITY;
-
-        for arg in args {
-            if let Some(n) = arg.as_number_coerce() {
-                max_val = max_val.max(n);
-            } else {
-                all_numbers = false;
-                break;
-            }
-        }
-
-        if all_numbers {
-            return Ok(ValueWord::from_f64(max_val));
-        }
-    }
-
-    // Single argument: series or array
-    let data = nb_extract_f64_data(&args[0])?;
-
-    if data.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-
-    let max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    Ok(ValueWord::from_f64(max))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_max)
 }
 
 /// Variance (population variance)
 pub fn vm_intrinsic_variance(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "variance() requires 1 argument".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-
-    if data.is_empty() {
-        return Ok(ValueWord::from_f64(f64::NAN));
-    }
-
-    let n = data.len() as f64;
-    let mean: f64 = data.iter().sum::<f64>() / n;
-    let variance: f64 = data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n;
-
-    Ok(ValueWord::from_f64(variance))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_variance)
 }
 
 /// Standard deviation
 pub fn vm_intrinsic_std(args: &[ValueWord]) -> NbIntrinsicResult {
-    let variance_nb = vm_intrinsic_variance(args)?;
-    let var = variance_nb.as_number_coerce().unwrap_or(f64::NAN);
-    Ok(ValueWord::from_f64(var.sqrt()))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_std)
 }
 
 // ===== Trigonometric Intrinsics =====
 
 /// Two-argument arc tangent
 pub fn vm_intrinsic_atan2(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "atan2() requires 2 arguments (y, x)".to_string(),
-        ));
-    }
-    let y = args[0]
-        .as_number_coerce()
-        .ok_or_else(|| VMError::RuntimeError("atan2: y must be a number".to_string()))?;
-    let x = args[1]
-        .as_number_coerce()
-        .ok_or_else(|| VMError::RuntimeError("atan2: x must be a number".to_string()))?;
-    Ok(ValueWord::from_f64(y.atan2(x)))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_atan2)
 }
 
 /// Hyperbolic sine
 pub fn vm_intrinsic_sinh(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "sinh() requires 1 argument".to_string(),
-        ));
-    }
-    let x = args[0]
-        .as_number_coerce()
-        .ok_or_else(|| VMError::RuntimeError("sinh: argument must be a number".to_string()))?;
-    Ok(ValueWord::from_f64(x.sinh()))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_sinh)
 }
 
 /// Hyperbolic cosine
 pub fn vm_intrinsic_cosh(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "cosh() requires 1 argument".to_string(),
-        ));
-    }
-    let x = args[0]
-        .as_number_coerce()
-        .ok_or_else(|| VMError::RuntimeError("cosh: argument must be a number".to_string()))?;
-    Ok(ValueWord::from_f64(x.cosh()))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_cosh)
 }
 
 /// Hyperbolic tangent
 pub fn vm_intrinsic_tanh(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "tanh() requires 1 argument".to_string(),
-        ));
-    }
-    let x = args[0]
-        .as_number_coerce()
-        .ok_or_else(|| VMError::RuntimeError("tanh: argument must be a number".to_string()))?;
-    Ok(ValueWord::from_f64(x.tanh()))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_tanh)
 }
 
 // ===== Character Code Intrinsics =====
 
 /// Get the Unicode code point of the first character in a string
 pub fn vm_intrinsic_char_code(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "__intrinsic_char_code requires 1 argument".to_string(),
-        ));
-    }
-    let s = args[0]
-        .as_str()
-        .ok_or_else(|| VMError::RuntimeError("char_code: argument must be a string".to_string()))?;
-    let ch = s
-        .chars()
-        .next()
-        .ok_or_else(|| VMError::RuntimeError("char_code: empty string".to_string()))?;
-    Ok(ValueWord::from_f64(ch as u32 as f64))
+    delegate(args, shape_runtime::intrinsics::math::intrinsic_char_code)
 }
 
 /// Create a single-character string from a Unicode code point
 pub fn vm_intrinsic_from_char_code(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "__intrinsic_from_char_code requires 1 argument".to_string(),
-        ));
-    }
-    let code = args[0].as_number_coerce().ok_or_else(|| {
-        VMError::RuntimeError("from_char_code: argument must be a number".to_string())
-    })?;
-    let ch = char::from_u32(code as u32).ok_or_else(|| {
-        VMError::RuntimeError(format!(
-            "from_char_code: invalid code point {}",
-            code as u32
-        ))
-    })?;
-    Ok(ValueWord::from_string(Arc::new(ch.to_string())))
+    delegate(
+        args,
+        shape_runtime::intrinsics::math::intrinsic_from_char_code,
+    )
 }
 
 #[cfg(test)]

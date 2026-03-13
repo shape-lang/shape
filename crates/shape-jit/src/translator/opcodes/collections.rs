@@ -685,22 +685,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         let is_array = self.emit_is_heap_kind(arr, HK_ARRAY);
 
         // Extract JitArray pointer: (arr & PAYLOAD_MASK) + JIT_ALLOC_DATA_OFFSET
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(arr, payload_mask);
-        let arr_ptr = self
-            .builder
-            .ins()
-            .iadd_imm(alloc_ptr, JIT_ALLOC_DATA_OFFSET as i64);
+        let arr_ptr = self.emit_jit_alloc_data_ptr(arr);
 
         // Load len (offset 8) and cap (offset 16) from JitArray repr(C)
-        let len = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, 8);
-        let cap = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, 16);
+        let len = self.emit_trusted_load(types::I64, arr_ptr, 8);
+        let cap = self.emit_trusted_load(types::I64, arr_ptr, 16);
         let has_capacity = self.builder.ins().icmp(IntCC::UnsignedLessThan, len, cap);
 
         // Both conditions must pass for inline path
@@ -764,21 +753,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         arr: cranelift::codegen::ir::Value,
         value: cranelift::codegen::ir::Value,
     ) -> cranelift::codegen::ir::Value {
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(arr, payload_mask);
-        let arr_ptr = self
-            .builder
-            .ins()
-            .iadd_imm(alloc_ptr, JIT_ALLOC_DATA_OFFSET as i64);
+        let arr_ptr = self.emit_jit_alloc_data_ptr(arr);
 
-        let data_ptr = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
-        let len = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, 8);
+        let data_ptr = self.emit_trusted_load(types::I64, arr_ptr, 0);
+        let len = self.emit_trusted_load(types::I64, arr_ptr, 8);
 
         let offset = self.builder.ins().ishl_imm(len, 3);
         let elem_addr = self.builder.ins().iadd(data_ptr, offset);
@@ -806,17 +784,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         index_i64: cranelift::codegen::ir::Value,
         value: cranelift::codegen::ir::Value,
     ) -> cranelift::codegen::ir::Value {
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(arr, payload_mask);
-        let arr_ptr = self
-            .builder
-            .ins()
-            .iadd_imm(alloc_ptr, JIT_ALLOC_DATA_OFFSET as i64);
+        let arr_ptr = self.emit_jit_alloc_data_ptr(arr);
 
-        let data_ptr = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+        let data_ptr = self.emit_trusted_load(types::I64, arr_ptr, 0);
         let offset = self.builder.ins().ishl_imm(index_i64, 3);
         let elem_addr = self.builder.ins().iadd(data_ptr, offset);
         self.builder

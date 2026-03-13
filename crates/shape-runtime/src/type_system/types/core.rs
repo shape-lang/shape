@@ -170,7 +170,7 @@ impl TypeScheme {
 
         let mut subst = HashMap::new();
         for var in &self.quantified {
-            subst.insert(var.clone(), Type::Variable(TypeVar::fresh()));
+            subst.insert(var.clone(), Type::fresh_var());
         }
 
         substitute(&self.ty, &subst)
@@ -214,6 +214,16 @@ pub fn substitute(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
 }
 
 impl Type {
+    /// Create a fresh type variable.
+    ///
+    /// This is the canonical way to introduce an unknown type that will be
+    /// resolved by inference. Each call produces a globally unique variable
+    /// (e.g. `T0`, `T1`, ...) via an atomic counter, so two `fresh_var()`
+    /// calls never alias.
+    pub fn fresh_var() -> Type {
+        Type::Variable(TypeVar::fresh())
+    }
+
     /// Convert Type back to TypeAnnotation for AST
     pub fn to_annotation(&self) -> Option<TypeAnnotation> {
         match self {

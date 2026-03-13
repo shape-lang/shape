@@ -534,7 +534,8 @@ greet()
 /// the int to a "number" type, which does not match the `int` parameter type.
 /// When fixed, `add(5, 3)` with doubled first arg should produce 13 (10 + 3).
 #[test]
-#[should_panic(expected = "Trusted AddInt invariant violated")]
+// The Trusted arithmetic opcodes were removed; AddInt now returns a TypeError.
+#[should_panic(expected = "Type error: expected int")]
 fn ct_15_annotation_modify_args() {
     let code = r#"
 annotation double_first(label) {

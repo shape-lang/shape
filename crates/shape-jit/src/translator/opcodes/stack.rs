@@ -34,15 +34,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                             | OpCode::GteNumber
                             | OpCode::LteNumber
                             | OpCode::EqNumber
-                            | OpCode::NeqNumber
-                            | OpCode::AddNumberTrusted
-                            | OpCode::SubNumberTrusted
-                            | OpCode::MulNumberTrusted
-                            | OpCode::DivNumberTrusted
-                            | OpCode::GtNumberTrusted
-                            | OpCode::LtNumberTrusted
-                            | OpCode::GteNumberTrusted
-                            | OpCode::LteNumberTrusted => {
+                            | OpCode::NeqNumber => {
                                 consumer_is_typed_float = true;
                                 break;
                             }
@@ -58,14 +50,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                             | OpCode::LteInt
                             | OpCode::EqInt
                             | OpCode::NeqInt
-                            | OpCode::AddIntTrusted
-                            | OpCode::SubIntTrusted
-                            | OpCode::MulIntTrusted
-                            | OpCode::DivIntTrusted
-                            | OpCode::GtIntTrusted
-                            | OpCode::LtIntTrusted
-                            | OpCode::GteIntTrusted
-                            | OpCode::LteIntTrusted
                             | OpCode::Add
                             | OpCode::Sub
                             | OpCode::Mul

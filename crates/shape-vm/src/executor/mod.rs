@@ -288,7 +288,15 @@ pub struct VirtualMachine {
     /// Interrupt flag set by Ctrl+C handler (0 = none, >0 = interrupted)
     interrupt: Arc<AtomicU8>,
 
-    /// Counter for generating unique future IDs (for SpawnTask)
+    /// Counter for generating unique future IDs (for SpawnTask).
+    ///
+    /// # Safety (single-threaded access)
+    ///
+    /// This is a plain `u64` rather than an `AtomicU64` because the VM executor
+    /// is inherently single-threaded: `VirtualMachine` is `!Sync` and all
+    /// execution happens on the thread that owns the VM instance. The counter
+    /// is only mutated by `next_future_id()` which requires `&mut self`,
+    /// guaranteeing exclusive access at compile time.
     future_id_counter: u64,
 
     /// Stack of async scopes for structured concurrency.

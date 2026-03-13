@@ -1,201 +1,14 @@
-//! Signal processing intrinsics — rolling operations, EMA, array transforms
-//! (shift, diff, pct_change, fillna, cumsum, cumprod, clip)
+//! Signal processing intrinsics — delegates to shape_runtime canonical
+//! implementations for rolling operations, EMA, and array transforms
+//! (shift, diff, pct_change, fillna, cumsum, cumprod, clip).
 
 use shape_value::{VMError, ValueWord};
 
-use super::{NbIntrinsicResult, nb_create_array_result, nb_extract_f64_data, nb_extract_window};
+use super::NbIntrinsicResult;
 
-// =============================================================================
-// Rolling Intrinsics - Use SIMD-optimized implementations from shape_runtime
-// =============================================================================
-
-/// Rolling sum with SIMD optimization
-pub fn vm_intrinsic_rolling_sum(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.len() != 2 {
-        return Err(VMError::RuntimeError(
-            "rolling_sum() requires 2 arguments (series, window)".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-    let window = nb_extract_window(&args[1])?;
-
-    if data.is_empty() {
-        return nb_create_array_result(vec![]);
-    }
-
-    if window == 0 {
-        return Err(VMError::RuntimeError("Window size must be > 0".to_string()));
-    }
-
-    let result = shape_runtime::simd_rolling::rolling_sum(&data, window);
-    nb_create_array_result(result)
-}
-
-/// Rolling mean (SMA) with SIMD optimization
-pub fn vm_intrinsic_rolling_mean(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.len() != 2 {
-        return Err(VMError::RuntimeError(
-            "rolling_mean() requires 2 arguments (series, window)".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-    let window = nb_extract_window(&args[1])?;
-
-    if data.is_empty() {
-        return nb_create_array_result(vec![]);
-    }
-
-    if window == 0 {
-        return Err(VMError::RuntimeError("Window size must be > 0".to_string()));
-    }
-
-    let result = shape_runtime::simd_rolling::rolling_mean(&data, window);
-    nb_create_array_result(result)
-}
-
-/// Rolling standard deviation using Welford's algorithm
-pub fn vm_intrinsic_rolling_std(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.len() != 2 {
-        return Err(VMError::RuntimeError(
-            "rolling_std() requires 2 arguments (series, window)".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-    let window = nb_extract_window(&args[1])?;
-
-    if data.is_empty() {
-        return nb_create_array_result(vec![]);
-    }
-
-    if window == 0 {
-        return Err(VMError::RuntimeError("Window size must be > 0".to_string()));
-    }
-
-    let result = shape_runtime::simd_rolling::rolling_std_welford(&data, window);
-    nb_create_array_result(result)
-}
-
-/// Rolling minimum using deque-based algorithm
-pub fn vm_intrinsic_rolling_min(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.len() != 2 {
-        return Err(VMError::RuntimeError(
-            "rolling_min() requires 2 arguments (series, window)".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-    let window = nb_extract_window(&args[1])?;
-
-    if data.is_empty() {
-        return nb_create_array_result(vec![]);
-    }
-
-    if window == 0 {
-        return Err(VMError::RuntimeError("Window size must be > 0".to_string()));
-    }
-
-    let result = shape_runtime::simd_rolling::rolling_min_deque(&data, window);
-    nb_create_array_result(result)
-}
-
-/// Rolling maximum using deque-based algorithm
-pub fn vm_intrinsic_rolling_max(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.len() != 2 {
-        return Err(VMError::RuntimeError(
-            "rolling_max() requires 2 arguments (series, window)".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-    let window = nb_extract_window(&args[1])?;
-
-    if data.is_empty() {
-        return nb_create_array_result(vec![]);
-    }
-
-    if window == 0 {
-        return Err(VMError::RuntimeError("Window size must be > 0".to_string()));
-    }
-
-    let result = shape_runtime::simd_rolling::rolling_max_deque(&data, window);
-    nb_create_array_result(result)
-}
-
-/// Exponential Moving Average
-pub fn vm_intrinsic_ema(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.len() != 2 {
-        return Err(VMError::RuntimeError(
-            "ema() requires 2 arguments (series, period)".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-    let period = nb_extract_window(&args[1])?;
-
-    if data.is_empty() {
-        return nb_create_array_result(vec![]);
-    }
-
-    if period == 0 {
-        return Err(VMError::RuntimeError("EMA period must be > 0".to_string()));
-    }
-
-    let alpha = 2.0 / (period + 1) as f64;
-    let mut result = Vec::with_capacity(data.len());
-
-    let mut ema = data[0];
-    result.push(ema);
-
-    for &price in &data[1..] {
-        ema = alpha * price + (1.0 - alpha) * ema;
-        result.push(ema);
-    }
-
-    nb_create_array_result(result)
-}
-
-// =============================================================================
-// Array Transform Intrinsics
-// =============================================================================
-
-/// Shift array by n positions (fills shifted positions with NaN)
-pub fn vm_intrinsic_shift(args: &[ValueWord]) -> NbIntrinsicResult {
-    if args.len() != 2 {
-        return Err(VMError::RuntimeError(
-            "shift() requires 2 arguments (array, n)".to_string(),
-        ));
-    }
-
-    let data = nb_extract_f64_data(&args[0])?;
-
-    let shift = args[1]
-        .as_number_coerce()
-        .ok_or_else(|| VMError::RuntimeError("shift amount must be a number".to_string()))?
-        as i64;
-
-    let len = data.len();
-    let mut result = vec![f64::NAN; len];
-
-    if shift >= 0 {
-        let shift = shift as usize;
-        for i in shift..len {
-            result[i] = data[i - shift];
-        }
-    } else {
-        let shift = (-shift) as usize;
-        for i in 0..len.saturating_sub(shift) {
-            result[i] = data[i + shift];
-        }
-    }
-
-    nb_create_array_result(result)
-}
-
-/// Helper: create temp context and call a runtime intrinsic
-fn call_runtime_intrinsic(
+/// Helper: call a runtime intrinsic that takes (&[ValueWord], &mut ExecutionContext)
+/// and convert the error to VMError.
+fn delegate(
     args: &[ValueWord],
     func: fn(
         &[ValueWord],
@@ -203,15 +16,84 @@ fn call_runtime_intrinsic(
     ) -> shape_ast::error::Result<ValueWord>,
     name: &str,
 ) -> NbIntrinsicResult {
-    let timeframe = shape_ast::data::Timeframe::new(1, shape_ast::data::TimeframeUnit::Minute);
-    let empty_df = shape_runtime::data::dataframe::DataFrame::new("", timeframe);
-    let mut ctx = shape_runtime::context::ExecutionContext::new(&empty_df);
+    let mut ctx = shape_runtime::context::ExecutionContext::new_empty();
     func(args, &mut ctx).map_err(|e| VMError::RuntimeError(format!("{} failed: {}", name, e)))
+}
+
+// =============================================================================
+// Rolling Intrinsics — delegates to shape_runtime::intrinsics::rolling
+// =============================================================================
+
+/// Rolling sum with SIMD optimization
+pub fn vm_intrinsic_rolling_sum(args: &[ValueWord]) -> NbIntrinsicResult {
+    delegate(
+        args,
+        shape_runtime::intrinsics::rolling::intrinsic_rolling_sum,
+        "rolling_sum",
+    )
+}
+
+/// Rolling mean (SMA) with SIMD optimization
+pub fn vm_intrinsic_rolling_mean(args: &[ValueWord]) -> NbIntrinsicResult {
+    delegate(
+        args,
+        shape_runtime::intrinsics::rolling::intrinsic_rolling_mean,
+        "rolling_mean",
+    )
+}
+
+/// Rolling standard deviation using Welford's algorithm
+pub fn vm_intrinsic_rolling_std(args: &[ValueWord]) -> NbIntrinsicResult {
+    delegate(
+        args,
+        shape_runtime::intrinsics::rolling::intrinsic_rolling_std,
+        "rolling_std",
+    )
+}
+
+/// Rolling minimum using deque-based algorithm
+pub fn vm_intrinsic_rolling_min(args: &[ValueWord]) -> NbIntrinsicResult {
+    delegate(
+        args,
+        shape_runtime::intrinsics::rolling::intrinsic_rolling_min,
+        "rolling_min",
+    )
+}
+
+/// Rolling maximum using deque-based algorithm
+pub fn vm_intrinsic_rolling_max(args: &[ValueWord]) -> NbIntrinsicResult {
+    delegate(
+        args,
+        shape_runtime::intrinsics::rolling::intrinsic_rolling_max,
+        "rolling_max",
+    )
+}
+
+/// Exponential Moving Average
+pub fn vm_intrinsic_ema(args: &[ValueWord]) -> NbIntrinsicResult {
+    delegate(
+        args,
+        shape_runtime::intrinsics::rolling::intrinsic_ema,
+        "ema",
+    )
+}
+
+// =============================================================================
+// Array Transform Intrinsics — delegates to shape_runtime::intrinsics::array_transforms
+// =============================================================================
+
+/// Shift array by n positions (fills shifted positions with NaN)
+pub fn vm_intrinsic_shift(args: &[ValueWord]) -> NbIntrinsicResult {
+    delegate(
+        args,
+        shape_runtime::intrinsics::array_transforms::intrinsic_shift,
+        "shift",
+    )
 }
 
 /// Difference between consecutive elements
 pub fn vm_intrinsic_diff(args: &[ValueWord]) -> NbIntrinsicResult {
-    call_runtime_intrinsic(
+    delegate(
         args,
         shape_runtime::intrinsics::array_transforms::intrinsic_diff,
         "diff",
@@ -220,7 +102,7 @@ pub fn vm_intrinsic_diff(args: &[ValueWord]) -> NbIntrinsicResult {
 
 /// Percentage change between consecutive elements
 pub fn vm_intrinsic_pct_change(args: &[ValueWord]) -> NbIntrinsicResult {
-    call_runtime_intrinsic(
+    delegate(
         args,
         shape_runtime::intrinsics::array_transforms::intrinsic_pct_change,
         "pct_change",
@@ -229,7 +111,7 @@ pub fn vm_intrinsic_pct_change(args: &[ValueWord]) -> NbIntrinsicResult {
 
 /// Fill NaN values with a specified value
 pub fn vm_intrinsic_fillna(args: &[ValueWord]) -> NbIntrinsicResult {
-    call_runtime_intrinsic(
+    delegate(
         args,
         shape_runtime::intrinsics::array_transforms::intrinsic_fillna,
         "fillna",
@@ -238,7 +120,7 @@ pub fn vm_intrinsic_fillna(args: &[ValueWord]) -> NbIntrinsicResult {
 
 /// Cumulative sum
 pub fn vm_intrinsic_cumsum(args: &[ValueWord]) -> NbIntrinsicResult {
-    call_runtime_intrinsic(
+    delegate(
         args,
         shape_runtime::intrinsics::array_transforms::intrinsic_cumsum,
         "cumsum",
@@ -247,7 +129,7 @@ pub fn vm_intrinsic_cumsum(args: &[ValueWord]) -> NbIntrinsicResult {
 
 /// Cumulative product
 pub fn vm_intrinsic_cumprod(args: &[ValueWord]) -> NbIntrinsicResult {
-    call_runtime_intrinsic(
+    delegate(
         args,
         shape_runtime::intrinsics::array_transforms::intrinsic_cumprod,
         "cumprod",
@@ -256,7 +138,7 @@ pub fn vm_intrinsic_cumprod(args: &[ValueWord]) -> NbIntrinsicResult {
 
 /// Clip values to a range
 pub fn vm_intrinsic_clip(args: &[ValueWord]) -> NbIntrinsicResult {
-    call_runtime_intrinsic(
+    delegate(
         args,
         shape_runtime::intrinsics::array_transforms::intrinsic_clip,
         "clip",

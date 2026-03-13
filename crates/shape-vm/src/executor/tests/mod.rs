@@ -2,6 +2,9 @@ use super::*;
 use crate::bytecode::*;
 use shape_value::ValueWord;
 
+/// Shared test helpers (eval, eval_result, compile, etc.)
+pub(crate) mod test_utils;
+
 // Phase 1.1 & 1.2: Critical execution tests for recently merged features
 mod auto_drop;
 mod channel_ops;

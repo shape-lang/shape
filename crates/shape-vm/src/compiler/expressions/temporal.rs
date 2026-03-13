@@ -80,18 +80,8 @@ impl BytecodeCompiler {
 
 #[cfg(test)]
 mod tests {
-    use crate::compiler::BytecodeCompiler;
-    use crate::executor::{VMConfig, VirtualMachine};
+    use crate::test_utils::eval;
     use shape_value::ValueWord;
-
-    fn eval(code: &str) -> ValueWord {
-        let program = shape_ast::parser::parse_program(code).expect("parse failed");
-        let compiler = BytecodeCompiler::new();
-        let bytecode = compiler.compile(&program).expect("compile failed");
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        vm.execute(None).expect("execution failed").clone()
-    }
 
     // === MED-11: @"..." DateTime literals ===
 

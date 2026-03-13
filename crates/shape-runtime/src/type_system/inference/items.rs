@@ -51,7 +51,7 @@ impl TypeInferenceEngine {
                 p.type_annotation
                     .as_ref()
                     .map(|ann| self.resolve_type_annotation(ann))
-                    .unwrap_or_else(|| Type::Variable(TypeVar::fresh()))
+                    .unwrap_or_else(|| Type::fresh_var())
             })
             .collect();
 
@@ -59,7 +59,7 @@ impl TypeInferenceEngine {
             .return_type
             .as_ref()
             .map(|ann| self.resolve_type_annotation(ann))
-            .unwrap_or_else(|| Type::Variable(TypeVar::fresh()));
+            .unwrap_or_else(|| Type::fresh_var());
 
         let scheme =
             self.make_function_scheme(func, BuiltinTypes::function(param_types, return_type));
@@ -75,7 +75,7 @@ impl TypeInferenceEngine {
                 p.type_annotation
                     .as_ref()
                     .map(|ann| self.resolve_type_annotation(ann))
-                    .unwrap_or_else(|| Type::Variable(TypeVar::fresh()))
+                    .unwrap_or_else(|| Type::fresh_var())
             })
             .collect();
 
@@ -83,7 +83,7 @@ impl TypeInferenceEngine {
             .return_type
             .as_ref()
             .map(|ann| self.resolve_type_annotation(ann))
-            .unwrap_or_else(|| Type::Variable(TypeVar::fresh()));
+            .unwrap_or_else(|| Type::fresh_var());
 
         let func_type = BuiltinTypes::function(param_types, return_type);
         let scheme = TypeScheme::mono(func_type);
@@ -342,7 +342,7 @@ impl TypeInferenceEngine {
         let declared_return_type = if let Some(ann) = &func.return_type {
             self.resolve_type_annotation(ann)
         } else {
-            Type::Variable(TypeVar::fresh())
+            Type::fresh_var()
         };
 
         // Infer callable return type from all explicit returns (or final expression)
@@ -583,7 +583,7 @@ impl TypeInferenceEngine {
                     if let Some(ann) = &p.type_annotation {
                         self.resolve_type_annotation(ann)
                     } else {
-                        Type::Variable(TypeVar::fresh())
+                        Type::fresh_var()
                     }
                 })
                 .collect();
@@ -591,7 +591,7 @@ impl TypeInferenceEngine {
                 .return_type
                 .as_ref()
                 .map(|ann| self.resolve_type_annotation(ann))
-                .unwrap_or_else(|| Type::Variable(TypeVar::fresh()));
+                .unwrap_or_else(|| Type::fresh_var());
 
             self.method_table.register_user_method(
                 &type_name,
@@ -614,7 +614,7 @@ impl TypeInferenceEngine {
                                 if let Some(ann) = &p.type_annotation {
                                     self.resolve_type_annotation(ann)
                                 } else {
-                                    Type::Variable(TypeVar::fresh())
+                                    Type::fresh_var()
                                 }
                             })
                             .collect();
@@ -622,7 +622,7 @@ impl TypeInferenceEngine {
                             .return_type
                             .as_ref()
                             .map(|ann| self.resolve_type_annotation(ann))
-                            .unwrap_or_else(|| Type::Variable(TypeVar::fresh()));
+                            .unwrap_or_else(|| Type::fresh_var());
 
                         self.method_table.register_user_method(
                             &type_name,
@@ -651,7 +651,7 @@ impl TypeInferenceEngine {
                     if let Some(ann) = &p.type_annotation {
                         self.resolve_type_annotation(ann)
                     } else {
-                        Type::Variable(TypeVar::fresh())
+                        Type::fresh_var()
                     }
                 })
                 .collect();
@@ -659,7 +659,7 @@ impl TypeInferenceEngine {
                 .return_type
                 .as_ref()
                 .map(|ann| self.resolve_type_annotation(ann))
-                .unwrap_or_else(|| Type::Variable(TypeVar::fresh()));
+                .unwrap_or_else(|| Type::fresh_var());
 
             for target in &targets {
                 self.method_table.register_user_method(
@@ -843,7 +843,7 @@ impl TypeInferenceEngine {
             // so subsequent expressions can immediately use structural info.
             inferred
         } else {
-            Type::Variable(TypeVar::fresh())
+            Type::fresh_var()
         };
 
         if let Some(inferred_type) = inferred_init_type {
@@ -888,18 +888,18 @@ impl TypeInferenceEngine {
             }
             DestructurePattern::Array(patterns) => {
                 for pattern in patterns {
-                    self.bind_decl_pattern(pattern, Type::Variable(TypeVar::fresh()));
+                    self.bind_decl_pattern(pattern, Type::fresh_var());
                 }
             }
             DestructurePattern::Object(fields) => {
                 for field in fields {
-                    self.bind_decl_pattern(&field.pattern, Type::Variable(TypeVar::fresh()));
+                    self.bind_decl_pattern(&field.pattern, Type::fresh_var());
                 }
             }
             DestructurePattern::Rest(pattern) => {
                 self.bind_decl_pattern(
                     pattern,
-                    BuiltinTypes::array(Type::Variable(TypeVar::fresh())),
+                    BuiltinTypes::array(Type::fresh_var()),
                 );
             }
         }

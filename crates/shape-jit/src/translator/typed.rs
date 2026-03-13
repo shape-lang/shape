@@ -337,13 +337,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 self.f64_to_i64(f64_val)
             }
             CraneliftRepr::I8 => {
-                // Box bool
-                use crate::nan_boxing::{TAG_BOOL_FALSE, TAG_BOOL_TRUE};
-                let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-                let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
+                // Box bool: convert i8 (0/1) to NaN-boxed TAG_BOOL_TRUE/TAG_BOOL_FALSE
                 let zero = self.builder.ins().iconst(types::I8, 0);
                 let is_true = self.builder.ins().icmp(IntCC::NotEqual, tv.value, zero);
-                self.builder.ins().select(is_true, true_val, false_val)
+                self.emit_boxed_bool_from_i1(is_true)
             }
             CraneliftRepr::NanBoxed => {
                 // Already boxed

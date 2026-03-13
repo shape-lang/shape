@@ -1,9 +1,45 @@
 //! Method Table for Static Method Resolution
 //!
-//! Provides compile-time method type checking by maintaining a registry
-//! of methods available on each type.
+//! Provides compile-time method type checking by maintaining a unified
+//! registry of methods available on each type. The table has two tiers:
+//!
+//! ## Concrete method signatures (`methods`)
+//!
+//! Simple `(receiver_type, method_name) -> Vec<MethodSignature>` map.
+//! Used for monomorphic methods (e.g. `String.len() -> number`) and as
+//! a fallback for generic types when no `GenericMethodSignature` exists.
+//! Multiple overloads for the same name are stored as separate entries
+//! in the `Vec`.
+//!
+//! ## Generic method signatures (`generic_methods`)
+//!
+//! `(receiver_type, method_name) -> GenericMethodSignature` map for
+//! methods on parameterised types (`Vec<T>`, `HashMap<K,V>`, `Option<T>`,
+//! `Result<T,E>`). Signatures use `TypeParamExpr` to express return and
+//! parameter types in terms of:
+//!
+//! - `ReceiverParam(i)` -- the i-th type parameter of the receiver
+//!   (e.g. `T` for `Vec<T>`, `K`/`V` for `HashMap<K,V>`)
+//! - `MethodParam(i)` -- a type parameter introduced by the method itself
+//!   (e.g. `U` in `.map<U>(fn(T) -> U) -> Vec<U>`)
+//! - `SelfType` -- the full receiver type (used for `filter`, `sort`, etc.)
+//! - `Concrete(Type)` -- a fixed type (`bool`, `void`, `number`, ...)
+//! - `Function { params, returns }` -- a callback shape
+//! - `GenericContainer { name, args }` -- a parameterised return container
+//!
+//! At a call site the inference engine calls `extract_receiver_info` to
+//! obtain the receiver's type name and actual type arguments, allocates
+//! fresh type variables for each `MethodParam`, then resolves the
+//! `TypeParamExpr` tree into concrete `Type` values.
+//!
+//! ## User-defined methods
+//!
+//! `impl` blocks and `extend` blocks register methods at inference time
+//! via `register_user_method`. These are stored in the concrete `methods`
+//! map alongside builtins. A universal receiver key (`__Any__`) is used
+//! for methods available on every value (e.g. `toString`, `toJSON`).
 
-use crate::type_system::{BuiltinTypes, Type, TypeVar};
+use crate::type_system::{BuiltinTypes, Type};
 use shape_ast::ast::TypeAnnotation;
 use std::collections::HashMap;
 
@@ -126,20 +162,20 @@ impl MethodTable {
             "Vec",
             "first",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "last",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "push",
-            vec![Type::Variable(TypeVar::fresh())],
+            vec![Type::fresh_var()],
             BuiltinTypes::void(),
             false,
         );
@@ -147,14 +183,14 @@ impl MethodTable {
             "Vec",
             "pop",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "reverse",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
 
@@ -219,48 +255,48 @@ impl MethodTable {
             "Vec",
             "slice",
             vec![BuiltinTypes::number(), BuiltinTypes::number()],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "take",
             vec![BuiltinTypes::number()],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "drop",
             vec![BuiltinTypes::number()],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "flatten",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "unique",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "concat",
-            vec![Type::Variable(TypeVar::fresh())],
-            Type::Variable(TypeVar::fresh()),
+            vec![Type::fresh_var()],
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Vec",
             "indexOf",
-            vec![Type::Variable(TypeVar::fresh())],
+            vec![Type::fresh_var()],
             BuiltinTypes::number(),
             false,
         );
@@ -268,7 +304,7 @@ impl MethodTable {
             "Vec",
             "sort",
             vec![BuiltinTypes::any()],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
 
@@ -541,14 +577,14 @@ impl MethodTable {
             "Option",
             "unwrap",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             true,
         );
         self.register_method(
             "Option",
             "unwrapOr",
-            vec![Type::Variable(TypeVar::fresh())],
-            Type::Variable(TypeVar::fresh()),
+            vec![Type::fresh_var()],
+            Type::fresh_var(),
             false,
         );
         self.register_method("Option", "isSome", vec![], BuiltinTypes::boolean(), false);
@@ -557,7 +593,7 @@ impl MethodTable {
             "Option",
             "map",
             vec![BuiltinTypes::any()],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
 
@@ -566,14 +602,14 @@ impl MethodTable {
             "Result",
             "unwrap",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             true,
         );
         self.register_method(
             "Result",
             "unwrapOr",
-            vec![Type::Variable(TypeVar::fresh())],
-            Type::Variable(TypeVar::fresh()),
+            vec![Type::fresh_var()],
+            Type::fresh_var(),
             false,
         );
         self.register_method("Result", "isOk", vec![], BuiltinTypes::boolean(), false);
@@ -582,14 +618,14 @@ impl MethodTable {
             "Result",
             "map",
             vec![BuiltinTypes::any()],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Result",
             "mapErr",
             vec![BuiltinTypes::any()],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
 
@@ -599,14 +635,14 @@ impl MethodTable {
             "Column",
             "first",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method(
             "Column",
             "last",
             vec![],
-            Type::Variable(TypeVar::fresh()),
+            Type::fresh_var(),
             false,
         );
         self.register_method("Column", "sum", vec![], BuiltinTypes::number(), false);
@@ -1275,11 +1311,11 @@ impl MethodTable {
             TypeParamExpr::ReceiverParam(idx) => receiver_params
                 .get(*idx)
                 .cloned()
-                .unwrap_or_else(|| Type::Variable(TypeVar::fresh())),
+                .unwrap_or_else(|| Type::fresh_var()),
             TypeParamExpr::MethodParam(idx) => method_vars
                 .get(*idx)
                 .cloned()
-                .unwrap_or_else(|| Type::Variable(TypeVar::fresh())),
+                .unwrap_or_else(|| Type::fresh_var()),
             TypeParamExpr::SelfType => receiver_type.clone(),
             TypeParamExpr::Function { params, returns } => Type::Function {
                 params: params
@@ -1371,7 +1407,7 @@ impl MethodTable {
         let key = (type_name, method_name.to_string());
         if let Some(gsig) = self.generic_methods.get(&key) {
             let method_vars: Vec<Type> = (0..gsig.method_type_params)
-                .map(|_| Type::Variable(TypeVar::fresh()))
+                .map(|_| Type::fresh_var())
                 .collect();
             return Some(Self::resolve_type_param_expr(
                 &gsig.return_type,

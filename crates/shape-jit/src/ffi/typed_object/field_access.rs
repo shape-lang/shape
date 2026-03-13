@@ -14,8 +14,21 @@ impl TypedObject {
     /// - The object is properly initialized
     #[inline]
     pub unsafe fn get_field(&self, offset: usize) -> u64 {
-        let base = unsafe { (self as *const Self as *const u8).add(TYPED_OBJECT_HEADER_SIZE) };
-        unsafe { *(base.add(offset) as *const u64) }
+        debug_assert!(
+            offset % 8 == 0,
+            "TypedObject::get_field: offset {} is not 8-byte aligned",
+            offset
+        );
+        unsafe {
+            let base = (self as *const Self as *const u8).add(TYPED_OBJECT_HEADER_SIZE);
+            let field_ptr = base.add(offset) as *const u64;
+            debug_assert!(
+                // Verify alignment of the computed pointer
+                (field_ptr as usize) % std::mem::align_of::<u64>() == 0,
+                "TypedObject::get_field: computed pointer is misaligned"
+            );
+            *field_ptr
+        }
     }
 
     /// Set a field value at the given byte offset.
@@ -28,8 +41,20 @@ impl TypedObject {
     /// - The object is properly initialized
     #[inline]
     pub unsafe fn set_field(&mut self, offset: usize, value: u64) {
-        let base = unsafe { (self as *mut Self as *mut u8).add(TYPED_OBJECT_HEADER_SIZE) };
-        unsafe { *(base.add(offset) as *mut u64) = value };
+        debug_assert!(
+            offset % 8 == 0,
+            "TypedObject::set_field: offset {} is not 8-byte aligned",
+            offset
+        );
+        unsafe {
+            let base = (self as *mut Self as *mut u8).add(TYPED_OBJECT_HEADER_SIZE);
+            let field_ptr = base.add(offset) as *mut u64;
+            debug_assert!(
+                (field_ptr as usize) % std::mem::align_of::<u64>() == 0,
+                "TypedObject::set_field: computed pointer is misaligned"
+            );
+            *field_ptr = value;
+        }
     }
 
     /// Get a field value as f64 at the given byte offset.
@@ -102,7 +127,14 @@ pub extern "C" fn jit_typed_object_get_field(obj_bits: u64, offset: u64) -> u64 
         return TAG_NULL;
     }
 
-    unsafe { (*ptr).get_field(offset as usize) }
+    let offset = offset as usize;
+
+    // Safety: verify offset is 8-byte aligned (all fields are u64-sized slots)
+    if offset % 8 != 0 {
+        return TAG_NULL;
+    }
+
+    unsafe { (*ptr).get_field(offset) }
 }
 
 /// Set a field on a typed object by byte offset.
@@ -125,10 +157,17 @@ pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: 
         return TAG_NULL;
     }
 
+    let offset = offset as usize;
+
+    // Safety: verify offset is 8-byte aligned (all fields are u64-sized slots)
+    if offset % 8 != 0 {
+        return TAG_NULL;
+    }
+
     unsafe {
-        let old_bits = (*ptr).get_field(offset as usize);
+        let old_bits = (*ptr).get_field(offset);
         super::super::gc::jit_write_barrier(old_bits, value);
-        (*ptr).set_field(offset as usize, value);
+        (*ptr).set_field(offset, value);
     }
     obj_bits
 }

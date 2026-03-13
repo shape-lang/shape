@@ -3,18 +3,8 @@
 //! Run: `cargo test -p shape-vm soak_`
 
 use super::*;
+use super::test_utils::eval;
 use shape_value::ValueWord;
-
-/// Helper to compile and execute Shape source, returning the final value.
-fn eval(source: &str) -> ValueWord {
-    let program = shape_ast::parser::parse_program(source).expect("parse failed");
-    let mut compiler = crate::compiler::BytecodeCompiler::new();
-    compiler.set_source(source);
-    let bytecode = compiler.compile(&program).expect("compile failed");
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(bytecode);
-    vm.execute(None).expect("execution failed").clone()
-}
 
 /// Expected sum of 0..n using the closed-form formula.
 fn expected_sum(n: i64) -> i64 {

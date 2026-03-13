@@ -3,27 +3,8 @@
 // ============================================================================
 
 use crate::nan_boxing::{
-    TAG_NULL, box_column_ref, is_column_ref, is_number, unbox_column_ref, unbox_number,
+    TAG_NULL, box_column_result, extract_column, is_number, unbox_number,
 };
-
-/// Extract a &[f64] slice from column reference bits.
-unsafe fn extract_column(bits: u64) -> Option<&'static [f64]> {
-    if !is_column_ref(bits) {
-        return None;
-    }
-    let (ptr, len) = unsafe { unbox_column_ref(bits) };
-    if ptr.is_null() || len == 0 {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts(ptr, len) })
-}
-
-/// Return a new column reference from a Vec<f64>.
-fn box_column_result(data: Vec<f64>) -> u64 {
-    let len = data.len();
-    let leaked = Box::leak(data.into_boxed_slice());
-    box_column_ref(leaked.as_ptr(), len)
-}
 
 /// Shift a column by n periods, filling with NaN.
 pub extern "C" fn jit_series_shift(series_bits: u64, n_bits: u64) -> u64 {

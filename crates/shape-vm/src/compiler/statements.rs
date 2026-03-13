@@ -76,15 +76,39 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// Serialize a value to JSON for comptime directive payloads.
+    ///
+    /// Wraps serde_json serialization errors into ShapeError with the given
+    /// directive label for diagnostics.
+    fn serialize_directive_payload(
+        &self,
+        value: &(impl serde::Serialize + ?Sized),
+        directive_label: &str,
+        span: Span,
+    ) -> Result<String> {
+        serde_json::to_string(value).map_err(|e| ShapeError::RuntimeError {
+            message: format!("Failed to serialize comptime {} directive: {}", directive_label, e),
+            location: Some(self.span_to_source_location(span)),
+        })
+    }
+
+    /// Check that the compiler is in comptime mode, returning an error otherwise.
+    fn require_comptime_mode(&self, directive_name: &str, span: Span) -> Result<()> {
+        if !self.comptime_mode {
+            return Err(ShapeError::SemanticError {
+                message: format!("`{}` is only valid inside `comptime {{}}` context", directive_name),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+        Ok(())
+    }
+
     fn emit_comptime_extend_directive(
         &mut self,
         extend: &shape_ast::ast::ExtendStatement,
         span: Span,
     ) -> Result<()> {
-        let payload = serde_json::to_string(extend).map_err(|e| ShapeError::RuntimeError {
-            message: format!("Failed to serialize comptime extend directive: {}", e),
-            location: Some(self.span_to_source_location(span)),
-        })?;
+        let payload = self.serialize_directive_payload(extend, "extend", span)?;
         self.emit_comptime_internal_call(
             "__emit_extend",
             vec![Expr::Literal(Literal::String(payload), span)],
@@ -118,11 +142,7 @@ impl BytecodeCompiler {
         type_annotation: &TypeAnnotation,
         span: Span,
     ) -> Result<()> {
-        let payload =
-            serde_json::to_string(type_annotation).map_err(|e| ShapeError::RuntimeError {
-                message: format!("Failed to serialize comptime param type directive: {}", e),
-                location: Some(self.span_to_source_location(span)),
-            })?;
+        let payload = self.serialize_directive_payload(type_annotation, "param type", span)?;
         self.emit_comptime_internal_call(
             "__emit_set_param_type",
             vec![
@@ -138,11 +158,7 @@ impl BytecodeCompiler {
         type_annotation: &TypeAnnotation,
         span: Span,
     ) -> Result<()> {
-        let payload =
-            serde_json::to_string(type_annotation).map_err(|e| ShapeError::RuntimeError {
-                message: format!("Failed to serialize comptime return type directive: {}", e),
-                location: Some(self.span_to_source_location(span)),
-            })?;
+        let payload = self.serialize_directive_payload(type_annotation, "return type", span)?;
         self.emit_comptime_internal_call(
             "__emit_set_return_type",
             vec![Expr::Literal(Literal::String(payload), span)],
@@ -163,10 +179,7 @@ impl BytecodeCompiler {
         body: &[Statement],
         span: Span,
     ) -> Result<()> {
-        let payload = serde_json::to_string(body).map_err(|e| ShapeError::RuntimeError {
-            message: format!("Failed to serialize comptime replace-body directive: {}", e),
-            location: Some(self.span_to_source_location(span)),
-        })?;
+        let payload = self.serialize_directive_payload(body, "replace-body", span)?;
         self.emit_comptime_internal_call(
             "__emit_replace_body",
             vec![Expr::Literal(Literal::String(payload), span)],
@@ -4088,24 +4101,11 @@ impl BytecodeCompiler {
                 self.compile_if_statement(if_stmt)?;
             }
             Statement::Extend(extend, span) => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message:
-                            "`extend` as a statement is only valid inside `comptime { }` context"
-                                .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("extend", *span)?;
                 self.emit_comptime_extend_directive(extend, *span)?;
             }
             Statement::RemoveTarget(span) => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message: "`remove target` is only valid inside `comptime { }` context"
-                            .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("remove target", *span)?;
                 self.emit_comptime_remove_directive(*span)?;
             }
             Statement::SetParamType {
@@ -4113,13 +4113,7 @@ impl BytecodeCompiler {
                 type_annotation,
                 span,
             } => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message: "`set param` is only valid inside `comptime { }` context"
-                            .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("set param", *span)?;
                 self.emit_comptime_set_param_type_directive(param_name, type_annotation, *span)?;
             }
             Statement::SetParamValue {
@@ -4127,66 +4121,30 @@ impl BytecodeCompiler {
                 expression,
                 span,
             } => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message: "`set param` is only valid inside `comptime { }` context"
-                            .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("set param", *span)?;
                 self.emit_comptime_set_param_value_directive(param_name, expression, *span)?;
             }
             Statement::SetReturnType {
                 type_annotation,
                 span,
             } => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message: "`set return` is only valid inside `comptime { }` context"
-                            .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("set return", *span)?;
                 self.emit_comptime_set_return_type_directive(type_annotation, *span)?;
             }
             Statement::SetReturnExpr { expression, span } => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message: "`set return` is only valid inside `comptime { }` context"
-                            .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("set return", *span)?;
                 self.emit_comptime_set_return_expr_directive(expression, *span)?;
             }
             Statement::ReplaceBody { body, span } => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message: "`replace body` is only valid inside `comptime { }` context"
-                            .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("replace body", *span)?;
                 self.emit_comptime_replace_body_directive(body, *span)?;
             }
             Statement::ReplaceBodyExpr { expression, span } => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message: "`replace body` is only valid inside `comptime { }` context"
-                            .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("replace body", *span)?;
                 self.emit_comptime_replace_body_expr_directive(expression, *span)?;
             }
             Statement::ReplaceModuleExpr { expression, span } => {
-                if !self.comptime_mode {
-                    return Err(ShapeError::SemanticError {
-                        message: "`replace module` is only valid inside `comptime { }` context"
-                            .to_string(),
-                        location: Some(self.span_to_source_location(*span)),
-                    });
-                }
+                self.require_comptime_mode("replace module", *span)?;
                 self.emit_comptime_replace_module_expr_directive(expression, *span)?;
             }
         }

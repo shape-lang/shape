@@ -143,20 +143,12 @@ fn stack_effect_for_param_analysis(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::DivInt
         | OpCode::ModInt
         | OpCode::PowInt
-        | OpCode::AddIntTrusted
-        | OpCode::SubIntTrusted
-        | OpCode::MulIntTrusted
-        | OpCode::DivIntTrusted
         | OpCode::AddNumber
         | OpCode::SubNumber
         | OpCode::MulNumber
         | OpCode::DivNumber
         | OpCode::ModNumber
         | OpCode::PowNumber
-        | OpCode::AddNumberTrusted
-        | OpCode::SubNumberTrusted
-        | OpCode::MulNumberTrusted
-        | OpCode::DivNumberTrusted
         | OpCode::Gt
         | OpCode::Lt
         | OpCode::Gte
@@ -167,18 +159,10 @@ fn stack_effect_for_param_analysis(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::LtInt
         | OpCode::GteInt
         | OpCode::LteInt
-        | OpCode::GtIntTrusted
-        | OpCode::LtIntTrusted
-        | OpCode::GteIntTrusted
-        | OpCode::LteIntTrusted
         | OpCode::GtNumber
         | OpCode::LtNumber
         | OpCode::GteNumber
         | OpCode::LteNumber
-        | OpCode::GtNumberTrusted
-        | OpCode::LtNumberTrusted
-        | OpCode::GteNumberTrusted
-        | OpCode::LteNumberTrusted
         | OpCode::EqInt
         | OpCode::EqNumber
         | OpCode::NeqInt
@@ -238,20 +222,12 @@ fn collect_numeric_param_hints(
                 | OpCode::DivInt
                 | OpCode::ModInt
                 | OpCode::PowInt
-                | OpCode::AddIntTrusted
-                | OpCode::SubIntTrusted
-                | OpCode::MulIntTrusted
-                | OpCode::DivIntTrusted
                 | OpCode::AddNumber
                 | OpCode::SubNumber
                 | OpCode::MulNumber
                 | OpCode::DivNumber
                 | OpCode::ModNumber
                 | OpCode::PowNumber
-                | OpCode::AddNumberTrusted
-                | OpCode::SubNumberTrusted
-                | OpCode::MulNumberTrusted
-                | OpCode::DivNumberTrusted
                 | OpCode::Gt
                 | OpCode::Lt
                 | OpCode::Gte
@@ -262,18 +238,10 @@ fn collect_numeric_param_hints(
                 | OpCode::LtInt
                 | OpCode::GteInt
                 | OpCode::LteInt
-                | OpCode::GtIntTrusted
-                | OpCode::LtIntTrusted
-                | OpCode::GteIntTrusted
-                | OpCode::LteIntTrusted
                 | OpCode::GtNumber
                 | OpCode::LtNumber
                 | OpCode::GteNumber
                 | OpCode::LteNumber
-                | OpCode::GtNumberTrusted
-                | OpCode::LtNumberTrusted
-                | OpCode::GteNumberTrusted
-                | OpCode::LteNumberTrusted
                 | OpCode::EqInt
                 | OpCode::EqNumber
                 | OpCode::NeqInt

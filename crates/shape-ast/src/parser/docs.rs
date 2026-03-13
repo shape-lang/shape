@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn parses_stdlib_json_value_module_with_documented_methods() {
-        let source = include_str!("../../../shape-core/stdlib/core/json_value.shape");
+        let source = include_str!("../../../shape-runtime/stdlib-src/core/json_value.shape");
         let program = parse_program(source).expect("stdlib json_value module should parse");
         assert!(
             program

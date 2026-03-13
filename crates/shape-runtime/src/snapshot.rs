@@ -20,13 +20,18 @@ use shape_ast::data::Timeframe;
 use crate::data::DataFrame;
 use shape_value::datatable::DataTable;
 
-/// Version for snapshot format.
+/// Schema version for the snapshot binary format.
 ///
-/// v5: ValueWord-native serialization — `nanboxed_to_serializable` and
-///     `serializable_to_nanboxed` operate on ValueWord directly without
-///     intermediate ValueWord conversion. Format is wire-compatible with v4
-///     (same `SerializableVMValue` enum), so v4 snapshots deserialize
-///     correctly without migration.
+/// This version is embedded in every [`ExecutionSnapshot`] via the `version`
+/// field. Readers should check this value to determine whether they can
+/// decode a snapshot or need migration logic.
+///
+/// Version history:
+/// - v5 (current): ValueWord-native serialization — `nanboxed_to_serializable`
+///   and `serializable_to_nanboxed` operate on ValueWord directly without
+///   intermediate ValueWord conversion. Format is wire-compatible with v4
+///   (same `SerializableVMValue` enum), so v4 snapshots deserialize
+///   correctly without migration.
 pub const SNAPSHOT_VERSION: u32 = 5;
 
 pub(crate) const DEFAULT_CHUNK_LEN: usize = 4096;
@@ -115,6 +120,14 @@ impl SnapshotStore {
     }
 
     /// List all snapshots in the store, returning (hash, snapshot) pairs.
+    ///
+    /// **Note:** This method eagerly loads and deserializes every snapshot in the
+    /// store directory into memory. For stores with many snapshots this may
+    /// become a bottleneck. A future improvement could return a lazy iterator
+    /// that streams snapshot metadata (hash + `created_at_ms`) without
+    /// deserializing full payloads until requested — e.g. via a
+    /// `SnapshotEntry { hash, created_at_ms }` header read, deferring full
+    /// `ExecutionSnapshot` deserialization to an explicit `.load()` call.
     pub fn list_snapshots(&self) -> Result<Vec<(HashDigest, ExecutionSnapshot)>> {
         let snapshots_dir = self.root.join("snapshots");
         if !snapshots_dir.exists() {
@@ -149,8 +162,16 @@ impl SnapshotStore {
     }
 }
 
+/// A serializable snapshot of a Shape program's execution state.
+///
+/// The `version` field records which [`SNAPSHOT_VERSION`] was used to
+/// produce this snapshot. Readers must check this value before
+/// deserializing the referenced sub-snapshots (semantic, context, VM)
+/// to ensure binary compatibility or apply migration logic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionSnapshot {
+    /// Schema version — should equal [`SNAPSHOT_VERSION`] at write time.
+    /// Used by readers to detect format changes and apply migrations.
     pub version: u32,
     pub created_at_ms: i64,
     pub semantic_hash: HashDigest,

@@ -1,16 +1,20 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+use crate::config;
+
 /// Default directory for storing Shape key files.
 fn keys_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".shape").join("keys"))
+    let config_dir =
+        config::shape_config_dir().context("could not determine config directory")?;
+    Ok(config_dir.join("keys"))
 }
 
 /// Default path for the trusted authors keychain file.
 fn keychain_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".shape").join("trusted_authors.json"))
+    let config_dir =
+        config::shape_config_dir().context("could not determine config directory")?;
+    Ok(config_dir.join("trusted_authors.json"))
 }
 
 /// `shape keys generate` -- generate a new Ed25519 key pair.

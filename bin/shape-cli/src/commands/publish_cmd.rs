@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+use crate::config;
 use crate::registry_client::RegistryClient;
 
-/// Find the first `.key` file in `~/.shape/keys/`.
+/// Find the first `.key` file in the keys directory.
 fn find_default_signing_key() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    let keys_dir = home.join(".shape").join("keys");
+    let config_dir =
+        config::shape_config_dir().context("could not determine config directory")?;
+    let keys_dir = config_dir.join("keys");
     if !keys_dir.is_dir() {
         anyhow::bail!(
             "No keys directory found at {}. Run `shape keys generate` first.",

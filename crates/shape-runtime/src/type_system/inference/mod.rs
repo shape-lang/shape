@@ -1,7 +1,35 @@
 //! Type Inference Engine
 //!
-//! Implements Hindley-Milner style type inference with extensions
-//! for Shape's domain-specific features.
+//! Implements Hindley-Milner style type inference with extensions for
+//! Shape's domain-specific features.
+//!
+//! ## Bidirectional type checking
+//!
+//! The engine supports three checking modes (see `bidirectional.rs`):
+//!
+//! - **Infer** -- purely synthesise a type from the expression structure.
+//! - **Check(T)** -- verify the expression against an expected type (hard
+//!   constraint, emitted for annotated bindings and return positions).
+//! - **Synth(T)** -- synthesise with a hint (soft constraint, used for
+//!   closure parameter inference from generic method signatures).
+//!
+//! When a method call like `arr.map(|x| ...)` is encountered, the engine
+//! looks up the `GenericMethodSignature` for the receiver type, extracts
+//! the expected closure parameter types, and passes them as `Synth` hints
+//! so that `x` receives the array element type without annotation.
+//!
+//! ## Sub-modules
+//!
+//! - `access` -- property access, index access, field resolution
+//! - `bidirectional` -- `CheckMode` and the `check_expr` entry point
+//! - `expressions` -- expression-level inference (literals, calls, closures,
+//!   match, if/else, binary/unary ops)
+//! - `hoisting` -- optimistic pre-pass that collects property assignments
+//!   to widen object types before the main inference walk
+//! - `items` -- top-level item inference (functions, types, impls, extends)
+//! - `operators` -- binary and unary operator type rules
+//! - `statements` -- statement-level inference (let, assignment, return,
+//!   for, while, blocks)
 
 mod access;
 mod bidirectional;
@@ -138,7 +166,7 @@ impl TypeInferenceEngine {
                 // should allow member access/call constraints without producing
                 // undefined-variable or concrete-method-not-found errors.
                 self.env
-                    .define(name, TypeScheme::mono(Type::Variable(TypeVar::fresh())));
+                    .define(name, TypeScheme::mono(Type::fresh_var()));
             }
         }
     }
@@ -858,7 +886,7 @@ impl TypeInferenceEngine {
                         if name == "Result"
                 ) && normalized_args.len() == 1
                 {
-                    normalized_args.push(Type::Variable(TypeVar::fresh()));
+                    normalized_args.push(Type::fresh_var());
                 }
                 Some(((*base.clone()), normalized_args))
             }
@@ -868,7 +896,7 @@ impl TypeInferenceEngine {
                     .map(|arg| Type::Concrete(arg.clone()))
                     .collect::<Vec<_>>();
                 if name == "Result" && normalized_args.len() == 1 {
-                    normalized_args.push(Type::Variable(TypeVar::fresh()));
+                    normalized_args.push(Type::fresh_var());
                 }
                 Some((
                     Type::Concrete(TypeAnnotation::Reference(name.clone())),
@@ -929,7 +957,7 @@ impl TypeInferenceEngine {
                     let representative = unresolved_candidates
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| Type::Variable(TypeVar::fresh()));
+                        .unwrap_or_else(|| Type::fresh_var());
                     for unresolved in unresolved_candidates.iter().skip(1) {
                         self.constraints
                             .push((representative.clone(), unresolved.clone()));

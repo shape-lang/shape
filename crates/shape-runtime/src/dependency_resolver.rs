@@ -4,6 +4,27 @@
 //! - **Path deps**: resolved relative to the project root.
 //! - **Git deps**: cloned/fetched into `~/.shape/cache/git/` and checked out.
 //! - **Version deps**: resolved from a local registry index with semver solving.
+//!
+//! ## Semver solver limitations
+//!
+//! The registry solver uses a backtracking search with the following known
+//! limitations:
+//!
+//! - **No pre-release support**: Pre-release versions (e.g. `1.0.0-beta.1`)
+//!   are parsed but not given special precedence or pre-release matching
+//!   semantics beyond what `semver::VersionReq` provides.
+//! - **No lock file integration**: The solver does not read or produce a lock
+//!   file. Each `resolve()` call recomputes from scratch.
+//! - **Greedy highest-version selection**: Candidates are sorted
+//!   highest-first. The solver picks the first compatible version and only
+//!   backtracks on conflict. This can miss valid solutions that a SAT-based
+//!   solver would find.
+//! - **No version unification across sources**: A dependency declared as both
+//!   a path dep and a registry dep by different packages produces an error
+//!   rather than attempting unification.
+//! - **Exponential worst case**: Deeply nested constraint graphs with many
+//!   conflicting ranges can cause exponential backtracking. In practice,
+//!   Shape package graphs are small enough that this is not an issue.
 
 use semver::{Version, VersionReq};
 use serde::Deserialize;
@@ -227,7 +248,12 @@ impl DependencyResolver {
         registry_constraints: &mut HashMap<String, Vec<VersionReq>>,
     ) -> Result<(), String> {
         let mut pending: VecDeque<(PathBuf, String, DependencySpec)> = VecDeque::new();
+        // Track which dependency names have already been enqueued to prevent
+        // redundant work and guard against infinite loops during transitive
+        // dependency traversal.
+        let mut visited: HashSet<String> = HashSet::new();
         for (name, spec) in root_deps {
+            visited.insert(name.clone());
             pending.push_back((self.project_root.clone(), name.clone(), spec.clone()));
         }
 
@@ -258,7 +284,9 @@ impl DependencyResolver {
                 continue;
             };
             for (child_name, child_spec) in dep_specs {
-                pending.push_back((dep_path.clone(), child_name, child_spec));
+                if visited.insert(child_name.clone()) {
+                    pending.push_back((dep_path.clone(), child_name, child_spec));
+                }
             }
         }
 

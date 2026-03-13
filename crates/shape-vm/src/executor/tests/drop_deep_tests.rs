@@ -9,26 +9,9 @@
 //! 6. Drop with Closures & Higher-Order (~10 tests)
 //! 7. Async Drop (~10 tests)
 
-use crate::VMConfig;
 use crate::bytecode::OpCode;
-use crate::compiler::BytecodeCompiler;
-use crate::executor::VirtualMachine;
-use shape_ast::parser::parse_program;
+use crate::executor::tests::test_utils::{compile, eval};
 use shape_value::ValueWord;
-
-fn compile(source: &str) -> crate::bytecode::BytecodeProgram {
-    let program = parse_program(source).expect("parse failed");
-    let mut compiler = BytecodeCompiler::new();
-    compiler.set_source(source);
-    compiler.compile(&program).expect("compile failed")
-}
-
-fn eval(source: &str) -> ValueWord {
-    let bytecode = compile(source);
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(bytecode);
-    vm.execute(None).expect("execution failed").clone()
-}
 
 /// Count occurrences of a specific opcode in compiled bytecode.
 fn count_opcode(source: &str, opcode: OpCode) -> usize {
@@ -2182,8 +2165,8 @@ fn test_drop_closure_with_block_body() {
 fn try_compile(
     source: &str,
 ) -> Result<crate::bytecode::BytecodeProgram, shape_ast::error::ShapeError> {
-    let program = parse_program(source).expect("parse failed");
-    let mut compiler = BytecodeCompiler::new();
+    let program = shape_ast::parser::parse_program(source).expect("parse failed");
+    let mut compiler = crate::compiler::BytecodeCompiler::new();
     compiler.set_source(source);
     compiler.compile(&program)
 }

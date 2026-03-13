@@ -2,7 +2,6 @@
 //!
 //! ## Acceptance bands (CI gate):
 //! - No benchmark regresses >10% from baseline with p<0.05
-//! - Trusted ops (when available) must be faster than guarded (p<0.05)
 //! - GC young pause p99 tracked but no assumed target until baseline established
 //!
 //! ## Benchmark groups:
@@ -70,52 +69,11 @@ fn build_add_number_program(a: f64, b: f64) -> BytecodeProgram {
     prog
 }
 
-/// Build a program that pushes two integer constants, runs AddIntTrusted, and halts.
-/// Simulates the bytecode the compiler emits for `let x: int = a; let y: int = b; let z = x + y`
-/// where both operands have compiler-proved int types.
-fn build_add_int_trusted_program(a: i64, b: i64) -> BytecodeProgram {
-    let mut prog = BytecodeProgram::new();
-    let ca = prog.add_constant(Constant::Int(a));
-    let cb = prog.add_constant(Constant::Int(b));
-    prog.emit(Instruction::new(
-        OpCode::PushConst,
-        Some(Operand::Const(ca)),
-    ));
-    prog.emit(Instruction::new(
-        OpCode::PushConst,
-        Some(Operand::Const(cb)),
-    ));
-    prog.emit(Instruction::simple(OpCode::AddIntTrusted));
-    prog.emit(Instruction::simple(OpCode::Pop));
-    prog.emit(Instruction::simple(OpCode::Halt));
-    prog
-}
-
-/// Build a program that pushes two f64 constants, runs AddNumberTrusted, and halts.
-/// Simulates `let x: number = a; let y: number = b; let z = x + y`.
-fn build_add_number_trusted_program(a: f64, b: f64) -> BytecodeProgram {
-    let mut prog = BytecodeProgram::new();
-    let ca = prog.add_constant(Constant::Number(a));
-    let cb = prog.add_constant(Constant::Number(b));
-    prog.emit(Instruction::new(
-        OpCode::PushConst,
-        Some(Operand::Const(ca)),
-    ));
-    prog.emit(Instruction::new(
-        OpCode::PushConst,
-        Some(Operand::Const(cb)),
-    ));
-    prog.emit(Instruction::simple(OpCode::AddNumberTrusted));
-    prog.emit(Instruction::simple(OpCode::Pop));
-    prog.emit(Instruction::simple(OpCode::Halt));
-    prog
-}
-
-/// Build a fully-trusted variant of the while-loop program.
+/// Build a typed variant of the while-loop program.
 ///
-/// Uses trusted opcodes throughout: LoadLocalTrusted, LtIntTrusted,
-/// JumpIfFalseTrusted, AddIntTrusted. This is the bytecode the compiler
-/// would emit when all locals have typed `let` bindings (e.g., `let x: int = 0`).
+/// Uses typed opcodes throughout: LoadLocalTrusted, LtInt,
+/// JumpIfFalseTrusted, AddInt. This is the bytecode the compiler
+/// emits when all locals have typed `let` bindings (e.g., `let x: int = 0`).
 ///
 /// ```text
 ///   let x: int = 0      // local 0, compiler-proved int
@@ -129,15 +87,15 @@ fn build_add_number_trusted_program(a: f64, b: f64) -> BytecodeProgram {
 ///   1: StoreLocal(0)            -- x = 0
 ///   2: LoadLocalTrusted(0)      -- [loop top] push x (trusted: proven int)
 ///   3: PushConst(N)             -- push limit
-///   4: LtIntTrusted             -- x < N (trusted: both ints)
+///   4: LtInt                    -- x < N (typed: both ints)
 ///   5: JumpIfFalseTrusted(+5)   -- if false, jump to Halt
 ///   6: LoadLocalTrusted(0)      -- push x (trusted)
 ///   7: PushConst(1)             -- push 1
-///   8: AddIntTrusted            -- x + 1 (trusted: both ints)
+///   8: AddInt                   -- x + 1 (typed: both ints)
 ///   9: StoreLocal(0)            -- x = result
 ///  10: Jump(-8)                 -- back to instruction 2
 ///  11: Halt
-fn build_trusted_loop_program(iterations: i64) -> BytecodeProgram {
+fn build_typed_loop_program(iterations: i64) -> BytecodeProgram {
     let mut prog = BytecodeProgram::new();
     let c_zero = prog.add_constant(Constant::Int(0));
     let c_limit = prog.add_constant(Constant::Int(iterations));
@@ -153,7 +111,7 @@ fn build_trusted_loop_program(iterations: i64) -> BytecodeProgram {
         OpCode::StoreLocal,
         Some(Operand::Local(0)),
     ));
-    // 2: load local 0 (trusted — compiler proved int)
+    // 2: load local 0 (trusted — skips SharedCell deref)
     prog.emit(Instruction::new(
         OpCode::LoadLocalTrusted,
         Some(Operand::Local(0)),
@@ -163,8 +121,8 @@ fn build_trusted_loop_program(iterations: i64) -> BytecodeProgram {
         OpCode::PushConst,
         Some(Operand::Const(c_limit)),
     ));
-    // 4: x < N (trusted — both operands proven int)
-    prog.emit(Instruction::simple(OpCode::LtIntTrusted));
+    // 4: x < N (typed — both operands proven int)
+    prog.emit(Instruction::simple(OpCode::LtInt));
     // 5: jump if false to halt (trusted — condition proven bool)
     prog.emit(Instruction::new(
         OpCode::JumpIfFalseTrusted,
@@ -180,8 +138,8 @@ fn build_trusted_loop_program(iterations: i64) -> BytecodeProgram {
         OpCode::PushConst,
         Some(Operand::Const(c_one)),
     ));
-    // 8: AddIntTrusted (trusted — both operands proven int)
-    prog.emit(Instruction::simple(OpCode::AddIntTrusted));
+    // 8: AddInt (typed — both operands proven int)
+    prog.emit(Instruction::simple(OpCode::AddInt));
     // 9: store local 0
     prog.emit(Instruction::new(
         OpCode::StoreLocal,
@@ -240,39 +198,19 @@ fn bench_typed_arithmetic(c: &mut Criterion) {
         });
     });
 
-    // --- AddIntTrusted: compiler-proved integer operands, no runtime guard ---
-    let add_int_trusted_prog = build_add_int_trusted_program(42, 58);
-    group.bench_function("add_int_trusted", |b| {
+    // --- Typed loop: typed opcode loop (LoadLocalTrusted + LtInt +
+    //     JumpIfFalseTrusted + AddInt) vs generic loop ---
+    let typed_loop_prog = build_typed_loop_program(1_000);
+    group.bench_function("loop_1k_typed", |b| {
         b.iter(|| {
-            for _ in 0..1000 {
-                execute_program(black_box(&add_int_trusted_prog));
-            }
+            execute_program(black_box(&typed_loop_prog));
         });
     });
 
-    // --- AddNumberTrusted: compiler-proved float operands, no runtime guard ---
-    let add_num_trusted_prog = build_add_number_trusted_program(3.14, 2.72);
-    group.bench_function("add_number_trusted", |b| {
+    let generic_loop_prog = build_loop_program(1_000);
+    group.bench_function("loop_1k_generic", |b| {
         b.iter(|| {
-            for _ in 0..1000 {
-                execute_program(black_box(&add_num_trusted_prog));
-            }
-        });
-    });
-
-    // --- Trusted loop: all-trusted opcode loop (LoadLocalTrusted + LtIntTrusted +
-    //     JumpIfFalseTrusted + AddIntTrusted) vs guarded loop ---
-    let trusted_loop_prog = build_trusted_loop_program(1_000);
-    group.bench_function("loop_1k_trusted", |b| {
-        b.iter(|| {
-            execute_program(black_box(&trusted_loop_prog));
-        });
-    });
-
-    let guarded_loop_prog = build_loop_program(1_000);
-    group.bench_function("loop_1k_guarded", |b| {
-        b.iter(|| {
-            execute_program(black_box(&guarded_loop_prog));
+            execute_program(black_box(&generic_loop_prog));
         });
     });
 

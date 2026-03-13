@@ -196,7 +196,7 @@ impl TypeInferenceEngine {
                 }
 
                 // For unknown types, create a constraint
-                let result_type = Type::Variable(TypeVar::fresh());
+                let result_type = Type::fresh_var();
                 let var = TypeVar::fresh();
 
                 self.constraints.push((
@@ -333,7 +333,7 @@ impl TypeInferenceEngine {
         property: &str,
     ) -> TypeResult<Type> {
         // For unknown types, create a constraint
-        let result_type = Type::Variable(TypeVar::fresh());
+        let result_type = Type::fresh_var();
         let var = TypeVar::fresh();
 
         self.constraints.push((
@@ -378,7 +378,7 @@ impl TypeInferenceEngine {
                     Ok(Type::Concrete(TypeAnnotation::Basic(name.clone())))
                 } else {
                     // For unknown types, create a constraint
-                    let result_type = Type::Variable(TypeVar::fresh());
+                    let result_type = Type::fresh_var();
                     let var = TypeVar::fresh();
 
                     self.constraints.push((
@@ -394,7 +394,7 @@ impl TypeInferenceEngine {
             }
             _ => {
                 // For unknown types, create a constraint
-                let result_type = Type::Variable(TypeVar::fresh());
+                let result_type = Type::fresh_var();
                 let var = TypeVar::fresh();
 
                 self.constraints.push((
@@ -475,7 +475,7 @@ impl TypeInferenceEngine {
             Type::Function { .. } | Type::Concrete(TypeAnnotation::Function { .. })
         ) {
             if matches!(&func_type, Type::Variable(_) | Type::Constrained { .. }) {
-                let result_type = Type::Variable(TypeVar::fresh());
+                let result_type = Type::fresh_var();
                 let expected_func_type =
                     BuiltinTypes::function(arg_types.clone(), result_type.clone());
                 self.push_constraint_with_origin(func_type, expected_func_type, origin);
@@ -573,12 +573,12 @@ impl TypeInferenceEngine {
                     Ok(Type::Concrete(TypeAnnotation::Basic(name.clone())))
                 } else {
                     // For unknown iterators, return a fresh type variable
-                    Ok(Type::Variable(TypeVar::fresh()))
+                    Ok(Type::fresh_var())
                 }
             }
             _ => {
                 // For unknown iterators, return a fresh type variable
-                Ok(Type::Variable(TypeVar::fresh()))
+                Ok(Type::fresh_var())
             }
         }
     }

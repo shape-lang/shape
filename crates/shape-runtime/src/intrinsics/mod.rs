@@ -379,10 +379,13 @@ impl Default for IntrinsicsRegistry {
 
 // ============================================================================
 // Common arg extraction helpers (DRY across all intrinsic modules)
+//
+// These are `pub` so that shape-vm can reuse them when delegating to runtime
+// intrinsics without duplicating extraction/conversion logic.
 // ============================================================================
 
 /// Extract a f64 from a ValueWord argument, coercing int to float.
-pub(crate) fn extract_f64(nb: &ValueWord, label: &str) -> Result<f64> {
+pub fn extract_f64(nb: &ValueWord, label: &str) -> Result<f64> {
     nb.as_number_coerce()
         .ok_or_else(|| ShapeError::RuntimeError {
             message: format!("{} must be a number", label),
@@ -391,7 +394,7 @@ pub(crate) fn extract_f64(nb: &ValueWord, label: &str) -> Result<f64> {
 }
 
 /// Extract a usize from a ValueWord argument (for window sizes, counts, etc.).
-pub(crate) fn extract_usize(nb: &ValueWord, label: &str) -> Result<usize> {
+pub fn extract_usize(nb: &ValueWord, label: &str) -> Result<usize> {
     let n = nb
         .as_number_coerce()
         .ok_or_else(|| ShapeError::RuntimeError {
@@ -404,7 +407,7 @@ pub(crate) fn extract_usize(nb: &ValueWord, label: &str) -> Result<usize> {
 /// Extract a Vec<f64> from a ValueWord array argument.
 ///
 /// Supports typed arrays (IntArray, FloatArray) with zero-copy fast paths.
-pub(crate) fn extract_f64_array(nb: &ValueWord, label: &str) -> Result<Vec<f64>> {
+pub fn extract_f64_array(nb: &ValueWord, label: &str) -> Result<Vec<f64>> {
     let view = nb.as_any_array().ok_or_else(|| ShapeError::RuntimeError {
         message: format!("{} must be an array", label),
         location: None,
@@ -428,7 +431,7 @@ pub(crate) fn extract_f64_array(nb: &ValueWord, label: &str) -> Result<Vec<f64>>
 }
 
 /// Extract a string reference from a ValueWord argument.
-pub(crate) fn extract_str<'a>(nb: &'a ValueWord, label: &str) -> Result<&'a str> {
+pub fn extract_str<'a>(nb: &'a ValueWord, label: &str) -> Result<&'a str> {
     nb.as_str().ok_or_else(|| ShapeError::RuntimeError {
         message: format!("{} must be a string", label),
         location: None,
@@ -436,7 +439,7 @@ pub(crate) fn extract_str<'a>(nb: &'a ValueWord, label: &str) -> Result<&'a str>
 }
 
 /// Build a ValueWord array from a Vec<f64>.
-pub(crate) fn f64_vec_to_nb_array(data: Vec<f64>) -> ValueWord {
+pub fn f64_vec_to_nb_array(data: Vec<f64>) -> ValueWord {
     ValueWord::from_array(std::sync::Arc::new(
         data.into_iter().map(ValueWord::from_f64).collect(),
     ))
@@ -446,7 +449,7 @@ pub(crate) fn f64_vec_to_nb_array(data: Vec<f64>) -> ValueWord {
 ///
 /// Returns a typed IntArray (preserves integer type fidelity) rather than
 /// a generic array of boxed ValueWords.
-pub(crate) fn i64_vec_to_nb_int_array(data: Vec<i64>) -> ValueWord {
+pub fn i64_vec_to_nb_int_array(data: Vec<i64>) -> ValueWord {
     ValueWord::from_int_array(std::sync::Arc::new(data.into()))
 }
 
@@ -454,7 +457,7 @@ pub(crate) fn i64_vec_to_nb_int_array(data: Vec<i64>) -> ValueWord {
 ///
 /// Zero-copy: returns a reference into the Arc<TypedBuffer<i64>>.
 /// Returns `None` for all non-IntArray values (caller should fall back to f64 path).
-pub(crate) fn try_extract_i64_slice(nb: &ValueWord) -> Option<&[i64]> {
+pub fn try_extract_i64_slice(nb: &ValueWord) -> Option<&[i64]> {
     nb.as_int_array().map(|buf| buf.as_slice())
 }
 
@@ -463,7 +466,7 @@ pub(crate) fn try_extract_i64_slice(nb: &ValueWord) -> Option<&[i64]> {
 /// `None` entries become null (validity bit = 0), `Some(v)` entries become valid.
 /// Used by rolling window i64 paths where positions before the window is full
 /// have no value.
-pub(crate) fn option_i64_vec_to_nb(data: Vec<Option<i64>>) -> ValueWord {
+pub fn option_i64_vec_to_nb(data: Vec<Option<i64>>) -> ValueWord {
     use shape_value::typed_buffer::TypedBuffer;
     let mut buf = TypedBuffer::<i64>::with_capacity(data.len());
     for item in data {

@@ -1,6 +1,7 @@
 //! Method handlers for Channel type (MPSC sender/receiver endpoints).
 
 use crate::executor::VirtualMachine;
+use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
@@ -20,7 +21,7 @@ pub fn handle_channel_send(
     let value = args.get(1).cloned().unwrap_or_else(ValueWord::none);
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("send() called on non-channel value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("send()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => match data.as_ref() {
             shape_value::heap_value::ChannelData::Sender { tx, closed, .. } => {
@@ -58,13 +59,14 @@ pub fn handle_channel_recv(
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("recv() called on non-channel value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("recv()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => match data.as_ref() {
             shape_value::heap_value::ChannelData::Receiver { rx, .. } => {
-                let guard = rx.lock().map_err(|e| {
-                    VMError::RuntimeError(format!("Channel receiver poisoned: {}", e))
-                })?;
+                // Recover from mutex poisoning: the underlying Receiver is still
+                // usable even if a previous holder panicked. Use into_inner() to
+                // extract the guard and clear the poison flag.
+                let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 match guard.recv() {
                     Ok(val) => vm.push_vw(val)?,
                     Err(_) => vm.push_vw(ValueWord::none())?,
@@ -90,14 +92,15 @@ pub fn handle_channel_try_recv(
 ) -> Result<(), VMError> {
     let receiver = &args[0];
     let heap = receiver.as_heap_ref().ok_or_else(|| {
-        VMError::RuntimeError("try_recv() called on non-channel value".to_string())
+        type_mismatch_error("try_recv()", "channel")
     })?;
     match heap {
         HeapValue::Channel(data) => match data.as_ref() {
             shape_value::heap_value::ChannelData::Receiver { rx, .. } => {
-                let guard = rx.lock().map_err(|e| {
-                    VMError::RuntimeError(format!("Channel receiver poisoned: {}", e))
-                })?;
+                // Recover from mutex poisoning: the underlying Receiver is still
+                // usable even if a previous holder panicked. Use into_inner() to
+                // extract the guard and clear the poison flag.
+                let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 match guard.try_recv() {
                     Ok(val) => vm.push_vw(val)?,
                     Err(_) => vm.push_vw(ValueWord::none())?,
@@ -127,7 +130,7 @@ pub fn handle_channel_close(
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
-        .ok_or_else(|| VMError::RuntimeError("close() called on non-channel value".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("close()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => {
             data.close();
@@ -148,7 +151,7 @@ pub fn handle_channel_is_closed(
 ) -> Result<(), VMError> {
     let receiver = &args[0];
     let heap = receiver.as_heap_ref().ok_or_else(|| {
-        VMError::RuntimeError("is_closed() called on non-channel value".to_string())
+        type_mismatch_error("is_closed()", "channel")
     })?;
     match heap {
         HeapValue::Channel(data) => {
@@ -169,7 +172,7 @@ pub fn handle_channel_is_sender(
 ) -> Result<(), VMError> {
     let receiver = &args[0];
     let heap = receiver.as_heap_ref().ok_or_else(|| {
-        VMError::RuntimeError("is_sender() called on non-channel value".to_string())
+        type_mismatch_error("is_sender()", "channel")
     })?;
     match heap {
         HeapValue::Channel(data) => {

@@ -246,6 +246,27 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
 
 /// Decide the storage class for a single slot, returning both the storage class
 /// and enriched binding semantics.
+/// Decide the storage class and enriched semantics for a single slot.
+///
+/// ## Decision matrix
+///
+/// Priority order (first matching rule wins):
+///
+/// | # | Condition                                      | Storage class  |
+/// |---|------------------------------------------------|----------------|
+/// | 0 | Explicit `Reference` already set               | `Reference`    |
+/// | 1 | Slot holds a first-class reference              | `Reference`    |
+/// | 2 | Captured by closure with mutation               | `UniqueHeap`   |
+/// | 3 | `var` (Flexible) + aliased + mutated            | `SharedCow`    |
+/// | 3b| Escaped + aliased + mutated (any ownership)     | `SharedCow`    |
+/// | 4 | Everything else                                 | `Direct`       |
+///
+/// Notes:
+/// - "Aliased" means either captured by a closure or referenced from multiple
+///   MIR places (e.g. through a borrow chain).
+/// - `UniqueHeap` and `SharedCow` both result in heap boxing at runtime, but
+///   `SharedCow` adds copy-on-write semantics for safe shared mutation.
+/// - Immutable closure captures stay `Direct` — the closure gets a plain copy.
 fn decide_slot_storage(
     slot: SlotId,
     input: &StoragePlannerInput<'_>,

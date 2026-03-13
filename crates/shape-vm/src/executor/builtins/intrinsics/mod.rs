@@ -1,8 +1,10 @@
-//! Native VM intrinsics - operate directly on ValueWord without runtime conversion
+//! Native VM intrinsics — thin wrappers delegating to shape_runtime
 //!
-//! These functions eliminate the expensive ValueWord <-> RuntimeValue conversion by
-//! operating directly on the VM's value types. They use the same SIMD-optimized
-//! algorithms from shape_runtime::simd_rolling where applicable.
+//! All intrinsic logic lives in `shape_runtime::intrinsics` as the single
+//! source of truth. These wrappers adapt the runtime's
+//! `(&[ValueWord], &mut ExecutionContext) -> Result<ValueWord, ShapeError>`
+//! signature to the VM's `(&[ValueWord]) -> Result<ValueWord, VMError>`
+//! signature by providing a temporary ExecutionContext and converting errors.
 //!
 //! Organized into domain-specific submodules:
 //! - `math`: sum, mean, min, max, variance, std
@@ -13,71 +15,10 @@ pub mod math;
 pub mod signal;
 pub mod statistical;
 
-use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
-use std::sync::Arc;
 
 /// Result type for ValueWord-native intrinsics
 pub type NbIntrinsicResult = Result<ValueWord, VMError>;
-
-// =============================================================================
-// Shared Helper Functions (ValueWord-native)
-// =============================================================================
-
-/// Extract f64 slice from a ValueWord value (Array, ColumnRef, or Number)
-pub(crate) fn nb_extract_f64_data(value: &ValueWord) -> Result<Vec<f64>, VMError> {
-    // Fast path: inline number
-    if let Some(n) = value.as_number_coerce() {
-        return Ok(vec![n]);
-    }
-    match value.as_heap_ref() {
-        Some(HeapValue::Array(arr)) => arr
-            .iter()
-            .map(|nb| {
-                nb.as_number_coerce()
-                    .ok_or_else(|| VMError::RuntimeError("Array must contain numbers".to_string()))
-            })
-            .collect(),
-        Some(HeapValue::FloatArray(arr)) => Ok(arr.as_slice().to_vec()),
-        Some(HeapValue::IntArray(arr)) => Ok(arr.as_slice().iter().map(|&v| v as f64).collect()),
-        Some(HeapValue::ColumnRef { table, col_id, .. }) => {
-            use arrow_array::{Float64Array, Int64Array};
-            let col = table.inner().column(*col_id as usize);
-            if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-                Ok(arr.iter().flatten().collect())
-            } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
-                Ok(arr.iter().filter_map(|v| v.map(|i| i as f64)).collect())
-            } else {
-                Err(VMError::RuntimeError(format!(
-                    "Column is not numeric (type: {:?})",
-                    col.data_type()
-                )))
-            }
-        }
-        _ => Err(VMError::RuntimeError(format!(
-            "Expected Array, Column, or Number, got {}",
-            value.type_name()
-        ))),
-    }
-}
-
-/// Extract window size from ValueWord
-pub(crate) fn nb_extract_window(value: &ValueWord) -> Result<usize, VMError> {
-    match value.as_number_coerce() {
-        Some(n) if n >= 1.0 => Ok(n as usize),
-        Some(_) => Err(VMError::RuntimeError(
-            "Window size must be >= 1".to_string(),
-        )),
-        None => Err(VMError::RuntimeError("Window must be a number".to_string())),
-    }
-}
-
-/// Create a ValueWord Array from f64 data
-pub(crate) fn nb_create_array_result(data: Vec<f64>) -> NbIntrinsicResult {
-    Ok(ValueWord::from_array(Arc::new(
-        data.into_iter().map(ValueWord::from_f64).collect(),
-    )))
-}
 
 // =============================================================================
 // Re-exports for public API

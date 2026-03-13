@@ -1,7 +1,32 @@
 //! Type Constraint Solver
 //!
-//! Solves type constraints generated during type inference
-//! to determine concrete types for type variables.
+//! Solves type constraints generated during type inference to determine
+//! concrete types for type variables. The solver operates in three phases:
+//!
+//! ## Phase 1: Eager unification
+//!
+//! Each constraint `(T1, T2)` is attempted immediately via `solve_constraint`.
+//! Simple bindings (variable-to-concrete, variable-to-variable) succeed here.
+//! Constraints that fail (e.g. because a variable is not yet resolved) are
+//! deferred to the next phase.
+//!
+//! ## Phase 2: Fixed-point iteration on deferred constraints
+//!
+//! Deferred constraints are retried in a loop. Each successful resolution may
+//! unlock further deferred constraints by refining substitutions. The loop
+//! terminates when a full pass makes no progress. Any constraints still
+//! unsolved after the fixed-point are reported as `UnsolvedConstraints`.
+//!
+//! ## Phase 3: Bound application
+//!
+//! After all equality constraints are resolved, `apply_bounds` validates
+//! type variable bounds (`Numeric`, `Comparable`, `Iterable`, `HasField`,
+//! `HasMethod`, `ImplementsTrait`). `HasField` constraints additionally
+//! perform backward propagation: when a structural object field is found,
+//! the field's result type variable is bound to the actual field type.
+//!
+//! The solver delegates low-level variable binding and substitution to the
+//! `Unifier` (Robinson's algorithm with path compression).
 
 use super::checking::MethodTable;
 use super::unification::Unifier;
@@ -1192,8 +1217,8 @@ mod tests {
     #[test]
     fn test_function_type_preserves_variables() {
         // BuiltinTypes::function with Variable params should be Type::Function
-        let param = Type::Variable(TypeVar::fresh());
-        let ret = Type::Variable(TypeVar::fresh());
+        let param = Type::fresh_var();
+        let ret = Type::fresh_var();
         let func = BuiltinTypes::function(vec![param.clone()], ret.clone());
         match func {
             Type::Function { params, returns } => {

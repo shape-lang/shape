@@ -10,22 +10,6 @@ use shape_vm::type_tracking::StorageHint;
 use crate::translator::types::{BytecodeToIR, CompilationMode};
 
 impl<'a, 'b> BytecodeToIR<'a, 'b> {
-    /// Compile RunSimulation opcode - generic simulation engine
-    pub(crate) fn compile_run_simulation(&mut self) -> Result<(), String> {
-        // Pop the config argument from stack
-        let config_val = self
-            .stack_pop()
-            .ok_or("run_simulation: missing config argument")?;
-        // Call jit_run_simulation(ctx, config) -> result
-        let inst = self
-            .builder
-            .ins()
-            .call(self.ffi.run_simulation, &[self.ctx_ptr, config_val]);
-        let result = self.builder.inst_results(inst)[0];
-        self.stack_push(result);
-        Ok(())
-    }
-
     // ========================================================================
     // Typed Column Access (LoadCol* opcodes → FFI calls)
     // ========================================================================
@@ -189,9 +173,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     .builder
                     .ins()
                     .fcmp(FloatCC::NotEqual, value_f64, zero_f64);
-                let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-                let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
-                self.builder.ins().select(is_true, true_val, false_val)
+                self.emit_boxed_bool_from_i1(is_true)
             }
             _ => self.builder.ins().iconst(types::I64, TAG_NULL as i64),
         };

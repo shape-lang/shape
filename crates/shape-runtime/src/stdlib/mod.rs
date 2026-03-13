@@ -16,6 +16,7 @@ pub mod csv_module;
 pub mod deterministic;
 pub mod env;
 pub mod file;
+pub mod helpers;
 pub mod http;
 pub mod json;
 pub mod msgpack_module;

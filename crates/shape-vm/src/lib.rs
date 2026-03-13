@@ -65,5 +65,8 @@ pub use type_tracking::{FrameDescriptor, SlotKind, StorageHint, TypeTracker, Var
 pub use shape_value::{ErrorLocation, LocatedVMError, Upvalue, VMContext, VMError};
 
 #[cfg(test)]
+pub(crate) mod test_utils;
+
+#[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;

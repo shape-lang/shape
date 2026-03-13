@@ -1,9 +1,46 @@
-//! Async operations for the VM executor
+//! Async operations for the VM executor.
 //!
-//! Handles: Yield, Suspend, Resume, Poll, AwaitBar, AwaitTick, EmitAlert, EmitEvent
+//! # Concurrency Model
 //!
-//! These opcodes enable cooperative multitasking and event-driven execution
-//! in a platform-agnostic way (works on Tokio and bare metal).
+//! The Shape VM uses **cooperative, single-threaded concurrency**. All async
+//! operations execute on the thread that owns the `VirtualMachine` instance --
+//! there is no work-stealing or multi-threaded task execution within the VM
+//! itself. The VM is `!Sync` by design.
+//!
+//! ## Task Lifecycle
+//!
+//! 1. **Spawn** (`SpawnTask`): Pops a callable from the stack, assigns a
+//!    monotonic future ID, registers it with the `TaskScheduler`, and pushes
+//!    a `Future(id)` value onto the stack.
+//! 2. **Await** (`Await`): Pops a `Future(id)`, attempts synchronous inline
+//!    resolution via the `TaskScheduler`. If the task cannot be resolved
+//!    (e.g., it depends on an external I/O operation), execution suspends
+//!    with `VMError::Suspended` so the host runtime can schedule it.
+//! 3. **Join** (`JoinInit` + `JoinAwait`): Collects multiple futures into a
+//!    `TaskGroup` value, then resolves them according to a join strategy
+//!    (all, race, any, all-settled).
+//! 4. **Cancel** (`CancelTask`): Marks a task as cancelled in the scheduler.
+//!
+//! ## Structured Concurrency
+//!
+//! `AsyncScopeEnter` / `AsyncScopeExit` bracket a structured concurrency
+//! region. All tasks spawned within a scope are tracked; on scope exit, any
+//! still-pending tasks are cancelled in LIFO order. This guarantees that no
+//! task outlives its enclosing scope.
+//!
+//! ## Suspension Protocol
+//!
+//! When an operation cannot complete synchronously, it returns
+//! `AsyncExecutionResult::Suspended(SuspensionInfo)`. The dispatch layer in
+//! `dispatch.rs` converts this into `VMError::Suspended { future_id, resume_ip }`
+//! which propagates up to the host runtime. The host resolves the future and
+//! calls back into the VM to resume execution at `resume_ip`.
+//!
+//! ## Opcodes Handled
+//!
+//! `Yield`, `Suspend`, `Resume`, `Poll`, `AwaitBar`, `AwaitTick`,
+//! `EmitAlert`, `EmitEvent`, `Await`, `SpawnTask`, `JoinInit`, `JoinAwait`,
+//! `CancelTask`, `AsyncScopeEnter`, `AsyncScopeExit`.
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
@@ -196,6 +233,7 @@ impl VirtualMachine {
     /// Otherwise, suspends execution so the host runtime can schedule the task.
     /// If the value is not a Future, pushes it back (sync shortcut).
     fn op_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
+        let sp_before = self.sp;
         let nb = self.pop_vw()?;
         match nb.as_heap_ref() {
             Some(HeapValue::Future(id)) => {
@@ -215,6 +253,12 @@ impl VirtualMachine {
                 match resolved {
                     Ok(value) => {
                         self.push_vw(value)?;
+                        // Await consumes a Future and pushes a result: net stack effect is 0.
+                        debug_assert_eq!(
+                            self.sp, sp_before,
+                            "op_await: stack depth changed (before={}, after={})",
+                            sp_before, self.sp
+                        );
                         Ok(AsyncExecutionResult::Continue)
                     }
                     Err(_) => {
@@ -229,6 +273,11 @@ impl VirtualMachine {
             _ => {
                 // Sync shortcut: value is already resolved, push it back
                 self.push_vw(nb)?;
+                debug_assert_eq!(
+                    self.sp, sp_before,
+                    "op_await (sync shortcut): stack depth changed (before={}, after={})",
+                    sp_before, self.sp
+                );
                 Ok(AsyncExecutionResult::Continue)
             }
         }
@@ -244,6 +293,7 @@ impl VirtualMachine {
     ///
     /// If inside an async scope, the spawned future ID is tracked for cancellation.
     fn op_spawn_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
+        let sp_before = self.sp;
         let callable_nb = self.pop_vw()?;
 
         let task_id = self.next_future_id();
@@ -254,6 +304,12 @@ impl VirtualMachine {
         }
 
         self.push_vw(ValueWord::from_future(task_id))?;
+        // SpawnTask replaces a callable with a Future: net stack effect is 0.
+        debug_assert_eq!(
+            self.sp, sp_before,
+            "op_spawn_task: stack depth changed (before={}, after={})",
+            sp_before, self.sp
+        );
         Ok(AsyncExecutionResult::Continue)
     }
 
@@ -308,6 +364,7 @@ impl VirtualMachine {
     /// which executes each task's callable synchronously (same strategy as `op_await`).
     /// Pushes the result value onto the stack according to the join strategy.
     fn op_join_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
+        let sp_before = self.sp;
         let nb = self.pop_vw()?;
         match nb.as_heap_ref() {
             Some(HeapValue::TaskGroup { kind, task_ids }) => {
@@ -321,6 +378,12 @@ impl VirtualMachine {
                 match result {
                     Ok(value) => {
                         self.push_vw(value)?;
+                        // JoinAwait consumes a TaskGroup and pushes a result: net effect is 0.
+                        debug_assert_eq!(
+                            self.sp, sp_before,
+                            "op_join_await: stack depth changed (before={}, after={})",
+                            sp_before, self.sp
+                        );
                         Ok(AsyncExecutionResult::Continue)
                     }
                     Err(_) => {
@@ -362,7 +425,13 @@ impl VirtualMachine {
     /// Pushes a new empty Vec onto the async_scope_stack.
     /// All tasks spawned while this scope is active are tracked in that Vec.
     fn op_async_scope_enter(&mut self) -> Result<AsyncExecutionResult, VMError> {
+        let depth_before = self.async_scope_stack.len();
         self.async_scope_stack.push(Vec::new());
+        debug_assert_eq!(
+            self.async_scope_stack.len(),
+            depth_before + 1,
+            "op_async_scope_enter: scope stack depth not incremented"
+        );
         Ok(AsyncExecutionResult::Continue)
     }
 
@@ -372,6 +441,10 @@ impl VirtualMachine {
     /// all tasks spawned within it that are still pending, in LIFO order.
     /// The body's result value remains on top of the stack.
     fn op_async_scope_exit(&mut self) -> Result<AsyncExecutionResult, VMError> {
+        debug_assert!(
+            !self.async_scope_stack.is_empty(),
+            "op_async_scope_exit: scope stack is empty (mismatched Enter/Exit)"
+        );
         if let Some(mut scope_tasks) = self.async_scope_stack.pop() {
             // Cancel in LIFO order (last spawned first)
             scope_tasks.reverse();

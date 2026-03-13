@@ -1,0 +1,137 @@
+/// @module std::math::linalg
+/// Linear Algebra — Vector operations on Array<number>
+///
+/// Provides dot product, cross product, norms, normalization,
+/// distance, and element-wise arithmetic for numeric arrays.
+
+/// Dot product of two vectors.
+///
+/// @param a - First vector
+/// @param b - Second vector
+/// @returns Sum of element-wise products
+///
+/// @example
+/// dot([1, 2, 3], [4, 5, 6])  // 32
+pub fn dot(a, b) {
+    let n = a.length
+    let mut result = 0.0
+    let mut i = 0
+    while i < n {
+        result = result + a[i] * b[i]
+        i = i + 1
+    }
+    result
+}
+
+/// Cross product of two 3D vectors.
+///
+/// @param a - First 3D vector
+/// @param b - Second 3D vector
+/// @returns 3D vector perpendicular to both inputs
+///
+/// @example
+/// cross([1, 0, 0], [0, 1, 0])  // [0, 0, 1]
+pub fn cross(a, b) {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0]
+    ]
+}
+
+/// Euclidean norm (L2 length) of a vector.
+///
+/// @param v - Input vector
+/// @returns Non-negative scalar length
+///
+/// @example
+/// norm([3, 4])  // 5
+pub fn norm(v) {
+    let mut sum_sq = 0.0
+    let mut i = 0
+    while i < v.length {
+        sum_sq = sum_sq + v[i] * v[i]
+        i = i + 1
+    }
+    sqrt(sum_sq)
+}
+
+/// Normalize a vector to unit length.
+///
+/// Returns the original vector if its norm is zero.
+///
+/// @param v - Input vector
+/// @returns Unit vector in the same direction
+///
+/// @example
+/// normalize([3, 4])  // [0.6, 0.8]
+pub fn normalize(v) {
+    let mag = norm(v)
+    if mag == 0.0 {
+        scale(v, 1.0)
+    } else {
+        scale(v, 1.0 / mag)
+    }
+}
+
+/// Euclidean distance between two vectors.
+///
+/// @param a - First vector
+/// @param b - Second vector
+/// @returns Non-negative scalar distance
+///
+/// @example
+/// distance([0, 0], [3, 4])  // 5
+pub fn distance(a, b) {
+    norm(sub(a, b))
+}
+
+/// Multiply a vector by a scalar.
+///
+/// @param v - Input vector
+/// @param s - Scalar multiplier
+/// @returns Scaled vector
+///
+/// @example
+/// scale([1, 2, 3], 2)  // [2, 4, 6]
+pub fn scale(v, s) {
+    v.map(|x| x * s)
+}
+
+/// Element-wise addition of two vectors.
+///
+/// @param a - First vector
+/// @param b - Second vector
+/// @returns Sum vector
+///
+/// @example
+/// add([1, 2], [3, 4])  // [4, 6]
+pub fn add(a, b) {
+    let n = a.length
+    let mut result = []
+    let mut i = 0
+    while i < n {
+        result = result.push(a[i] + b[i])
+        i = i + 1
+    }
+    result
+}
+
+/// Element-wise subtraction of two vectors (a - b).
+///
+/// @param a - First vector
+/// @param b - Second vector
+/// @returns Difference vector
+///
+/// @example
+/// sub([3, 4], [1, 2])  // [2, 2]
+pub fn sub(a, b) {
+    let n = a.length
+    let mut result = []
+    let mut i = 0
+    while i < n {
+        result = result.push(a[i] - b[i])
+        i = i + 1
+    }
+    result
+}

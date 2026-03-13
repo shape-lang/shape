@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::config;
 use crate::registry_client::RegistryClient;
 use shape_runtime::crypto::signing::ModuleSignatureData;
 use shape_runtime::package_bundle::{PackageBundle, verify_bundle_checksum};
@@ -44,9 +45,9 @@ pub async fn run_add(name: String, version: Option<String>) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
-    let index_dir = home.join(".shape").join("registry").join("index");
+    let config_dir = config::shape_config_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?;
+    let index_dir = config_dir.join("registry").join("index");
     std::fs::create_dir_all(&index_dir)
         .with_context(|| format!("failed to create index directory: {}", index_dir.display()))?;
     let index_path = index_dir.join(format!("{}.toml", name));
@@ -93,8 +94,7 @@ pub async fn run_add(name: String, version: Option<String>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // 4. Cache bundle
-    let cache_dir = home
-        .join(".shape")
+    let cache_dir = config_dir
         .join("registry")
         .join("cache")
         .join(&name);

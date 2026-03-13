@@ -10,7 +10,9 @@ fn read_stdlib_module(path: &str) -> String {
     let base = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("shape-core/stdlib")
+        .parent()
+        .unwrap()
+        .join("crates/shape-runtime/stdlib-src")
         .join(path);
     std::fs::read_to_string(&base)
         .unwrap_or_else(|e| panic!("Failed to read stdlib module {}: {}", base.display(), e))

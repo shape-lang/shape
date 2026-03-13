@@ -296,21 +296,44 @@ pub unsafe fn read_heap_kind(bits: u64) -> u16 {
 
 /// Get a reference to the data within a JIT heap allocation.
 ///
+/// The returned reference borrows from the heap allocation with an unbounded
+/// lifetime. Callers MUST either:
+/// - Use the reference only within the current scope (do not store it), OR
+/// - Immediately clone/copy the data if it needs to outlive the current call.
+///
+/// The reference is only valid as long as the `JitAlloc` has not been freed
+/// via `jit_drop`. Holding this reference across a `jit_drop` call on the
+/// same `bits` value is undefined behavior.
+///
 /// # Safety
-/// `bits` must be a TAG_HEAP value pointing to `JitAlloc<T>`.
+/// - `bits` must be a TAG_HEAP value pointing to a live `JitAlloc<T>`.
+/// - The caller must not hold the returned reference past the lifetime of
+///   the allocation (i.e., must not use it after `jit_drop` is called).
+/// - The pointee must have been allocated as `JitAlloc<T>` (correct type).
 #[inline]
 pub unsafe fn jit_unbox<T>(bits: u64) -> &'static T {
     let ptr = (bits & PAYLOAD_MASK) as *const JitAlloc<T>;
+    debug_assert!(!ptr.is_null(), "jit_unbox called with null payload pointer");
     unsafe { &(*ptr).data }
 }
 
 /// Get a mutable reference to the data within a JIT heap allocation.
 ///
+/// Same safety requirements as `jit_unbox`, plus:
+/// - The caller must ensure exclusive access (no other references exist).
+///
 /// # Safety
-/// `bits` must be a TAG_HEAP value pointing to `JitAlloc<T>`.
+/// - `bits` must be a TAG_HEAP value pointing to a live `JitAlloc<T>`.
+/// - No other references (mutable or shared) to the same allocation may exist.
+/// - The caller must not hold the returned reference past the lifetime of
+///   the allocation.
 #[inline]
 pub unsafe fn jit_unbox_mut<T>(bits: u64) -> &'static mut T {
     let ptr = (bits & PAYLOAD_MASK) as *mut JitAlloc<T>;
+    debug_assert!(
+        !ptr.is_null(),
+        "jit_unbox_mut called with null payload pointer"
+    );
     unsafe { &mut (*ptr).data }
 }
 
@@ -468,6 +491,39 @@ pub unsafe fn unbox_column_ref(bits: u64) -> (*const f64, usize) {
 #[inline]
 pub fn is_column_ref(bits: u64) -> bool {
     is_heap_kind(bits, HK_COLUMN_REF)
+}
+
+/// Extract a `&[f64]` slice from a NaN-boxed column reference.
+///
+/// Returns `None` if `bits` is not a valid column reference, or if the
+/// underlying pointer is null or the length is zero.
+///
+/// # Safety
+/// `bits` must be a TAG_HEAP value whose payload points to a live
+/// `JitAlloc<(*const f64, usize)>`. The returned slice borrows from
+/// the column data and must not outlive the column allocation.
+#[inline]
+pub unsafe fn extract_column(bits: u64) -> Option<&'static [f64]> {
+    if !is_column_ref(bits) {
+        return None;
+    }
+    let (ptr, len) = unsafe { unbox_column_ref(bits) };
+    if ptr.is_null() || len == 0 {
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts(ptr, len) })
+}
+
+/// Box a `Vec<f64>` as a new column reference.
+///
+/// Leaks the vector into a heap-allocated boxed slice and returns a
+/// NaN-boxed column reference pointing to it. The caller is responsible
+/// for eventually freeing the column via `jit_drop`.
+#[inline]
+pub fn box_column_result(data: Vec<f64>) -> u64 {
+    let len = data.len();
+    let leaked = Box::leak(data.into_boxed_slice());
+    box_column_ref(leaked.as_ptr(), len)
 }
 
 // ============================================================================

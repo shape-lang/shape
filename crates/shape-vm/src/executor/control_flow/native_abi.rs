@@ -47,6 +47,23 @@ struct CallbackSignature {
     ret: CType,
 }
 
+/// Extract the inner type argument from a generic type like `name<inner>`.
+///
+/// Given `compact` (whitespace-stripped original) and `type_name` (e.g. "cview"),
+/// returns the trimmed inner string. Returns an error if the angle-bracket
+/// extraction fails or the inner string is empty.
+fn parse_generic_type_arg<'a>(
+    compact: &'a str,
+    type_name: &str,
+) -> Result<&'a str, String> {
+    compact
+        .split_once('<')
+        .and_then(|(_, rest)| rest.strip_suffix('>'))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("{}<T> requires a type argument", type_name))
+}
+
 impl CType {
     fn parse(token: &str) -> Result<Self, String> {
         let compact = token
@@ -74,35 +91,17 @@ impl CType {
         }
 
         if normalized.starts_with("cview<") && normalized.ends_with('>') {
-            let inner = compact
-                .split_once('<')
-                .and_then(|(_, rest)| rest.strip_suffix('>'))
-                .map(str::trim)
-                .ok_or_else(|| format!("invalid cview type syntax '{}'", token))?;
-            if inner.is_empty() {
-                return Err("cview<T> requires a layout type name".to_string());
-            }
+            let inner = parse_generic_type_arg(&compact, "cview")?;
             return Ok(Self::CView(inner.to_string()));
         }
 
         if normalized.starts_with("cmut<") && normalized.ends_with('>') {
-            let inner = compact
-                .split_once('<')
-                .and_then(|(_, rest)| rest.strip_suffix('>'))
-                .map(str::trim)
-                .ok_or_else(|| format!("invalid cmut type syntax '{}'", token))?;
-            if inner.is_empty() {
-                return Err("cmut<T> requires a layout type name".to_string());
-            }
+            let inner = parse_generic_type_arg(&compact, "cmut")?;
             return Ok(Self::CMut(inner.to_string()));
         }
 
         if normalized.starts_with("cslice<") && normalized.ends_with('>') {
-            let inner = compact
-                .split_once('<')
-                .and_then(|(_, rest)| rest.strip_suffix('>'))
-                .map(str::trim)
-                .ok_or_else(|| format!("invalid cslice type syntax '{}'", token))?;
+            let inner = parse_generic_type_arg(&compact, "cslice")?;
             let elem = CType::parse(inner)?;
             if !is_supported_slice_element_type(&elem) {
                 return Err(format!(
@@ -114,11 +113,7 @@ impl CType {
         }
 
         if normalized.starts_with("cmut_slice<") && normalized.ends_with('>') {
-            let inner = compact
-                .split_once('<')
-                .and_then(|(_, rest)| rest.strip_suffix('>'))
-                .map(str::trim)
-                .ok_or_else(|| format!("invalid cmut_slice type syntax '{}'", token))?;
+            let inner = parse_generic_type_arg(&compact, "cmut_slice")?;
             let elem = CType::parse(inner)?;
             if !is_supported_slice_element_type(&elem) {
                 return Err(format!(

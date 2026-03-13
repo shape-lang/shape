@@ -54,7 +54,7 @@ impl BuiltinTypes {
     }
 
     pub fn any() -> Type {
-        Type::Variable(super::core::TypeVar::fresh())
+        Type::fresh_var()
     }
 
     /// Canonical runtime numeric type for aliases and width-aware native names.

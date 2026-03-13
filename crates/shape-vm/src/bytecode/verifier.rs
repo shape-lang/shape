@@ -172,8 +172,9 @@ mod tests {
 
     #[test]
     fn trusted_opcode_missing_frame_descriptor() {
+        use crate::bytecode::Operand;
         let func = Function {
-            name: "add_trusted".to_string(),
+            name: "load_trusted".to_string(),
             arity: 2,
             param_names: vec!["a".to_string(), "b".to_string()],
             locals_count: 2,
@@ -189,7 +190,7 @@ mod tests {
             osr_entry_points: vec![],
         };
         let instructions = vec![
-            Instruction::simple(OpCode::AddIntTrusted),
+            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
             Instruction::simple(OpCode::ReturnValue),
         ];
         let prog = make_program(vec![func], instructions);
@@ -203,8 +204,9 @@ mod tests {
 
     #[test]
     fn trusted_opcode_with_valid_frame_descriptor() {
+        use crate::bytecode::Operand;
         let func = Function {
-            name: "add_trusted".to_string(),
+            name: "load_trusted".to_string(),
             arity: 2,
             param_names: vec!["a".to_string(), "b".to_string()],
             locals_count: 2,
@@ -223,7 +225,7 @@ mod tests {
             osr_entry_points: vec![],
         };
         let instructions = vec![
-            Instruction::simple(OpCode::AddIntTrusted),
+            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
             Instruction::simple(OpCode::ReturnValue),
         ];
         let prog = make_program(vec![func], instructions);
@@ -232,8 +234,8 @@ mod tests {
 
     #[test]
     fn is_trusted_method() {
-        assert!(OpCode::AddIntTrusted.is_trusted());
-        assert!(OpCode::DivNumberTrusted.is_trusted());
+        assert!(OpCode::LoadLocalTrusted.is_trusted());
+        assert!(OpCode::JumpIfFalseTrusted.is_trusted());
         assert!(!OpCode::AddInt.is_trusted());
         assert!(!OpCode::Add.is_trusted());
     }
@@ -241,14 +243,14 @@ mod tests {
     #[test]
     fn trusted_variant_mapping() {
         assert_eq!(
-            OpCode::AddInt.trusted_variant(),
-            Some(OpCode::AddIntTrusted)
+            OpCode::LoadLocal.trusted_variant(),
+            Some(OpCode::LoadLocalTrusted)
         );
         assert_eq!(
-            OpCode::DivNumber.trusted_variant(),
-            Some(OpCode::DivNumberTrusted)
+            OpCode::JumpIfFalse.trusted_variant(),
+            Some(OpCode::JumpIfFalseTrusted)
         );
         assert_eq!(OpCode::Add.trusted_variant(), None);
-        assert_eq!(OpCode::AddDecimal.trusted_variant(), None);
+        assert_eq!(OpCode::AddInt.trusted_variant(), None);
     }
 }

@@ -29,7 +29,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::CastWidth
             | OpCode::Neg
             | OpCode::Not => (1, 1),
-            // Binary numeric/comparison ops (including Trusted variants)
+            // Binary numeric/comparison ops
             OpCode::Add
             | OpCode::Sub
             | OpCode::Mul
@@ -42,20 +42,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::DivInt
             | OpCode::ModInt
             | OpCode::PowInt
-            | OpCode::AddIntTrusted
-            | OpCode::SubIntTrusted
-            | OpCode::MulIntTrusted
-            | OpCode::DivIntTrusted
             | OpCode::AddNumber
             | OpCode::SubNumber
             | OpCode::MulNumber
             | OpCode::DivNumber
             | OpCode::ModNumber
             | OpCode::PowNumber
-            | OpCode::AddNumberTrusted
-            | OpCode::SubNumberTrusted
-            | OpCode::MulNumberTrusted
-            | OpCode::DivNumberTrusted
             | OpCode::Gt
             | OpCode::Lt
             | OpCode::Gte
@@ -66,18 +58,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::LtInt
             | OpCode::GteInt
             | OpCode::LteInt
-            | OpCode::GtIntTrusted
-            | OpCode::LtIntTrusted
-            | OpCode::GteIntTrusted
-            | OpCode::LteIntTrusted
             | OpCode::GtNumber
             | OpCode::LtNumber
             | OpCode::GteNumber
             | OpCode::LteNumber
-            | OpCode::GtNumberTrusted
-            | OpCode::LtNumberTrusted
-            | OpCode::GteNumberTrusted
-            | OpCode::LteNumberTrusted
             | OpCode::EqInt
             | OpCode::EqNumber
             | OpCode::NeqInt

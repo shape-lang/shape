@@ -49,6 +49,90 @@ impl Delta {
     pub fn change_count(&self) -> usize {
         self.changed.len() + self.removed.len()
     }
+
+    /// Apply this delta to a base value, producing the updated value.
+    ///
+    /// This is a convenience wrapper around [`patch_value`] that validates
+    /// delta paths before applying. Invalid paths (empty segments, leading
+    /// or trailing dots) are silently skipped.
+    ///
+    /// # Path validation
+    ///
+    /// Each path in `changed` and `removed` is checked for basic structural
+    /// validity:
+    /// - Must not be empty (except the root sentinel `"."`).
+    /// - Must not contain empty segments (e.g. `"a..b"`).
+    /// - Must not start or end with `"."` (except the root sentinel).
+    ///
+    /// Paths that fail validation are excluded from the applied delta and
+    /// collected into the returned `Vec` of rejected path strings.
+    pub fn patch(
+        &self,
+        base: &ValueWord,
+        schemas: &TypeSchemaRegistry,
+    ) -> (ValueWord, Vec<String>) {
+        let mut rejected = Vec::new();
+        let validated = self.validated_delta(&mut rejected);
+        let result = patch_value(base, &validated, schemas);
+        (result, rejected)
+    }
+
+    /// Build a new `Delta` containing only paths that pass validation,
+    /// collecting rejected paths into `rejected`.
+    fn validated_delta(&self, rejected: &mut Vec<String>) -> Delta {
+        let mut valid = Delta::empty();
+
+        for (path, value) in &self.changed {
+            if is_valid_delta_path(path) {
+                valid.changed.insert(path.clone(), value.clone());
+            } else {
+                rejected.push(path.clone());
+            }
+        }
+
+        for path in &self.removed {
+            if is_valid_delta_path(path) {
+                valid.removed.push(path.clone());
+            } else {
+                rejected.push(path.clone());
+            }
+        }
+
+        valid
+    }
+}
+
+/// Check whether a delta path is structurally valid.
+///
+/// The root sentinel `"."` is always valid. All other paths must be
+/// non-empty, must not contain empty segments (consecutive dots), and
+/// must not start or end with a dot.
+fn is_valid_delta_path(path: &str) -> bool {
+    // Root sentinel is always valid
+    if path == "." {
+        return true;
+    }
+
+    if path.is_empty() {
+        return false;
+    }
+
+    // Array index paths like "[0]" are valid
+    if path.starts_with('[') {
+        return true;
+    }
+
+    // Must not start or end with a dot
+    if path.starts_with('.') || path.ends_with('.') {
+        return false;
+    }
+
+    // Must not contain empty segments (consecutive dots)
+    if path.contains("..") {
+        return false;
+    }
+
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,5 +1363,93 @@ mod tests {
             "should have path data.[1], got keys: {:?}",
             delta.changed.keys().collect::<Vec<_>>()
         );
+    }
+
+    // ---- Path validation tests ----
+
+    #[test]
+    fn test_is_valid_delta_path_root() {
+        assert!(super::is_valid_delta_path("."));
+    }
+
+    #[test]
+    fn test_is_valid_delta_path_simple_field() {
+        assert!(super::is_valid_delta_path("name"));
+        assert!(super::is_valid_delta_path("field_name"));
+    }
+
+    #[test]
+    fn test_is_valid_delta_path_dotted() {
+        assert!(super::is_valid_delta_path("a.b.c"));
+        assert!(super::is_valid_delta_path("inner.field"));
+    }
+
+    #[test]
+    fn test_is_valid_delta_path_array_index() {
+        assert!(super::is_valid_delta_path("[0]"));
+        assert!(super::is_valid_delta_path("[42]"));
+    }
+
+    #[test]
+    fn test_is_valid_delta_path_rejects_empty() {
+        assert!(!super::is_valid_delta_path(""));
+    }
+
+    #[test]
+    fn test_is_valid_delta_path_rejects_leading_dot() {
+        assert!(!super::is_valid_delta_path(".field"));
+    }
+
+    #[test]
+    fn test_is_valid_delta_path_rejects_trailing_dot() {
+        assert!(!super::is_valid_delta_path("field."));
+    }
+
+    #[test]
+    fn test_is_valid_delta_path_rejects_empty_segment() {
+        assert!(!super::is_valid_delta_path("a..b"));
+    }
+
+    // ---- Delta::patch() tests ----
+
+    #[test]
+    fn test_delta_patch_valid_paths() {
+        let schemas = TypeSchemaRegistry::new();
+        let base = ValueWord::from_f64(42.0);
+        let mut delta = Delta::empty();
+        delta
+            .changed
+            .insert(".".to_string(), ValueWord::from_f64(99.0));
+
+        let (result, rejected) = delta.patch(&base, &schemas);
+        assert!(rejected.is_empty());
+        assert_eq!(result.as_f64(), Some(99.0));
+    }
+
+    #[test]
+    fn test_delta_patch_rejects_invalid_paths() {
+        let schemas = TypeSchemaRegistry::new();
+        let base = ValueWord::from_f64(42.0);
+        let mut delta = Delta::empty();
+        // Valid path
+        delta
+            .changed
+            .insert(".".to_string(), ValueWord::from_f64(99.0));
+        // Invalid paths
+        delta
+            .changed
+            .insert("".to_string(), ValueWord::from_f64(1.0));
+        delta
+            .changed
+            .insert("a..b".to_string(), ValueWord::from_f64(2.0));
+        delta.removed.push(".trailing.".to_string());
+
+        let (result, rejected) = delta.patch(&base, &schemas);
+        assert_eq!(rejected.len(), 3);
+        assert!(rejected.contains(&"".to_string()));
+        assert!(rejected.contains(&"a..b".to_string()));
+        assert!(rejected.contains(&".trailing.".to_string()));
+        // The valid root replacement should still apply
+        assert_eq!(result.as_f64(), Some(99.0));
     }
 }

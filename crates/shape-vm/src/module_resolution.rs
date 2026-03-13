@@ -8,8 +8,12 @@ use crate::configuration::BytecodeExecutor;
 use shape_ast::Program;
 use shape_ast::ast::{DestructurePattern, ExportItem, Item, ModuleDecl, Span};
 use shape_ast::error::Result;
+use shape_ast::module_utils::{
+    ModuleExportKind, collect_exported_symbols, direct_export_target, export_kind_description,
+    strip_import_items,
+};
 use shape_ast::parser::parse_program;
-use shape_runtime::module_loader::{ModuleCode, ModuleExportKind};
+use shape_runtime::module_loader::ModuleCode;
 
 #[derive(Debug, Clone)]
 struct ExportTarget {
@@ -17,97 +21,36 @@ struct ExportTarget {
     kind: ModuleExportKind,
 }
 
-fn direct_export_target(export_item: &ExportItem) -> Option<(String, ModuleExportKind)> {
-    match export_item {
-        ExportItem::Function(function) => Some((function.name.clone(), ModuleExportKind::Function)),
-        ExportItem::BuiltinFunction(function) => {
-            Some((function.name.clone(), ModuleExportKind::BuiltinFunction))
-        }
-        ExportItem::BuiltinType(type_decl) => {
-            Some((type_decl.name.clone(), ModuleExportKind::BuiltinType))
-        }
-        ExportItem::TypeAlias(alias) => Some((alias.name.clone(), ModuleExportKind::TypeAlias)),
-        ExportItem::Enum(enum_def) => Some((enum_def.name.clone(), ModuleExportKind::Enum)),
-        ExportItem::Struct(struct_def) => {
-            Some((struct_def.name.clone(), ModuleExportKind::TypeAlias))
-        }
-        ExportItem::Interface(interface) => {
-            Some((interface.name.clone(), ModuleExportKind::Interface))
-        }
-        ExportItem::Trait(trait_def) => Some((trait_def.name.clone(), ModuleExportKind::Interface)),
-        ExportItem::Annotation(annotation) => {
-            Some((annotation.name.clone(), ModuleExportKind::Annotation))
-        }
-        ExportItem::ForeignFunction(function) => {
-            Some((function.name.clone(), ModuleExportKind::Function))
-        }
-        ExportItem::Named(_) => None,
-    }
-}
-
 fn collect_export_targets(
     program: &Program,
 ) -> Result<std::collections::HashMap<String, ExportTarget>> {
-    let mut export_kinds = std::collections::HashMap::new();
-    for symbol in shape_runtime::module_loader::collect_exported_symbols(program)? {
-        let export_name = symbol.alias.unwrap_or(symbol.name);
-        export_kinds.insert(export_name, symbol.kind);
+    let mut targets = std::collections::HashMap::new();
+
+    for symbol in collect_exported_symbols(program)? {
+        let export_name = symbol.alias.unwrap_or_else(|| symbol.name.clone());
+        targets.insert(
+            export_name,
+            ExportTarget {
+                local_name: symbol.name,
+                kind: symbol.kind,
+            },
+        );
     }
 
-    let mut targets = std::collections::HashMap::new();
+    // Also include direct exports (non-Named) which have local_name == export_name.
     for item in &program.items {
         let Item::Export(export, _) = item else {
             continue;
         };
-
         if let Some((name, kind)) = direct_export_target(&export.item) {
-            targets.insert(
-                name.clone(),
-                ExportTarget {
-                    local_name: name,
-                    kind,
-                },
-            );
-            continue;
-        }
-
-        if let ExportItem::Named(specs) = &export.item {
-            for spec in specs {
-                let export_name = spec.alias.clone().unwrap_or_else(|| spec.name.clone());
-                let kind = export_kinds.get(&export_name).copied().ok_or_else(|| {
-                    shape_ast::error::ShapeError::ModuleError {
-                        message: format!(
-                            "Cannot export '{}': not found in module scope",
-                            spec.name
-                        ),
-                        module_path: None,
-                    }
-                })?;
-                targets.insert(
-                    export_name,
-                    ExportTarget {
-                        local_name: spec.name.clone(),
-                        kind,
-                    },
-                );
-            }
+            targets.entry(name.clone()).or_insert(ExportTarget {
+                local_name: name,
+                kind,
+            });
         }
     }
 
     Ok(targets)
-}
-
-fn export_kind_description(kind: ModuleExportKind) -> &'static str {
-    match kind {
-        ModuleExportKind::Function => "a function",
-        ModuleExportKind::BuiltinFunction => "a builtin function",
-        ModuleExportKind::TypeAlias => "a type",
-        ModuleExportKind::BuiltinType => "a builtin type",
-        ModuleExportKind::Interface => "an interface",
-        ModuleExportKind::Enum => "an enum",
-        ModuleExportKind::Annotation => "an annotation",
-        ModuleExportKind::Value => "a value",
-    }
 }
 
 fn validate_import_kind(
@@ -157,12 +100,6 @@ pub(crate) fn hidden_annotation_import_module_name(module_path: &str) -> String 
 
 pub(crate) fn is_hidden_annotation_import_module_name(name: &str) -> bool {
     name.starts_with("__annimport__")
-}
-
-fn strip_import_items(items: Vec<Item>) -> Vec<Item> {
-    items.into_iter()
-        .filter(|item| !matches!(item, Item::Import(..)))
-        .collect()
 }
 
 fn build_namespace_module_item(local_name: String, items: Vec<Item>) -> Item {
@@ -612,6 +549,20 @@ impl BytecodeExecutor {
         &mut self,
         program: &mut Program,
     ) -> Result<std::collections::HashSet<String>> {
+        let mut inlining_stack = std::collections::HashSet::new();
+        self.append_imported_module_items_inner(program, &mut inlining_stack)
+    }
+
+    /// Inner implementation of import inlining with cycle detection.
+    ///
+    /// `inlining_stack` tracks module paths currently being inlined up the
+    /// call stack. If we encounter a module that is already in the stack we
+    /// skip it (breaking the cycle) instead of recursing infinitely.
+    fn append_imported_module_items_inner(
+        &mut self,
+        program: &mut Program,
+        inlining_stack: &mut std::collections::HashSet<String>,
+    ) -> Result<std::collections::HashSet<String>> {
         use shape_ast::ast::ImportItems;
         // Track which specific named imports have already been materialized.
         let mut inlined_names: std::collections::HashMap<
@@ -724,15 +675,26 @@ impl BytecodeExecutor {
                 };
 
                 if let Some(ast) = ast_program {
-                    let mut nested_program = ast;
-                    self.append_imported_module_items(&mut nested_program)?;
-                    let nested_items = strip_import_items(nested_program.items);
-                    if !nested_items.is_empty() {
-                        if is_std {
-                            stdlib_names.extend(collect_function_names_from_items(&nested_items));
+                    // Cycle detection: skip if this module is already being
+                    // inlined further up the call stack.
+                    if !inlining_stack.contains(&module_path) {
+                        inlining_stack.insert(module_path.clone());
+                        let mut nested_program = ast;
+                        self.append_imported_module_items_inner(
+                            &mut nested_program,
+                            inlining_stack,
+                        )?;
+                        inlining_stack.remove(&module_path);
+                        let nested_items = strip_import_items(nested_program.items);
+                        if !nested_items.is_empty() {
+                            if is_std {
+                                stdlib_names
+                                    .extend(collect_function_names_from_items(&nested_items));
+                            }
+                            module_items
+                                .push(build_namespace_module_item(local_name, nested_items));
+                            found_new = true;
                         }
-                        module_items.push(build_namespace_module_item(local_name, nested_items));
-                        found_new = true;
                     }
                 }
             }
@@ -819,9 +781,15 @@ impl BytecodeExecutor {
                     }
                     if needs_annotation_scope
                         && wrapped_annotation_modules.insert(module_path.clone())
+                        && !inlining_stack.contains(module_path.as_str())
                     {
+                        inlining_stack.insert(module_path.clone());
                         let mut nested_program = ast.clone();
-                        self.append_imported_module_items(&mut nested_program)?;
+                        self.append_imported_module_items_inner(
+                            &mut nested_program,
+                            inlining_stack,
+                        )?;
+                        inlining_stack.remove(module_path.as_str());
                         let nested_items = strip_import_items(nested_program.items);
                         if !nested_items.is_empty() {
                             let hidden_name = hidden_annotation_import_module_name(module_path);

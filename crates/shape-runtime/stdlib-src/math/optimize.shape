@@ -1,0 +1,333 @@
+/// @module std::math::optimize
+/// Numerical Optimization — Nelder-Mead (downhill simplex) method
+///
+/// Minimizes a scalar objective function over n-dimensional space
+/// with optional box constraints.
+
+/// Options for the optimizer.
+pub type OptimizeOptions {
+    tol: number,
+    max_iter: int,
+    bounds: Array<Array<number>>?
+}
+
+/// Result of an optimization run.
+pub type OptimizeResult {
+    x: Array<number>,
+    fun: number,
+    converged: bool,
+    iterations: int
+}
+
+/// Compute the centroid of all simplex vertices except one.
+fn simplex_centroid(vertices, exclude_idx) {
+    let n = vertices[0].length
+    let count = vertices.length - 1
+
+    let mut sums = []
+    let mut j = 0
+    while j < n {
+        sums = sums.push(0.0)
+        j = j + 1
+    }
+
+    let mut i = 0
+    while i < vertices.length {
+        if i != exclude_idx {
+            let mut j = 0
+            while j < n {
+                sums = vec_set(sums, j, sums[j] + vertices[i][j])
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    sums.map(|s| s / count)
+}
+
+/// Set element at index in an array (returns new array).
+fn vec_set(arr, idx, val) {
+    let mut result = []
+    let mut i = 0
+    while i < arr.length {
+        if i == idx { result = result.push(val) }
+        else { result = result.push(arr[i]) }
+        i = i + 1
+    }
+    result
+}
+
+/// Reflect the worst point through the centroid.
+fn simplex_reflect(centroid, worst, alpha) {
+    let n = centroid.length
+    let mut result = []
+    let mut i = 0
+    while i < n {
+        result = result.push(centroid[i] + alpha * (centroid[i] - worst[i]))
+        i = i + 1
+    }
+    result
+}
+
+/// Expand beyond the reflected point.
+fn simplex_expand(centroid, reflected, gamma) {
+    let n = centroid.length
+    let mut result = []
+    let mut i = 0
+    while i < n {
+        result = result.push(centroid[i] + gamma * (reflected[i] - centroid[i]))
+        i = i + 1
+    }
+    result
+}
+
+/// Contract toward the centroid from the worst point.
+fn simplex_contract(centroid, worst, rho) {
+    let n = centroid.length
+    let mut result = []
+    let mut i = 0
+    while i < n {
+        result = result.push(centroid[i] + rho * (worst[i] - centroid[i]))
+        i = i + 1
+    }
+    result
+}
+
+/// Shrink all vertices toward the best vertex.
+fn simplex_shrink(vertices, best_idx, sigma) {
+    let best = vertices[best_idx]
+    let n = best.length
+    let mut result = []
+    let mut i = 0
+    while i < vertices.length {
+        if i == best_idx {
+            result = result.push(best)
+        } else {
+            let mut v = []
+            let mut j = 0
+            while j < n {
+                v = v.push(best[j] + sigma * (vertices[i][j] - best[j]))
+                j = j + 1
+            }
+            result = result.push(v)
+        }
+        i = i + 1
+    }
+    result
+}
+
+/// Apply box constraints to a point.
+fn apply_bounds(x, bounds) {
+    if bounds == None {
+        x
+    } else {
+        let mut result = []
+        let mut i = 0
+        while i < x.length {
+            if i < bounds.length {
+                let lo = bounds[i][0]
+                let hi = bounds[i][1]
+                let v = if x[i] < lo { lo } else if x[i] > hi { hi } else { x[i] }
+                result = result.push(v)
+            } else {
+                result = result.push(x[i])
+            }
+            i = i + 1
+        }
+        result
+    }
+}
+
+/// Compute the standard deviation of an array of values.
+fn vec_std(values) {
+    let n = values.length
+    if n == 0 { 0.0 }
+    else {
+        let mut sum = 0.0
+        let mut i = 0
+        while i < n {
+            sum = sum + values[i]
+            i = i + 1
+        }
+        let mean = sum / n
+
+        let mut sq_sum = 0.0
+        let mut i = 0
+        while i < n {
+            let d = values[i] - mean
+            sq_sum = sq_sum + d * d
+            i = i + 1
+        }
+        sqrt(sq_sum / n)
+    }
+}
+
+/// Sort simplex vertices and their function values by ascending value.
+/// Returns [sorted_vertices, sorted_values] as a 2-element array.
+fn sort_simplex(vertices, values) {
+    // Simple insertion sort — simplex is small (n+1 elements)
+    let n = vertices.length
+    let mut verts = vertices
+    let mut vals = values
+    let mut i = 1
+    while i < n {
+        let mut j = i
+        while j > 0 {
+            if vals[j] < vals[j - 1] {
+                // Swap values
+                let tmp_val = vals[j]
+                vals = vec_set(vals, j, vals[j - 1])
+                vals = vec_set(vals, j - 1, tmp_val)
+                // Swap vertices
+                let tmp_vert = verts[j]
+                verts = vec_set(verts, j, verts[j - 1])
+                verts = vec_set(verts, j - 1, tmp_vert)
+                j = j - 1
+            } else {
+                j = 0 // break
+            }
+        }
+        i = i + 1
+    }
+    [verts, vals]
+}
+
+/// Minimize a scalar function using the Nelder-Mead simplex method.
+///
+/// @param f - Objective function (Array<number>) -> number
+/// @param x0 - Initial guess as Array<number>
+/// @param options - OptimizeOptions with tol, max_iter, and optional bounds
+/// @returns OptimizeResult with optimal x, function value, convergence, and iteration count
+///
+/// @example
+/// let result = minimize(|x| x[0] * x[0] + x[1] * x[1], [5.0, 5.0], OptimizeOptions {
+///     tol: 0.000001,
+///     max_iter: 1000,
+///     bounds: None
+/// })
+/// // result.x is near [0, 0], result.fun is near 0
+pub fn minimize(f, x0, options) {
+    let tol = options.tol
+    let max_iter = options.max_iter
+    let bounds = options.bounds
+    let n = x0.length
+
+    // Nelder-Mead coefficients
+    let alpha = 1.0
+    let gamma = 2.0
+    let rho = 0.5
+    let sigma = 0.5
+
+    // Initialize simplex: n+1 vertices
+    let mut vertices = []
+    let mut values = []
+
+    // First vertex is x0 (with bounds applied)
+    let v0 = apply_bounds(x0, bounds)
+    vertices = vertices.push(v0)
+    values = values.push(f(v0))
+
+    // Remaining n vertices: perturb each dimension
+    let mut i = 0
+    while i < n {
+        let mut v = []
+        let mut j = 0
+        while j < n {
+            if j == i {
+                let delta = if abs(x0[j]) > 0.0001 { x0[j] * 0.05 } else { 0.00025 }
+                v = v.push(x0[j] + delta)
+            } else {
+                v = v.push(x0[j])
+            }
+            j = j + 1
+        }
+        let vb = apply_bounds(v, bounds)
+        vertices = vertices.push(vb)
+        values = values.push(f(vb))
+        i = i + 1
+    }
+
+    // Sort initial simplex
+    let mut sorted = sort_simplex(vertices, values)
+    vertices = sorted[0]
+    values = sorted[1]
+
+    let mut iter = 0
+    let mut converged = false
+
+    while iter < max_iter {
+        // Check convergence: std dev of function values
+        if vec_std(values) < tol {
+            converged = true
+            iter = max_iter // break
+        } else {
+            let worst_idx = n  // last index (n+1 vertices, 0-indexed)
+            let worst = vertices[worst_idx]
+            let f_worst = values[worst_idx]
+            let f_best = values[0]
+            let f_second_worst = values[n - 1]
+
+            // Centroid of all except worst
+            let centroid = simplex_centroid(vertices, worst_idx)
+
+            // Reflect
+            let x_r = apply_bounds(simplex_reflect(centroid, worst, alpha), bounds)
+            let f_r = f(x_r)
+
+            if f_r < f_second_worst {
+                if f_r < f_best {
+                    // Try expansion
+                    let x_e = apply_bounds(simplex_expand(centroid, x_r, gamma), bounds)
+                    let f_e = f(x_e)
+                    if f_e < f_r {
+                        vertices = vec_set(vertices, worst_idx, x_e)
+                        values = vec_set(values, worst_idx, f_e)
+                    } else {
+                        vertices = vec_set(vertices, worst_idx, x_r)
+                        values = vec_set(values, worst_idx, f_r)
+                    }
+                } else {
+                    // Accept reflection
+                    vertices = vec_set(vertices, worst_idx, x_r)
+                    values = vec_set(values, worst_idx, f_r)
+                }
+            } else {
+                // Contraction
+                let x_c = apply_bounds(simplex_contract(centroid, worst, rho), bounds)
+                let f_c = f(x_c)
+                if f_c < f_worst {
+                    vertices = vec_set(vertices, worst_idx, x_c)
+                    values = vec_set(values, worst_idx, f_c)
+                } else {
+                    // Shrink
+                    vertices = simplex_shrink(vertices, 0, sigma)
+                    // Re-evaluate all except best
+                    let mut new_values = [values[0]]
+                    let mut k = 1
+                    while k < vertices.length {
+                        let vb = apply_bounds(vertices[k], bounds)
+                        vertices = vec_set(vertices, k, vb)
+                        new_values = new_values.push(f(vb))
+                        k = k + 1
+                    }
+                    values = new_values
+                }
+            }
+
+            // Re-sort simplex
+            sorted = sort_simplex(vertices, values)
+            vertices = sorted[0]
+            values = sorted[1]
+
+            iter = iter + 1
+        }
+    }
+
+    OptimizeResult {
+        x: vertices[0],
+        fun: values[0],
+        converged: converged,
+        iterations: iter
+    }
+}

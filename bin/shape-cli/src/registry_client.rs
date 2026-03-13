@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-const DEFAULT_REGISTRY: &str = "https://pkg.shape-lang.dev";
+use crate::config::{self, DEFAULT_REGISTRY};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Credentials {
@@ -76,8 +76,9 @@ impl RegistryClient {
     }
 
     fn credentials_path() -> Result<PathBuf, String> {
-        let home = dirs::home_dir().ok_or("could not determine home directory")?;
-        Ok(home.join(".shape").join("credentials.json"))
+        let config_dir =
+            config::shape_config_dir().ok_or("could not determine config directory")?;
+        Ok(config_dir.join("credentials.json"))
     }
 
     /// Load credentials from ~/.shape/credentials.json

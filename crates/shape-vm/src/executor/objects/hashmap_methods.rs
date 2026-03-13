@@ -14,6 +14,7 @@
 //! instead of cloning the entire HashMap.
 
 use crate::executor::VirtualMachine;
+use crate::executor::utils::extraction_helpers::{check_arg_count, type_mismatch_error};
 use crate::memory::{record_heap_write, write_barrier_vw};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HashMapData;
@@ -39,11 +40,7 @@ pub fn handle_get(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "HashMap.get requires a key argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "HashMap.get", "a key argument")?;
     let receiver = &args[0];
     let key = &args[1];
 
@@ -67,9 +64,7 @@ pub fn handle_get(
         vm.push_vw(result)?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "get called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("get", "HashMap"))
     }
 }
 
@@ -79,11 +74,7 @@ pub fn handle_set(
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 3 {
-        return Err(VMError::RuntimeError(
-            "HashMap.set requires key and value arguments".to_string(),
-        ));
-    }
+    check_arg_count(&args, 3, "HashMap.set", "key and value arguments")?;
     let key = args[1].clone();
     let value = args[2].clone();
 
@@ -141,9 +132,7 @@ pub fn handle_set(
         vm.push_vw(ValueWord::from_hashmap(keys, values, index))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "set called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("set", "HashMap"))
     }
 }
 
@@ -153,11 +142,7 @@ pub fn handle_has(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "HashMap.has requires a key argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "HashMap.has", "a key argument")?;
     let receiver = &args[0];
     let key = &args[1];
 
@@ -170,9 +155,7 @@ pub fn handle_has(
         vm.push_vw(ValueWord::from_bool(found))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "has called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("has", "HashMap"))
     }
 }
 
@@ -182,11 +165,7 @@ pub fn handle_delete(
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "HashMap.delete requires a key argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "HashMap.delete", "a key argument")?;
     let key = args[1].clone();
     let hash = key.vw_hash();
 
@@ -255,9 +234,7 @@ pub fn handle_delete(
         }
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "delete called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("delete", "HashMap"))
     }
 }
 
@@ -275,9 +252,7 @@ pub fn handle_keys(
         vm.push_vw(ValueWord::from_array(arr))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "keys called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("keys", "HashMap"))
     }
 }
 
@@ -293,9 +268,7 @@ pub fn handle_values(
         vm.push_vw(ValueWord::from_array(arr))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "values called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("values", "HashMap"))
     }
 }
 
@@ -319,9 +292,7 @@ pub fn handle_entries(
         vm.push_vw(ValueWord::from_array(arr))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "entries called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("entries", "HashMap"))
     }
 }
 
@@ -336,9 +307,7 @@ pub fn handle_len(
         vm.push_vw(ValueWord::from_i64(keys.len() as i64))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "len called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("len", "HashMap"))
     }
 }
 
@@ -353,9 +322,7 @@ pub fn handle_is_empty(
         vm.push_vw(ValueWord::from_bool(keys.is_empty()))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "isEmpty called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("isEmpty", "HashMap"))
     }
 }
 
@@ -367,11 +334,7 @@ pub fn handle_for_each(
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "HashMap.forEach requires a function argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "HashMap.forEach", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
 
@@ -384,9 +347,7 @@ pub fn handle_for_each(
         vm.push_vw(ValueWord::unit())?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "forEach called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("forEach", "HashMap"))
     }
 }
 
@@ -396,11 +357,7 @@ pub fn handle_filter(
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "HashMap.filter requires a function argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "HashMap.filter", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
 
@@ -422,9 +379,7 @@ pub fn handle_filter(
         vm.push_vw(ValueWord::from_hashmap_pairs(keys, values))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "filter called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("filter", "HashMap"))
     }
 }
 
@@ -434,11 +389,7 @@ pub fn handle_map(
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "HashMap.map requires a function argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "HashMap.map", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
 
@@ -461,9 +412,7 @@ pub fn handle_map(
         ))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "map called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("map", "HashMap"))
     }
 }
 
@@ -475,17 +424,13 @@ pub fn handle_merge(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "HashMap.merge requires a HashMap argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "HashMap.merge", "a HashMap argument")?;
     let receiver = &args[0];
     let other = &args[1];
 
     let (base_keys, base_values, _) = receiver
         .as_hashmap()
-        .ok_or_else(|| VMError::RuntimeError("merge called on non-HashMap".to_string()))?;
+        .ok_or_else(|| type_mismatch_error("merge", "HashMap"))?;
     let (other_keys, other_values, _) = other
         .as_hashmap()
         .ok_or_else(|| VMError::RuntimeError("merge argument must be a HashMap".to_string()))?;
@@ -519,11 +464,7 @@ pub fn handle_get_or_default(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 3 {
-        return Err(VMError::RuntimeError(
-            "HashMap.getOrDefault requires key and default arguments".to_string(),
-        ));
-    }
+    check_arg_count(&args, 3, "HashMap.getOrDefault", "key and default arguments")?;
     let receiver = &args[0];
     let key = &args[1];
     let default = &args[2];
@@ -540,9 +481,7 @@ pub fn handle_get_or_default(
         vm.push_vw(result)?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "getOrDefault called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("getOrDefault", "HashMap"))
     }
 }
 
@@ -552,11 +491,7 @@ pub fn handle_reduce(
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 3 {
-        return Err(VMError::RuntimeError(
-            "HashMap.reduce requires a function and initial value".to_string(),
-        ));
-    }
+    check_arg_count(&args, 3, "HashMap.reduce", "a function and initial value")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
     let initial = args[2].clone();
@@ -575,9 +510,7 @@ pub fn handle_reduce(
         vm.push_vw(acc)?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "reduce called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("reduce", "HashMap"))
     }
 }
 
@@ -596,11 +529,7 @@ pub fn handle_group_by(
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "HashMap.groupBy requires a function argument".to_string(),
-        ));
-    }
+    check_arg_count(&args, 2, "HashMap.groupBy", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
 
@@ -647,9 +576,7 @@ pub fn handle_group_by(
         vm.push_vw(ValueWord::from_hashmap_pairs(outer_keys, outer_values))?;
         Ok(())
     } else {
-        Err(VMError::RuntimeError(
-            "groupBy called on non-HashMap".to_string(),
-        ))
+        Err(type_mismatch_error("groupBy", "HashMap"))
     }
 }
 

@@ -8,36 +8,8 @@
 //! - impl Neg for custom types
 //! - Operator trait fallback only fires when built-in paths don't match
 
-use crate::VMConfig;
-use crate::compiler::BytecodeCompiler;
-use crate::executor::VirtualMachine;
-use shape_ast::parser::parse_program;
+use crate::executor::tests::test_utils::{eval, eval_result};
 use shape_value::ValueWord;
-
-/// Compile and execute Shape source code, returning the final value.
-fn eval(source: &str) -> ValueWord {
-    let program = parse_program(source).expect("parse failed");
-    let mut compiler = BytecodeCompiler::new();
-    compiler.set_source(source);
-    let bytecode = compiler.compile(&program).expect("compile failed");
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(bytecode);
-    vm.execute(None).expect("execution failed").clone()
-}
-
-/// Compile and execute, returning Result to check for expected errors.
-fn eval_result(source: &str) -> Result<ValueWord, shape_value::VMError> {
-    let program = parse_program(source)
-        .map_err(|e| shape_value::VMError::RuntimeError(format!("{:?}", e)))?;
-    let mut compiler = BytecodeCompiler::new();
-    compiler.set_source(source);
-    let bytecode = compiler
-        .compile(&program)
-        .map_err(|e| shape_value::VMError::RuntimeError(format!("{:?}", e)))?;
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(bytecode);
-    vm.execute(None).map(|v| v.clone())
-}
 
 #[test]
 fn test_add_trait_overload() {

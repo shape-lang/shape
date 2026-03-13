@@ -673,9 +673,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 let (_, length) = self.emit_array_data_ptr(receiver);
                 let zero = self.builder.ins().iconst(types::I64, 0);
                 let is_zero = self.builder.ins().icmp(IntCC::Equal, length, zero);
-                let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-                let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
-                let result = self.builder.ins().select(is_zero, true_val, false_val);
+                let result = self.emit_boxed_bool_from_i1(is_zero);
                 self.builder.ins().jump(merge_block, &[result]);
 
                 // FFI fallback

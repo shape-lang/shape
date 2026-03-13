@@ -1799,13 +1799,13 @@ fn test_untyped_numeric_param_infers_typed_loop_arithmetic() {
     let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
     let opcodes: Vec<_> = bytecode.instructions.iter().map(|ins| ins.opcode).collect();
     assert!(
-        opcodes.contains(&OpCode::LtNumber) || opcodes.contains(&OpCode::LtNumberTrusted),
-        "Expected LtNumber or LtNumberTrusted from inferred numeric param type, got opcodes: {:?}",
+        opcodes.contains(&OpCode::LtNumber),
+        "Expected LtNumber from inferred numeric param type, got opcodes: {:?}",
         opcodes
     );
     assert!(
-        opcodes.contains(&OpCode::AddNumber) || opcodes.contains(&OpCode::AddNumberTrusted),
-        "Expected AddNumber or AddNumberTrusted from inferred numeric param type, got opcodes: {:?}",
+        opcodes.contains(&OpCode::AddNumber),
+        "Expected AddNumber from inferred numeric param type, got opcodes: {:?}",
         opcodes
     );
 }
@@ -1870,8 +1870,8 @@ fn test_mutable_numeric_vars_emit_typed_opcodes() {
     let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
     let opcodes: Vec<_> = bytecode.instructions.iter().map(|ins| ins.opcode).collect();
     assert!(
-        opcodes.contains(&OpCode::AddInt) || opcodes.contains(&OpCode::AddIntTrusted),
-        "Expected AddInt or AddIntTrusted for mutable numeric loop vars, got opcodes: {:?}",
+        opcodes.contains(&OpCode::AddInt),
+        "Expected AddInt for mutable numeric loop vars, got opcodes: {:?}",
         opcodes
     );
 }

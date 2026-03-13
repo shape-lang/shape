@@ -61,11 +61,6 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::DivInt
         | OpCode::ModInt
         | OpCode::PowInt => true,
-        // Arithmetic (Int Trusted)
-        OpCode::AddIntTrusted
-        | OpCode::SubIntTrusted
-        | OpCode::MulIntTrusted
-        | OpCode::DivIntTrusted => true,
         // Arithmetic (Number)
         OpCode::AddNumber
         | OpCode::SubNumber
@@ -73,11 +68,6 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::DivNumber
         | OpCode::ModNumber
         | OpCode::PowNumber => true,
-        // Arithmetic (Number Trusted)
-        OpCode::AddNumberTrusted
-        | OpCode::SubNumberTrusted
-        | OpCode::MulNumberTrusted
-        | OpCode::DivNumberTrusted => true,
         // Neg
         OpCode::Neg => true,
         // Comparison (Int)
@@ -87,11 +77,6 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::LteInt
         | OpCode::EqInt
         | OpCode::NeqInt => true,
-        // Comparison (Int Trusted)
-        OpCode::GtIntTrusted
-        | OpCode::LtIntTrusted
-        | OpCode::GteIntTrusted
-        | OpCode::LteIntTrusted => true,
         // Comparison (Number)
         OpCode::GtNumber
         | OpCode::LtNumber
@@ -99,11 +84,6 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::LteNumber
         | OpCode::EqNumber
         | OpCode::NeqNumber => true,
-        // Comparison (Number Trusted)
-        OpCode::GtNumberTrusted
-        | OpCode::LtNumberTrusted
-        | OpCode::GteNumberTrusted
-        | OpCode::LteNumberTrusted => true,
         // Logic
         OpCode::And | OpCode::Or | OpCode::Not => true,
         // Control
@@ -456,7 +436,7 @@ pub fn compile_osr_loop(
                 }
 
                 // Integer arithmetic: values in JIT context are raw i64 for Int64 slots.
-                OpCode::AddInt | OpCode::AddIntTrusted => {
+                OpCode::AddInt => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -464,7 +444,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::SubInt | OpCode::SubIntTrusted => {
+                OpCode::SubInt => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -472,7 +452,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::MulInt | OpCode::MulIntTrusted => {
+                OpCode::MulInt => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -480,7 +460,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::DivInt | OpCode::DivIntTrusted => {
+                OpCode::DivInt => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -504,7 +484,7 @@ pub fn compile_osr_loop(
 
                 // Float arithmetic: values are NaN-boxed f64 bit patterns.
                 // Bitcast to f64, operate, bitcast back.
-                OpCode::AddNumber | OpCode::AddNumberTrusted => {
+                OpCode::AddNumber => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -515,7 +495,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::SubNumber | OpCode::SubNumberTrusted => {
+                OpCode::SubNumber => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -526,7 +506,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::MulNumber | OpCode::MulNumberTrusted => {
+                OpCode::MulNumber => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -537,7 +517,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::DivNumber | OpCode::DivNumberTrusted => {
+                OpCode::DivNumber => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -578,7 +558,7 @@ pub fn compile_osr_loop(
                 }
 
                 // Integer comparisons: compare raw i64, produce i64 (0 or 1)
-                OpCode::LtInt | OpCode::LtIntTrusted => {
+                OpCode::LtInt => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -587,7 +567,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::GtInt | OpCode::GtIntTrusted => {
+                OpCode::GtInt => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -596,7 +576,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::LteInt | OpCode::LteIntTrusted => {
+                OpCode::LteInt => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -605,7 +585,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::GteInt | OpCode::GteIntTrusted => {
+                OpCode::GteInt => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -634,7 +614,7 @@ pub fn compile_osr_loop(
                 }
 
                 // Float comparisons: bitcast to f64, compare, produce i64
-                OpCode::LtNumber | OpCode::LtNumberTrusted => {
+                OpCode::LtNumber => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -645,7 +625,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::GtNumber | OpCode::GtNumberTrusted => {
+                OpCode::GtNumber => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -656,7 +636,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::LteNumber | OpCode::LteNumberTrusted => {
+                OpCode::LteNumber => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
@@ -667,7 +647,7 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
-                OpCode::GteNumber | OpCode::GteNumberTrusted => {
+                OpCode::GteNumber => {
                     if stack_depth >= 2 {
                         let b = stack_pop!(builder, stack_depth);
                         let a = stack_pop!(builder, stack_depth);
