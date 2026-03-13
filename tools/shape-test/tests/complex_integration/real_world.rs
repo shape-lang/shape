@@ -13,7 +13,7 @@ use shape_test::shape_test::ShapeTest;
 fn test_program_score_tracker() {
     ShapeTest::new(
         r#"
-        var scores = []
+        let mut scores = []
         fn add_score(score) { scores = scores.push(score) }
         fn get_average() {
             if scores.length == 0 { return 0 }
@@ -39,12 +39,12 @@ fn test_program_score_tracker() {
 fn test_program_task_list_manager() {
     ShapeTest::new(
         r#"
-        var tasks = []
+        let mut tasks = []
         fn add_task(name, done) {
             tasks = tasks.push(HashMap().set("name", name).set("done", done))
         }
         fn count_done() {
-            var c = 0
+            let mut c = 0
             for t in tasks {
                 if t.get("done") == true { c = c + 1 }
             }
@@ -203,7 +203,7 @@ fn test_program_word_counter() {
         r#"
         fn count_words(text) {
             let words = text.split(" ")
-            var counts = HashMap()
+            let mut counts = HashMap()
             for word in words {
                 let existing = counts.get(word)
                 if existing == None {
@@ -252,7 +252,7 @@ fn test_program_matrix_operations() {
         print(scaled[1][1])
     "#,
     )
-    .expect_output("6\n8\n10\n12\n3\n12");
+    .expect_output("6\n8\n10\n12\n3.0\n12.0");
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn test_program_running_statistics() {
     // NOTE: 'data' is a reserved keyword in Shape, use 'values' instead
     ShapeTest::new(
         r#"
-        var values = []
+        let mut values = []
         fn add_value(v) { values = values.push(v) }
         fn avg() {
             values.reduce(|acc, x| acc + x, 0) / values.length
@@ -286,7 +286,7 @@ fn test_program_running_statistics() {
 fn test_program_string_builder() {
     ShapeTest::new(
         r#"
-        var buffer = ""
+        let mut buffer = ""
         fn append(s) { buffer = buffer + s }
         fn append_line(s) { buffer = buffer + s + "\n" }
         fn build() { buffer }
@@ -304,14 +304,14 @@ fn test_program_string_builder() {
 fn test_program_retry_logic() {
     ShapeTest::new(
         r#"
-        var attempt = 0
+        let mut attempt = 0
         fn flaky_operation() {
             attempt = attempt + 1
             if attempt < 3 { return Err("failed") }
             Ok("success")
         }
         fn retry(max_retries) {
-            var i = 0
+            let mut i = 0
             while i < max_retries {
                 match flaky_operation() {
                     Ok(v) => { return Ok(v) },
@@ -334,8 +334,8 @@ fn test_program_group_by() {
     ShapeTest::new(
         r#"
         fn group_by_parity(arr) {
-            var evens = []
-            var odds = []
+            let mut evens = []
+            let mut odds = []
             for x in arr {
                 if x % 2 == 0 {
                     evens = evens.push(x)
@@ -361,7 +361,7 @@ fn test_program_simple_interpreter() {
         r#"
         enum Instr { Push(int), Add, Mul, Print }
         fn run(program) {
-            var stack = []
+            let mut stack = []
             for instr in program {
                 match instr {
                     Instr::Push(n) => {

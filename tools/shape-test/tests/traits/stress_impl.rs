@@ -47,7 +47,7 @@ fn impl_method_accesses_self_fields() {
         p.describe()
     "#,
     )
-    .expect_string("(3, 4)");
+    .expect_string("(3.0, 4.0)");
 }
 
 /// Verifies impl method returns number.

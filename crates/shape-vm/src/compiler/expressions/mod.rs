@@ -1072,7 +1072,9 @@ impl BytecodeCompiler {
                         .cloned()
                     {
                         let const_idx =
-                            if let Some(n) = comptime_value.as_number_coerce() {
+                            if let Some(i) = comptime_value.as_i64() {
+                                self.program.add_constant(Constant::Int(i))
+                            } else if let Some(n) = comptime_value.as_number_coerce() {
                                 self.program.add_constant(Constant::Number(n))
                             } else if let Some(b) = comptime_value.as_bool() {
                                 self.program.add_constant(Constant::Bool(b))

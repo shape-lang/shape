@@ -46,7 +46,6 @@ fn pure_module_math_parses_without_permissions() {
 // =========================================================================
 
 #[test]
-// TDD: ShapeTest does not expose permission_set
 fn io_import_denied_with_pure_permissions() {
     // With a pure PermissionSet, importing io.open should fail at compile time
     // because io.open requires FsRead capability.
@@ -57,11 +56,11 @@ fn io_import_denied_with_pure_permissions() {
     "#,
     )
     .with_stdlib()
+    .with_pure_permissions()
     .expect_run_err();
 }
 
 #[test]
-// TDD: ShapeTest does not expose permission_set
 fn net_connect_denied_with_pure_permissions() {
     // With a pure PermissionSet, importing io.tcp_connect should fail
     // because it requires NetConnect capability.
@@ -72,11 +71,11 @@ fn net_connect_denied_with_pure_permissions() {
     "#,
     )
     .with_stdlib()
+    .with_pure_permissions()
     .expect_run_err();
 }
 
 #[test]
-// TDD: ShapeTest does not expose permission_set
 fn process_spawn_denied_with_pure_permissions() {
     // With a pure PermissionSet, importing io.spawn should fail
     // because it requires Process capability.
@@ -87,5 +86,6 @@ fn process_spawn_denied_with_pure_permissions() {
     "#,
     )
     .with_stdlib()
+    .with_pure_permissions()
     .expect_run_err();
 }

@@ -41,7 +41,7 @@ fn if_without_else_true_condition() {
     // if without else when condition is true should execute body
     ShapeTest::new(
         r#"
-        var x = 0
+        let mut x = 0
         if true { x = 42 }
         x
     "#,
@@ -54,7 +54,7 @@ fn if_without_else_false_condition() {
     // if without else when condition is false should skip body
     ShapeTest::new(
         r#"
-        var x = 0
+        let mut x = 0
         if false { x = 42 }
         x
     "#,
@@ -403,10 +403,10 @@ if !(x == 5) {
 fn if_with_block_body_multiple_statements() {
     ShapeTest::new(
         r#"
-        var total = 0
+        let mut total = 0
         if true {
-            var a = 10
-            var b = 20
+            let a = 10
+            let b = 20
             total = a + b
         }
         total

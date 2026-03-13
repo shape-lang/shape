@@ -130,6 +130,30 @@ pub fn create_regex_module() -> ModuleExports {
         },
     );
 
+    // regex.find(text, pattern) — alias for `match` (since `match` is a keyword in Shape)
+    module.add_function(
+        "find",
+        |args: &[ValueWord], _ctx: &ModuleContext| {
+            let text = args
+                .first()
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "regex.find() requires a text string argument".to_string())?;
+            let pattern = args
+                .get(1)
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "regex.find() requires a pattern string argument".to_string())?;
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| format!("regex.find() invalid pattern: {}", e))?;
+            match re.captures(text) {
+                Some(caps) => {
+                    let m = caps.get(0).unwrap();
+                    Ok(ValueWord::from_some(match_to_nanboxed(&m, &caps)))
+                }
+                None => Ok(ValueWord::none()),
+            }
+        },
+    );
+
     // regex.match_all(text: string, pattern: string) -> Array<object>
     module.add_function_with_schema(
         "match_all",

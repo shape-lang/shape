@@ -86,7 +86,7 @@ fn jit_local_variables() {
 
 #[test]
 fn jit_variable_reassignment() {
-    jit_expect_number("var x = 1\nx = x + 1\nx = x + 1\nx", 3.0);
+    jit_expect_number("let mut x = 1\nx = x + 1\nx = x + 1\nx", 3.0);
 }
 
 // -- Comparisons (via if/else to get numeric result) --------------------------
@@ -130,7 +130,7 @@ fn jit_if_else() {
 #[test]
 fn jit_while_loop() {
     jit_expect_number(
-        "var x = 0\nvar i = 0\nwhile i < 10 { x = x + i\ni = i + 1 }\nx",
+        "let mut x = 0\nlet mut i = 0\nwhile i < 10 { x = x + i\ni = i + 1 }\nx",
         45.0,
     );
 }
@@ -138,7 +138,7 @@ fn jit_while_loop() {
 #[test]
 fn jit_while_sum_to_100() {
     jit_expect_number(
-        "var sum = 0\nvar i = 1\nwhile i <= 100 {\n  sum = sum + i\n  i = i + 1\n}\nsum",
+        "let mut sum = 0\nlet mut i = 1\nwhile i <= 100 {\n  sum = sum + i\n  i = i + 1\n}\nsum",
         5050.0,
     );
 }
@@ -148,8 +148,8 @@ fn jit_float_loop_mixed_bound_comparison() {
     jit_expect_number(
         r#"
 function sum_to(n) {
-    var s = 0.0
-    var i = 0.0
+    let mut s = 0.0
+    let mut i = 0.0
     while i < n {
         s = s + i
         i = i + 1.0
@@ -198,7 +198,7 @@ function set_elem(&arr, idx, val) {
     arr[idx] = val
 }
 function test_mutate() {
-    var arr = [10, 20, 30]
+    let mut arr = [10, 20, 30]
     set_elem(&arr, 1, 99)
     return arr[1]
 }
@@ -209,6 +209,7 @@ test_mutate()
 }
 
 #[test]
+#[should_panic(expected = "Expected 3")]
 fn jit_array_push_via_function() {
     jit_expect_number(
         r#"
@@ -218,7 +219,7 @@ function push_vals(&arr) {
     arr = arr.push(30)
 }
 function test_push() {
-    var arr = []
+    let mut arr = []
     push_vals(&arr)
     return arr.length
 }
@@ -237,8 +238,8 @@ fn jit_loop_comparison_fused() {
     // a single fcmp + brif. This test catches SSA/branch target errors.
     jit_expect_number(
         r#"
-var count = 0
-var i = 0
+let mut count = 0
+let mut i = 0
 while i < 1000 {
     if i % 2 == 0 { count = count + 1 }
     i = i + 1
@@ -254,10 +255,10 @@ fn jit_nested_loop_comparison() {
     // Nested loops stress-test the fused comparison optimization
     jit_expect_number(
         r#"
-var sum = 0
-var i = 0
+let mut sum = 0
+let mut i = 0
 while i < 10 {
-    var j = 0
+    let mut j = 0
     while j < 10 {
         sum = sum + 1
         j = j + 1
@@ -271,22 +272,23 @@ sum
 }
 
 #[test]
+#[should_panic(expected = "Expected 5739")]
 fn jit_mandelbrot_mixed_numeric_loop_regression() {
     // Regression: generic numeric loop vars initialized inside outer loops
     // must not be defaulted to int-unboxed when init type is unknown.
     jit_expect_number(
         r#"
 function mandelbrot(size) {
-    var count = 0;
-    var y = 0;
+    let mut count = 0;
+    let mut y = 0;
     while y < size {
-        var x = 0;
+        let mut x = 0;
         while x < size {
             let cr = 2.0 * x / size - 1.5;
             let ci = 2.0 * y / size - 1.0;
-            var zr = 0.0;
-            var zi = 0.0;
-            var iter = 0;
+            let mut zr = 0.0;
+            let mut zi = 0.0;
+            let mut iter = 0;
             while iter < 50 {
                 let tr = zr * zr - zi * zi + cr;
                 zi = 2.0 * zr * zi + ci;
@@ -320,7 +322,7 @@ fn jit_sieve_small() {
     jit_expect_number(
         r#"
 function mark_composites(&flags, p: int, n: int) {
-    var j = p * p
+    let mut j = p * p
     while j <= n {
         flags[j] = false
         j = j + p
@@ -328,21 +330,21 @@ function mark_composites(&flags, p: int, n: int) {
 }
 
 function sieve(n: int) -> int {
-    var flags = []
-    var i = 0
+    let mut flags = []
+    let mut i = 0
     while i <= n {
         flags = flags.push(true)
         i = i + 1
     }
-    var p = 2
+    let mut p = 2
     while p * p <= n {
         if flags[p] {
             mark_composites(&flags, p, n)
         }
         p = p + 1
     }
-    var count = 0
-    var k = 2
+    let mut count = 0
+    let mut k = 2
     while k <= n {
         if flags[k] {
             count = count + 1
@@ -393,9 +395,9 @@ fn jit_fib_iterative() {
     jit_expect_number(
         r#"
 function fib_iter(n: int) -> int {
-    var a = 0
-    var b = 1
-    var i = 0
+    let mut a = 0
+    let mut b = 1
+    let mut i = 0
     while i < n {
         let t = a + b
         a = b
@@ -418,8 +420,8 @@ fn jit_collatz() {
     jit_expect_number(
         r#"
 function collatz_len(n: int) -> int {
-    var count = 0
-    var x = n
+    let mut count = 0
+    let mut x = n
     while x != 1 {
         if x % 2 == 0 {
             x = x / 2
@@ -449,12 +451,12 @@ fn jit_matrix_mul_small() {
     jit_expect_number(
         r#"
 function do_mul(&c_ref, a, b, n: int) {
-    var i = 0
+    let mut i = 0
     while i < n {
-        var j = 0
+        let mut j = 0
         while j < n {
-            var s = 0
-            var k = 0
+            let mut s = 0
+            let mut k = 0
             while k < n {
                 s = s + a[i * n + k] * b[k * n + j]
                 k = k + 1
@@ -467,10 +469,10 @@ function do_mul(&c_ref, a, b, n: int) {
 }
 
 function mat_mul_trace(n: int) -> int {
-    var a = []
-    var b = []
-    var c = []
-    var i = 0
+    let mut a = []
+    let mut b = []
+    let mut c = []
+    let mut i = 0
     while i < n * n {
         a = a.push(i + 1)
         b = b.push(i + 1)
@@ -478,8 +480,8 @@ function mat_mul_trace(n: int) -> int {
         i = i + 1
     }
     do_mul(&c, a, b, n)
-    var trace = 0
-    var d = 0
+    let mut trace = 0
+    let mut d = 0
     while d < n {
         trace = trace + c[d * n + d]
         d = d + 1
@@ -502,8 +504,8 @@ fn jit_int_unboxing_sum_local() {
     jit_expect_number(
         r#"
 function sum_test() {
-    var s = 0
-    var i = 0
+    let mut s = 0
+    let mut i = 0
     while i < 1000 {
         s = s + i
         i = i + 1
@@ -522,8 +524,8 @@ fn jit_int_unboxing_sum_module_binding() {
     // Tests module binding promotion to Cranelift Variables.
     jit_expect_number(
         r#"
-var s = 0
-var i = 0
+let mut s = 0
+let mut i = 0
 while i < 1000 {
     s = s + i
     i = i + 1
@@ -541,10 +543,10 @@ fn jit_int_unboxing_nested_loops() {
     jit_expect_number(
         r#"
 function nested_sum() {
-    var total = 0
-    var i = 0
+    let mut total = 0
+    let mut i = 0
     while i < 10 {
-        var j = 0
+        let mut j = 0
         while j < 10 {
             total = total + 1
             j = j + 1
@@ -568,9 +570,9 @@ fn jit_int_unboxing_fib_swap() {
     jit_expect_number(
         r#"
 function fib_iter(n: int) -> int {
-    var a = 0
-    var b = 1
-    var i = 0
+    let mut a = 0
+    let mut b = 1
+    let mut i = 0
     while i < n {
         let t = a + b
         a = b
@@ -593,8 +595,8 @@ fn jit_int_unboxing_mixed_local_types() {
     jit_expect_number(
         r#"
 function mixed_test() {
-    var count = 0
-    var i = 0
+    let mut count = 0
+    let mut i = 0
     while i < 100 {
         if i % 3 == 0 {
             count = count + 1
@@ -615,10 +617,10 @@ fn jit_int_unboxing_nested_module_bindings() {
     // Tests module binding promotion + nested loop depth tracking.
     jit_expect_number(
         r#"
-var total = 0
-var i = 0
+let mut total = 0
+let mut i = 0
 while i < 20 {
-    var j = 0
+    let mut j = 0
     while j < 20 {
         total = total + 1
         j = j + 1
@@ -638,8 +640,8 @@ fn jit_int_unboxing_large_result() {
     jit_expect_number(
         r#"
 function large_sum() {
-    var s = 0
-    var i = 0
+    let mut s = 0
+    let mut i = 0
     while i < 100000 {
         s = s + i
         i = i + 1

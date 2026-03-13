@@ -132,14 +132,14 @@ pub fn aabb_separation(a, b) {
 
     if overlap_x <= overlap_y {
         // Separate along x (minimum penetration axis)
-        var dir = 1.0;
+        let mut dir = 1.0;
         if ca_x < cb_x {
             dir = -1.0;
         }
         { x: dir * overlap_x, y: 0.0 }
     } else {
         // Separate along y
-        var dir = 1.0;
+        let mut dir = 1.0;
         if ca_y < cb_y {
             dir = -1.0;
         }
@@ -154,7 +154,7 @@ pub fn aabb_separation(a, b) {
 /// @param boxes - array of AABB objects
 /// @returns array of { i, j } index pairs where boxes[i] overlaps boxes[j]
 pub fn find_collisions_brute(boxes) {
-    let pairs = [];
+    let mut pairs = [];
     let n = len(boxes);
 
     for i in range(0, n) {
@@ -179,7 +179,7 @@ pub fn find_collisions_sweep(boxes) {
     let n = len(boxes);
 
     // Build index array sorted by min_x
-    let indices = [];
+    let mut indices = [];
     for i in range(0, n) {
         indices.push({ idx: i, min_x: boxes[i].min_x });
     }
@@ -187,7 +187,7 @@ pub fn find_collisions_sweep(boxes) {
     // Simple insertion sort by min_x (sufficient for typical counts)
     for i in range(1, n) {
         let key = indices[i];
-        var j = i - 1;
+        let mut j = i - 1;
         while j >= 0 && indices[j].min_x > key.min_x {
             indices[j + 1] = indices[j];
             j = j - 1;
@@ -195,7 +195,7 @@ pub fn find_collisions_sweep(boxes) {
         indices[j + 1] = key;
     }
 
-    let pairs = [];
+    let mut pairs = [];
 
     for i in range(0, n) {
         let ai = indices[i].idx;
@@ -212,8 +212,8 @@ pub fn find_collisions_sweep(boxes) {
 
             // Check full AABB overlap (x already overlaps, just check y)
             if a.min_y <= b.max_y && a.max_y >= b.min_y {
-                var lo = ai;
-                var hi = bi;
+                let mut lo = ai;
+                let mut hi = bi;
                 if lo > hi {
                     let tmp = lo;
                     lo = hi;

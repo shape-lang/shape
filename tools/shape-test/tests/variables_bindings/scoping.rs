@@ -76,7 +76,7 @@ fn function_scope_isolation() {
 fn var_mutation_visible_in_same_scope() {
     ShapeTest::new(
         r#"
-        var x = 0
+        let mut x = 0
         {
             x = 42
         }
@@ -90,7 +90,7 @@ fn var_mutation_visible_in_same_scope() {
 fn loop_body_scope() {
     ShapeTest::new(
         r#"
-        var total = 0
+        let mut total = 0
         for i in 0..3 {
             let temp = i * 10
             total = total + temp

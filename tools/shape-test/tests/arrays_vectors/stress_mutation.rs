@@ -77,8 +77,8 @@ test()"#,
 fn test_array_large_build_with_loop() {
     ShapeTest::new(
         r#"function test() {
-            var a = []
-            var i = 0
+            let mut a = []
+            let mut i = 0
             while i < 100 {
                 a = a.push(i)
                 i = i + 1
@@ -95,8 +95,8 @@ test()"#,
 fn test_array_large_last_element() {
     ShapeTest::new(
         r#"function test() {
-            var a = []
-            var i = 0
+            let mut a = []
+            let mut i = 0
             while i < 50 {
                 a = a.push(i)
                 i = i + 1
@@ -113,8 +113,8 @@ test()"#,
 fn test_array_large_first_element() {
     ShapeTest::new(
         r#"function test() {
-            var a = []
-            var i = 0
+            let mut a = []
+            let mut i = 0
             while i < 50 {
                 a = a.push(i)
                 i = i + 1
@@ -131,8 +131,8 @@ test()"#,
 fn test_array_large_index_access() {
     ShapeTest::new(
         r#"function test() {
-            var a = []
-            var i = 0
+            let mut a = []
+            let mut i = 0
             while i < 100 {
                 a = a.push(i * 2)
                 i = i + 1
@@ -149,7 +149,7 @@ test()"#,
 fn test_array_passed_to_function() {
     ShapeTest::new(
         r#"function sum_arr(arr) {
-            var s = 0
+            let mut s = 0
             for x in arr {
                 s = s + x
             }
@@ -298,7 +298,7 @@ test()"#,
 fn test_array_index_assignment() {
     ShapeTest::new(
         r#"function test() {
-            var a = [1, 2, 3]
+            let mut a = [1, 2, 3]
             a[1] = 99
             a[1]
         }
@@ -312,7 +312,7 @@ test()"#,
 fn test_array_index_assignment_first() {
     ShapeTest::new(
         r#"function test() {
-            var a = [10, 20, 30]
+            let mut a = [10, 20, 30]
             a[0] = 99
             a[0]
         }
@@ -326,7 +326,7 @@ test()"#,
 fn test_array_index_assignment_last() {
     ShapeTest::new(
         r#"function test() {
-            var a = [10, 20, 30]
+            let mut a = [10, 20, 30]
             a[2] = 99
             a[2]
         }
@@ -340,7 +340,7 @@ test()"#,
 fn test_array_index_assignment_preserves_others() {
     ShapeTest::new(
         r#"function test() {
-            var a = [10, 20, 30]
+            let mut a = [10, 20, 30]
             a[1] = 99
             a[0]
         }
@@ -354,7 +354,7 @@ test()"#,
 fn test_array_for_in_collect_sum() {
     ShapeTest::new(
         r#"function test() {
-            var total = 0
+            let mut total = 0
             for v in [100, 200, 300] {
                 total = total + v
             }
@@ -370,7 +370,7 @@ test()"#,
 fn test_array_for_in_count() {
     ShapeTest::new(
         r#"function test() {
-            var count = 0
+            let mut count = 0
             for _ in [1, 2, 3, 4, 5] {
                 count = count + 1
             }
@@ -386,7 +386,7 @@ test()"#,
 fn test_array_for_in_empty() {
     ShapeTest::new(
         r#"function test() {
-            var count = 0
+            let mut count = 0
             for _ in [] {
                 count = count + 1
             }
@@ -402,7 +402,7 @@ test()"#,
 fn test_array_for_in_strings() {
     ShapeTest::new(
         r#"function test() {
-            var result = ""
+            let mut result = ""
             for s in ["a", "b", "c"] {
                 result = result + s
             }

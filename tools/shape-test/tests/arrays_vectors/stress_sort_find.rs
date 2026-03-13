@@ -509,8 +509,8 @@ fn test_large_array_map() {
     ShapeTest::new(
         r#"
         fn make_array() {
-            var arr = []
-            var i = 0
+            let mut arr = []
+            let mut i = 0
             while i < 100 {
                 arr = arr.concat([i])
                 i = i + 1
@@ -529,8 +529,8 @@ fn test_large_array_filter() {
     ShapeTest::new(
         r#"
         fn make_array() {
-            let arr = []
-            let i = 0
+            let mut arr = []
+            let mut i = 0
             while i < 100 {
                 arr = arr.concat([i])
                 i = i + 1
@@ -549,8 +549,8 @@ fn test_large_array_sort_reverse() {
     ShapeTest::new(
         r#"
         fn make_rev_array() {
-            let arr = []
-            let i = 20
+            let mut arr = []
+            let mut i = 20
             while i > 0 {
                 arr = arr.concat([i])
                 i = i - 1
@@ -570,8 +570,8 @@ fn test_large_array_unique() {
     ShapeTest::new(
         r#"
         fn make_dup_array() {
-            let arr = []
-            let i = 0
+            let mut arr = []
+            let mut i = 0
             while i < 50 {
                 arr = arr.concat([i % 10])
                 i = i + 1
@@ -585,8 +585,8 @@ fn test_large_array_unique() {
     ShapeTest::new(
         r#"
         fn make_dup_array() {
-            let arr = []
-            let i = 0
+            let mut arr = []
+            let mut i = 0
             while i < 50 {
                 arr = arr.concat([i % 10])
                 i = i + 1
@@ -605,8 +605,8 @@ fn test_large_array_reduce() {
     ShapeTest::new(
         r#"
         fn make_array() {
-            let arr = []
-            let i = 1
+            let mut arr = []
+            let mut i = 1
             while i <= 50 {
                 arr = arr.concat([i])
                 i = i + 1
@@ -625,8 +625,8 @@ fn test_large_pipeline() {
     ShapeTest::new(
         r#"
         fn make_array() {
-            let arr = []
-            let i = 0
+            let mut arr = []
+            let mut i = 0
             while i < 100 {
                 arr = arr.concat([i])
                 i = i + 1

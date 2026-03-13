@@ -5566,6 +5566,7 @@ name = "shape-test"
 version = "0.1.6"
 dependencies = [
  "serde_json",
+ "shape-abi-v1",
  "shape-ast",
  "shape-jit",
  "shape-lsp",

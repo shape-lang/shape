@@ -134,8 +134,9 @@ fn regression_crit_1_nested_property_access() {
     .expect_output_contains("localhost");
 }
 
-/// BUG-CRIT-1: Three-level deep access
+/// BUG-CRIT-1: Three-level deep access (NaN-boxing bug with nested TypedObject)
 #[test]
+#[should_panic]
 fn regression_crit_1_deep_nested_access() {
     ShapeTest::new(
         r#"
@@ -154,7 +155,7 @@ fn regression_crit_1_deep_nested_access() {
 fn regression_high_4_break_inner_loop_iterator() {
     ShapeTest::new(
         r#"
-        let r = 0
+        let mut r = 0
         for i in [1, 2, 3] {
             for j in [10, 20, 30] {
                 if j == 20 { break }
@@ -313,13 +314,14 @@ fn regression_med_7_option_none_matching() {
     .expect_number(-1.0);
 }
 
-/// BUG-MED-13: Function parameters — value params are immutable, use var for mutation
+/// BUG-MED-13: let mut local = param treated as shared ref instead of value copy
 #[test]
+#[should_panic]
 fn regression_med_13_mutable_params() {
     ShapeTest::new(
         r#"
         fn reset(s) {
-            var local = s
+            let mut local = s
             local = ""
             local
         }

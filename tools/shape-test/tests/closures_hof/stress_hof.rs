@@ -151,8 +151,8 @@ fn test_large_array_map() {
     ShapeTest::new(
         r#"
         fn test() {
-            let arr = []
-            let i = 0
+            let mut arr = []
+            let mut i = 0
             while i < 100 {
                 arr.push(i);
                 i = i + 1
@@ -171,8 +171,8 @@ fn test_large_array_filter() {
     ShapeTest::new(
         r#"
         fn test() {
-            let arr = []
-            let i = 0
+            let mut arr = []
+            let mut i = 0
             while i < 100 {
                 arr.push(i);
                 i = i + 1
@@ -205,8 +205,8 @@ fn test_closure_in_loop() {
         r#"
         fn test() {
             let f = |x| x * 2
-            let sum = 0
-            let i = 0
+            let mut sum = 0
+            let mut i = 0
             while i < 5 {
                 sum = sum + f(i)
                 i = i + 1

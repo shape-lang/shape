@@ -275,8 +275,8 @@ fn edge_result_in_while_loop() {
             else { Ok(n) }
         }
         fn run() -> Result<number> {
-            let i = 0
-            let sum = 0
+            let mut i = 0
+            let mut sum = 0
             while i < 10 {
                 let v = check(i)?
                 sum = sum + v
@@ -299,8 +299,8 @@ fn edge_result_in_while_loop_all_ok() {
         r#"
         fn check(n) -> Result<number> { Ok(n) }
         fn run() -> Result<number> {
-            let i = 0
-            let sum = 0
+            let mut i = 0
+            let mut sum = 0
             while i < 5 {
                 let v = check(i)?
                 sum = sum + v
@@ -462,7 +462,7 @@ fn edge_err_in_array_iteration() {
     ShapeTest::new(
         r#"
         let items = [Ok(1), Ok(2), Err("bad"), Ok(4)]
-        let count = 0
+        let mut count = 0
         for item in items {
             match item {
                 Ok(_) => { count = count + 1 }

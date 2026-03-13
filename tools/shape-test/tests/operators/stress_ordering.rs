@@ -441,7 +441,7 @@ fn null_coalesce_first_non_null() {
 fn comparison_in_while_loop() {
     ShapeTest::new(
         "function test() {
-            let i = 0
+            let mut i = 0
             while i < 10 {
                 i = i + 1
             }
@@ -456,7 +456,7 @@ fn comparison_in_while_loop() {
 fn comparison_in_for_loop_with_break() {
     ShapeTest::new(
         "function test() {
-            let result = 0
+            let mut result = 0
             for i in range(0, 100) {
                 if i >= 5 {
                     break
@@ -538,7 +538,7 @@ function test() {
 fn comparison_stability_loop() {
     ShapeTest::new(
         "function test() {
-            let count = 0
+            let mut count = 0
             for i in range(0, 100) {
                 if 5 > 3 {
                     count = count + 1

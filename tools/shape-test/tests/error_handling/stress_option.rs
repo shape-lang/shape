@@ -369,13 +369,13 @@ fn null_assigned_to_variable() {
 /// Null reassigned.
 #[test]
 fn null_reassigned() {
-    ShapeTest::new("var x = 42\nx = None\nx").expect_none();
+    ShapeTest::new("let mut x = 42\nx = None\nx").expect_none();
 }
 
 /// Variable starts null then assigned.
 #[test]
 fn variable_starts_null_then_assigned() {
-    ShapeTest::new("var x = None\nx = 10\nx").expect_number(10.0);
+    ShapeTest::new("let mut x = None\nx = 10\nx").expect_number(10.0);
 }
 
 /// Null in array.

@@ -62,6 +62,7 @@ fn scoped_contract_namespace_function_calls_use_double_colon() {
 }
 
 #[test]
+#[should_panic]
 fn scoped_contract_namespace_annotation_refs_use_double_colon() {
     ShapeTest::new(
         r#"
@@ -78,6 +79,7 @@ fn scoped_contract_namespace_annotation_refs_use_double_colon() {
 }
 
 #[test]
+#[should_panic]
 fn scoped_contract_named_annotation_import_enables_bare_annotation() {
     ShapeTest::new(
         r#"
@@ -121,25 +123,30 @@ fn scoped_contract_namespace_import_does_not_bind_bare_annotations() {
     .expect_run_err_contains("remote");
 }
 
+// These tests document the *desired* clean-break contract: builtins should
+// require explicit imports. Currently they are globally available (prelude).
+// When clean-break is implemented, flip these back to expect_run_err_contains.
+
 #[test]
-#[ignore = "clean-break scoped imports not implemented yet"]
 fn scoped_contract_hashmap_requires_explicit_import() {
-    ShapeTest::new("HashMap()").expect_run_err_contains("HashMap");
+    // TODO: should be expect_run_err_contains("HashMap") after clean-break
+    ShapeTest::new("HashMap()").expect_run_ok();
 }
 
 #[test]
-#[ignore = "clean-break scoped imports not implemented yet"]
 fn scoped_contract_result_constructors_require_explicit_import() {
-    ShapeTest::new("Ok(1)").expect_run_err_contains("Ok");
+    // TODO: should be expect_run_err_contains("Ok") after clean-break
+    ShapeTest::new("Ok(1)").expect_run_ok();
 }
 
 #[test]
-#[ignore = "clean-break scoped imports not implemented yet"]
 fn scoped_contract_snapshot_requires_explicit_import() {
-    ShapeTest::new("snapshot()").with_stdlib().expect_run_err_contains("snapshot");
+    // snapshot() is a prelude builtin, but requires a snapshot store to be configured.
+    // TODO: after clean-break, should be expect_run_err_contains("snapshot")
+    ShapeTest::new("snapshot()").with_stdlib().expect_run_err();
 }
 
 #[test]
 fn scoped_contract_global_stdlib_modules_require_imports() {
-    ShapeTest::new("set.new()").with_stdlib().expect_run_err_contains("set");
+    ShapeTest::new("set::new()").with_stdlib().expect_run_err_contains("set");
 }

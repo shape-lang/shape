@@ -844,7 +844,7 @@ fn t42_match_in_loop() {
     ShapeTest::new(
         r#"
         function test() {
-            var total = 0
+            let mut total = 0
             for i in range(5) {
                 total = total + match i {
                     0 => 10,

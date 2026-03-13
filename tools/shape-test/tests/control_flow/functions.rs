@@ -127,7 +127,7 @@ fn function_return_from_loop() {
     ShapeTest::new(
         r#"
         fn find_first_even(arr) {
-            var i = 0
+            let mut i = 0
             while i < arr.length {
                 if arr[i] % 2 == 0 { return arr[i] }
                 i = i + 1
@@ -145,7 +145,7 @@ fn function_return_from_loop_not_found() {
     ShapeTest::new(
         r#"
         fn find_first_even(arr) {
-            var i = 0
+            let mut i = 0
             while i < arr.length {
                 if arr[i] % 2 == 0 { return arr[i] }
                 i = i + 1

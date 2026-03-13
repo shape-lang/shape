@@ -13,8 +13,8 @@ use shape_test::shape_test::ShapeTest;
 fn if_inside_for_loop() {
     ShapeTest::new(
         r#"
-        var positives = 0
-        var negatives = 0
+        let mut positives = 0
+        let mut negatives = 0
         for x in [3, -1, 4, -1, 5, -9] {
             if x > 0 {
                 positives = positives + 1
@@ -32,9 +32,9 @@ fn if_inside_for_loop() {
 fn match_inside_for_loop() {
     ShapeTest::new(
         r#"
-        var ones = 0
-        var twos = 0
-        var others = 0
+        let mut ones = 0
+        let mut twos = 0
+        let mut others = 0
         for x in [1, 2, 1, 3, 2, 1] {
             match x {
                 1 => { ones = ones + 1 },
@@ -55,8 +55,8 @@ fn function_with_for_loop_and_match() {
     ShapeTest::new(
         r#"
         fn count_category(arr) {
-            var small = 0
-            var big = 0
+            let mut small = 0
+            let mut big = 0
             for x in arr {
                 match x {
                     n where n <= 10 => { small = small + 1 },
@@ -75,8 +75,8 @@ fn function_with_for_loop_and_match() {
 fn while_loop_with_match_inside() {
     ShapeTest::new(
         r#"
-        var i = 0
-        var result = ""
+        let mut i = 0
+        let mut result = ""
         while i < 5 {
             result = result + match i {
                 0 => "a",

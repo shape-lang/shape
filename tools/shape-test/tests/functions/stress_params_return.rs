@@ -423,7 +423,7 @@ fn test_fn_local_reassignment() {
     ShapeTest::new(
         r#"
         fn accumulate() {
-            var sum = 0
+            let mut sum = 0
             sum = sum + 10
             sum = sum + 20
             sum = sum + 30
@@ -518,7 +518,7 @@ fn test_fn_with_for_loop() {
         r#"
         fn sum_array() {
             let arr = [1, 2, 3, 4, 5]
-            let total = 0
+            let mut total = 0
             for item in arr {
                 total = total + item
             }
@@ -536,8 +536,8 @@ fn test_fn_with_while_loop() {
     ShapeTest::new(
         r#"
         fn count_up(n) {
-            let i = 0
-            let sum = 0
+            let mut i = 0
+            let mut sum = 0
             while i < n {
                 i = i + 1
                 sum = sum + i

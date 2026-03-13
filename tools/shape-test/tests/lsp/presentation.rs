@@ -70,14 +70,14 @@ fn semantic_tokens_for_let_declaration() {
 
 #[test]
 fn semantic_tokens_for_var_declaration() {
-    ShapeTest::new("var y = 2;")
+    ShapeTest::new("let mut y = 2;")
         .expect_semantic_tokens()
         .expect_semantic_tokens_min(2);
 }
 
 #[test]
 fn semantic_tokens_distinguish_let_var() {
-    ShapeTest::new("let x = 1;\nvar y = 2;")
+    ShapeTest::new("let x = 1;\nlet mut y = 2;")
         .expect_semantic_tokens()
         .expect_semantic_tokens_min(4);
 }
@@ -98,14 +98,14 @@ fn semantic_tokens_for_if_else() {
 
 #[test]
 fn semantic_tokens_for_while_loop() {
-    ShapeTest::new("var i = 0;\nwhile (i < 10) { i = i + 1; }")
+    ShapeTest::new("let mut i = 0;\nwhile (i < 10) { i = i + 1; }")
         .expect_semantic_tokens()
         .expect_semantic_tokens_min(3);
 }
 
 #[test]
 fn semantic_tokens_for_for_loop() {
-    ShapeTest::new("for (let i = 0; i < 10; i = i + 1) { print(i); }")
+    ShapeTest::new("for (let mut i = 0; i < 10; i = i + 1) { print(i); }")
         .expect_semantic_tokens()
         .expect_semantic_tokens_min(2);
 }

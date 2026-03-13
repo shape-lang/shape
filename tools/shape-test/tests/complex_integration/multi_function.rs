@@ -50,8 +50,8 @@ fn test_complex_string_reverse() {
     ShapeTest::new(
         r#"
         fn reverse_string(s) {
-            var result = ""
-            var i = s.length - 1
+            let mut result = ""
+            let mut i = s.length - 1
             while i >= 0 {
                 result = result + s.substring(i, i + 1)
                 i = i - 1
@@ -69,7 +69,7 @@ fn test_complex_string_pad_left() {
     ShapeTest::new(
         r#"
         fn pad_left(s, total_len, pad_char) {
-            var result = s
+            let mut result = s
             while result.length < total_len {
                 result = pad_char + result
             }
@@ -158,9 +158,9 @@ fn test_complex_iterative_fibonacci() {
         r#"
         fn fib(n) {
             if n < 2 { return n }
-            var a = 0
-            var b = 1
-            var i = 2
+            let mut a = 0
+            let mut b = 1
+            let mut i = 2
             while i <= n {
                 let temp = a + b
                 a = b
@@ -183,8 +183,8 @@ fn test_complex_binary_search() {
     ShapeTest::new(
         r#"
         fn binary_search(arr, target) {
-            var lo = 0
-            var hi = arr.length - 1
+            let mut lo = 0
+            let mut hi = arr.length - 1
             while lo <= hi {
                 let mid = lo + (hi - lo) / 2
                 if arr[mid] == target { return mid }
@@ -229,7 +229,7 @@ fn test_complex_array_unique() {
             false
         }
         fn unique(arr) {
-            var result = []
+            let mut result = []
             for item in arr {
                 if !contains(result, item) {
                     result = result.push(item)
@@ -262,8 +262,8 @@ fn test_complex_array_zip() {
     ShapeTest::new(
         r#"
         fn zip_sum(a, b) {
-            var result = []
-            var i = 0
+            let mut result = []
+            let mut i = 0
             let len = if a.length < b.length { a.length } else { b.length }
             while i < len {
                 result = result.push(a[i] + b[i])
@@ -324,8 +324,8 @@ fn test_complex_collatz_steps() {
     ShapeTest::new(
         r#"
         fn collatz_steps(n) {
-            var steps = 0
-            var current = n
+            let mut steps = 0
+            let mut current = n
             while current != 1 {
                 if current % 2 == 0 {
                     current = current / 2
@@ -349,8 +349,8 @@ fn test_complex_is_palindrome() {
     ShapeTest::new(
         r#"
         fn reverse_string(s) {
-            var result = ""
-            var i = s.length - 1
+            let mut result = ""
+            let mut i = s.length - 1
             while i >= 0 {
                 result = result + s.substring(i, i + 1)
                 i = i - 1
@@ -371,7 +371,7 @@ fn test_complex_count_occurrences() {
     ShapeTest::new(
         r#"
         fn count_if(arr, pred) {
-            var c = 0
+            let mut c = 0
             for item in arr {
                 if pred(item) { c = c + 1 }
             }

@@ -83,7 +83,7 @@ fn destructuring_in_for_loop() {
     ShapeTest::new(
         r#"
         let points = [{x: 1, y: 2}, {x: 3, y: 4}]
-        var sum = 0
+        let mut sum = 0
         for {x, y} in points {
             sum = sum + x + y
         }

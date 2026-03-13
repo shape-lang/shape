@@ -8,7 +8,7 @@ use shape_test::shape_test::ShapeTest;
 fn var_binding_integer() {
     ShapeTest::new(
         r#"
-        var x = 42
+        let mut x = 42
         x
     "#,
     )
@@ -19,7 +19,7 @@ fn var_binding_integer() {
 fn var_reassignment() {
     ShapeTest::new(
         r#"
-        var x = 10
+        let mut x = 10
         x = 20
         x
     "#,
@@ -31,7 +31,7 @@ fn var_reassignment() {
 fn var_multiple_reassignments() {
     ShapeTest::new(
         r#"
-        var x = 1
+        let mut x = 1
         x = 2
         x = 3
         x = 4
@@ -45,7 +45,7 @@ fn var_multiple_reassignments() {
 fn var_increment_pattern() {
     ShapeTest::new(
         r#"
-        var count = 0
+        let mut count = 0
         count = count + 1
         count = count + 1
         count = count + 1
@@ -59,7 +59,7 @@ fn var_increment_pattern() {
 fn var_accumulate_in_loop() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 0..5 {
             sum = sum + i
         }
@@ -73,7 +73,7 @@ fn var_accumulate_in_loop() {
 fn var_reassign_different_value() {
     ShapeTest::new(
         r#"
-        var msg = "hello"
+        let mut msg = "hello"
         msg = "world"
         msg
     "#,
@@ -85,8 +85,8 @@ fn var_reassign_different_value() {
 fn var_swap_values() {
     ShapeTest::new(
         r#"
-        var a = 1
-        var b = 2
+        let mut a = 1
+        let mut b = 2
         let temp = a
         a = b
         b = temp
@@ -102,7 +102,7 @@ fn var_swap_values() {
 fn var_decrement_to_zero() {
     ShapeTest::new(
         r#"
-        var n = 5
+        let mut n = 5
         while n > 0 {
             n = n - 1
         }

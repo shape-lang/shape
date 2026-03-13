@@ -184,7 +184,9 @@ impl BytecodeCompiler {
                 .and_then(|m| m.get(property))
                 .cloned()
             {
-                let const_idx = if let Some(n) = comptime_value.as_number_coerce() {
+                let const_idx = if let Some(i) = comptime_value.as_i64() {
+                    self.program.add_constant(Constant::Int(i))
+                } else if let Some(n) = comptime_value.as_number_coerce() {
                     self.program.add_constant(Constant::Number(n))
                 } else if let Some(b) = comptime_value.as_bool() {
                     self.program.add_constant(Constant::Bool(b))
@@ -265,7 +267,9 @@ impl BytecodeCompiler {
                     // Pop the object — we don't need it for a comptime field
                     self.emit(Instruction::simple(OpCode::Pop));
                     // Push the constant value directly from ValueWord
-                    let const_idx = if let Some(n) = value.as_number_coerce() {
+                    let const_idx = if let Some(i) = value.as_i64() {
+                        self.program.add_constant(Constant::Int(i))
+                    } else if let Some(n) = value.as_number_coerce() {
                         self.program.add_constant(Constant::Number(n))
                     } else if let Some(b) = value.as_bool() {
                         self.program.add_constant(Constant::Bool(b))

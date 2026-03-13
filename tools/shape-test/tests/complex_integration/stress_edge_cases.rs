@@ -62,8 +62,8 @@ fn test_complex_long_method_chain() {
 fn test_complex_large_string_operations() {
     ShapeTest::new(
         r#"
-        var s = ""
-        var i = 0
+        let mut s = ""
+        let mut i = 0
         while i < 100 {
             s = s + "x"
             i = i + 1
@@ -110,12 +110,12 @@ fn test_complex_nested_control_flow() {
     ShapeTest::new(
         r#"
         fn process(arr) {
-            var result = 0
+            let mut result = 0
             for item in arr {
                 if item > 0 {
                     match item {
                         n where n > 50 => {
-                            var i = 0
+                            let mut i = 0
                             while i < 3 {
                                 result = result + n
                                 i = i + 1
@@ -164,7 +164,7 @@ fn test_complex_all_features_together() {
             Item { name: "Doohickey", price: 50 }
         ]
         let discount = Discount::Percent(20)
-        var total = 0
+        let mut total = 0
         for item in items {
             let discounted = apply_discount(item.price, discount)
             let with_tax = apply_tax(discounted)
@@ -178,7 +178,7 @@ fn test_complex_all_features_together() {
         print(receipt.get("total"))
     "#,
     )
-    .expect_output("3\n308");
+    .expect_output("3\n308.0");
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn test_complex_recursive_descent_evaluator() {
         r#"
         // Simple postfix expression evaluator
         fn eval_postfix(tokens) {
-            var stack = []
+            let mut stack = []
             for t in tokens {
                 match t {
                     "+" => {
@@ -312,7 +312,7 @@ fn test_complex_enum_dispatch_with_closures_and_loop() {
         r#"
         enum Task { Compute(int), Log(string), Halt }
         fn run_tasks(tasks) {
-            var total = 0
+            let mut total = 0
             for task in tasks {
                 match task {
                     Task::Compute(n) => { total = total + n },

@@ -87,6 +87,7 @@ pub struct ShapeTest {
     selected_range: Option<Range>,
     use_stdlib: bool,
     snapshot_dir: Option<tempfile::TempDir>,
+    permission_set: Option<shape_abi_v1::PermissionSet>,
 }
 
 impl ShapeTest {
@@ -101,6 +102,7 @@ impl ShapeTest {
             selected_range: None,
             use_stdlib: false,
             snapshot_dir: None,
+            permission_set: None,
         }
     }
 
@@ -114,6 +116,23 @@ impl ShapeTest {
     pub fn with_snapshots(mut self) -> Self {
         self.snapshot_dir = Some(tempfile::tempdir().unwrap());
         self
+    }
+
+    /// Set a custom permission set for compile-time capability checking.
+    ///
+    /// When set, the compiler will deny imports that require permissions
+    /// not present in the given set.
+    pub fn with_permissions(mut self, permissions: shape_abi_v1::PermissionSet) -> Self {
+        self.permission_set = Some(permissions);
+        self
+    }
+
+    /// Use a pure (empty) permission set — no IO, network, or process capabilities.
+    ///
+    /// Pure-computation modules (json, crypto, math, etc.) will still be importable.
+    /// IO-related modules (io, file, http, env) will be denied at compile time.
+    pub fn with_pure_permissions(self) -> Self {
+        self.with_permissions(shape_abi_v1::PermissionSet::pure())
     }
 
     /// Set the cursor position for subsequent assertions.
@@ -215,6 +234,12 @@ impl ShapeTest {
         }
 
         let mut executor = BytecodeExecutor::new();
+
+        // Wire permission set for compile-time capability checking
+        if let Some(pset) = &self.permission_set {
+            executor.set_permission_set(Some(pset.clone()));
+        }
+
         let result = engine
             .execute(&mut executor, &self.text)
             .map_err(|e| e.to_string())?;

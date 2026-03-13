@@ -132,7 +132,15 @@ impl TypeInferenceEngine {
                 span,
                 ..
             } => {
-                if self.env.lookup(namespace).is_some()
+                // Check if this is an enum constructor (e.g. Signal::Market(1, 2)).
+                // The parser can't distinguish enum tuple constructors from qualified
+                // function calls, so we resolve it here using type information.
+                if self.env.get_enum(namespace).is_some() {
+                    for arg in args {
+                        self.infer_expr(arg)?;
+                    }
+                    Ok(Type::Concrete(TypeAnnotation::Reference(namespace.clone())))
+                } else if self.env.lookup(namespace).is_some()
                     || self.struct_type_defs.contains_key(namespace.as_str())
                     || self.env.lookup_type_alias(namespace).is_some()
                     || matches!(namespace.as_str(), "DateTime" | "Content")

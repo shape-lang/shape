@@ -366,8 +366,8 @@ fn trait_method_with_loop() {
         trait Repeatable { repeat_str(self, s: string): string }
         impl Repeatable for Repeater {
             method repeat_str(s: string) {
-                let result = ""
-                let i = 0
+                let mut result = ""
+                let mut i = 0
                 while i < self.count {
                     result = result + s
                     i = i + 1
@@ -467,8 +467,8 @@ fn trait_method_while_accumulator() {
         trait Summable { sum_to(self): int }
         impl Summable for Summer {
             method sum_to() {
-                let total = 0
-                let i = 1
+                let mut total = 0
+                let mut i = 1
                 while i <= self.n {
                     total = total + i
                     i = i + 1
@@ -1047,7 +1047,7 @@ fn trait_method_called_in_loop() {
             method inc() { Counter { val: self.val + 1 } }
         }
         let mut c = Counter { val: 0 }
-        let i = 0
+        let mut i = 0
         while i < 10 {
             c = c.inc()
             i = i + 1

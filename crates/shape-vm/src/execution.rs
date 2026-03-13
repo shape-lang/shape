@@ -689,6 +689,9 @@ impl ProgramExecutor for BytecodeExecutor {
             let mut compiler = BytecodeCompiler::new();
             compiler.stdlib_function_names = stdlib_names;
             compiler.register_known_bindings(&known_bindings);
+            if self.allow_internal_builtins {
+                compiler.allow_internal_builtins = true;
+            }
 
             // Wire extension registry into compiler for comptime execution
             if !self.extensions.is_empty() {
@@ -701,6 +704,11 @@ impl ProgramExecutor for BytecodeExecutor {
             }
 
             compiler.native_resolution_context = self.native_resolution_context.clone();
+
+            // Wire permission set for compile-time capability checking
+            if let Some(pset) = &self.permission_set {
+                compiler.set_permission_set(Some(pset.clone()));
+            }
 
             // Use compile_with_source if source text is available for better error messages
             let bytecode = if let Some(source) = &source_for_compilation {

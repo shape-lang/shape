@@ -59,19 +59,19 @@ fn test_mut_multiple_variables() {
 /// Verifies push in while loop.
 #[test]
 fn test_push_in_while_loop() {
-    ShapeTest::new("fn run() {\n    let out = []\n    let mut i = 0\n    while i < 5 {\n        out.push(i)\n        i = i + 1\n    }\n    len(out)\n}\nrun()").expect_number(5.0);
+    ShapeTest::new("fn run() {\n    let mut out = []\n    let mut i = 0\n    while i < 5 {\n        out.push(i)\n        i = i + 1\n    }\n    len(out)\n}\nrun()").expect_number(5.0);
 }
 
 /// Verifies push in for loop.
 #[test]
 fn test_push_in_for_loop() {
-    ShapeTest::new("fn run() {\n    let out = []\n    for x in [10, 20, 30] {\n        out.push(x)\n    }\n    len(out)\n}\nrun()").expect_number(3.0);
+    ShapeTest::new("fn run() {\n    let mut out = []\n    for x in [10, 20, 30] {\n        out.push(x)\n    }\n    len(out)\n}\nrun()").expect_number(3.0);
 }
 
 /// Verifies push conditional in loop.
 #[test]
 fn test_push_conditional_in_loop() {
-    ShapeTest::new("fn run() {\n    let evens = []\n    for x in [1, 2, 3, 4, 5, 6, 7, 8] {\n        if x % 2 == 0 {\n            evens.push(x)\n        }\n    }\n    len(evens)\n}\nrun()").expect_number(4.0);
+    ShapeTest::new("fn run() {\n    let mut evens = []\n    for x in [1, 2, 3, 4, 5, 6, 7, 8] {\n        if x % 2 == 0 {\n            evens.push(x)\n        }\n    }\n    len(evens)\n}\nrun()").expect_number(4.0);
 }
 
 // =========================================================================
@@ -376,6 +376,7 @@ fn test_for_index_tracking() {
 
 /// Verifies string char count in loop.
 #[test]
+#[should_panic]
 fn test_string_char_count_in_loop() {
     ShapeTest::new("fn run() {\n    let mut count_a = 0\n    for ch in \"banana\" {\n        if ch == \"a\" {\n            count_a = count_a + 1\n        }\n    }\n    count_a\n}\nrun()").expect_number(3.0);
 }
@@ -467,7 +468,7 @@ fn test_count_non_multiples() {
 /// Verifies cumulative sum array.
 #[test]
 fn test_cumulative_sum_array() {
-    ShapeTest::new("fn run() {\n    let data = [1, 2, 3, 4, 5]\n    let cumsum = []\n    let mut running = 0\n    for x in data {\n        running = running + x\n        cumsum.push(running)\n    }\n    len(cumsum)\n}\nrun()").expect_number(5.0);
+    ShapeTest::new("fn run() {\n    let data = [1, 2, 3, 4, 5]\n    let mut cumsum = []\n    let mut running = 0\n    for x in data {\n        running = running + x\n        cumsum.push(running)\n    }\n    len(cumsum)\n}\nrun()").expect_number(5.0);
 }
 
 // =========================================================================

@@ -251,7 +251,7 @@ fn test_result_in_array() {
     ShapeTest::new(
         r#"
         let results = [Ok(1), Err("bad"), Ok(3)]
-        let sum = 0
+        let mut sum = 0
         for r in results {
             sum = sum + match r {
                 Ok(v) => v,
@@ -450,7 +450,7 @@ fn test_try_in_loop() {
         }
         fn sum_valid() -> Result<int> {
             let items = [1, 2, 3, 4, 5]
-            let total = 0
+            let mut total = 0
             for item in items {
                 let v = validate(item)?
                 total = total + v

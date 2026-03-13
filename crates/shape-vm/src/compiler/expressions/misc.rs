@@ -890,7 +890,7 @@ mod comptime_for_tests {
     use shape_value::ValueWord;
 
     #[test]
-    #[ignore = "blocked: comptime_builtin_forwarders uses dot-notation on __comptime__ module, needs :: namespace syntax fix in comptime.rs"]
+
     fn test_comptime_for_literal_array() {
         // Unroll over a literal array: each iteration yields the element.
         let result = eval(
@@ -906,7 +906,7 @@ mod comptime_for_tests {
     }
 
     #[test]
-    #[ignore = "blocked: comptime_builtin_forwarders uses dot-notation on __comptime__ module, needs :: namespace syntax fix in comptime.rs"]
+
     fn test_comptime_for_empty_array() {
         // Empty array: result is Unit (PushNull)
         let result = eval(
@@ -920,7 +920,7 @@ mod comptime_for_tests {
     }
 
     #[test]
-    #[ignore = "blocked: comptime_builtin_forwarders uses dot-notation on __comptime__ module, needs :: namespace syntax fix in comptime.rs"]
+
     fn test_comptime_for_string_array() {
         // Unroll over string array
         let result = eval(
@@ -939,7 +939,7 @@ mod comptime_for_tests {
     }
 
     #[test]
-    #[ignore = "blocked: comptime_builtin_forwarders uses dot-notation on __comptime__ module, needs :: namespace syntax fix in comptime.rs"]
+
     fn test_comptime_for_non_array_iterable_errors() {
         let code = r#"comptime for x in 42 { x }"#;
         let result = crate::test_utils::eval_result(code);

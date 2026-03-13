@@ -639,7 +639,7 @@ fn t90_let_destructure_in_loop_body() {
         r#"
         function test() {
             let items = [[1, 2], [3, 4], [5, 6]]
-            var total = 0
+            let mut total = 0
             for item in items {
                 let [a, b] = item
                 total = total + a + b
@@ -770,7 +770,7 @@ fn t98_for_loop_object_destructure() {
         r#"
         function test() {
             let points = [{x: 1, y: 2}, {x: 3, y: 4}]
-            var sum = 0
+            let mut sum = 0
             for {x, y} in points {
                 sum = sum + x + y
             }

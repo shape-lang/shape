@@ -20,7 +20,7 @@ print(user.name)"#;
 
 #[test]
 fn object_property_assignment() {
-    let code = r#"let user = {
+    let code = r#"let mut user = {
   id: 1,
   name: "Ada"
 }
@@ -75,7 +75,7 @@ print(cfg.server.port)"#;
 
 #[test]
 fn object_merge_with_plus() {
-    let code = r#"let a = { x: 1 }
+    let code = r#"let mut a = { x: 1 }
 a.y = 2
 let b = { z: 3 }
 let c = a + b

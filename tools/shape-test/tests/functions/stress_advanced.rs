@@ -142,8 +142,8 @@ fn test_fn_iterative_factorial() {
     ShapeTest::new(
         r#"
         fn factorial(n: int) -> int {
-            let result = 1
-            let i = 2
+            let mut result = 1
+            let mut i = 2
             while i <= n {
                 result = result * i
                 i = i + 1
@@ -163,9 +163,9 @@ fn test_fn_iterative_fibonacci() {
         r#"
         fn fib(n: int) -> int {
             if n <= 1 { return n }
-            let a = 0
-            let b = 1
-            let i = 2
+            let mut a = 0
+            let mut b = 1
+            let mut i = 2
             while i <= n {
                 let temp = a + b
                 a = b
@@ -407,7 +407,7 @@ fn test_fn_max_of_three() {
     ShapeTest::new(
         r#"
         fn max3(a, b, c) {
-            let m = a
+            let mut m = a
             if b > m { m = b }
             if c > m { m = c }
             m
@@ -424,8 +424,8 @@ fn test_fn_string_repeat_via_loop() {
     ShapeTest::new(
         r#"
         fn repeat_str(s, n) {
-            let result = ""
-            let i = 0
+            let mut result = ""
+            let mut i = 0
             while i < n {
                 result = result + s
                 i = i + 1
@@ -444,8 +444,8 @@ fn test_fn_count_down_accumulate() {
     ShapeTest::new(
         r#"
         fn sum_range(a: int, b: int) -> int {
-            let total = 0
-            let i = a
+            let mut total = 0
+            let mut i = a
             while i <= b {
                 total = total + i
                 i = i + 1
@@ -602,8 +602,8 @@ fn test_fn_power_iterative() {
     ShapeTest::new(
         r#"
         fn pow(base: int, exp: int) -> int {
-            let result = 1
-            let i = 0
+            let mut result = 1
+            let mut i = 0
             while i < exp {
                 result = result * base
                 i = i + 1

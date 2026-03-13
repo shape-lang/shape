@@ -4,7 +4,7 @@
 /// Basic Euler and RK4 integrators for scalar and vector systems.
 
 function vec_add(a, b) {
-    let out = [];
+    let mut out = [];
     for i in range(0, len(a)) {
         out.push(a[i] + b[i]);
     }
@@ -12,7 +12,7 @@ function vec_add(a, b) {
 }
 
 function vec_scale(a, s) {
-    let out = [];
+    let mut out = [];
     for i in range(0, len(a)) {
         out.push(a[i] * s);
     }
@@ -26,9 +26,9 @@ function vec_add_scaled(a, b, s) {
 /// Euler integrator for scalar ODE
 pub fn euler(f, y0, t_start, t_end, dt) {
     let steps = floor((t_end - t_start) / dt);
-    var t = t_start;
-    var y = y0;
-    let results = [];
+    let mut t = t_start;
+    let mut y = y0;
+    let mut results = [];
 
     for i in range(0, steps + 1) {
         results.push({ t: t, y: y });
@@ -42,9 +42,9 @@ pub fn euler(f, y0, t_start, t_end, dt) {
 /// RK4 integrator for scalar ODE
 pub fn rk4(f, y0, t_start, t_end, dt) {
     let steps = floor((t_end - t_start) / dt);
-    var t = t_start;
-    var y = y0;
-    let results = [];
+    let mut t = t_start;
+    let mut y = y0;
+    let mut results = [];
 
     for i in range(0, steps + 1) {
         results.push({ t: t, y: y });
@@ -64,9 +64,9 @@ pub fn rk4(f, y0, t_start, t_end, dt) {
 /// Euler integrator for vector systems
 pub fn euler_system(f, y0_vec, t_start, t_end, dt) {
     let steps = floor((t_end - t_start) / dt);
-    var t = t_start;
-    var y = y0_vec;
-    let results = [];
+    let mut t = t_start;
+    let mut y = y0_vec;
+    let mut results = [];
 
     for i in range(0, steps + 1) {
         results.push({ t: t, y: y });
@@ -81,9 +81,9 @@ pub fn euler_system(f, y0_vec, t_start, t_end, dt) {
 /// RK4 integrator for vector systems
 pub fn rk4_system(f, y0_vec, t_start, t_end, dt) {
     let steps = floor((t_end - t_start) / dt);
-    var t = t_start;
-    var y = y0_vec;
-    let results = [];
+    let mut t = t_start;
+    let mut y = y0_vec;
+    let mut results = [];
 
     for i in range(0, steps + 1) {
         results.push({ t: t, y: y });
@@ -104,7 +104,7 @@ pub fn rk4_system(f, y0_vec, t_start, t_end, dt) {
 // ===== Adaptive Step-Size Integrators =====
 
 function vec_sub(a, b) {
-    let out = [];
+    let mut out = [];
     for i in range(0, len(a)) {
         out.push(a[i] - b[i]);
     }
@@ -112,7 +112,7 @@ function vec_sub(a, b) {
 }
 
 function vec_norm(a) {
-    var s = 0.0;
+    let mut s = 0.0;
     for i in range(0, len(a)) {
         s = s + a[i] * a[i];
     }
@@ -138,22 +138,22 @@ pub fn rk45(f, y0, t_start, t_end, tol = 0.000001, dt_init = 0.0, dt_min = 0.000
     let max_factor = 5.0;
     let min_factor = 0.2;
 
-    var h = dt_init;
+    let mut h = dt_init;
     if h == 0.0 {
         h = (t_end - t_start) / 100.0;
     }
-    var h_max = dt_max;
+    let mut h_max = dt_max;
     if h_max == 0.0 {
         h_max = (t_end - t_start) / 4.0;
     }
 
-    var t = t_start;
-    var y = y0;
-    let results = [];
+    let mut t = t_start;
+    let mut y = y0;
+    let mut results = [];
     results.push({ t: t, y: y });
 
     let max_steps = 100000;
-    var step_count = 0;
+    let mut step_count = 0;
 
     while t < t_end && step_count < max_steps {
         // Clamp step to not overshoot t_end
@@ -180,7 +180,7 @@ pub fn rk45(f, y0, t_start, t_end, tol = 0.000001, dt_init = 0.0, dt_min = 0.000
         let y4 = y + h * (5179.0 * k1 / 57600.0 + 7571.0 * k3 / 16695.0 + 393.0 * k4 / 640.0 - 92097.0 * k5 / 339200.0 + 187.0 * k6 / 2100.0 + k7 / 40.0);
 
         // Error estimate
-        var err = abs(y5 - y4);
+        let mut err = abs(y5 - y4);
         if err < 0.000000000000001 {
             err = 0.000000000000001;
         }
@@ -193,7 +193,7 @@ pub fn rk45(f, y0, t_start, t_end, tol = 0.000001, dt_init = 0.0, dt_min = 0.000
         }
 
         // Adjust step size
-        var factor = safety * pow(tol / err, 0.2);
+        let mut factor = safety * pow(tol / err, 0.2);
         if factor > max_factor {
             factor = max_factor;
         }
@@ -227,22 +227,22 @@ pub fn rk45_system(f, y0_vec, t_start, t_end, tol = 0.000001, dt_init = 0.0, dt_
     let max_factor = 5.0;
     let min_factor = 0.2;
 
-    var h = dt_init;
+    let mut h = dt_init;
     if h == 0.0 {
         h = (t_end - t_start) / 100.0;
     }
-    var h_max = dt_max;
+    let mut h_max = dt_max;
     if h_max == 0.0 {
         h_max = (t_end - t_start) / 4.0;
     }
 
-    var t = t_start;
-    var y = y0_vec;
-    let results = [];
+    let mut t = t_start;
+    let mut y = y0_vec;
+    let mut results = [];
     results.push({ t: t, y: y });
 
     let max_steps = 100000;
-    var step_count = 0;
+    let mut step_count = 0;
 
     while t < t_end && step_count < max_steps {
         if t + h > t_end {
@@ -277,7 +277,7 @@ pub fn rk45_system(f, y0_vec, t_start, t_end, tol = 0.000001, dt_init = 0.0, dt_
 
         // Error estimate (vector norm)
         let err_vec = vec_sub(y_next, y4_sol);
-        var err = vec_norm(err_vec);
+        let mut err = vec_norm(err_vec);
         if err < 0.000000000000001 {
             err = 0.000000000000001;
         }
@@ -288,7 +288,7 @@ pub fn rk45_system(f, y0_vec, t_start, t_end, tol = 0.000001, dt_init = 0.0, dt_
             results.push({ t: t, y: y });
         }
 
-        var factor = safety * pow(tol / err, 0.2);
+        let mut factor = safety * pow(tol / err, 0.2);
         if factor > max_factor {
             factor = max_factor;
         }

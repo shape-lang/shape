@@ -33,9 +33,26 @@ impl ModuleCache {
         self.module_cache.get(module_path).cloned()
     }
 
-    /// Check for circular dependencies
+    /// Check for circular dependencies.
+    ///
+    /// Self-imports (A imports A) are silently allowed — the caller skips
+    /// inlining a module into itself. True cycles (A -> B -> A, or longer)
+    /// are still rejected.
     pub(super) fn check_circular_dependency(&self, module_path: &str) -> Result<()> {
         if self.loading_stack.contains(&module_path.to_string()) {
+            // Self-import: the module at the top of the loading stack is
+            // importing itself. This is harmless and handled by the inlining
+            // layer which skips self-references.
+            if self.loading_stack.last().map(|s| s.as_str()) == Some(module_path)
+                && self
+                    .loading_stack
+                    .iter()
+                    .filter(|s| s.as_str() == module_path)
+                    .count()
+                    == 1
+            {
+                return Ok(());
+            }
             let cycle = self.loading_stack.join(" -> ") + " -> " + module_path;
             return Err(ShapeError::ModuleError {
                 message: format!("Circular dependency detected: {}", cycle),

@@ -84,7 +84,7 @@ fn test_if_comparison_lte() {
 /// Verifies if without else, condition true.
 #[test]
 fn test_if_without_else_true() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if true { x = 1; }\n  return x;\n}\ntest()")
+    ShapeTest::new("function test() {\n  let mut x = 0;\n  if true { x = 1; }\n  return x;\n}\ntest()")
         .expect_number(1.0);
 }
 
@@ -92,7 +92,7 @@ fn test_if_without_else_true() {
 #[test]
 fn test_if_without_else_false() {
     ShapeTest::new(
-        "function test() {\n  let x = 0;\n  if false { x = 1; }\n  return x;\n}\ntest()",
+        "function test() {\n  let mut x = 0;\n  if false { x = 1; }\n  return x;\n}\ntest()",
     )
     .expect_number(0.0);
 }
@@ -100,7 +100,7 @@ fn test_if_without_else_false() {
 /// Verifies if without else side effects.
 #[test]
 fn test_if_without_else_side_effect() {
-    ShapeTest::new("function test() {\n  let sum = 0;\n  if 1 > 0 { sum = sum + 10; }\n  if 1 < 0 { sum = sum + 100; }\n  return sum;\n}\ntest()").expect_number(10.0);
+    ShapeTest::new("function test() {\n  let mut sum = 0;\n  if 1 > 0 { sum = sum + 10; }\n  if 1 < 0 { sum = sum + 100; }\n  return sum;\n}\ntest()").expect_number(10.0);
 }
 
 // ===========================================================================
@@ -352,7 +352,7 @@ fn test_conditional_assignment_false() {
 /// Verifies conditional reassignment.
 #[test]
 fn test_conditional_reassignment() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if true { x = 10; }\n  if false { x = 20; }\n  return x;\n}\ntest()").expect_number(10.0);
+    ShapeTest::new("function test() {\n  let mut x = 0;\n  if true { x = 10; }\n  if false { x = 20; }\n  return x;\n}\ntest()").expect_number(10.0);
 }
 
 // ===========================================================================
@@ -404,13 +404,13 @@ fn test_guard_clause_early_exit() {
 /// Verifies if-else with mutation.
 #[test]
 fn test_if_else_with_mutation() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if true { x = x + 1; }\n  if true { x = x + 2; }\n  if false { x = x + 100; }\n  return x;\n}\ntest()").expect_number(3.0);
+    ShapeTest::new("function test() {\n  let mut x = 0;\n  if true { x = x + 1; }\n  if true { x = x + 2; }\n  if false { x = x + 100; }\n  return x;\n}\ntest()").expect_number(3.0);
 }
 
 /// Verifies conditional accumulator.
 #[test]
 fn test_conditional_accumulator() {
-    ShapeTest::new("function test() {\n  let sum = 0;\n  for i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {\n    if i > 5 { sum = sum + i; }\n  }\n  return sum;\n}\ntest()").expect_number(40.0);
+    ShapeTest::new("function test() {\n  let mut sum = 0;\n  for i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {\n    if i > 5 { sum = sum + i; }\n  }\n  return sum;\n}\ntest()").expect_number(40.0);
 }
 
 /// Verifies if with string comparison.
@@ -428,13 +428,13 @@ fn test_if_with_string_comparison_false() {
 /// Verifies chained if all false.
 #[test]
 fn test_chained_if_all_false() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if false { x = 1; }\n  if false { x = 2; }\n  if false { x = 3; }\n  return x;\n}\ntest()").expect_number(0.0);
+    ShapeTest::new("function test() {\n  let mut x = 0;\n  if false { x = 1; }\n  if false { x = 2; }\n  if false { x = 3; }\n  return x;\n}\ntest()").expect_number(0.0);
 }
 
 /// Verifies chained if last true.
 #[test]
 fn test_chained_if_last_true() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if false { x = 1; }\n  if false { x = 2; }\n  if true { x = 3; }\n  return x;\n}\ntest()").expect_number(3.0);
+    ShapeTest::new("function test() {\n  let mut x = 0;\n  if false { x = 1; }\n  if false { x = 2; }\n  if true { x = 3; }\n  return x;\n}\ntest()").expect_number(3.0);
 }
 
 /// Verifies if with arithmetic condition.
@@ -530,13 +530,13 @@ fn test_if_else_classify_negative() {
 /// Verifies sequential if blocks.
 #[test]
 fn test_sequential_if_blocks() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if 1 > 0 { x = x + 1; }\n  if 2 > 0 { x = x + 2; }\n  if 3 > 0 { x = x + 4; }\n  return x;\n}\ntest()").expect_number(7.0);
+    ShapeTest::new("function test() {\n  let mut x = 0;\n  if 1 > 0 { x = x + 1; }\n  if 2 > 0 { x = x + 2; }\n  if 3 > 0 { x = x + 4; }\n  return x;\n}\ntest()").expect_number(7.0);
 }
 
 /// Verifies sequential if-else blocks.
 #[test]
 fn test_sequential_if_else_blocks() {
-    ShapeTest::new("function test() {\n  let x = 0;\n  if true { x = x + 1; } else { x = x + 10; }\n  if false { x = x + 100; } else { x = x + 2; }\n  if true { x = x + 4; } else { x = x + 1000; }\n  return x;\n}\ntest()").expect_number(7.0);
+    ShapeTest::new("function test() {\n  let mut x = 0;\n  if true { x = x + 1; } else { x = x + 10; }\n  if false { x = x + 100; } else { x = x + 2; }\n  if true { x = x + 4; } else { x = x + 1000; }\n  return x;\n}\ntest()").expect_number(7.0);
 }
 
 /// Verifies if with large numbers.
@@ -572,13 +572,13 @@ fn test_multiple_return_paths_fallthrough() {
 /// Verifies conditional over loop sum.
 #[test]
 fn test_conditional_over_loop_sum() {
-    ShapeTest::new("function test() {\n  let sum = 0;\n  for i in [1, 2, 3, 4, 5] {\n    sum = sum + i;\n  }\n  if sum > 10 { return \"big\"; } else { return \"small\"; }\n}\ntest()").expect_string("big");
+    ShapeTest::new("function test() {\n  let mut sum = 0;\n  for i in [1, 2, 3, 4, 5] {\n    sum = sum + i;\n  }\n  if sum > 10 { return \"big\"; } else { return \"small\"; }\n}\ntest()").expect_string("big");
 }
 
 /// Verifies conditional break in loop.
 #[test]
 fn test_conditional_break_in_loop() {
-    ShapeTest::new("function test() {\n  let result = 0;\n  for i in [1, 2, 3, 4, 5] {\n    if i == 3 {\n      result = i;\n      break;\n    }\n  }\n  return result;\n}\ntest()").expect_number(3.0);
+    ShapeTest::new("function test() {\n  let mut result = 0;\n  for i in [1, 2, 3, 4, 5] {\n    if i == 3 {\n      result = i;\n      break;\n    }\n  }\n  return result;\n}\ntest()").expect_number(3.0);
 }
 
 /// Verifies if with closure-like function condition.

@@ -40,7 +40,7 @@ fn array_length_empty() {
 fn array_push() {
     ShapeTest::new(
         r#"
-        let arr = [1, 2, 3]
+        let mut arr = [1, 2, 3]
         let arr2 = arr.push(4)
         print(arr2.length)
     "#,
@@ -128,7 +128,7 @@ fn array_index_of() {
     "#,
     )
     .expect_run_ok()
-    .expect_output("2");
+    .expect_output("2.0");
 }
 
 // =========================================================================

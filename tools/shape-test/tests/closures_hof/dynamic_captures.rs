@@ -110,7 +110,7 @@ fn closure_captures_mixed_types() {
 fn mutable_capture_modifies_enclosing_scope() {
     ShapeTest::new(
         r#"
-        let x = 0
+        let mut x = 0
         let set = |v| { x = v }
         set(42)
         x
@@ -123,7 +123,7 @@ fn mutable_capture_modifies_enclosing_scope() {
 fn mutable_capture_counter_reads_from_outer() {
     ShapeTest::new(
         r#"
-        let count = 0
+        let mut count = 0
         let inc = || { count = count + 1 }
         inc()
         inc()

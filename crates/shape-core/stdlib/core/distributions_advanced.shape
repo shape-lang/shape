@@ -33,7 +33,7 @@ function ln_gamma(x) {
     }
 
     let z = x - 1.0;
-    var ag = coefs[0];
+    let mut ag = coefs[0];
     for i in range(1, 9) {
         ag = ag + coefs[i] / (z + i);
     }
@@ -65,8 +65,8 @@ pub fn normal_cdf(x, mu = 0.0, sigma = 1.0) {
     let z = (x - mu) / sigma;
 
     // Use symmetry for negative values
-    var sign = 1.0;
-    var z_abs = z;
+    let mut sign = 1.0;
+    let mut z_abs = z;
     if z < 0.0 {
         sign = -1.0;
         z_abs = -z;
@@ -131,9 +131,9 @@ pub fn normal_quantile(p, mu = 0.0, sigma = 1.0) {
     let p_low = 0.02425;
     let p_high = 1.0 - p_low;
 
-    var q = 0.0;
-    var r = 0.0;
-    var z = 0.0;
+    let mut q = 0.0;
+    let mut r = 0.0;
+    let mut z = 0.0;
 
     if p < p_low {
         q = sqrt(-2.0 * ln(p));
@@ -174,7 +174,7 @@ pub fn chi_square_cdf(x, k) {
 
 /// Sample from chi-square distribution (sum of k squared standard normals)
 pub fn chi_square_sample(k) {
-    var sum = 0.0;
+    let mut sum = 0.0;
     for i in range(0, k) {
         let z = __intrinsic_random_normal(0.0, 1.0);
         sum = sum + z * z;
@@ -276,12 +276,12 @@ pub fn gamma_sample(k, theta = 1.0) {
     let d = k - 1.0 / 3.0;
     let c = 1.0 / sqrt(9.0 * d);
 
-    var result = 0.0;
-    var found = false;
-    var attempts = 0;
+    let mut result = 0.0;
+    let mut found = false;
+    let mut attempts = 0;
     while !found && attempts < 10000 {
-        var x = __intrinsic_random_normal(0.0, 1.0);
-        var v = 1.0 + c * x;
+        let mut x = __intrinsic_random_normal(0.0, 1.0);
+        let mut v = 1.0 + c * x;
         while v <= 0.0 {
             x = __intrinsic_random_normal(0.0, 1.0);
             v = 1.0 + c * x;
@@ -313,8 +313,8 @@ function regularized_gamma_p(a, x) {
     }
 
     // Series expansion: P(a,x) = e^(-x) * x^a * sum(x^n / Gamma(a+n+1))
-    var sum = 1.0 / a;
-    var term = 1.0 / a;
+    let mut sum = 1.0 / a;
+    let mut term = 1.0 / a;
     for n in range(1, 200) {
         term = term * x / (a + n);
         sum = sum + term;
@@ -328,12 +328,12 @@ function regularized_gamma_p(a, x) {
 /// Complementary regularized incomplete gamma Q(a, x) via continued fraction
 function regularized_gamma_q(a, x) {
     // Lentz's method for continued fraction
-    var f = 0.0000000000000001;
-    var c_val = f;
-    var d_val = 0.0;
+    let mut f = 0.0000000000000001;
+    let mut c_val = f;
+    let mut d_val = 0.0;
 
     for n in range(1, 200) {
-        var an = 0.0;
+        let mut an = 0.0;
         if n % 2 == 1 {
             let k = (n - 1) / 2;
             an = -(a + k) * (a + k + 0.0 - a + n * 1.0);
@@ -346,8 +346,8 @@ function regularized_gamma_q(a, x) {
 
     // Fallback: use series for P and return 1 - P
     // For large x, this converges fast anyway
-    var sum = 1.0 / a;
-    var term = 1.0 / a;
+    let mut sum = 1.0 / a;
+    let mut term = 1.0 / a;
     for n in range(1, 200) {
         term = term * x / (a + n);
         sum = sum + term;
@@ -381,9 +381,9 @@ function regularized_beta(x, a, b) {
     let eps = 0.0000000001;
     let tiny = 0.0000000000000001;
 
-    var f = 1.0;
-    var c_val = 1.0;
-    var d_val = 1.0 - (a + b) * x / (a + 1.0);
+    let mut f = 1.0;
+    let mut c_val = 1.0;
+    let mut d_val = 1.0 - (a + b) * x / (a + 1.0);
     if abs(d_val) < tiny {
         d_val = tiny;
     }
@@ -392,7 +392,7 @@ function regularized_beta(x, a, b) {
 
     for m in range(1, 200) {
         // Even step
-        var num = m * (b - m) * x / ((a + 2.0 * m - 1.0) * (a + 2.0 * m));
+        let mut num = m * (b - m) * x / ((a + 2.0 * m - 1.0) * (a + 2.0 * m));
         d_val = 1.0 + num / d_val;
         if abs(d_val) < tiny { d_val = tiny; }
         c_val = 1.0 + num / c_val;

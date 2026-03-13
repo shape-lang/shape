@@ -1,6 +1,6 @@
 //! Integration tests for new stdlib modules: csv, msgpack, set, crypto.
 //!
-//! These tests evaluate Shape code through the ShapeEngine, using `use <module>`
+//! These tests evaluate Shape code through the ShapeEngine, using `use std::core::<module>`
 //! to import the native stdlib modules.
 
 use crate::common::{eval_to_bool, eval_to_number, eval_to_string, init_runtime};
@@ -52,7 +52,7 @@ fn test_csv_parse() {
     assert!(eval_with_csv_to_bool(
         r#"
         use csv
-        let rows = csv.parse("a,b,c\n1,2,3")
+        let rows = csv::parse("a,b,c\n1,2,3")
         rows[1][0] == "1"
     "#
     ));
@@ -64,7 +64,7 @@ fn test_csv_parse_records() {
     assert!(eval_with_csv_to_bool(
         r#"
         use csv
-        let records = csv.parse_records("name,age\nAlice,30")
+        let records = csv::parse_records("name,age\nAlice,30")
         records[0]["name"] == "Alice"
     "#
     ));
@@ -76,7 +76,7 @@ fn test_csv_stringify() {
     let result = eval_with_csv_to_string(
         r#"
         use csv
-        csv.stringify([["x", "y"], ["1", "2"]])
+        csv::stringify([["x", "y"], ["1", "2"]])
     "#,
     );
     assert!(!result.is_empty());
@@ -88,7 +88,7 @@ fn test_csv_is_valid() {
     assert!(eval_with_csv_to_bool(
         r#"
         use csv
-        csv.is_valid("a,b\n1,2")
+        csv::is_valid("a,b\n1,2")
     "#
     ));
 }
@@ -100,11 +100,11 @@ fn test_msgpack_roundtrip_number() {
     init_runtime();
     assert!(eval_to_bool(
         r#"
-        use msgpack
-        let encoded = msgpack.encode(42)
+        use std::core::msgpack
+        let encoded = msgpack::encode(42)
         match encoded {
             Ok(data) => {
-                let decoded = msgpack.decode(data)
+                let decoded = msgpack::decode(data)
                 match decoded {
                     Ok(val) => val == 42,
                     Err(_) => false,
@@ -121,11 +121,11 @@ fn test_msgpack_roundtrip_string() {
     init_runtime();
     assert!(eval_to_bool(
         r#"
-        use msgpack
-        let encoded = msgpack.encode("hello")
+        use std::core::msgpack
+        let encoded = msgpack::encode("hello")
         match encoded {
             Ok(data) => {
-                let decoded = msgpack.decode(data)
+                let decoded = msgpack::decode(data)
                 match decoded {
                     Ok(val) => val == "hello",
                     Err(_) => false,
@@ -143,8 +143,8 @@ fn test_msgpack_encode_decode_basic() {
     // Verify encode produces a non-empty hex string (Ok result)
     assert!(eval_to_bool(
         r#"
-        use msgpack
-        let encoded = msgpack.encode("test")
+        use std::core::msgpack
+        let encoded = msgpack::encode("test")
         match encoded {
             Ok(data) => len(data) > 0,
             Err(_) => false,
@@ -161,9 +161,9 @@ fn test_set_from_array_dedup() {
     assert_eq!(
         eval_to_number(
             r#"
-            use set
-            let s = set.from_array([1, 2, 2, 3, 3, 3])
-            set.size(s)
+            use std::core::set
+            let s = set::from_array([1, 2, 2, 3, 3, 3])
+            set::size(s)
         "#
         ),
         3.0
@@ -175,9 +175,9 @@ fn test_set_contains() {
     init_runtime();
     assert!(eval_to_bool(
         r#"
-        use set
-        let s = set.from_array([1, 2, 3])
-        set.contains(s, 2)
+        use std::core::set
+        let s = set::from_array([1, 2, 3])
+        set::contains(s, 2)
     "#
     ));
 }
@@ -188,10 +188,10 @@ fn test_set_union() {
     assert_eq!(
         eval_to_number(
             r#"
-            use set
-            let a = set.from_array([1, 2])
-            let b = set.from_array([2, 3])
-            set.size(set.union(a, b))
+            use std::core::set
+            let a = set::from_array([1, 2])
+            let b = set::from_array([2, 3])
+            set::size(set::union(a, b))
         "#
         ),
         3.0
@@ -204,10 +204,10 @@ fn test_set_intersection() {
     assert_eq!(
         eval_to_number(
             r#"
-            use set
-            let a = set.from_array([1, 2, 3])
-            let b = set.from_array([2, 3, 4])
-            set.size(set.intersection(a, b))
+            use std::core::set
+            let a = set::from_array([1, 2, 3])
+            let b = set::from_array([2, 3, 4])
+            set::size(set::intersection(a, b))
         "#
         ),
         2.0
@@ -220,10 +220,10 @@ fn test_set_difference() {
     assert_eq!(
         eval_to_number(
             r#"
-            use set
-            let a = set.from_array([1, 2, 3])
-            let b = set.from_array([2, 3])
-            set.size(set.difference(a, b))
+            use std::core::set
+            let a = set::from_array([1, 2, 3])
+            let b = set::from_array([2, 3])
+            set::size(set::difference(a, b))
         "#
         ),
         1.0
@@ -237,8 +237,8 @@ fn test_crypto_sha512() {
     init_runtime();
     let hash = eval_to_string(
         r#"
-        use crypto
-        crypto.sha512("hello")
+        use std::core::crypto
+        crypto::sha512("hello")
     "#,
     );
     assert_eq!(hash.len(), 128); // 64 bytes hex-encoded
@@ -249,8 +249,8 @@ fn test_crypto_sha1() {
     init_runtime();
     let hash = eval_to_string(
         r#"
-        use crypto
-        crypto.sha1("hello")
+        use std::core::crypto
+        crypto::sha1("hello")
     "#,
     );
     assert_eq!(hash, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d");
@@ -261,8 +261,8 @@ fn test_crypto_md5() {
     init_runtime();
     let hash = eval_to_string(
         r#"
-        use crypto
-        crypto.md5("hello")
+        use std::core::crypto
+        crypto::md5("hello")
     "#,
     );
     assert_eq!(hash, "5d41402abc4b2a76b9719d911017c592");
@@ -273,8 +273,8 @@ fn test_crypto_random_bytes() {
     init_runtime();
     let hex = eval_to_string(
         r#"
-        use crypto
-        crypto.random_bytes(16)
+        use std::core::crypto
+        crypto::random_bytes(16)
     "#,
     );
     assert_eq!(hex.len(), 32); // 16 bytes = 32 hex chars
@@ -285,10 +285,10 @@ fn test_crypto_ed25519_roundtrip() {
     init_runtime();
     assert!(eval_to_bool(
         r#"
-        use crypto
-        let kp = crypto.ed25519_generate_keypair()
-        let sig = crypto.ed25519_sign("test message", kp["secret_key"])
-        crypto.ed25519_verify("test message", sig, kp["public_key"])
+        use std::core::crypto
+        let kp = crypto::ed25519_generate_keypair()
+        let sig = crypto::ed25519_sign("test message", kp["secret_key"])
+        crypto::ed25519_verify("test message", sig, kp["public_key"])
     "#
     ));
 }

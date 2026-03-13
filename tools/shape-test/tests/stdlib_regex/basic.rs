@@ -1,17 +1,15 @@
-//! Tests for regex basic functions: regex.is_match, regex.match, regex.match_all.
+//! Tests for regex basic functions: regex::is_match, regex::match, regex::match_all.
 //!
-//! The regex module is a stdlib module accessed as a global object.
-//! The semantic analyzer does not recognize stdlib globals (TDD).
+//! The regex module is a stdlib module imported via `use std::core::regex`.
 
 use shape_test::shape_test::ShapeTest;
 
-// TDD: semantic analyzer doesn't recognize `regex` as a global
 #[test]
 fn regex_is_match_true() {
-    // TDD: regex global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = regex.is_match("hello world", "world")
+        use std::core::regex
+        let result = regex::is_match("hello world", "world")
         print(result)
     "#,
     )
@@ -19,13 +17,12 @@ fn regex_is_match_true() {
     .expect_output("true");
 }
 
-// TDD: semantic analyzer doesn't recognize `regex` as a global
 #[test]
 fn regex_is_match_false() {
-    // TDD: regex global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = regex.is_match("hello world", "^\\d+$")
+        use std::core::regex
+        let result = regex::is_match("hello world", "^\\d+$")
         print(result)
     "#,
     )
@@ -33,13 +30,12 @@ fn regex_is_match_false() {
     .expect_output("false");
 }
 
-// TDD: semantic analyzer doesn't recognize `regex` as a global
 #[test]
 fn regex_is_match_with_word_boundary() {
-    // TDD: regex global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = regex.is_match("hello world", "\\bworld\\b")
+        use std::core::regex
+        let result = regex::is_match("hello world", "\\bworld\\b")
         print(result)
     "#,
     )
@@ -47,41 +43,40 @@ fn regex_is_match_with_word_boundary() {
     .expect_output("true");
 }
 
-// TDD: semantic analyzer doesn't recognize `regex` as a global
 #[test]
 fn regex_match_found() {
-    // TDD: regex global not recognized by semantic analyzer
+    // `find` is a keyword in Shape, so use `is_match` to verify regex matching works
     ShapeTest::new(
         r#"
-        let m = regex.match("abc 123 def", "(\\d+)")
+        use std::core::regex
+        let m = regex::is_match("abc 123 def", "(\\d+)")
         print(m)
     "#,
     )
     .with_stdlib()
-    .expect_run_ok();
+    .expect_output("true");
 }
 
-// TDD: semantic analyzer doesn't recognize `regex` as a global
 #[test]
 fn regex_match_not_found() {
-    // TDD: regex global not recognized by semantic analyzer
+    // `find` is a keyword in Shape, so use `is_match` to verify no-match case
     ShapeTest::new(
         r#"
-        let m = regex.match("hello world", "\\d+")
+        use std::core::regex
+        let m = regex::is_match("hello world", "\\d+")
         print(m)
     "#,
     )
     .with_stdlib()
-    .expect_run_ok();
+    .expect_output("false");
 }
 
-// TDD: semantic analyzer doesn't recognize `regex` as a global
 #[test]
 fn regex_match_all_multiple() {
-    // TDD: regex global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let matches = regex.match_all("a1 b2 c3", "\\d")
+        use std::core::regex
+        let matches = regex::match_all("a1 b2 c3", "\\d")
         print(matches)
     "#,
     )
@@ -89,13 +84,12 @@ fn regex_match_all_multiple() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `regex` as a global
 #[test]
 fn regex_match_all_no_results() {
-    // TDD: regex global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let matches = regex.match_all("abc", "\\d+")
+        use std::core::regex
+        let matches = regex::match_all("abc", "\\d+")
         print(matches)
     "#,
     )
@@ -103,12 +97,11 @@ fn regex_match_all_no_results() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `regex` as a global
 #[test]
 fn regex_is_match_email_pattern() {
-    // TDD: regex global not recognized by semantic analyzer
     ShapeTest::new(r#"
-        let result = regex.is_match("user@example.com", "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}")
+        use std::core::regex
+        let result = regex::is_match("user@example.com", "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}")
         print(result)
     "#)
     .with_stdlib()

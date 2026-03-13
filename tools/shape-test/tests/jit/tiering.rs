@@ -47,7 +47,7 @@ fn tier2_hot_loop_function() {
     ShapeTest::new(
         r#"
         fn hot(x) { x * 2 }
-        let result = 0
+        let mut result = 0
         for i in range(0, 100) {
             result = hot(i)
         }
@@ -129,7 +129,7 @@ fn jit_compatible_with_arrays() {
     ShapeTest::new(
         r#"
         fn sum_array(arr) {
-            let total = 0
+            let mut total = 0
             for item in arr {
                 total = total + item
             }

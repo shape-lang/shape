@@ -183,16 +183,16 @@ fn division_by_zero_float_is_inf_or_error() {
     ShapeTest::new("1.0 / 0.0").expect_run_err();
 }
 
-/// Index out of bounds fails.
+/// Index out of bounds returns null (not an error).
 #[test]
 fn index_out_of_bounds_fails() {
-    ShapeTest::new("let arr = [1, 2, 3]\narr[10]").expect_run_err();
+    ShapeTest::new("let arr = [1, 2, 3]\narr[10]").expect_none();
 }
 
-/// Negative index out of bounds fails.
+/// Negative index out of bounds returns null (not an error).
 #[test]
 fn negative_index_out_of_bounds_fails() {
-    ShapeTest::new("let arr = [1, 2, 3]\narr[-10]").expect_run_err();
+    ShapeTest::new("let arr = [1, 2, 3]\narr[-10]").expect_none();
 }
 
 // =============================================================================
@@ -224,7 +224,7 @@ fn result_accumulation_in_loop() {
     return Ok(x)
 }
 fn test() -> int {
-    let sum = 0
+    let mut sum = 0
     for i in [1, 2, 3, 4, 5] {
         let r = maybe_add(i)
         match r {

@@ -8,7 +8,7 @@ use shape_test::shape_test::ShapeTest;
 fn for_in_exclusive_range() {
     ShapeTest::new(
         r#"
-        var items = []
+        let mut items = []
         for i in 0..5 {
             items = items.push(i)
         }
@@ -22,7 +22,7 @@ fn for_in_exclusive_range() {
 fn for_in_inclusive_range() {
     ShapeTest::new(
         r#"
-        var items = []
+        let mut items = []
         for i in 0..=4 {
             items = items.push(i)
         }
@@ -37,7 +37,7 @@ fn for_in_inclusive_range() {
 fn range_builtin_function() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in range(0, 5) {
             sum = sum + i
         }
@@ -64,7 +64,7 @@ fn range_with_step() {
 fn range_as_loop_counter() {
     ShapeTest::new(
         r#"
-        var factorial = 1
+        let mut factorial = 1
         for i in 1..=10 {
             factorial = factorial * i
         }
@@ -78,7 +78,7 @@ fn range_as_loop_counter() {
 fn range_with_break() {
     ShapeTest::new(
         r#"
-        var last = 0
+        let mut last = 0
         for i in 0..100 {
             if i >= 5 { break }
             last = i
@@ -93,7 +93,7 @@ fn range_with_break() {
 fn range_with_continue() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 0..10 {
             if i % 2 != 0 { continue }
             sum = sum + i
@@ -108,7 +108,7 @@ fn range_with_continue() {
 fn large_range() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 0..1000 {
             sum = sum + i
         }

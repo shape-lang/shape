@@ -38,7 +38,7 @@ fn struct_literal_missing_field_diagnostic_points_to_literal_line() {
 #[test]
 fn semantic_diagnostic_does_not_reject_valid_named_intersection_assertion() {
     let code = r#"
-let a = { x: 1}
+let mut a = { x: 1}
 let b = { z: 3}
 a.y = 2
 let c = a+b
@@ -52,7 +52,7 @@ let (f:TypeA, g: TypeB) = c as (TypeA+TypeB)
 #[test]
 fn named_intersection_destructure_does_not_report_f_or_g_undefined() {
     let code = r#"
-let a = { x: 1}
+let mut a = { x: 1}
 let b = { z: 3}
 a.y = 2
 let c = a+b

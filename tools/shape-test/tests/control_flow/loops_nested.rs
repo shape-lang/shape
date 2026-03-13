@@ -84,9 +84,9 @@ for i in 0..2 {
 fn cf_11d_nested_while_break() {
     let code = r#"
 // Test 11d: Nested while loops with break (does the same bug occur?)
-let i = 0
+let mut i = 0
 while i < 3 {
-  let j = 0
+  let mut j = 0
   while j < 3 {
     if j == 1 { break }
     print(f"i={i} j={j}")
@@ -107,7 +107,7 @@ fn cf_11e_for_while_nested_break() {
     let code = r#"
 // Test 11e: Outer for, inner while with break
 for i in 0..3 {
-  let j = 0
+  let mut j = 0
   while j < 3 {
     if j == 1 { break }
     print(f"i={i} j={j}")
@@ -125,7 +125,7 @@ for i in 0..3 {
 fn nested_for_loops() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in [1, 2, 3] {
             for j in [10, 20] {
                 sum = sum + i * j
@@ -141,10 +141,10 @@ fn nested_for_loops() {
 fn nested_while_loops() {
     ShapeTest::new(
         r#"
-        var sum = 0
-        var i = 0
+        let mut sum = 0
+        let mut i = 0
         while i < 10 {
-            var j = 0
+            let mut j = 0
             while j < 10 {
                 sum = sum + 1
                 j = j + 1
@@ -161,7 +161,7 @@ fn nested_while_loops() {
 fn break_from_inner_loop_does_not_affect_outer() {
     ShapeTest::new(
         r#"
-        var r = 0
+        let mut r = 0
         for i in [1, 2, 3] {
             for j in [10, 20, 30] {
                 if j == 20 { break }
@@ -220,7 +220,7 @@ fn nested_for_with_continue_in_inner() {
     // Skip even j values
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in [1, 2] {
             for j in [1, 2, 3, 4] {
                 if j % 2 == 0 { continue }
@@ -243,7 +243,7 @@ fn nested_for_with_continue_in_inner() {
 fn loop_with_break_value_is_null_bug() {
     ShapeTest::new(
         r#"
-        var i = 0
+        let mut i = 0
         loop {
             i = i + 1
             if i == 5 { break }
@@ -258,7 +258,7 @@ fn loop_with_break_value_is_null_bug() {
 fn loop_with_counter_and_break() {
     ShapeTest::new(
         r#"
-        var count = 0
+        let mut count = 0
         loop {
             count = count + 1
             if count >= 10 { break }
@@ -275,9 +275,9 @@ fn loop_with_counter_and_break() {
 fn loop_break_with_result_workaround() {
     ShapeTest::new(
         r#"
-        var i = 0
+        let mut i = 0
         let items = ["apple", "banana", "cherry"]
-        var result = "not found"
+        let mut result = "not found"
         loop {
             if items[i] == "banana" {
                 result = "found banana"

@@ -8,7 +8,7 @@ use shape_test::shape_test::ShapeTest;
 fn exclusive_range_for_loop() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 0..5 {
             sum = sum + i
         }
@@ -22,7 +22,7 @@ fn exclusive_range_for_loop() {
 fn inclusive_range_for_loop() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 0..=5 {
             sum = sum + i
         }
@@ -62,7 +62,7 @@ fn inclusive_range_print_values() {
 fn range_starting_at_nonzero() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 5..10 {
             sum = sum + i
         }
@@ -76,7 +76,7 @@ fn range_starting_at_nonzero() {
 fn empty_range_no_iterations() {
     ShapeTest::new(
         r#"
-        var count = 0
+        let mut count = 0
         for i in 5..5 {
             count = count + 1
         }
@@ -90,7 +90,7 @@ fn empty_range_no_iterations() {
 fn inclusive_range_single_value() {
     ShapeTest::new(
         r#"
-        var count = 0
+        let mut count = 0
         for i in 5..=5 {
             count = count + 1
         }
@@ -104,7 +104,7 @@ fn inclusive_range_single_value() {
 fn reverse_range_no_iterations() {
     ShapeTest::new(
         r#"
-        var count = 0
+        let mut count = 0
         for i in 5..0 {
             count = count + 1
         }

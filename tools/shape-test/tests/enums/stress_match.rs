@@ -206,7 +206,7 @@ fn test_enum_in_if_condition_off() {
 #[test]
 fn test_enum_match_in_loop() {
     ShapeTest::new(
-        "enum Step { Inc, Dec, Nop }\nfn test() -> int { let steps = [Step::Inc, Step::Inc, Step::Dec, Step::Nop, Step::Inc]\nvar total = 0\nfor s in steps { total = total + match s { Step::Inc => 1, Step::Dec => -1, Step::Nop => 0, } }\ntotal }\ntest()",
+        "enum Step { Inc, Dec, Nop }\nfn test() -> int { let steps = [Step::Inc, Step::Inc, Step::Dec, Step::Nop, Step::Inc]\nlet mut total = 0\nfor s in steps { total = total + match s { Step::Inc => 1, Step::Dec => -1, Step::Nop => 0, } }\ntotal }\ntest()",
     )
     .expect_number(2.0);
 }

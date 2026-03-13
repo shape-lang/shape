@@ -21,7 +21,7 @@ fn object_spread_merge() {
     "#,
     )
     .expect_run_ok()
-    .expect_output("1\n10\n3");
+    .expect_output("1\n1\n10");
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn object_destructuring_in_function() {
 fn object_property_assignment() {
     ShapeTest::new(
         r#"
-        let obj = { name: "Alice", score: 0 }
+        let mut obj = { name: "Alice", score: 0 }
         obj.score = 100
         print(obj.score)
     "#,
@@ -90,7 +90,7 @@ fn object_property_assignment() {
 fn object_add_new_property() {
     ShapeTest::new(
         r#"
-        let obj = { x: 1 }
+        let mut obj = { x: 1 }
         obj.y = 2
         print(obj.y)
     "#,
@@ -108,7 +108,7 @@ fn object_add_new_property() {
 fn object_computed_key() {
     ShapeTest::new(
         r#"
-        let obj = { name: "default" }
+        let mut obj = { name: "default" }
         obj.name = "Bob"
         print(obj.name)
     "#,

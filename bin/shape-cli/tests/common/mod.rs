@@ -15,6 +15,9 @@ pub fn eval(code: &str) -> Result<serde_json::Value, String> {
     let mut engine = ShapeEngine::new().map_err(|e| e.to_string())?;
     engine.load_stdlib().map_err(|e| e.to_string())?;
     let mut executor = BytecodeExecutor::new();
+    // Allow __intrinsic_* calls so that tests inlining stdlib source
+    // (via with_modules()) can reference internal builtins.
+    executor.allow_internal_builtins = true;
     let result = engine
         .execute(&mut executor, code)
         .map_err(|e| e.to_string())?;

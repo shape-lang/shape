@@ -308,7 +308,7 @@ fn test_complex_enum_state_machine() {
                 State::Done => State::Done
             }
         }
-        var s = State::Idle
+        let mut s = State::Idle
         s = next_state(s)
         s = next_state(s)
         s = next_state(s)
@@ -331,7 +331,7 @@ fn test_complex_enum_command_pattern() {
                 Cmd::Reset => 0
             }
         }
-        var state = 0
+        let mut state = 0
         state = apply(state, Cmd::Add(10))
         state = apply(state, Cmd::Add(5))
         state = apply(state, Cmd::Sub(3))
@@ -353,7 +353,7 @@ fn test_complex_enum_command_reset() {
                 Cmd::Reset => 0
             }
         }
-        var state = 100
+        let mut state = 100
         state = apply(state, Cmd::Add(50))
         state = apply(state, Cmd::Reset)
         state = apply(state, Cmd::Add(7))
@@ -376,7 +376,7 @@ fn test_complex_enum_multi_step_matching() {
             }
         }
         let tokens = [Token::Num(3), Token::Plus, Token::Num(4), Token::Star, Token::Num(5)]
-        let sum = 0
+        let mut sum = 0
         for t in tokens {
             let v = token_value(t)
             if v >= 0 { sum = sum + v }

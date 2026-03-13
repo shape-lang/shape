@@ -64,7 +64,7 @@ fn test_array_push_immutable() {
     // .push returns a new array with the element appended
     ShapeTest::new(
         r#"
-        var arr = [1, 2]
+        let mut arr = [1, 2]
         arr = arr.push(3)
         arr.length
     "#,

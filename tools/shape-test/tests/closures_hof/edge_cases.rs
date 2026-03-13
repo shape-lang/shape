@@ -96,7 +96,7 @@ fn test_closure_edge_inside_else() {
 fn test_closure_edge_inside_loop_body() {
     ShapeTest::new(
         r#"
-        let results = []
+        let mut results = []
         for i in [1, 2, 3] {
             let f = |x| x * i
             results = results + [f(10)]
@@ -111,7 +111,7 @@ fn test_closure_edge_inside_loop_body() {
 fn test_closure_edge_many_closures_stress() {
     ShapeTest::new(
         r#"
-        let sum = 0
+        let mut sum = 0
         for i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
             let f = |x| x * 2
             sum = sum + f(i)

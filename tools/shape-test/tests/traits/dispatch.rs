@@ -156,5 +156,5 @@ fn impl_with_multiple_methods_dispatch() {
         print(v.is_zero())
     "#,
     )
-    .expect_output("25\nfalse");
+    .expect_output("25.0\nfalse");
 }

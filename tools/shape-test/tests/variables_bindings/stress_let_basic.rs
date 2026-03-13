@@ -224,7 +224,7 @@ fn test_width_typed_u8_arithmetic() {
 fn test_width_var_reassign_truncates_u8() {
     ShapeTest::new(
         "fn test() -> int {
-            var x: u8 = 10
+            let mut x: u8 = 10
             x = 300
             return x
         }\ntest()",
@@ -237,7 +237,7 @@ fn test_width_var_reassign_truncates_u8() {
 fn test_width_var_reassign_truncates_i8() {
     ShapeTest::new(
         "fn test() -> int {
-            var x: i8 = 0
+            let mut x: i8 = 0
             x = 200
             return x
         }\ntest()",
@@ -250,7 +250,7 @@ fn test_width_var_reassign_truncates_i8() {
 fn test_width_var_reassign_truncates_u16() {
     ShapeTest::new(
         "fn test() -> int {
-            var x: u16 = 0
+            let mut x: u16 = 0
             x = 70000
             return x
         }\ntest()",
@@ -859,7 +859,7 @@ fn test_const_in_expression_with_var() {
     ShapeTest::new(
         "fn test() -> int {
             const OFFSET = 100
-            var x = 5
+            let mut x = 5
             x = x + OFFSET
             return x
         }\ntest()",

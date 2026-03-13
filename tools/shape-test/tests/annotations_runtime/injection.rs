@@ -5,11 +5,9 @@
 
 use shape_test::shape_test::ShapeTest;
 
-// BUG: before hook arg modification causes int->number type coercion,
-// which triggers a TypeError at AddInt (known bug ct_15).
-// The Trusted arithmetic opcodes were removed; AddInt now returns a TypeError.
+// Previously: before hook arg modification caused int->number type coercion.
+// The int->number coercion bug has been fixed.
 #[test]
-#[should_panic(expected = "Type error: expected int")]
 fn before_hook_doubles_first_argument() {
     ShapeTest::new(
         r#"

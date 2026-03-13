@@ -90,8 +90,8 @@ fn multi_return_array() {
     ShapeTest::new(
         r#"
         fn min_max(arr) {
-            var lo = arr[0]
-            var hi = arr[0]
+            let mut lo = arr[0]
+            let mut hi = arr[0]
             for x in arr {
                 if x < lo { lo = x }
                 if x > hi { hi = x }

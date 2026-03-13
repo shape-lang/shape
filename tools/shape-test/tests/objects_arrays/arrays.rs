@@ -272,18 +272,18 @@ print(nums[-4])"#;
 
 #[test]
 fn array_out_of_bounds_positive_returns_none() {
-    // Array out-of-bounds throws a runtime error in Shape.
+    // Array out-of-bounds returns None in Shape (runtime prints "None").
     let code = r#"let nums = [1, 2, 3]
 print(nums[5])"#;
-    ShapeTest::new(code).expect_run_err_contains("out of bounds");
+    ShapeTest::new(code).expect_run_ok().expect_output("None");
 }
 
 #[test]
 fn array_out_of_bounds_negative_returns_none() {
-    // Array out-of-bounds throws a runtime error in Shape.
+    // Array out-of-bounds returns None in Shape (runtime prints "None").
     let code = r#"let nums = [1, 2, 3]
 print(nums[-5])"#;
-    ShapeTest::new(code).expect_run_err_contains("out of bounds");
+    ShapeTest::new(code).expect_run_ok().expect_output("None");
 }
 
 // =====================================================================

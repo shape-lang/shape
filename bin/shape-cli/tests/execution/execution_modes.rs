@@ -19,7 +19,7 @@ const SIMPLE_STRATEGY: Strategy = Strategy {
 
 const MEDIUM_STRATEGY: Strategy = Strategy {
     name: "Loop with Conditionals",
-    code: "var total = 0; for i in range(100) { if i % 2 == 0 { total = total + i } }; total",
+    code: "let mut total = 0; for i in range(100) { if i % 2 == 0 { total = total + i } }; total",
 };
 
 const COMPLEX_STRATEGY: Strategy = Strategy {

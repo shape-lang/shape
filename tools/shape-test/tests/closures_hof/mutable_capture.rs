@@ -15,7 +15,7 @@ fn test_closure_capture_mutable_internal_state() {
     // Mutable capture works for the closure's own internal view
     ShapeTest::new(
         r#"
-        let count = 0
+        let mut count = 0
         let inc = || { count = count + 1; count }
         inc()
         inc()
@@ -30,7 +30,7 @@ fn test_closure_capture_mutable_internal_state() {
 fn test_closure_counter_pattern_outer_read() {
     ShapeTest::new(
         r#"
-        let count = 0
+        let mut count = 0
         let inc = || { count = count + 1; count }
         inc()
         inc()
@@ -46,7 +46,7 @@ fn test_closure_counter_pattern_outer_read() {
 fn test_mutable_capture_counter_increment_output() {
     ShapeTest::new(
         r#"
-        let count = 0
+        let mut count = 0
         let inc = || { count = count + 1; count }
         print(inc())
         print(inc())
@@ -60,7 +60,7 @@ fn test_mutable_capture_counter_increment_output() {
 fn test_mutable_capture_decrement() {
     ShapeTest::new(
         r#"
-        let count = 10
+        let mut count = 10
         let dec = || { count = count - 1; count }
         dec()
         dec()
@@ -74,7 +74,7 @@ fn test_mutable_capture_decrement() {
 fn test_mutable_capture_toggle() {
     ShapeTest::new(
         r#"
-        let flag = false
+        let mut flag = false
         let toggle = || { flag = !flag; flag }
         toggle()
         toggle()
@@ -88,7 +88,7 @@ fn test_mutable_capture_toggle() {
 fn test_mutable_capture_multiply_accumulate() {
     ShapeTest::new(
         r#"
-        let product = 1
+        let mut product = 1
         let mul = |x| { product = product * x; product }
         mul(2)
         mul(3)
@@ -102,7 +102,7 @@ fn test_mutable_capture_multiply_accumulate() {
 fn test_mutable_capture_running_sum_output() {
     ShapeTest::new(
         r#"
-        let sum = 0
+        let mut sum = 0
         let running = |x| { sum = sum + x; sum }
         print(running(10))
         print(running(20))
@@ -116,7 +116,7 @@ fn test_mutable_capture_running_sum_output() {
 fn test_mutable_capture_toggle_four_times() {
     ShapeTest::new(
         r#"
-        let flag = false
+        let mut flag = false
         let toggle = || { flag = !flag; flag }
         toggle()
         toggle()
@@ -131,7 +131,7 @@ fn test_mutable_capture_toggle_four_times() {
 fn test_mutable_capture_counter_five() {
     ShapeTest::new(
         r#"
-        let n = 0
+        let mut n = 0
         let inc = || { n = n + 1; n }
         inc()
         inc()
@@ -148,7 +148,7 @@ fn test_mutable_capture_counter_five() {
 fn test_mutable_capture_bug_visible_after_call() {
     ShapeTest::new(
         r#"
-        let x = 0
+        let mut x = 0
         let set_x = |v| { x = v }
         set_x(42)
         x
@@ -161,7 +161,7 @@ fn test_mutable_capture_bug_visible_after_call() {
 fn test_mutable_capture_bug_accumulator_in_loop() {
     ShapeTest::new(
         r#"
-        let total = 0
+        let mut total = 0
         let add = |v| { total = total + v }
         for i in [1, 2, 3, 4, 5] {
             add(i)
@@ -176,8 +176,8 @@ fn test_mutable_capture_bug_accumulator_in_loop() {
 fn test_mutable_capture_bug_multiple_vars() {
     ShapeTest::new(
         r#"
-        let a = 0
-        let b = 0
+        let mut a = 0
+        let mut b = 0
         let inc_a = || { a = a + 1 }
         let inc_b = || { b = b + 10 }
         inc_a()
@@ -194,7 +194,7 @@ fn test_mutable_capture_bug_partial_mutation() {
     ShapeTest::new(
         r#"
         let x = 10
-        let y = 0
+        let mut y = 0
         let f = || { y = y + x }
         f()
         f()
@@ -208,7 +208,7 @@ fn test_mutable_capture_bug_partial_mutation() {
 fn test_mutable_capture_bug_string_builder() {
     ShapeTest::new(
         r#"
-        let result = ""
+        let mut result = ""
         let append = |s| { result = result + s }
         append("hello")
         append(" ")
@@ -219,29 +219,26 @@ fn test_mutable_capture_bug_string_builder() {
     .expect_string("hello world");
 }
 
-// BUG: Returned closures that capture function-local mutable state fail with
-// "Undefined variable: count". The closure can't see function-scoped locals
-// after the function returns.
 #[test]
 fn test_mutable_capture_bug_returned_closure() {
     ShapeTest::new(
         r#"
         fn make_counter() {
-            let count = 0
+            let mut count = 0
             || { count = count + 1; count }
         }
         let c = make_counter()
         c()
     "#,
     )
-    .expect_run_err_contains("Undefined variable");
+    .expect_number(1.0);
 }
 
 #[test]
 fn test_mutable_capture_bug_count_calls() {
     ShapeTest::new(
         r#"
-        let calls = 0
+        let mut calls = 0
         let f = |x| { calls = calls + 1; x * x }
         f(2)
         f(3)
@@ -256,7 +253,7 @@ fn test_mutable_capture_bug_count_calls() {
 fn test_mutable_capture_bug_max_tracker() {
     ShapeTest::new(
         r#"
-        let max_val = 0
+        let mut max_val = 0
         let track_max = |x| {
             if x > max_val { max_val = x }
         }
@@ -273,7 +270,7 @@ fn test_mutable_capture_bug_max_tracker() {
 fn test_mutable_capture_bug_with_condition() {
     ShapeTest::new(
         r#"
-        let count = 0
+        let mut count = 0
         let inc_if_positive = |x| {
             if x > 0 { count = count + 1 }
         }
@@ -290,7 +287,7 @@ fn test_mutable_capture_bug_with_condition() {
 fn test_mutable_capture_bug_array_push() {
     ShapeTest::new(
         r#"
-        let items = []
+        let mut items = []
         let push = |x| { items = items + [x] }
         push(1)
         push(2)
@@ -306,8 +303,8 @@ fn test_mutable_capture_bug_swap_values() {
     // After swap: a=2, b=1 => a + b * 10 = 2 + 1*10 = 12
     ShapeTest::new(
         r#"
-        let a = 1
-        let b = 2
+        let mut a = 1
+        let mut b = 2
         let swap = || {
             let tmp = a
             a = b
@@ -325,8 +322,8 @@ fn test_mutable_capture_bug_conditional_accumulate() {
     // [1,2,3,4,5]: evens={2,4}=2, odds={1,3,5}=3 => 2*10+3 = 23
     ShapeTest::new(
         r#"
-        let evens = 0
-        let odds = 0
+        let mut evens = 0
+        let mut odds = 0
         let classify = |x| {
             if x % 2 == 0 { evens = evens + 1 } else { odds = odds + 1 }
         }
@@ -342,7 +339,7 @@ fn test_mutable_capture_bug_nested_closure() {
     // BUG: nested closure mutation doesn't propagate to outer scope
     ShapeTest::new(
         r#"
-        let x = 0
+        let mut x = 0
         let outer = || {
             let inner = || { x = x + 1 }
             inner()
@@ -362,7 +359,7 @@ fn test_mutable_capture_closure_in_loop_body() {
     // Closure is created and called in same loop iteration; captures i immutably
     ShapeTest::new(
         r#"
-        let total = 0
+        let mut total = 0
         for i in [1, 2, 3] {
             let doubler = || i * 2
             total = total + doubler()
@@ -381,7 +378,7 @@ fn test_mutable_capture_closure_in_loop_body() {
 fn closure_mutable_capture_counter() {
     ShapeTest::new(
         r#"
-        let count = 0
+        let mut count = 0
         let inc = || {
             count = count + 1
             count
@@ -398,7 +395,7 @@ fn closure_mutable_capture_counter() {
 fn closure_mutable_capture_accumulator() {
     ShapeTest::new(
         r#"
-        let total = 0
+        let mut total = 0
         let add = |n| {
             total = total + n
             total

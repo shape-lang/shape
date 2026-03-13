@@ -176,7 +176,7 @@ impl MethodTable {
             "Vec",
             "push",
             vec![Type::fresh_var()],
-            BuiltinTypes::void(),
+            Type::fresh_var(),
             false,
         );
         self.register_method(

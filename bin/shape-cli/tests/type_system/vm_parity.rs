@@ -112,7 +112,7 @@ fn test_variable_consistency() {
         "let x = 10; let y = 20; x + y",
         30.0
     ));
-    assert!(check_number("var_reassign", "var x = 5; x = x + 1; x", 6.0));
+    assert!(check_number("var_reassign", "let mut x = 5; x = x + 1; x", 6.0));
 }
 
 #[test]
@@ -162,12 +162,12 @@ fn test_loop_consistency() {
 
     assert!(check_number(
         "for_sum",
-        "let sum = 0; for i in range(5) { sum = sum + i }; sum",
+        "let mut sum = 0; for i in range(5) { sum = sum + i }; sum",
         10.0
     ));
     assert!(check_number(
         "while_count",
-        "let i = 0; while i < 5 { i = i + 1 }; i",
+        "let mut i = 0; while i < 5 { i = i + 1 }; i",
         5.0
     ));
 }

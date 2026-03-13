@@ -30,7 +30,7 @@ fn test_complex_array_mutation_through_ref_caller_sees_changes() {
     ShapeTest::new(
         r#"
         fn double_all(&arr) {
-            var i = 0
+            let mut i = 0
             while i < len(arr) {
                 arr[i] = arr[i] * 2
                 i = i + 1
@@ -306,8 +306,8 @@ fn test_complex_ref_with_while_break() {
     ShapeTest::new(
         r#"
         fn inc(&x) { x = x + 1 }
-        var count = 0
-        var i = 0
+        let mut count = 0
+        let mut i = 0
         while true {
             if i >= 5 { break }
             inc(&count)
@@ -330,9 +330,9 @@ fn test_complex_bubble_sort_via_refs() {
         }
         let arr = [5, 3, 1, 4, 2]
         let n = len(arr)
-        var i = 0
+        let mut i = 0
         while i < n {
-            var j = 0
+            let mut j = 0
             while j < n - 1 - i {
                 if arr[j] > arr[j + 1] {
                     swap_elem(&arr, j, j + 1)
@@ -442,7 +442,7 @@ fn test_complex_drop_triple_nested_loops() {
     ShapeTest::new(
         r#"
         fn f() {
-            var total = 0
+            let mut total = 0
             for i in [1, 2] {
                 for j in [1, 2] {
                     for k in [1, 2] {
@@ -570,9 +570,9 @@ fn complex_fibonacci_via_refs() {
             a = b
             b = t
         }
-        var a = 0
-        var b = 1
-        var i = 0
+        let mut a = 0
+        let mut b = 1
+        let mut i = 0
         while i < 10 {
             fib_step(&a, &b)
             i = i + 1
@@ -715,7 +715,7 @@ fn complex_sum_array_through_ref() {
     ShapeTest::new(
         r#"
         fn sum_all(&arr) {
-            var total = 0
+            let mut total = 0
             for v in arr { total = total + v }
             total
         }

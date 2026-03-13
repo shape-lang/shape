@@ -223,7 +223,7 @@ fn type_with_display_and_operator() {
         c.to_string()
     "#,
     )
-    .expect_string("Vec2(4, 6)");
+    .expect_string("Vec2(4.0, 6.0)");
 }
 
 // =========================================================================
@@ -383,7 +383,7 @@ fn display_trait_with_multiple_fields() {
         p.to_string()
     "#,
     )
-    .expect_string("(1, 2)");
+    .expect_string("(1.0, 2.0)");
 }
 
 // =========================================================================
@@ -451,7 +451,7 @@ fn display_trait_with_formatting() {
         c.to_string()
     "#,
     )
-    .expect_string("(40.7, -74)");
+    .expect_string("(40.7, -74.0)");
 }
 
 // =========================================================================

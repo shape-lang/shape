@@ -49,7 +49,7 @@ fn output_contains_substring() {
 
 #[test]
 fn typed_object_property_assignment() {
-    ShapeTest::new("let a = { x: 10 }\na.y = 2\nprint(a.y)")
+    ShapeTest::new("let mut a = { x: 10 }\na.y = 2\nprint(a.y)")
         .expect_run_ok()
         .expect_output("2");
 }

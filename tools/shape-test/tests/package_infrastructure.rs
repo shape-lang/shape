@@ -532,6 +532,13 @@ fn test_bundle_preferred_over_directory() {
     let bundle_path = root_dir.path().join("dep.shapec");
     bundle.write_to_file(&bundle_path).unwrap();
 
+    // Bump the directory version so we can tell which source was resolved
+    std::fs::write(
+        dep_dir.join("shape.toml"),
+        "[project]\nname = \"dep\"\nversion = \"1.0.0\"",
+    )
+    .unwrap();
+
     // Consumer project
     std::fs::write(
         root_dir.path().join("shape.toml"),
@@ -558,9 +565,9 @@ dep = { path = "./dep" }
 
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].name, "dep");
-    // Bundle should be preferred and keep its declared version
+    // Bundle should be preferred — its version is "0.5.0", not the directory's "1.0.0"
     assert_eq!(
-        resolved[0].version, "1.0.0",
+        resolved[0].version, "0.5.0",
         "bundle should be preferred over directory"
     );
 }

@@ -707,7 +707,7 @@ fn test_hashmap_get_or_default_bool_default() {
 fn test_hashmap_var_reassignment() {
     ShapeTest::new(
         r#"{
-        var m = HashMap()
+        let mut m = HashMap()
         m = m.set("a", 1)
         m = m.set("b", 2)
         m = m.set("c", 3)
@@ -722,7 +722,7 @@ fn test_hashmap_var_reassignment() {
 fn test_hashmap_var_reassignment_overwrite() {
     ShapeTest::new(
         r#"{
-        var m = HashMap().set("x", 1)
+        let mut m = HashMap().set("x", 1)
         m = m.set("x", 2)
         m = m.set("x", 3)
         m.get("x")
@@ -736,7 +736,7 @@ fn test_hashmap_var_reassignment_overwrite() {
 fn test_hashmap_var_reassignment_delete() {
     ShapeTest::new(
         r#"{
-        var m = HashMap().set("a", 1).set("b", 2)
+        let mut m = HashMap().set("a", 1).set("b", 2)
         m = m.delete("a")
         print(m.len())
         print(m.has("a"))
@@ -751,7 +751,7 @@ fn test_hashmap_var_reassignment_delete() {
 fn test_hashmap_var_merge_reassignment() {
     ShapeTest::new(
         r#"{
-        var m = HashMap().set("a", 1)
+        let mut m = HashMap().set("a", 1)
         let extra = HashMap().set("b", 2)
         m = m.merge(extra)
         m.len()
@@ -765,7 +765,7 @@ fn test_hashmap_var_merge_reassignment() {
 fn test_hashmap_var_filter_reassignment() {
     ShapeTest::new(
         r#"{
-        var m = HashMap().set("a", 1).set("b", 10).set("c", 100)
+        let mut m = HashMap().set("a", 1).set("b", 10).set("c", 100)
         m = m.filter(|k, v| v >= 10)
         m.len()
     }"#,

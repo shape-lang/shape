@@ -153,7 +153,7 @@ fn test_vis_empty_module_member_access_runtime() {
     ShapeTest::new(
         r#"
         mod empty { }
-        empty.nonexistent()
+        empty::nonexistent()
     "#,
     )
     .expect_run_err_contains("has no export");
@@ -174,7 +174,7 @@ fn test_vis_module_inner_fn_not_accessible_on_outer() {
                 fn f() { 1 }
             }
         }
-        outer.f()
+        outer::f()
     "#,
     )
     .expect_run_err_contains("Invalid function call");
@@ -188,7 +188,7 @@ fn test_vis_nonexistent_fn_on_module() {
         mod M {
             fn real() { 1 }
         }
-        M.fake()
+        M::fake()
     "#,
     )
     .expect_run_err_contains("has no export");

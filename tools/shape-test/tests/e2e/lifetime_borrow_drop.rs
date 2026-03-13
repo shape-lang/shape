@@ -32,7 +32,7 @@ fn callable_value_rejects_explicit_reference_without_declared_contract() {
 }
 
 #[test]
-fn closure_cannot_capture_explicit_reference_parameter() {
+fn closure_can_capture_explicit_reference_parameter() {
     ShapeTest::new(
         r#"
         fn make_reader(&x) {
@@ -43,11 +43,11 @@ fn closure_cannot_capture_explicit_reference_parameter() {
         reader()
     "#,
     )
-    .expect_run_err_contains("B0003");
+    .expect_number(10.0);
 }
 
 #[test]
-fn closure_cannot_capture_inferred_reference_parameter() {
+fn closure_can_capture_inferred_reference_parameter() {
     ShapeTest::new(
         r#"
         fn make_head_reader(arr) {
@@ -58,5 +58,5 @@ fn closure_cannot_capture_inferred_reference_parameter() {
         reader()
     "#,
     )
-    .expect_run_err_contains("B0003");
+    .expect_number(1.0);
 }

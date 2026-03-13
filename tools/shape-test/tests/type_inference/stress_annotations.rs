@@ -673,7 +673,7 @@ fn higher_order_function_typed() {
 fn var_keyword_with_type() {
     ShapeTest::new(
         r#"
-        var x: int = 10
+        let mut x: int = 10
         x
     "#,
     )

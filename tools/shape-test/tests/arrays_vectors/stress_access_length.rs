@@ -476,7 +476,7 @@ test()"#,
 #[test]
 fn test_array_push_basic() {
     ShapeTest::new(
-        r#"function test() { var a = [1, 2]; a = a.push(3); a.length() }
+        r#"function test() { let mut a = [1, 2]; a = a.push(3); a.length() }
 test()"#,
     )
     .expect_number(3.0);
@@ -486,7 +486,7 @@ test()"#,
 #[test]
 fn test_array_push_value_preserved() {
     ShapeTest::new(
-        r#"function test() { var a = [1, 2]; a = a.push(3); a.last() }
+        r#"function test() { let mut a = [1, 2]; a = a.push(3); a.last() }
 test()"#,
     )
     .expect_number(3.0);
@@ -496,7 +496,7 @@ test()"#,
 #[test]
 fn test_array_push_to_empty() {
     ShapeTest::new(
-        r#"function test() { var a = []; a = a.push(42); a.first() }
+        r#"function test() { let mut a = []; a = a.push(42); a.first() }
 test()"#,
     )
     .expect_number(42.0);
@@ -507,7 +507,7 @@ test()"#,
 fn test_array_push_multiple() {
     ShapeTest::new(
         r#"function test() {
-            var a = []
+            let mut a = []
             a = a.push(1)
             a = a.push(2)
             a = a.push(3)
@@ -522,7 +522,7 @@ test()"#,
 #[test]
 fn test_array_push_preserves_existing() {
     ShapeTest::new(
-        r#"function test() { var a = [10, 20]; a = a.push(30); a[0] }
+        r#"function test() { let mut a = [10, 20]; a = a.push(30); a[0] }
 test()"#,
     )
     .expect_number(10.0);
@@ -556,8 +556,8 @@ test()"#,
 fn test_array_built_in_loop() {
     ShapeTest::new(
         r#"function test() {
-            var a = []
-            var i = 0
+            let mut a = []
+            let mut i = 0
             while i < 5 {
                 a = a.push(i)
                 i = i + 1
@@ -574,8 +574,8 @@ test()"#,
 fn test_array_built_in_loop_values() {
     ShapeTest::new(
         r#"function test() {
-            var a = []
-            var i = 0
+            let mut a = []
+            let mut i = 0
             while i < 3 {
                 a = a.push(i * 10)
                 i = i + 1
@@ -592,7 +592,7 @@ test()"#,
 fn test_array_for_in_loop() {
     ShapeTest::new(
         r#"function test() {
-            var sum = 0
+            let mut sum = 0
             for x in [10, 20, 30] {
                 sum = sum + x
             }

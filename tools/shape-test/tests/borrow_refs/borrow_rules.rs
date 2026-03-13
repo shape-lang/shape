@@ -143,8 +143,8 @@ fn test_borrow_in_while_loop_body() {
     ShapeTest::new(
         r#"
         fn double(&x) { x = x * 2 }
-        var val = 1
-        var i = 0
+        let mut val = 1
+        let mut i = 0
         while i < 4 {
             double(&val)
             i = i + 1
@@ -222,10 +222,10 @@ fn test_borrow_nested_while_loops() {
     ShapeTest::new(
         r#"
         fn inc(&x) { x = x + 1 }
-        var total = 0
-        var i = 0
+        let mut total = 0
+        let mut i = 0
         while i < 3 {
-            var j = 0
+            let mut j = 0
             while j < 3 {
                 inc(&total)
                 j = j + 1
@@ -243,7 +243,7 @@ fn test_borrow_assign_after_borrow_release() {
     ShapeTest::new(
         r#"
         fn read(&x) { x }
-        var a = 5
+        let mut a = 5
         let v = read(&a)
         a = 100
         a + v
@@ -341,7 +341,7 @@ fn test_borrow_for_in_with_ref_accumulator() {
     ShapeTest::new(
         r#"
         fn add_to(&acc, val) { acc = acc + val }
-        var sum = 0
+        let mut sum = 0
         for x in [10, 20, 30] {
             add_to(&sum, x)
         }
@@ -356,9 +356,9 @@ fn test_borrow_alternating_vars_in_loop() {
     ShapeTest::new(
         r#"
         fn inc(&x) { x = x + 1 }
-        var a = 0
-        var b = 0
-        var i = 0
+        let mut a = 0
+        let mut b = 0
+        let mut i = 0
         while i < 6 {
             if i % 2 == 0 {
                 inc(&a)
@@ -382,9 +382,9 @@ fn test_borrow_fibonacci_via_refs() {
             a = b
             b = tmp
         }
-        var a = 0
-        var b = 1
-        var i = 0
+        let mut a = 0
+        let mut b = 1
+        let mut i = 0
         while i < 10 {
             fib_step(&a, &b)
             i = i + 1
@@ -420,8 +420,8 @@ fn test_borrow_loop_accumulator_sum_1_to_100() {
     ShapeTest::new(
         r#"
         fn add_to(&sum, val) { sum = sum + val }
-        var total = 0
-        var i = 1
+        let mut total = 0
+        let mut i = 1
         while i <= 100 {
             add_to(&total, i)
             i = i + 1

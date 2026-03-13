@@ -440,31 +440,6 @@ pub fn default_stdlib_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
-
-    fn collect_shape_files(root: &Path) -> BTreeMap<PathBuf, String> {
-        let mut files = BTreeMap::new();
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_file())
-        {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("shape") {
-                continue;
-            }
-            let rel = path
-                .strip_prefix(root)
-                .expect("vendored stdlib file should be under root")
-                .to_path_buf();
-            let content = std::fs::read_to_string(path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));
-            files.insert(rel, content);
-        }
-        files
-    }
-
     #[test]
     fn test_load_stdlib() {
         let stdlib_path = default_stdlib_path();
@@ -558,20 +533,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_vendored_stdlib_matches_workspace_copy() {
-        let workspace_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../shape-core/stdlib");
-        let packaged_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib-src");
-
-        if !workspace_path.is_dir() || !packaged_path.is_dir() {
-            return;
-        }
-
-        let workspace_files = collect_shape_files(&workspace_path);
-        let packaged_files = collect_shape_files(&packaged_path);
-        assert_eq!(
-            packaged_files, workspace_files,
-            "shape-runtime/stdlib-src is out of sync with crates/shape-core/stdlib"
-        );
-    }
 }

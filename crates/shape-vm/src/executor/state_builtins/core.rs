@@ -336,9 +336,9 @@ pub fn create_state_module() -> ModuleExports {
         "snapshot",
         state_capture_all_stub,
         ModuleFunction {
-            description: "Convenience alias for capture_all()".to_string(),
+            description: "Create a snapshot of the current execution state. This is a suspension point: the engine saves all state and returns Snapshot::Hash(id). When resumed from a snapshot, execution continues here and returns Snapshot::Resumed.".to_string(),
             params: vec![],
-            return_type: Some("VmState".into()),
+            return_type: Some("Snapshot".into()),
         },
     );
 

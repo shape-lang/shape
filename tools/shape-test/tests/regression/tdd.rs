@@ -29,7 +29,7 @@ fn bug2_chained_call() {
 fn bug3_mutable_capture_propagates() {
     ShapeTest::new(
         r#"
-        let count = 0
+        let mut count = 0
         let inc = || { count = count + 1; count }
         inc()
         inc()
@@ -45,7 +45,7 @@ fn bug4_module_member_access() {
     ShapeTest::new(
         r#"
         mod math { pub fn add(a, b) { a + b } }
-        math.add(1, 2)
+        math::add(1, 2)
     "#,
     )
     .expect_number(3.0);
@@ -128,7 +128,7 @@ fn bug10_nested_field_mutation() {
         r#"
         type Inner { val: int }
         type Outer { data: Inner }
-        let o = Outer { data: Inner { val: 1 } }
+        let mut o = Outer { data: Inner { val: 1 } }
         o.data.val = 42
         o.data.val
     "#,
@@ -142,7 +142,7 @@ fn bug11_push_through_ref() {
     ShapeTest::new(
         r#"
         fn add_item(&arr, item) { arr = arr.push(item) }
-        var items = []
+        let mut items = []
         add_item(&items, 1)
         add_item(&items, 2)
         items.length
@@ -202,8 +202,8 @@ fn bug15_let_copies_in_ref_fn() {
             a = b
             b = old
         }
-        var x = 1
-        var y = 2
+        let mut x = 1
+        let mut y = 2
         swap(&x, &y)
         x * 10 + y
     "#,

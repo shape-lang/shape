@@ -9,7 +9,8 @@ use shape_test::shape_test::ShapeTest;
 fn crypto_sha512_basic() {
     ShapeTest::new(
         r#"
-        let hash = crypto.sha512("hello")
+        use std::core::crypto
+        let hash = crypto::sha512("hello")
         print(hash)
     "#,
     )
@@ -21,7 +22,8 @@ fn crypto_sha512_basic() {
 fn crypto_sha512_empty() {
     ShapeTest::new(
         r#"
-        let hash = crypto.sha512("")
+        use std::core::crypto
+        let hash = crypto::sha512("")
         print(hash)
     "#,
     )
@@ -33,7 +35,8 @@ fn crypto_sha512_empty() {
 fn crypto_sha1_basic() {
     ShapeTest::new(
         r#"
-        let hash = crypto.sha1("hello")
+        use std::core::crypto
+        let hash = crypto::sha1("hello")
         print(hash)
     "#,
     )
@@ -45,7 +48,8 @@ fn crypto_sha1_basic() {
 fn crypto_sha1_empty() {
     ShapeTest::new(
         r#"
-        let hash = crypto.sha1("")
+        use std::core::crypto
+        let hash = crypto::sha1("")
         print(hash)
     "#,
     )
@@ -57,7 +61,8 @@ fn crypto_sha1_empty() {
 fn crypto_md5_basic() {
     ShapeTest::new(
         r#"
-        let hash = crypto.md5("hello")
+        use std::core::crypto
+        let hash = crypto::md5("hello")
         print(hash)
     "#,
     )
@@ -69,7 +74,8 @@ fn crypto_md5_basic() {
 fn crypto_md5_empty() {
     ShapeTest::new(
         r#"
-        let hash = crypto.md5("")
+        use std::core::crypto
+        let hash = crypto::md5("")
         print(hash)
     "#,
     )
@@ -81,7 +87,8 @@ fn crypto_md5_empty() {
 fn crypto_random_bytes_length() {
     ShapeTest::new(
         r#"
-        let bytes = crypto.random_bytes(16)
+        use std::core::crypto
+        let bytes = crypto::random_bytes(16)
         print(bytes.length())
     "#,
     )
@@ -93,7 +100,8 @@ fn crypto_random_bytes_length() {
 fn crypto_random_bytes_zero() {
     ShapeTest::new(
         r#"
-        let bytes = crypto.random_bytes(0)
+        use std::core::crypto
+        let bytes = crypto::random_bytes(0)
         print(bytes.length())
     "#,
     )
@@ -105,8 +113,9 @@ fn crypto_random_bytes_zero() {
 fn crypto_random_bytes_unique() {
     ShapeTest::new(
         r#"
-        let a = crypto.random_bytes(32)
-        let b = crypto.random_bytes(32)
+        use std::core::crypto
+        let a = crypto::random_bytes(32)
+        let b = crypto::random_bytes(32)
         print(a != b)
     "#,
     )
@@ -118,7 +127,8 @@ fn crypto_random_bytes_unique() {
 fn crypto_ed25519_keypair_generation() {
     ShapeTest::new(
         r#"
-        let kp = crypto.ed25519_generate_keypair()
+        use std::core::crypto
+        let kp = crypto::ed25519_generate_keypair()
         let pk = kp.get("public_key")
         let sk = kp.get("secret_key")
         print(pk.length())
@@ -133,9 +143,10 @@ fn crypto_ed25519_keypair_generation() {
 fn crypto_ed25519_sign_produces_signature() {
     ShapeTest::new(
         r#"
-        let kp = crypto.ed25519_generate_keypair()
+        use std::core::crypto
+        let kp = crypto::ed25519_generate_keypair()
         let sk = kp.get("secret_key")
-        let sig = crypto.ed25519_sign("hello", sk)
+        let sig = crypto::ed25519_sign("hello", sk)
         print(sig.length())
     "#,
     )
@@ -147,12 +158,13 @@ fn crypto_ed25519_sign_produces_signature() {
 fn crypto_ed25519_sign_verify_roundtrip() {
     ShapeTest::new(
         r#"
-        let kp = crypto.ed25519_generate_keypair()
+        use std::core::crypto
+        let kp = crypto::ed25519_generate_keypair()
         let pk = kp.get("public_key")
         let sk = kp.get("secret_key")
         let msg = "test message"
-        let sig = crypto.ed25519_sign(msg, sk)
-        let valid = crypto.ed25519_verify(msg, sig, pk)
+        let sig = crypto::ed25519_sign(msg, sk)
+        let valid = crypto::ed25519_verify(msg, sig, pk)
         print(valid)
     "#,
     )
@@ -164,11 +176,12 @@ fn crypto_ed25519_sign_verify_roundtrip() {
 fn crypto_ed25519_verify_wrong_message() {
     ShapeTest::new(
         r#"
-        let kp = crypto.ed25519_generate_keypair()
+        use std::core::crypto
+        let kp = crypto::ed25519_generate_keypair()
         let pk = kp.get("public_key")
         let sk = kp.get("secret_key")
-        let sig = crypto.ed25519_sign("correct", sk)
-        let valid = crypto.ed25519_verify("wrong", sig, pk)
+        let sig = crypto::ed25519_sign("correct", sk)
+        let valid = crypto::ed25519_verify("wrong", sig, pk)
         print(valid)
     "#,
     )
@@ -180,8 +193,9 @@ fn crypto_ed25519_verify_wrong_message() {
 fn crypto_sha512_different_inputs() {
     ShapeTest::new(
         r#"
-        let h1 = crypto.sha512("hello")
-        let h2 = crypto.sha512("world")
+        use std::core::crypto
+        let h1 = crypto::sha512("hello")
+        let h2 = crypto::sha512("world")
         print(h1 != h2)
     "#,
     )

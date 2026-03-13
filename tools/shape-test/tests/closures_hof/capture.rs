@@ -26,7 +26,7 @@ fn test_closure_capture_immutable() {
 fn test_closure_capture_loop_variable() {
     ShapeTest::new(
         r#"
-        let sum = 0
+        let mut sum = 0
         for i in [1, 2, 3] {
             let add_i = |x| x + i
             sum = sum + add_i(0)
@@ -82,7 +82,7 @@ fn test_closure_nested_capture_chain() {
 fn test_closure_capture_from_for_loop_accumulator() {
     ShapeTest::new(
         r#"
-        let total = 0
+        let mut total = 0
         for i in [10, 20, 30] {
             let adder = |x| x + i
             total = total + adder(0)
@@ -162,9 +162,6 @@ fn closure_capture_string() {
 
 #[test]
 fn closure_capture_in_returned_lambda() {
-    // BUG: reference 'prefix' cannot escape into a closure; capture a value instead.
-    // This is a known limitation: string function parameters cannot be captured
-    // in closures returned from functions.
     ShapeTest::new(
         r#"
         fn make_greeting(prefix) {
@@ -174,7 +171,7 @@ fn closure_capture_in_returned_lambda() {
         hi("Alice")
     "#,
     )
-    .expect_run_err();
+    .expect_string("hi Alice");
 }
 
 #[test]
@@ -196,7 +193,7 @@ fn closure_capture_updated_before_creation() {
     // `let` is immutable in Shape; use `var` to allow reassignment.
     ShapeTest::new(
         r#"
-        var x = 1
+        let mut x = 1
         x = 5
         let f = || x
         f()
@@ -248,7 +245,7 @@ fn closure_nested_capture() {
 fn closure_capture_in_loop() {
     ShapeTest::new(
         r#"
-        let sum = 0
+        let mut sum = 0
         for i in [1, 2, 3] {
             let add_i = |x| x + i
             sum = sum + add_i(0)
@@ -263,7 +260,7 @@ fn closure_capture_in_loop() {
 fn closure_capture_loop_variable_accumulation() {
     ShapeTest::new(
         r#"
-        let result = 0
+        let mut result = 0
         for i in [10, 20, 30] {
             let f = || i
             result = result + f()

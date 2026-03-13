@@ -4,7 +4,7 @@
 /// Basic step functions for common mechanics systems.
 
 function vec_add(a, b) {
-    let out = [];
+    let mut out = [];
     for i in range(0, len(a)) {
         out.push(a[i] + b[i]);
     }
@@ -12,7 +12,7 @@ function vec_add(a, b) {
 }
 
 function vec_scale(a, s) {
-    let out = [];
+    let mut out = [];
     for i in range(0, len(a)) {
         out.push(a[i] * s);
     }
@@ -63,7 +63,7 @@ pub fn spring_mass_step(state, k, m, dt, damping = 0.0) {
 /// @param G - gravitational constant
 pub fn n_body_step(particles, dt, G = 1.0) {
     let n = len(particles);
-    let acc = [];
+    let mut acc = [];
 
     for i in range(0, n) {
         acc.push([0.0, 0.0, 0.0]);
@@ -90,7 +90,7 @@ pub fn n_body_step(particles, dt, G = 1.0) {
         }
     }
 
-    let updated = [];
+    let mut updated = [];
     for i in range(0, n) {
         let p = particles[i];
         let v_next = vec_add(p.velocity, vec_scale(acc[i], dt));

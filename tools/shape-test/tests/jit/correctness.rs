@@ -105,7 +105,7 @@ fn jit_loop_accumulator() {
     ShapeTest::new(
         r#"
         fn sum_to(n) {
-            let total = 0
+            let mut total = 0
             for i in range(1, n + 1) {
                 total = total + i
             }

@@ -528,14 +528,10 @@ greet()
         .expect_output("simple before\nhi\nsimple after");
 }
 
-/// BUG: Annotation before hook modifying args causes int->number type coercion.
-/// When the before hook returns a modified args array `[args[0] * 2, args[1]]`,
-/// the runtime produces a TypeError because the multiplication converts
-/// the int to a "number" type, which does not match the `int` parameter type.
-/// When fixed, `add(5, 3)` with doubled first arg should produce 13 (10 + 3).
+/// Previously: Annotation before hook modifying args caused int->number type coercion.
+/// The int->number coercion bug has been fixed.
+/// `add(5, 3)` with doubled first arg should produce 13 (10 + 3).
 #[test]
-// The Trusted arithmetic opcodes were removed; AddInt now returns a TypeError.
-#[should_panic(expected = "Type error: expected int")]
 fn ct_15_annotation_modify_args() {
     let code = r#"
 annotation double_first(label) {

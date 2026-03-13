@@ -415,6 +415,10 @@ pub fn intrinsic_char_code(args: &[ValueWord], _ctx: &mut ExecutionContext) -> R
             location: None,
         });
     }
+    // Accept both HeapValue::Char (from string indexing) and HeapValue::String
+    if let Some(c) = args[0].as_char() {
+        return Ok(ValueWord::from_f64(c as u32 as f64));
+    }
     let s = args[0].as_str().ok_or_else(|| ShapeError::RuntimeError {
         message: "__intrinsic_char_code argument must be a string".to_string(),
         location: None,

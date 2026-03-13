@@ -1,18 +1,16 @@
 //! Tests for crypto encoding functions: base64_encode, base64_decode,
 //! hex_encode, hex_decode.
 //!
-//! The crypto module is a stdlib module accessed as a global object.
-//! The semantic analyzer does not recognize stdlib globals (TDD).
+//! The crypto module is a stdlib module imported via `use std::core::crypto`.
 
 use shape_test::shape_test::ShapeTest;
 
-// TDD: semantic analyzer doesn't recognize `crypto` as a global
 #[test]
 fn crypto_base64_encode() {
-    // TDD: crypto global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let encoded = crypto.base64_encode("Hello, World!")
+        use std::core::crypto
+        let encoded = crypto::base64_encode("Hello, World!")
         print(encoded)
     "#,
     )
@@ -20,12 +18,12 @@ fn crypto_base64_encode() {
     .expect_output("SGVsbG8sIFdvcmxkIQ==");
 }
 
-// TDD: semantic analyzer doesn't recognize `crypto` as a global
 #[test]
 fn crypto_base64_decode() {
     ShapeTest::new(
         r#"
-        let decoded = crypto.base64_decode("SGVsbG8sIFdvcmxkIQ==")
+        use std::core::crypto
+        let decoded = crypto::base64_decode("SGVsbG8sIFdvcmxkIQ==")
         print(decoded)
     "#,
     )
@@ -33,14 +31,14 @@ fn crypto_base64_decode() {
     .expect_output("Ok(Hello, World!)");
 }
 
-// TDD: semantic analyzer doesn't recognize `crypto` as a global
 #[test]
 fn crypto_base64_roundtrip() {
     ShapeTest::new(
         r#"
+        use std::core::crypto
         let original = "Shape language rocks"
-        let encoded = crypto.base64_encode(original)
-        let decoded = crypto.base64_decode(encoded)
+        let encoded = crypto::base64_encode(original)
+        let decoded = crypto::base64_decode(encoded)
         print(decoded)
     "#,
     )
@@ -48,13 +46,12 @@ fn crypto_base64_roundtrip() {
     .expect_output("Ok(Shape language rocks)");
 }
 
-// TDD: semantic analyzer doesn't recognize `crypto` as a global
 #[test]
 fn crypto_hex_encode() {
-    // TDD: crypto global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let hex = crypto.hex_encode("hello")
+        use std::core::crypto
+        let hex = crypto::hex_encode("hello")
         print(hex)
     "#,
     )
@@ -62,12 +59,12 @@ fn crypto_hex_encode() {
     .expect_output("68656c6c6f");
 }
 
-// TDD: semantic analyzer doesn't recognize `crypto` as a global
 #[test]
 fn crypto_hex_decode() {
     ShapeTest::new(
         r#"
-        let decoded = crypto.hex_decode("68656c6c6f")
+        use std::core::crypto
+        let decoded = crypto::hex_decode("68656c6c6f")
         print(decoded)
     "#,
     )
@@ -75,14 +72,14 @@ fn crypto_hex_decode() {
     .expect_output("Ok(hello)");
 }
 
-// TDD: semantic analyzer doesn't recognize `crypto` as a global
 #[test]
 fn crypto_hex_roundtrip() {
     ShapeTest::new(
         r#"
+        use std::core::crypto
         let original = "test data"
-        let encoded = crypto.hex_encode(original)
-        let decoded = crypto.hex_decode(encoded)
+        let encoded = crypto::hex_encode(original)
+        let decoded = crypto::hex_decode(encoded)
         print(decoded)
     "#,
     )
@@ -90,13 +87,12 @@ fn crypto_hex_roundtrip() {
     .expect_output("Ok(test data)");
 }
 
-// TDD: semantic analyzer doesn't recognize `crypto` as a global
 #[test]
 fn crypto_base64_encode_empty() {
-    // TDD: crypto global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let encoded = crypto.base64_encode("")
+        use std::core::crypto
+        let encoded = crypto::base64_encode("")
         print(encoded)
     "#,
     )

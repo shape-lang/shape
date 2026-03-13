@@ -245,21 +245,21 @@ fn test_bitwise_or_with_variables() {
 /// Verifies &= compound assignment.
 #[test]
 fn test_and_assign() {
-    ShapeTest::new("fn test() {\n    var x = 0xFF\n    x &= 0x0F\n    x\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut x = 0xFF\n    x &= 0x0F\n    x\n}\ntest()")
         .expect_number(0x0F as f64);
 }
 
 /// Verifies |= compound assignment.
 #[test]
 fn test_or_assign() {
-    ShapeTest::new("fn test() {\n    var x = 0xF0\n    x |= 0x0F\n    x\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut x = 0xF0\n    x |= 0x0F\n    x\n}\ntest()")
         .expect_number(0xFF as f64);
 }
 
 /// Verifies chained compound OR assignment.
 #[test]
 fn test_chained_compound_assign() {
-    ShapeTest::new("fn test() {\n    var x = 0\n    x |= 1\n    x |= 2\n    x |= 4\n    x |= 8\n    x\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut x = 0\n    x |= 1\n    x |= 2\n    x |= 4\n    x |= 8\n    x\n}\ntest()")
         .expect_number(15.0);
 }
 
@@ -288,14 +288,14 @@ fn test_bitwise_in_if_condition_unset() {
 /// Verifies bitwise OR accumulation in loop.
 #[test]
 fn test_bitwise_accumulate_in_loop() {
-    ShapeTest::new("fn test() {\n    var result = 0\n    var i = 0\n    while i < 4 {\n        result = result | (1 << i)\n        i = i + 1\n    }\n    result\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut result = 0\n    let mut i = 0\n    while i < 4 {\n        result = result | (1 << i)\n        i = i + 1\n    }\n    result\n}\ntest()")
         .expect_number(15.0);
 }
 
 /// Verifies bitwise AND clearing bits in loop.
 #[test]
 fn test_bitwise_clear_bits_in_loop() {
-    ShapeTest::new("fn test() {\n    var x = 0xFF\n    var i = 0\n    while i < 4 {\n        x = x & ~(1 << i)\n        i = i + 1\n    }\n    x\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut x = 0xFF\n    let mut i = 0\n    while i < 4 {\n        x = x & ~(1 << i)\n        i = i + 1\n    }\n    x\n}\ntest()")
         .expect_number(0xF0 as f64);
 }
 

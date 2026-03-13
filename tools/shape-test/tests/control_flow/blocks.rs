@@ -139,7 +139,7 @@ fn block_with_multiple_statements_last_is_value() {
     ShapeTest::new(
         r#"
         let x = {
-            var temp = 0
+            let mut temp = 0
             temp = temp + 1
             temp = temp + 2
             temp = temp + 3
@@ -401,8 +401,8 @@ fn block_with_loop_inside() {
     ShapeTest::new(
         r#"
         let sum = {
-            var total = 0
-            var i = 1
+            let mut total = 0
+            let mut i = 1
             while i <= 5 {
                 total = total + i
                 i = i + 1
@@ -419,7 +419,7 @@ fn block_with_loop_inside() {
 // Trailing semicolons and unit values
 // =========================================================================
 
-/// A trailing semicolon in a block discards the value (returns 1 in practice).
+/// A trailing semicolon in a block discards the value (returns unit).
 #[test]
 fn cf_03_trailing_semicolon() {
     let code = r#"
@@ -428,7 +428,7 @@ let unit = { 1; }
 print(unit)
 // Expected: () or some unit representation
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("1");
+    ShapeTest::new(code).expect_run_ok().expect_output("()");
 }
 
 /// Detailed trailing semicolon behavior across various block forms.
@@ -454,7 +454,7 @@ print(f"d={d}")
 "#;
     ShapeTest::new(code)
         .expect_run_ok()
-        .expect_output("a=42\nb=42\nc=3\nd=3");
+        .expect_output("a=42\nb=()\nc=3\nd=()");
 }
 
 // =========================================================================

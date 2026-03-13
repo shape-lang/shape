@@ -1,18 +1,15 @@
-//! Tests for json.parse() functionality.
+//! Tests for json::parse() functionality.
 //!
-//! The json module is a stdlib module accessed as a global object.
-//! The semantic analyzer does not recognize stdlib globals, so these
-//! tests are expected to fail at semantic analysis (TDD).
+//! The json module is a stdlib module imported via `use std::core::json`.
 
 use shape_test::shape_test::ShapeTest;
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_parse_number() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.parse("42")
+        use std::core::json
+        let result = json::parse("42")
         print(result)
     "#,
     )
@@ -20,13 +17,12 @@ fn json_parse_number() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_parse_string_value() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.parse("\"hello\"")
+        use std::core::json
+        let result = json::parse("\"hello\"")
         print(result)
     "#,
     )
@@ -34,13 +30,12 @@ fn json_parse_string_value() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_parse_boolean() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.parse("true")
+        use std::core::json
+        let result = json::parse("true")
         print(result)
     "#,
     )
@@ -48,13 +43,12 @@ fn json_parse_boolean() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_parse_null() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.parse("null")
+        use std::core::json
+        let result = json::parse("null")
         print(result)
     "#,
     )
@@ -62,13 +56,12 @@ fn json_parse_null() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_parse_array() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.parse("[1, 2, 3]")
+        use std::core::json
+        let result = json::parse("[1, 2, 3]")
         print(result)
     "#,
     )
@@ -76,13 +69,12 @@ fn json_parse_array() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_parse_object() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.parse("{\"name\": \"test\", \"value\": 42}")
+        use std::core::json
+        let result = json::parse("{\"name\": \"test\", \"value\": 42}")
         print(result)
     "#,
     )
@@ -90,13 +82,12 @@ fn json_parse_object() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_parse_nested_object() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.parse("{\"outer\": {\"inner\": [1, 2]}}")
+        use std::core::json
+        let result = json::parse("{\"outer\": {\"inner\": [1, 2]}}")
         print(result)
     "#,
     )
@@ -104,13 +95,12 @@ fn json_parse_nested_object() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_parse_invalid_json_error() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let result = json.parse("{invalid json}")
+        use std::core::json
+        let result = json::parse("{invalid json}")
         print(result)
     "#,
     )
@@ -118,13 +108,12 @@ fn json_parse_invalid_json_error() {
     .expect_run_err_contains("parse");
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_is_valid_true() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let valid = json.is_valid("{\"key\": \"value\"}")
+        use std::core::json
+        let valid = json::is_valid("{\"key\": \"value\"}")
         print(valid)
     "#,
     )
@@ -132,13 +121,12 @@ fn json_is_valid_true() {
     .expect_run_ok();
 }
 
-// TDD: semantic analyzer doesn't recognize `json` as a global
 #[test]
 fn json_is_valid_false() {
-    // TDD: json global not recognized by semantic analyzer
     ShapeTest::new(
         r#"
-        let valid = json.is_valid("{not valid}")
+        use std::core::json
+        let valid = json::is_valid("{not valid}")
         print(valid)
     "#,
     )

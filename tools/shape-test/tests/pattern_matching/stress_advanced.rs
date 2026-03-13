@@ -566,7 +566,7 @@ fn t137_match_with_var_mutation_in_arm() {
     ShapeTest::new(
         r#"
         function test() {
-            var acc = 0
+            let mut acc = 0
             let x = 2
             match x {
                 1 => { acc = acc + 10 },
@@ -587,7 +587,7 @@ fn t138_match_multiple_times_same_var() {
     ShapeTest::new(
         r#"
         function test() {
-            var x = 1
+            let mut x = 1
             let r1 = match x { 1 => 10, _ => 0 }
             x = 2
             let r2 = match x { 2 => 20, _ => 0 }
@@ -662,7 +662,7 @@ fn t144_for_loop_array_destructure() {
         r#"
         function test() {
             let pairs = [[1, 2], [3, 4], [5, 6]]
-            var sum = 0
+            let mut sum = 0
             for [a, b] in pairs {
                 sum = sum + a * b
             }
@@ -680,14 +680,14 @@ fn t145_match_fibonacci_iterative() {
     ShapeTest::new(
         r#"
         function test() {
-            var n = 10
+            let mut n = 10
             return match n {
                 0 => 0,
                 1 => 1,
                 _ => {
-                    var a = 0
-                    var b = 1
-                    var i = 2
+                    let mut a = 0
+                    let mut b = 1
+                    let mut i = 2
                     while (i <= n) {
                         let temp = a + b
                         a = b

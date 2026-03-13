@@ -92,8 +92,8 @@ fn test_hashmap_build_20_entries() {
 fn test_hashmap_build_loop() {
     ShapeTest::new(
         r#"{
-        var m = HashMap()
-        var i = 0
+        let mut m = HashMap()
+        let mut i = 0
         while i < 50 {
             m = m.set(i, i * i)
             i = i + 1
@@ -109,8 +109,8 @@ fn test_hashmap_build_loop() {
 fn test_hashmap_loop_build_and_query() {
     ShapeTest::new(
         r#"{
-        var m = HashMap()
-        var i = 0
+        let mut m = HashMap()
+        let mut i = 0
         while i < 10 {
             m = m.set(i, i * 2)
             i = i + 1

@@ -310,7 +310,7 @@ fn runtime_err_division_by_zero() {
     .expect_run_err();
 }
 
-// Array out-of-bounds throws a runtime error in Shape.
+// Array out-of-bounds returns null in Shape (not an error).
 #[test]
 fn runtime_err_array_index_out_of_bounds_returns_null() {
     ShapeTest::new(
@@ -320,10 +320,10 @@ fn runtime_err_array_index_out_of_bounds_returns_null() {
         v == None
     "#,
     )
-    .expect_run_err_contains("out of bounds");
+    .expect_bool(true);
 }
 
-// Negative out-of-bounds also throws a runtime error.
+// Negative out-of-bounds also returns null.
 #[test]
 fn runtime_err_negative_index_beyond_length_returns_null() {
     ShapeTest::new(
@@ -333,7 +333,7 @@ fn runtime_err_negative_index_beyond_length_returns_null() {
         v == None
     "#,
     )
-    .expect_run_err_contains("out of bounds");
+    .expect_bool(true);
 }
 
 #[test]
@@ -388,7 +388,7 @@ fn runtime_err_modulo_by_zero() {
     .expect_run_err();
 }
 
-// Empty array access throws a runtime error (out of bounds).
+// Empty array access returns null (not an error).
 #[test]
 fn runtime_err_empty_array_access_returns_null() {
     ShapeTest::new(
@@ -398,7 +398,7 @@ fn runtime_err_empty_array_access_returns_null() {
         v == None
     "#,
     )
-    .expect_run_err_contains("out of bounds");
+    .expect_bool(true);
 }
 
 #[test]

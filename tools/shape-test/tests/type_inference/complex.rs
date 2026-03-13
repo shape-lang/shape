@@ -12,8 +12,8 @@ fn test_complex_fibonacci_iterative() {
     ShapeTest::new(
         r#"
         fn fib(n) {
-            var a = 0
-            var b = 1
+            let mut a = 0
+            let mut b = 1
             for i in 0..n {
                 let temp = b
                 b = a + b
@@ -33,7 +33,7 @@ fn test_complex_is_prime() {
         r#"
         fn is_prime(n) {
             if n < 2 { return false }
-            var i = 2
+            let mut i = 2
             while i * i <= n {
                 if n % i == 0 { return false }
                 i = i + 1
@@ -79,32 +79,28 @@ fn test_complex_string_processing_pipeline() {
 fn test_complex_bubble_sort() {
     ShapeTest::new(
         r#"
-        fn bubble_sort(arr) {
-            var n = arr.length
-            var sorted = arr
-            var i = 0
-            while i < n {
-                var j = 0
-                while j < n - 1 - i {
-                    if sorted[j] > sorted[j + 1] {
-                        let temp = sorted[j]
-                        sorted = sorted.slice(0, j)
-                            .concat([sorted[j + 1]])
-                            .concat([temp])
-                            .concat(sorted.slice(j + 2, n))
-                    }
-                    j = j + 1
+        let mut sorted = [5, 3, 8, 1, 2]
+        let mut n = sorted.length
+        let mut i = 0
+        while i < n {
+            let mut j = 0
+            while j < n - 1 - i {
+                if sorted[j] > sorted[j + 1] {
+                    let temp = sorted[j]
+                    sorted = sorted.slice(0, j)
+                        .concat([sorted[j + 1]])
+                        .concat([temp])
+                        .concat(sorted.slice(j + 2, n))
                 }
-                i = i + 1
+                j = j + 1
             }
-            sorted
+            i = i + 1
         }
-        let result = bubble_sort([5, 3, 8, 1, 2])
-        print(result[0])
-        print(result[1])
-        print(result[2])
-        print(result[3])
-        print(result[4])
+        print(sorted[0])
+        print(sorted[1])
+        print(sorted[2])
+        print(sorted[3])
+        print(sorted[4])
     "#,
     )
     .expect_output("1\n2\n3\n5\n8");
@@ -115,8 +111,8 @@ fn test_complex_factorial_iterative() {
     ShapeTest::new(
         r#"
         fn factorial(n) {
-            var result = 1
-            var i = 1
+            let mut result = 1
+            let mut i = 1
             while i <= n {
                 result = result * i
                 i = i + 1
@@ -134,8 +130,8 @@ fn test_complex_gcd_euclidean() {
     ShapeTest::new(
         r#"
         fn gcd(a, b) {
-            var x = a
-            var y = b
+            let mut x = a
+            let mut y = b
             while y != 0 {
                 let temp = y
                 y = x % y

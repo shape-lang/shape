@@ -245,7 +245,7 @@ fn test_export_pub_fn_many_params_parses() {
 
 #[test]
 fn test_export_pub_var_parses() {
-    ShapeTest::new("pub var mutable_state = 0").expect_parse_ok();
+    ShapeTest::new("pub let mut mutable_state = 0").expect_parse_ok();
 }
 
 #[test]

@@ -176,7 +176,7 @@ fn test_enum_let_binding() {
 #[test]
 fn test_enum_reassign_var() {
     ShapeTest::new(
-        "enum Light { Red, Yellow, Green }\nvar l = Light::Red\nl = Light::Green\nmatch l { Light::Red => 1, Light::Yellow => 2, Light::Green => 3, }",
+        "enum Light { Red, Yellow, Green }\nlet mut l = Light::Red\nl = Light::Green\nmatch l { Light::Red => 1, Light::Yellow => 2, Light::Green => 3, }",
     )
     .expect_number(3.0);
 }
@@ -402,7 +402,7 @@ fn test_enum_eq_three_variants_cc() {
 #[test]
 fn test_enum_var_reassignment_across_variants() {
     ShapeTest::new(
-        "enum Light { Red, Yellow, Green }\nvar l = Light::Red\nlet v1 = match l { Light::Red => 1, Light::Yellow => 2, Light::Green => 3, }\nl = Light::Green\nlet v2 = match l { Light::Red => 1, Light::Yellow => 2, Light::Green => 3, }\nv1 * 10 + v2",
+        "enum Light { Red, Yellow, Green }\nlet mut l = Light::Red\nlet v1 = match l { Light::Red => 1, Light::Yellow => 2, Light::Green => 3, }\nl = Light::Green\nlet v2 = match l { Light::Red => 1, Light::Yellow => 2, Light::Green => 3, }\nv1 * 10 + v2",
     )
     .expect_number(13.0);
 }

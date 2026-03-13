@@ -38,7 +38,7 @@ pub fn property(name, n_trials, gen_fn, prop_fn) {
 /// @param tests - Array of { name, trials, gen, prop } objects
 /// @returns { passed, failed, results }
 pub fn run_properties(tests) {
-    let results = [];
+    let mut results = [];
     var passed_count = 0;
     var failed_count = 0;
 
@@ -95,7 +95,7 @@ pub fn gen_string(max_len) {
 pub fn gen_array(max_len, elem_gen) {
     || {
         let n = __intrinsic_random_int(0, max_len);
-        let arr = [];
+        let mut arr = [];
         for i in range(0, n) {
             arr.push(elem_gen());
         }

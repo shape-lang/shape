@@ -136,17 +136,19 @@ pub fn collect_startup_specs(
 
     // Auto-scan ~/.shape/extensions/ for globally installed extensions.
     let mut global_dir_specs = Vec::new();
-    if let Some(global_dir) = crate::commands::ext_cmd::default_extensions_dir() {
-        // Skip if it's the same dir already scanned via --extension-dir
-        let dominated = provider_opts
-            .extension_dir
-            .as_ref()
-            .and_then(|d| d.canonicalize().ok())
-            .zip(global_dir.canonicalize().ok())
-            .map(|(a, b)| a == b)
-            .unwrap_or(false);
-        if !dominated && global_dir.is_dir() {
-            collect_shared_libs_from_dir(&global_dir, &mut global_dir_specs);
+    if !provider_opts.skip_global_extensions {
+        if let Some(global_dir) = crate::commands::ext_cmd::default_extensions_dir() {
+            // Skip if it's the same dir already scanned via --extension-dir
+            let dominated = provider_opts
+                .extension_dir
+                .as_ref()
+                .and_then(|d| d.canonicalize().ok())
+                .zip(global_dir.canonicalize().ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false);
+            if !dominated && global_dir.is_dir() {
+                collect_shared_libs_from_dir(&global_dir, &mut global_dir_specs);
+            }
         }
     }
     global_dir_specs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -381,6 +383,7 @@ mod tests {
         let provider_opts = ProviderOptions {
             config_path: Some(temp.path().join("missing-config.toml")),
             extension_dir: None,
+            skip_global_extensions: true,
         };
 
         let specs = collect_startup_specs(

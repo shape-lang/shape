@@ -236,7 +236,7 @@ fn test_infer_let_from_match() {
 fn test_infer_reassignment_preserves_type() {
     ShapeTest::new(
         r#"
-        var x = 10
+        let mut x = 10
         x = x + 5
         x = x * 2
         x

@@ -28,8 +28,8 @@ fn test_complex_state_machine_traffic_light() {
                 Light::Yellow => "Yellow"
             }
         }
-        var light = Light::Red
-        var i = 0
+        let mut light = Light::Red
+        let mut i = 0
         while i < 6 {
             print(light_name(light))
             light = next_light(light)
@@ -175,7 +175,7 @@ fn test_complex_enum_with_loop_accumulation() {
     ShapeTest::new(r#"
         enum Action { Add(int), Sub(int), Reset }
         fn apply_actions(actions) {
-            var total = 0
+            let mut total = 0
             for action in actions {
                 total = match action {
                     Action::Add(n) => total + n,
@@ -288,8 +288,8 @@ fn test_complex_enum_state_machine_with_payload() {
                 State::Done(msg) => msg
             }
         }
-        var s = State::Idle
-        var i = 0
+        let mut s = State::Idle
+        let mut i = 0
         while i < 6 {
             s = step(s)
             i = i + 1

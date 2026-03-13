@@ -10,7 +10,7 @@ use shape_test::shape_test::ShapeTest;
 /// Verifies var basic reassignment.
 #[test]
 fn test_var_basic_reassign() {
-    ShapeTest::new("var x = 1\nx = 2\nx").expect_number(2.0);
+    ShapeTest::new("let mut x = 1\nx = 2\nx").expect_number(2.0);
 }
 
 /// Verifies let mut basic reassignment.
@@ -23,33 +23,33 @@ fn test_let_mut_basic_reassign() {
 /// Verifies var multiple reassignments.
 #[test]
 fn test_var_multiple_reassign() {
-    ShapeTest::new("var x = 0\nx = 1\nx = 2\nx = 3\nx").expect_number(3.0);
+    ShapeTest::new("let mut x = 0\nx = 1\nx = 2\nx = 3\nx").expect_number(3.0);
 }
 
 /// Verifies var reassign different value.
 #[test]
 fn test_var_reassign_different_value() {
-    ShapeTest::new("fn test() -> int { var x = 10\nx = 20\nreturn x }\ntest()").expect_number(20.0);
+    ShapeTest::new("fn test() -> int { let mut x = 10\nx = 20\nreturn x }\ntest()").expect_number(20.0);
 }
 
 /// Verifies self-increment pattern.
 #[test]
 fn test_var_self_increment() {
-    ShapeTest::new("fn test() -> int { var x = 5\nx = x + 1\nreturn x }\ntest()")
+    ShapeTest::new("fn test() -> int { let mut x = 5\nx = x + 1\nreturn x }\ntest()")
         .expect_number(6.0);
 }
 
 /// Verifies self-decrement pattern.
 #[test]
 fn test_var_self_decrement() {
-    ShapeTest::new("fn test() -> int { var x = 10\nx = x - 3\nreturn x }\ntest()")
+    ShapeTest::new("fn test() -> int { let mut x = 10\nx = x - 3\nreturn x }\ntest()")
         .expect_number(7.0);
 }
 
 /// Verifies self-multiply pattern.
 #[test]
 fn test_var_self_multiply() {
-    ShapeTest::new("fn test() -> int { var x = 4\nx = x * 3\nreturn x }\ntest()")
+    ShapeTest::new("fn test() -> int { let mut x = 4\nx = x * 3\nreturn x }\ntest()")
         .expect_number(12.0);
 }
 
@@ -73,7 +73,7 @@ fn test_let_mut_accumulate() {
 fn test_var_string_reassign() {
     ShapeTest::new(
         "fn test() -> string {
-            var s = \"hello\"
+            let mut s = \"hello\"
             s = \"world\"
             return s
         }\ntest()",
@@ -86,7 +86,7 @@ fn test_var_string_reassign() {
 fn test_var_bool_reassign() {
     ShapeTest::new(
         "fn test() -> bool {
-            var flag = true
+            let mut flag = true
             flag = false
             return flag
         }\ntest()",
@@ -273,7 +273,7 @@ fn test_each_level_shadows_independently() {
 fn test_var_self_add() {
     ShapeTest::new(
         "fn test() -> int {
-            var x = 0
+            let mut x = 0
             x = x + 1
             x = x + 1
             x = x + 1
@@ -288,9 +288,9 @@ fn test_var_self_add() {
 fn test_swap_pattern() {
     ShapeTest::new(
         "fn test() -> int {
-            var a = 1
-            var b = 2
-            var tmp = a
+            let mut a = 1
+            let mut b = 2
+            let mut tmp = a
             a = b
             b = tmp
             return a * 10 + b
@@ -304,7 +304,7 @@ fn test_swap_pattern() {
 fn test_accumulator_pattern() {
     ShapeTest::new(
         "fn test() -> int {
-            var acc = 0
+            let mut acc = 0
             acc = acc + 10
             acc = acc + 20
             acc = acc + 30
@@ -319,7 +319,7 @@ fn test_accumulator_pattern() {
 fn test_counter_with_multiply() {
     ShapeTest::new(
         "fn test() -> int {
-            var x = 1
+            let mut x = 1
             x = x * 2
             x = x * 2
             x = x * 2
@@ -377,7 +377,7 @@ fn test_var_defined_before_if() {
 fn test_mutable_var_modified_in_if() {
     ShapeTest::new(
         "fn test() -> int {
-            var x = 0
+            let mut x = 0
             if true {
                 x = 42
             }
@@ -392,7 +392,7 @@ fn test_mutable_var_modified_in_if() {
 fn test_mutable_var_both_branches() {
     ShapeTest::new(
         "fn test() -> int {
-            var x = 0
+            let mut x = 0
             if false {
                 x = 10
             } else {
@@ -435,7 +435,7 @@ fn test_nested_if_with_vars() {
 fn test_var_used_in_loop_accumulator() {
     ShapeTest::new(
         "fn test() -> int {
-            var sum = 0
+            let mut sum = 0
             for i in 1..6 {
                 sum = sum + i
             }
@@ -450,7 +450,7 @@ fn test_var_used_in_loop_accumulator() {
 fn test_var_loop_counter() {
     ShapeTest::new(
         "fn test() -> int {
-            var count = 0
+            let mut count = 0
             for i in 0..10 {
                 count = count + 1
             }
@@ -484,7 +484,7 @@ fn test_multiple_vars_in_different_blocks() {
 fn test_var_int_to_negative() {
     ShapeTest::new(
         "fn test() -> int {
-            var x = 5
+            let mut x = 5
             x = x - 10
             return x
         }\ntest()",
@@ -497,7 +497,7 @@ fn test_var_int_to_negative() {
 fn test_var_toggle_bool() {
     ShapeTest::new(
         "fn test() -> bool {
-            var flag = true
+            let mut flag = true
             flag = !flag
             return flag
         }\ntest()",
@@ -510,7 +510,7 @@ fn test_var_toggle_bool() {
 fn test_var_double_toggle_bool() {
     ShapeTest::new(
         "fn test() -> bool {
-            var flag = true
+            let mut flag = true
             flag = !flag
             flag = !flag
             return flag
@@ -524,7 +524,7 @@ fn test_var_double_toggle_bool() {
 fn test_mutable_number_var() {
     ShapeTest::new(
         "fn test() -> number {
-            var x = 1.0
+            let mut x = 1.0
             x = x + 0.5
             x = x + 0.5
             return x
@@ -538,8 +538,8 @@ fn test_mutable_number_var() {
 fn test_var_countdown() {
     ShapeTest::new(
         "fn test() -> int {
-            var n = 10
-            var steps = 0
+            let mut n = 10
+            let mut steps = 0
             while n > 0 {
                 n = n - 1
                 steps = steps + 1
@@ -556,7 +556,7 @@ fn test_var_conditional_assign() {
     ShapeTest::new(
         "fn test() -> int {
             let a = 5
-            var result = 0
+            let mut result = 0
             if a > 3 {
                 result = 1
             } else {
@@ -574,7 +574,7 @@ fn test_var_reassign_with_function_call() {
     ShapeTest::new(
         "fn double(n: int) -> int { return n * 2 }
         fn test() -> int {
-            var x = 3
+            let mut x = 3
             x = double(x)
             return x
         }\ntest()",
@@ -588,7 +588,7 @@ fn test_var_reassign_repeatedly_with_fn() {
     ShapeTest::new(
         "fn double(n: int) -> int { return n * 2 }
         fn test() -> int {
-            var x = 1
+            let mut x = 1
             x = double(x)
             x = double(x)
             x = double(x)

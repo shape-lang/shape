@@ -64,8 +64,8 @@ fn test_every_large_array() {
     ShapeTest::new(
         r#"
         fn test() {
-            let arr = []
-            let i = 1
+            let mut arr = []
+            let mut i = 1
             while i <= 50 {
                 arr.push(i);
                 i = i + 1
@@ -84,7 +84,7 @@ fn test_two_closures_sharing_capture() {
     ShapeTest::new(
         r#"
         fn make_pair() {
-            let val = 0
+            let mut val = 0
             let inc = || { val = val + 1; val }
             let get = || val
             inc()
@@ -268,8 +268,8 @@ fn test_apply_n_times() {
     ShapeTest::new(
         r#"
         fn apply_n(f, n, x) {
-            let result = x
-            let i = 0
+            let mut result = x
+            let mut i = 0
             while i < n {
                 result = f(result)
                 i = i + 1
@@ -443,8 +443,8 @@ fn test_full_pipeline_complex() {
     ShapeTest::new(
         r#"
         fn test() {
-            let data = []
-            let i = 1
+            let mut data = []
+            let mut i = 1
             while i <= 20 {
                 data.push(i);
                 i = i + 1

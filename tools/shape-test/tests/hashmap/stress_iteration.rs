@@ -382,7 +382,7 @@ fn test_hashmap_foreach_with_accumulator() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 10).set("b", 20).set("c", 30)
-        var sum = 0
+        let mut sum = 0
         m.forEach(|k, v| { sum = sum + v })
         sum
     }"#,
@@ -396,7 +396,7 @@ fn test_hashmap_foreach_single_entry() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("x", 42)
-        var count = 0
+        let mut count = 0
         m.forEach(|k, v| { count = count + 1 })
         count
     }"#,
@@ -761,7 +761,7 @@ fn test_hashmap_config_pattern() {
 fn test_hashmap_counter_pattern() {
     ShapeTest::new(
         r#"{
-        var counts = HashMap()
+        let mut counts = HashMap()
         let items = ["a", "b", "a", "c", "b", "a"]
         for item in items {
             let current = counts.getOrDefault(item, 0)
@@ -808,8 +808,8 @@ fn test_hashmap_set_in_loop_with_string_keys() {
     ShapeTest::new(
         r#"{
         let keys = ["alpha", "beta", "gamma", "delta"]
-        var m = HashMap()
-        var i = 0
+        let mut m = HashMap()
+        let mut i = 0
         for key in keys {
             m = m.set(key, i)
             i = i + 1
@@ -843,7 +843,7 @@ fn test_hashmap_function_as_value() {
 fn test_hashmap_conditional_set() {
     ShapeTest::new(
         r#"{
-        var m = HashMap()
+        let mut m = HashMap()
         let values = [1, 2, 3, 4, 5]
         for v in values {
             if v > 3 {

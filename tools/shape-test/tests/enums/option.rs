@@ -189,7 +189,7 @@ fn test_option_in_array() {
     ShapeTest::new(
         r#"
         let opts = [Some(1), None, Some(3)]
-        let sum = 0
+        let mut sum = 0
         for opt in opts {
             sum = sum + match opt {
                 Some(v) => v,
@@ -541,7 +541,7 @@ fn test_complex_option_chain_lookup() {
             else if key == "b" { Some(2) }
             else { None }
         }
-        let total = 0
+        let mut total = 0
         let keys = ["a", "b", "c", "a"]
         for k in keys {
             total = total + match lookup(k) {
@@ -568,7 +568,7 @@ fn test_complex_accumulate_with_option() {
             }
         }
         let data = [10, 20, 30, 40, 50]
-        let sum = 0
+        let mut sum = 0
         for i in [0, 2, 4, 6, 8] {
             sum = sum + match safe_get(data, i) {
                 Some(v) => v,

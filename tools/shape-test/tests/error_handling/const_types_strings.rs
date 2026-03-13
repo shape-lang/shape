@@ -51,7 +51,7 @@ fn let_is_mutable() {
     // This test verifies that `let` reassignment is correctly rejected.
     ShapeTest::new(
         r#"
-        var x = 1
+        let mut x = 1
         x = 2
         x
     "#,
@@ -217,7 +217,7 @@ fn const_in_loop_condition() {
     ShapeTest::new(
         r#"
         const LIMIT = 3
-        let sum = 0
+        let mut sum = 0
         for i in [1, 2, 3, 4, 5] {
             if i > LIMIT { break }
             sum = sum + i

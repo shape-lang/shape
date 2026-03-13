@@ -35,7 +35,7 @@ for i in 0..5 {
 fn for_loop_with_range() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 0..5 {
             sum = sum + i
         }
@@ -95,7 +95,7 @@ for i in 0..10 step 2 {
 fn cf_35_large_range() {
     let code = r#"
 // Test 35: Large range (performance check)
-let sum = 0
+let mut sum = 0
 for i in 0..10000 {
   sum = sum + i
 }
@@ -142,7 +142,7 @@ fn for_loop_over_array_print() {
 fn for_loop_accumulator() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for x in [10, 20, 30] {
             sum = sum + x
         }
@@ -156,7 +156,7 @@ fn for_loop_accumulator() {
 fn for_loop_over_string_array() {
     ShapeTest::new(
         r#"
-        var result = ""
+        let mut result = ""
         for s in ["a", "b", "c"] {
             result = result + s
         }
@@ -171,7 +171,7 @@ fn for_loop_empty_array() {
     // Iterating over empty array should not execute body
     ShapeTest::new(
         r#"
-        var x = 42
+        let mut x = 42
         for item in [] {
             x = 0
         }
@@ -185,7 +185,7 @@ fn for_loop_empty_array() {
 fn for_loop_counting_elements() {
     ShapeTest::new(
         r#"
-        var count = 0
+        let mut count = 0
         for x in [1, 2, 3, 4, 5] {
             count = count + 1
         }
@@ -200,7 +200,7 @@ fn for_loop_with_conditional_accumulation() {
     // Sum only positive values
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for x in [1, -2, 3, -4, 5] {
             if x > 0 { sum = sum + x }
         }
@@ -214,8 +214,8 @@ fn for_loop_with_conditional_accumulation() {
 fn for_loop_with_if_else_body() {
     ShapeTest::new(
         r#"
-        var evens = 0
-        var odds = 0
+        let mut evens = 0
+        let mut odds = 0
         for x in [1, 2, 3, 4, 5, 6] {
             if x % 2 == 0 {
                 evens = evens + 1
@@ -233,7 +233,7 @@ fn for_loop_with_if_else_body() {
 fn for_loop_building_result_array() {
     ShapeTest::new(
         r#"
-        var result = []
+        let mut result = []
         for x in [1, 2, 3] {
             result = result.push(x * 2)
         }
@@ -315,7 +315,7 @@ for i in 0..5 {
 fn cf_06_while_loop() {
     let code = r#"
 // Test 06: While loops
-let i = 0
+let mut i = 0
 while i < 3 {
   print(i)
   i = i + 1
@@ -331,8 +331,8 @@ while i < 3 {
 fn while_loop_basic_counter() {
     ShapeTest::new(
         r#"
-        var i = 0
-        var sum = 0
+        let mut i = 0
+        let mut sum = 0
         while i < 5 {
             sum = sum + i
             i = i + 1
@@ -347,8 +347,8 @@ fn while_loop_basic_counter() {
 fn while_loop_sum_to_100() {
     ShapeTest::new(
         r#"
-        var sum = 0
-        var i = 1
+        let mut sum = 0
+        let mut i = 1
         while i <= 100 {
             sum = sum + i
             i = i + 1
@@ -363,7 +363,7 @@ fn while_loop_sum_to_100() {
 fn while_loop_never_enters() {
     ShapeTest::new(
         r#"
-        var x = 0
+        let mut x = 0
         while false {
             x = 99
         }
@@ -391,8 +391,8 @@ print("done")
 fn while_loop_decrementing() {
     ShapeTest::new(
         r#"
-        var n = 10
-        var result = 1
+        let mut n = 10
+        let mut result = 1
         while n > 0 {
             result = result * n
             n = n - 1
@@ -407,8 +407,8 @@ fn while_loop_decrementing() {
 fn while_loop_with_compound_condition() {
     ShapeTest::new(
         r#"
-        var i = 0
-        var sum = 0
+        let mut i = 0
+        let mut sum = 0
         while i < 20 and sum < 50 {
             sum = sum + i
             i = i + 1
@@ -424,8 +424,8 @@ fn while_loop_simulating_do_while() {
     // Execute body at least once, then check condition
     ShapeTest::new(
         r#"
-        var i = 10
-        var ran = false
+        let mut i = 10
+        let mut ran = false
         while true {
             ran = true
             if i < 5 {
@@ -449,7 +449,7 @@ fn while_loop_simulating_do_while() {
 fn cf_12_while_true_break() {
     let code = r#"
 // Test 12: while true with break (infinite loop guard)
-let count = 0
+let mut count = 0
 while true {
   if count >= 5 { break }
   print(count)
@@ -467,7 +467,7 @@ print("done")
 fn while_loop_with_break() {
     ShapeTest::new(
         r#"
-        var i = 0
+        let mut i = 0
         while true {
             if i >= 5 { break }
             i = i + 1
@@ -484,8 +484,8 @@ fn while_loop_early_break_on_condition() {
     ShapeTest::new(
         r#"
         let arr = [1, 3, 7, 2, 9]
-        var found = -1
-        var i = 0
+        let mut found = -1
+        let mut i = 0
         while i < arr.length {
             if arr[i] > 5 {
                 found = arr[i]
@@ -525,7 +525,7 @@ for i in 0..10 {
 fn cf_19_while_break_continue() {
     let code = r#"
 // Test 19: Continue and break in while loops
-let i = 0
+let mut i = 0
 while i < 10 {
   i = i + 1
   if i == 3 { continue }
@@ -544,8 +544,8 @@ fn while_loop_with_continue() {
     // Sum only even numbers from 0 to 9
     ShapeTest::new(
         r#"
-        var sum = 0
-        var i = 0
+        let mut sum = 0
+        let mut i = 0
         while i < 10 {
             i = i + 1
             if i % 2 != 0 { continue }

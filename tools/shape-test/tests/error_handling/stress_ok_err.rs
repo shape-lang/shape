@@ -269,7 +269,7 @@ match r { Ok(v) => 1, Err(e) => -1 }"#,
 #[test]
 fn ok_reassigned_to_err() {
     ShapeTest::new(
-        r#"var r = Ok(1)
+        r#"let mut r = Ok(1)
 r = Err("changed")
 match r { Ok(v) => v, Err(e) => -1 }"#,
     )
@@ -280,7 +280,7 @@ match r { Ok(v) => v, Err(e) => -1 }"#,
 #[test]
 fn err_reassigned_to_ok() {
     ShapeTest::new(
-        r#"var r = Err("fail")
+        r#"let mut r = Err("fail")
 r = Ok(42)
 match r { Ok(v) => v, Err(e) => -1 }"#,
     )

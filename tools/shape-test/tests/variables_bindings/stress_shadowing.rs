@@ -10,7 +10,7 @@ use shape_test::shape_test::ShapeTest;
 /// Verifies mutable variable reassignment in same scope.
 #[test]
 fn test_shadow_same_scope() {
-    ShapeTest::new("var x = 1\nx = 2\nx").expect_number(2.0);
+    ShapeTest::new("let mut x = 1\nx = 2\nx").expect_number(2.0);
 }
 
 /// Verifies reassignment uses previous value.
@@ -18,7 +18,7 @@ fn test_shadow_same_scope() {
 fn test_shadow_uses_previous_value() {
     ShapeTest::new(
         "fn test() -> int {
-            var x = 1
+            let mut x = 1
             x = x + 1
             return x
         }\ntest()",
@@ -31,7 +31,7 @@ fn test_shadow_uses_previous_value() {
 fn test_shadow_chain() {
     ShapeTest::new(
         "fn test() -> int {
-            var x = 1
+            let mut x = 1
             x = x + 1
             x = x + 1
             x = x + 1
@@ -90,7 +90,7 @@ fn test_shadow_in_for_loop() {
     ShapeTest::new(
         "fn test() -> int {
             let i = 99
-            var sum = 0
+            let mut sum = 0
             for i in 1..4 {
                 sum = sum + i
             }
@@ -109,7 +109,7 @@ fn test_shadow_in_for_loop() {
 fn test_shadow_let_with_var() {
     ShapeTest::new(
         "fn test() -> int {
-            var x = 1
+            let mut x = 1
             x = x + 10
             x = x + 5
             return x

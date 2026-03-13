@@ -83,7 +83,7 @@ fn test_complex_module_then_for_loop() {
     ShapeTest::new(
         r#"
         mod M { fn f() { 0 } }
-        let total = 0
+        let mut total = 0
         for x in [1, 2, 3, 4, 5] {
             total = total + x
         }
@@ -98,7 +98,7 @@ fn test_complex_module_then_while_loop() {
     ShapeTest::new(
         r#"
         mod M { fn f() { 0 } }
-        let i = 0
+        let mut i = 0
         while i < 10 {
             i = i + 1
         }

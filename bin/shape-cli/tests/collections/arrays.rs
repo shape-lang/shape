@@ -15,7 +15,7 @@ fn test_array_operations() {
 
     assert_eq!(eval_to_number("let arr = [10, 20, 30]; arr[1]"), 20.0);
     assert_eq!(
-        eval_to_number("let arr = [1, 2, 3]; let sum = 0; for x in arr { sum = sum + x }; sum"),
+        eval_to_number("let arr = [1, 2, 3]; let mut sum = 0; for x in arr { sum = sum + x }; sum"),
         6.0
     );
 }

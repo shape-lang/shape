@@ -57,7 +57,7 @@ fn higher_order_map_style() {
     ShapeTest::new(
         r#"
         fn apply_to_each(arr, f) {
-            var result = []
+            let mut result = []
             for x in arr {
                 result = result.push(f(x))
             }

@@ -226,7 +226,7 @@ fn test_gamma_sample_positive() {
         &["core/distributions_advanced.shape"],
         r#"
         __intrinsic_random_seed(42);
-        var all_positive = true;
+        let mut all_positive = true;
         for i in range(0, 100) {
             let s = gamma_sample(2.0, 1.0);
             if s <= 0.0 {
@@ -246,7 +246,7 @@ fn test_beta_sample_in_unit_interval() {
         &["core/distributions_advanced.shape"],
         r#"
         __intrinsic_random_seed(42);
-        var all_ok = true;
+        let mut all_ok = true;
         for i in range(0, 100) {
             let s = beta_sample(2.0, 5.0);
             if s < 0.0 || s > 1.0 {
@@ -323,7 +323,7 @@ fn test_gen_int_range() {
         r#"
         __intrinsic_random_seed(42);
         let gen = gen_int(10, 20);
-        var all_in_range = true;
+        let mut all_in_range = true;
         for i in range(0, 50) {
             let v = gen();
             if v < 10 || v > 20 {
@@ -344,7 +344,7 @@ fn test_gen_float_range() {
         r#"
         __intrinsic_random_seed(42);
         let gen = gen_float(0.0, 1.0);
-        var all_ok = true;
+        let mut all_ok = true;
         for i in range(0, 50) {
             let v = gen();
             if v < 0.0 || v >= 1.0 {

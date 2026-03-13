@@ -1,8 +1,7 @@
 //! Tests for the http stdlib module.
 //!
 //! All HTTP functions are async and require network access. These tests
-//! are TDD since they need actual network connectivity and the semantic
-//! analyzer doesn't recognize `http` as a global.
+//! use `use std::core::http` to import the http module.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -11,7 +10,8 @@ use shape_test::shape_test::ShapeTest;
 fn http_get_basic() {
     ShapeTest::new(
         r#"
-        let response = http.get("https://httpbin.org/get")
+        use std::core::http
+        let response = http::get("https://httpbin.org/get")
         print(response)
     "#,
     )
@@ -24,7 +24,8 @@ fn http_get_basic() {
 fn http_post_basic() {
     ShapeTest::new(
         r#"
-        let response = http.post("https://httpbin.org/post", "hello")
+        use std::core::http
+        let response = http::post("https://httpbin.org/post", "hello")
         print(response)
     "#,
     )
@@ -37,7 +38,8 @@ fn http_post_basic() {
 fn http_put_basic() {
     ShapeTest::new(
         r#"
-        let response = http.put("https://httpbin.org/put", "data")
+        use std::core::http
+        let response = http::put("https://httpbin.org/put", "data")
         print(response)
     "#,
     )
@@ -50,7 +52,8 @@ fn http_put_basic() {
 fn http_delete_basic() {
     ShapeTest::new(
         r#"
-        let response = http.delete("https://httpbin.org/delete")
+        use std::core::http
+        let response = http::delete("https://httpbin.org/delete")
         print(response)
     "#,
     )
@@ -63,8 +66,9 @@ fn http_delete_basic() {
 fn http_post_with_json_body() {
     ShapeTest::new(
         r#"
+        use std::core::http
         let body = "{\"key\": \"value\"}"
-        let response = http.post("https://httpbin.org/post", body)
+        let response = http::post("https://httpbin.org/post", body)
         print(response)
     "#,
     )
@@ -77,7 +81,8 @@ fn http_post_with_json_body() {
 fn http_get_with_invalid_url() {
     ShapeTest::new(
         r#"
-        let response = http.get("not-a-valid-url")
+        use std::core::http
+        let response = http::get("not-a-valid-url")
         print(response)
     "#,
     )

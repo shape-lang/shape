@@ -38,7 +38,7 @@ fn test_complex_enum_match_function_combo() {
 fn test_complex_closure_mutable_capture_loop_array() {
     ShapeTest::new(
         r#"
-        var items = []
+        let mut items = []
         let add = |item| {
             items = items.push(item)
         }
@@ -72,7 +72,7 @@ fn test_complex_struct_method_chain() {
         print(v.y)
     "#,
     )
-    .expect_output("13\n26");
+    .expect_output("13.0\n26.0");
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn test_complex_array_of_closures() {
             |x| x - 3
         ]
         fn apply_all(transforms, val) {
-            var result = val
+            let mut result = val
             for t in transforms {
                 result = t(result)
             }
@@ -223,7 +223,7 @@ fn test_complex_enum_in_loop_with_match() {
         r#"
         enum Token { Num(int), Op(string), End }
         let tokens = [Token::Num(3), Token::Op("+"), Token::Num(4), Token::End]
-        var result = ""
+        let mut result = ""
         for t in tokens {
             result = result + match t {
                 Token::Num(n) => "N",
@@ -320,8 +320,8 @@ fn test_complex_mutable_closure_as_iterator() {
     ShapeTest::new(
         r#"
         fn make_range(start, end) {
-            var result = []
-            var i = start
+            let mut result = []
+            let mut i = start
             while i < end {
                 result = result.push(i)
                 i = i + 1
@@ -329,7 +329,7 @@ fn test_complex_mutable_closure_as_iterator() {
             result
         }
         let range = make_range(0, 5)
-        var sum = 0
+        let mut sum = 0
         for v in range {
             sum = sum + v
         }
@@ -367,7 +367,7 @@ fn test_complex_trait_dispatch_polymorphism() {
 fn test_complex_hashmap_with_loop_aggregation() {
     ShapeTest::new(
         r#"
-        var scores = HashMap()
+        let mut scores = HashMap()
         let entries = [["Alice", 90], ["Bob", 85], ["Alice", 95], ["Bob", 80]]
         for entry in entries {
             let name = entry[0]
@@ -393,7 +393,7 @@ fn test_complex_recursive_tree_sum() {
         // Simulate a tree using arrays: [value, left_children..., right_children...]
         // Simple recursive sum over nested arrays
         fn tree_sum(arr) {
-            var total = 0
+            let mut total = 0
             for item in arr {
                 total = total + item
             }
@@ -466,7 +466,7 @@ fn test_complex_nested_closures_with_capture() {
     ShapeTest::new(
         r#"
         fn make_accumulator(start) {
-            var total = start
+            let mut total = start
             let add = |n| {
                 total = total + n
                 total
@@ -493,8 +493,8 @@ fn test_complex_block_expressions_with_control_flow() {
                 if doubled > 20 { doubled - 10 } else { doubled + 10 }
             }
             let phase2 = {
-                var sum = 0
-                var i = 0
+                let mut sum = 0
+                let mut i = 0
                 while i < phase1 {
                     sum = sum + i
                     i = i + 1

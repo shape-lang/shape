@@ -136,7 +136,7 @@ print(describe(Shape::Point))
 "#;
     ShapeTest::new(code)
         .expect_run_ok()
-        .expect_output("circle(r=5)\nrect(3x4)\npoint");
+        .expect_output("circle(r=5.0)\nrect(3.0x4.0)\npoint");
 }
 
 // =========================================================================
@@ -187,7 +187,7 @@ fn area(s: Shape) -> number {
 print(area(Shape::Rectangle(3.0, 4.0)))
 print(area(Shape::Point))
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("12\n0");
+    ShapeTest::new(code).expect_run_ok().expect_output("12.0\n0");
 }
 
 // =========================================================================
@@ -542,7 +542,7 @@ fn test_match_inside_loop() {
     ShapeTest::new(
         r#"
         let items = [Some(1), None, Some(3), None, Some(5)]
-        let sum = 0
+        let mut sum = 0
         for item in items {
             sum = sum + match item {
                 Some(v) => v,
@@ -560,7 +560,7 @@ fn test_match_on_array_elements() {
     ShapeTest::new(
         r#"
         let arr = [Ok(10), Err("skip"), Ok(20)]
-        let sum = 0
+        let mut sum = 0
         for el in arr {
             let v = match el {
                 Ok(n) => n,

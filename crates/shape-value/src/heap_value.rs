@@ -959,6 +959,13 @@ impl HeapValue {
         match (self, other) {
             (HeapValue::Char(a), HeapValue::Char(b)) => a == b,
             (HeapValue::String(a), HeapValue::String(b)) => a == b,
+            // Cross-type: Char from string indexing vs String literal
+            (HeapValue::Char(c), HeapValue::String(s))
+            | (HeapValue::String(s), HeapValue::Char(c)) => {
+                let mut buf = [0u8; 4];
+                let cs = c.encode_utf8(&mut buf);
+                cs == s.as_str()
+            }
             (HeapValue::Array(a), HeapValue::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
             }
@@ -1012,6 +1019,13 @@ impl HeapValue {
         match (self, other) {
             (HeapValue::Char(a), HeapValue::Char(b)) => a == b,
             (HeapValue::String(a), HeapValue::String(b)) => a == b,
+            // Cross-type: Char from string indexing vs String literal
+            (HeapValue::Char(c), HeapValue::String(s))
+            | (HeapValue::String(s), HeapValue::Char(c)) => {
+                let mut buf = [0u8; 4];
+                let cs = c.encode_utf8(&mut buf);
+                cs == s.as_str()
+            }
             (HeapValue::Array(a), HeapValue::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.vw_equals(y))
             }

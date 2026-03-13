@@ -463,7 +463,7 @@ fn extend_method_with_loop() {
         type Range { start: int, end: int }
         extend Range {
             method sum() {
-                var total = 0
+                let mut total = 0
                 for i in self.start..self.end {
                     total = total + i
                 }

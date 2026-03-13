@@ -67,7 +67,7 @@ fn test_match_only_wildcard() {
 /// Verifies match wildcard captures all unmatched.
 #[test]
 fn test_match_wildcard_captures_all() {
-    ShapeTest::new("function test() {\n  let sum = 0;\n  for i in [1, 2, 3, 4, 5] {\n    sum = sum + match i {\n      1 => 10,\n      3 => 30,\n      5 => 50,\n      _ => 0\n    };\n  }\n  return sum;\n}\ntest()").expect_number(90.0);
+    ShapeTest::new("function test() {\n  let mut sum = 0;\n  for i in [1, 2, 3, 4, 5] {\n    sum = sum + match i {\n      1 => 10,\n      3 => 30,\n      5 => 50,\n      _ => 0\n    };\n  }\n  return sum;\n}\ntest()").expect_number(90.0);
 }
 
 // ===========================================================================
@@ -292,7 +292,7 @@ fn test_match_assignment() {
 /// Verifies match in loop.
 #[test]
 fn test_match_in_loop() {
-    ShapeTest::new("function test() {\n  let sum = 0;\n  for i in [1, 2, 3] {\n    sum = sum + match i {\n      1 => 10,\n      2 => 20,\n      3 => 30,\n      _ => 0\n    };\n  }\n  return sum;\n}\ntest()").expect_number(60.0);
+    ShapeTest::new("function test() {\n  let mut sum = 0;\n  for i in [1, 2, 3] {\n    sum = sum + match i {\n      1 => 10,\n      2 => 20,\n      3 => 30,\n      _ => 0\n    };\n  }\n  return sum;\n}\ntest()").expect_number(60.0);
 }
 
 /// Verifies match returns string from int.

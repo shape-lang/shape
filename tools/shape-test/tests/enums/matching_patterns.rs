@@ -332,7 +332,7 @@ fn match_constructor_some_guard_matches() {
 fn match_chained_in_loop() {
     ShapeTest::new(
         r#"
-        let sum = 0
+        let mut sum = 0
         for i in [1, 2, 3, 4, 5] {
             sum = sum + match i {
                 1 => 10,
@@ -691,7 +691,7 @@ fn match_enum_in_loop_body() {
     ShapeTest::new(
         r#"
         enum Dir { Up, Down }
-        let total = 0
+        let mut total = 0
         for d in [Dir::Up, Dir::Down, Dir::Up] {
             total = total + match d {
                 Dir::Up => 1,

@@ -555,7 +555,14 @@ impl ModuleLoader {
         self.cache
             .store_dependencies(cache_key.clone(), dependencies.clone());
 
-        // Load all dependencies first (with best available context directory).
+        // Compile the module (collect AST exports) and cache it BEFORE loading
+        // dependencies. This allows self-imports (a module importing itself) to
+        // find the partially-compiled module in cache instead of recursing.
+        let module = loading::compile_module(compile_module_path, ast)?;
+        let module = Arc::new(module);
+        self.cache.insert(cache_key.clone(), module.clone());
+
+        // Load all dependencies (with best available context directory).
         let module_dir = origin_path
             .as_ref()
             .and_then(|path| path.parent().map(|p| p.to_path_buf()))
@@ -563,13 +570,6 @@ impl ModuleLoader {
         for dep in &dependencies {
             self.load_module_with_context(dep, module_dir.as_ref())?;
         }
-
-        // Compile the module
-        let module = loading::compile_module(compile_module_path, ast)?;
-        let module = Arc::new(module);
-
-        // Cache it
-        self.cache.insert(cache_key, module.clone());
 
         Ok(module)
     }

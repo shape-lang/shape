@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
     let provider_opts = ProviderOptions {
         config_path: providers_config,
         extension_dir,
+        ..Default::default()
     };
 
     match (command, file) {
@@ -84,6 +85,7 @@ async fn main() -> Result<()> {
             let run_provider_opts = ProviderOptions {
                 config_path: providers_config,
                 extension_dir,
+                ..Default::default()
             };
 
             if expand {
@@ -104,6 +106,7 @@ async fn main() -> Result<()> {
             let provider_opts = ProviderOptions {
                 config_path: providers_config,
                 extension_dir,
+                ..Default::default()
             };
             run_repl(mode, extensions, &provider_opts).await?;
         }
@@ -117,6 +120,7 @@ async fn main() -> Result<()> {
             let provider_opts = ProviderOptions {
                 config_path: providers_config,
                 extension_dir,
+                ..Default::default()
             };
             run_tui(mode, extensions, &provider_opts).await?;
         }
@@ -138,6 +142,7 @@ async fn main() -> Result<()> {
             let schema_provider_opts = ProviderOptions {
                 config_path: providers_config,
                 extension_dir,
+                ..Default::default()
             };
             use cli_args::SchemaAction;
             match action {
@@ -243,6 +248,7 @@ async fn main() -> Result<()> {
             let provider_opts = ProviderOptions {
                 config_path: providers_config,
                 extension_dir,
+                ..Default::default()
             };
             run_wire_serve(address, mode, extensions, &provider_opts).await?;
         }
@@ -267,6 +273,7 @@ async fn main() -> Result<()> {
             let provider_opts = ProviderOptions {
                 config_path: providers_config,
                 extension_dir,
+                ..Default::default()
             };
             run_serve(
                 address,

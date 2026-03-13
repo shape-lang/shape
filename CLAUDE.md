@@ -79,7 +79,7 @@ just test-integration        # Only shape-test integration suite
 
 **Default workflow**: `just test-fast` during development, `just test` before committing.
 
-Deep tests are gated behind a `deep-tests` Cargo feature on shape-vm, shape-runtime, and shape-ast. Soak tests use `#[ignore]` and only run with `--include-ignored`.
+Deep tests are gated behind a `deep-tests` Cargo feature on shape-vm, shape-runtime, and shape-ast.
 
 ```bash
 # Run a specific test by name

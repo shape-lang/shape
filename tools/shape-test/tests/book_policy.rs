@@ -5,11 +5,12 @@ use walkdir::WalkDir;
 
 fn book_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.join("../docs/book")
+    manifest.join("../../../shape-web/book")
 }
 
 fn book_src_dir() -> PathBuf {
-    book_root().join("src")
+    // Astro Starlight: docs content lives under book-site/src/content/docs/
+    book_root().join("book-site/src/content/docs")
 }
 
 fn book_snippets_dir() -> PathBuf {
@@ -21,7 +22,12 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .filter(|entry| {
+            matches!(
+                entry.path().extension().and_then(|ext| ext.to_str()),
+                Some("md" | "mdx")
+            )
+        })
         .map(|entry| entry.path().to_path_buf())
         .collect();
     files.sort();
@@ -292,8 +298,16 @@ fn is_shape_fence(info: &str) -> bool {
 
 #[test]
 fn book_summary_links_resolve() {
+    // The book uses Astro Starlight (no SUMMARY.md). If a SUMMARY.md exists
+    // (e.g. a future mdbook migration), validate its links; otherwise skip.
     let summary = book_src_dir().join("SUMMARY.md");
-    let text = fs::read_to_string(&summary).expect("failed to read SUMMARY.md");
+    let Ok(text) = fs::read_to_string(&summary) else {
+        eprintln!(
+            "Skipping SUMMARY.md link check — file not found at {:?} (Astro Starlight site)",
+            summary
+        );
+        return;
+    };
     let mut errors = Vec::new();
 
     for (line_no, line) in text.lines().enumerate() {
@@ -338,7 +352,7 @@ fn book_md_links_and_includes_resolve() {
                     continue;
                 }
                 let target = normalize_link_target(&raw_target);
-                if !target.ends_with(".md") {
+                if !(target.ends_with(".md") || target.ends_with(".mdx")) {
                     continue;
                 }
                 let resolved = file.parent().unwrap().join(target);

@@ -221,7 +221,7 @@ fn test_mutable_capture_counter() {
     ShapeTest::new(
         r#"
         fn make_counter() {
-            let x = 0
+            let mut x = 0
             let inc = || { x = x + 1; x }
             inc
         }
@@ -240,7 +240,7 @@ fn test_mutable_capture_accumulator() {
     ShapeTest::new(
         r#"
         fn make_acc() {
-            let sum = 0
+            let mut sum = 0
             let add = |x| { sum = sum + x; sum }
             add
         }
@@ -482,8 +482,8 @@ fn test_closure_capture_loop_variable() {
     ShapeTest::new(
         r#"
         fn test() {
-            let closures = []
-            let i = 0
+            let mut closures = []
+            let mut i = 0
             while i < 3 {
                 let val = i
                 closures.push(|x| x + val);
@@ -547,7 +547,7 @@ fn test_for_each_side_effect() {
     ShapeTest::new(
         r#"
         fn test() {
-            let total = 0
+            let mut total = 0
             [1, 2, 3].forEach(|x| { total = total + x })
             return total
         }

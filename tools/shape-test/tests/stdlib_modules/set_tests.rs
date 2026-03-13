@@ -6,8 +6,9 @@ use shape_test::shape_test::ShapeTest;
 fn set_new_empty() {
     ShapeTest::new(
         r#"
-        let s = set.new()
-        print(set.size(s))
+        use std::core::set
+        let s = set::new()
+        print(set::size(s))
     "#,
     )
     .with_stdlib()
@@ -18,8 +19,9 @@ fn set_new_empty() {
 fn set_from_array_dedup() {
     ShapeTest::new(
         r#"
-        let s = set.from_array([1, 2, 2, 3, 3, 3])
-        print(set.size(s))
+        use std::core::set
+        let s = set::from_array([1, 2, 2, 3, 3, 3])
+        print(set::size(s))
     "#,
     )
     .with_stdlib()
@@ -30,8 +32,9 @@ fn set_from_array_dedup() {
 fn set_add_item() {
     ShapeTest::new(
         r#"
-        let s1 = set.add(set.new(), 42)
-        print(set.size(s1))
+        use std::core::set
+        let s1 = set::add(set::new(), 42)
+        print(set::size(s1))
     "#,
     )
     .with_stdlib()
@@ -42,9 +45,10 @@ fn set_add_item() {
 fn set_add_duplicate() {
     ShapeTest::new(
         r#"
-        let s1 = set.add(set.new(), 42)
-        let s2 = set.add(s1, 42)
-        print(set.size(s2))
+        use std::core::set
+        let s1 = set::add(set::new(), 42)
+        let s2 = set::add(s1, 42)
+        print(set::size(s2))
     "#,
     )
     .with_stdlib()
@@ -55,8 +59,9 @@ fn set_add_duplicate() {
 fn set_contains_true() {
     ShapeTest::new(
         r#"
-        let s = set.from_array([10, 20, 30])
-        print(set.contains(s, 20))
+        use std::core::set
+        let s = set::from_array([10, 20, 30])
+        print(set::contains(s, 20))
     "#,
     )
     .with_stdlib()
@@ -67,8 +72,9 @@ fn set_contains_true() {
 fn set_contains_false() {
     ShapeTest::new(
         r#"
-        let s = set.from_array([10, 20, 30])
-        print(set.contains(s, 99))
+        use std::core::set
+        let s = set::from_array([10, 20, 30])
+        print(set::contains(s, 99))
     "#,
     )
     .with_stdlib()
@@ -79,10 +85,11 @@ fn set_contains_false() {
 fn set_union() {
     ShapeTest::new(
         r#"
-        let a = set.from_array([1, 2])
-        let b = set.from_array([2, 3])
-        let u = set.union(a, b)
-        print(set.size(u))
+        use std::core::set
+        let a = set::from_array([1, 2])
+        let b = set::from_array([2, 3])
+        let u = set::union(a, b)
+        print(set::size(u))
     "#,
     )
     .with_stdlib()
@@ -93,10 +100,11 @@ fn set_union() {
 fn set_intersection() {
     ShapeTest::new(
         r#"
-        let a = set.from_array([1, 2, 3])
-        let b = set.from_array([2, 3, 4])
-        let i = set.intersection(a, b)
-        print(set.size(i))
+        use std::core::set
+        let a = set::from_array([1, 2, 3])
+        let b = set::from_array([2, 3, 4])
+        let i = set::intersection(a, b)
+        print(set::size(i))
     "#,
     )
     .with_stdlib()
@@ -107,10 +115,11 @@ fn set_intersection() {
 fn set_difference() {
     ShapeTest::new(
         r#"
-        let a = set.from_array([1, 2, 3])
-        let b = set.from_array([2, 4])
-        let d = set.difference(a, b)
-        print(set.size(d))
+        use std::core::set
+        let a = set::from_array([1, 2, 3])
+        let b = set::from_array([2, 4])
+        let d = set::difference(a, b)
+        print(set::size(d))
     "#,
     )
     .with_stdlib()
@@ -121,8 +130,9 @@ fn set_difference() {
 fn set_to_array() {
     ShapeTest::new(
         r#"
-        let s = set.from_array([10, 20])
-        let arr = set.to_array(s)
+        use std::core::set
+        let s = set::from_array([10, 20])
+        let arr = set::to_array(s)
         print(arr.length())
     "#,
     )
@@ -134,10 +144,11 @@ fn set_to_array() {
 fn set_remove() {
     ShapeTest::new(
         r#"
-        let s1 = set.from_array([1, 2, 3])
-        let s2 = set.remove(s1, 2)
-        print(set.size(s2))
-        print(set.contains(s2, 2))
+        use std::core::set
+        let s1 = set::from_array([1, 2, 3])
+        let s2 = set::remove(s1, 2)
+        print(set::size(s2))
+        print(set::contains(s2, 2))
     "#,
     )
     .with_stdlib()

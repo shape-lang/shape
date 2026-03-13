@@ -181,8 +181,8 @@ fn try_op_multiple_second_fails() {
 
 #[test]
 fn fallible_type_assertion_uses_named_try_into_impl() {
-    // The TryInto impl returning Ok(7) is not picked up at runtime;
-    // the fallible assertion hits the Err path, so -1 is returned.
+    // The TryInto impl returning Ok(7) IS picked up at runtime;
+    // parse_price("n/a") returns Ok(7), so match takes the Ok path.
     ShapeTest::new(
         r#"
         impl TryInto<int> for string as int {
@@ -202,7 +202,7 @@ fn fallible_type_assertion_uses_named_try_into_impl() {
         }
     "#,
     )
-    .expect_number(-1.0);
+    .expect_number(7.0);
 }
 
 #[test]
@@ -336,7 +336,7 @@ fn try_op_in_loop() {
             else { Ok(n) }
         }
         fn run() -> Result<number> {
-            let sum = 0
+            let mut sum = 0
             for i in [1, 2, 3, 4] {
                 let v = check(i)?
                 sum = sum + v
@@ -358,7 +358,7 @@ fn try_op_in_loop_all_ok() {
         r#"
         fn check(n) -> Result<number> { Ok(n * 2) }
         fn run() -> Result<number> {
-            let sum = 0
+            let mut sum = 0
             for i in [1, 2, 3] {
                 let v = check(i)?
                 sum = sum + v

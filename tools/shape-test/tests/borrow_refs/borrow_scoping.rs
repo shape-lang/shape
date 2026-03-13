@@ -37,7 +37,7 @@ fn borrow_reassign_after_borrow_released() {
     ShapeTest::new(
         r#"
         fn read_val(&x) { x }
-        var a = 5
+        let mut a = 5
         let v = read_val(&a)
         a = 100
         a + v
@@ -94,8 +94,8 @@ fn borrow_in_while_loop_per_iteration() {
     ShapeTest::new(
         r#"
         fn inc(&x) { x = x + 1 }
-        var counter = 0
-        var i = 0
+        let mut counter = 0
+        let mut i = 0
         while i < 5 {
             inc(&counter)
             i = i + 1
@@ -205,10 +205,10 @@ fn borrow_nested_while_loops() {
     ShapeTest::new(
         r#"
         fn inc(&x) { x = x + 1 }
-        var total = 0
-        var i = 0
+        let mut total = 0
+        let mut i = 0
         while i < 3 {
-            var j = 0
+            let mut j = 0
             while j < 3 {
                 inc(&total)
                 j = j + 1
@@ -242,8 +242,8 @@ fn borrow_for_loop_sum_1_to_100() {
     ShapeTest::new(
         r#"
         fn add_to(&sum, val) { sum = sum + val }
-        var total = 0
-        var i = 1
+        let mut total = 0
+        let mut i = 1
         while i <= 100 {
             add_to(&total, i)
             i = i + 1
@@ -279,7 +279,7 @@ fn borrow_sequential_exclusive_calls_different_fns() {
         r#"
         fn double(&x) { x = x * 2 }
         fn add_ten(&x) { x = x + 10 }
-        var a = 5
+        let mut a = 5
         double(&a)
         add_ten(&a)
         double(&a)
@@ -294,8 +294,8 @@ fn borrow_while_loop_doubling() {
     ShapeTest::new(
         r#"
         fn double(&x) { x = x * 2 }
-        var val = 1
-        var i = 0
+        let mut val = 1
+        let mut i = 0
         while i < 4 {
             double(&val)
             i = i + 1
@@ -311,9 +311,9 @@ fn borrow_alternating_vars_in_loop() {
     ShapeTest::new(
         r#"
         fn inc(&x) { x = x + 1 }
-        var a = 0
-        var b = 0
-        var i = 0
+        let mut a = 0
+        let mut b = 0
+        let mut i = 0
         while i < 6 {
             if i % 2 == 0 { inc(&a) } else { inc(&b) }
             i = i + 1
@@ -329,8 +329,8 @@ fn borrow_while_break_with_ref() {
     ShapeTest::new(
         r#"
         fn inc(&x) { x = x + 1 }
-        var count = 0
-        var i = 0
+        let mut count = 0
+        let mut i = 0
         while true {
             if i >= 5 { break }
             inc(&count)

@@ -280,7 +280,7 @@ fn computed_field_string_concat() {
 fn anon_object_field_mutation() {
     ShapeTest::new(
         r#"
-        let obj = { x: 1 }
+        let mut obj = { x: 1 }
         obj.x = 42
         obj.x
     "#,
@@ -294,7 +294,7 @@ fn anon_object_field_mutation_string() {
     ShapeTest::new(
         r#"
         function test() {
-            let obj = { name: "before" }
+            let mut obj = { name: "before" }
             obj.name = "after"
             return obj.name
         }

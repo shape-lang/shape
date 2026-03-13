@@ -30,7 +30,7 @@ pub fn monte_carlo(
         __intrinsic_random_seed(cfg.seed);
     }
 
-    let results = [];
+    let mut results = [];
 
     for i in range(0, n_sims) {
         let r = sim_fn(i, cfg);
@@ -69,7 +69,7 @@ pub fn monte_carlo_antithetic(
         __intrinsic_random_seed(cfg.seed);
     }
 
-    let results = [];
+    let mut results = [];
 
     for i in range(0, n_sims) {
         let r1 = sim_fn(i, false);
@@ -110,8 +110,8 @@ pub fn monte_carlo_control_variate(
         __intrinsic_random_seed(cfg.seed);
     }
 
-    let values = [];
-    let controls = [];
+    let mut values = [];
+    let mut controls = [];
 
     for i in range(0, n_sims) {
         let r = sim_fn(i);
@@ -124,8 +124,8 @@ pub fn monte_carlo_control_variate(
     let mean_x = __intrinsic_mean(values);
     let mean_y = __intrinsic_mean(controls);
 
-    var cov_xy = 0.0;
-    var var_y = 0.0;
+    let mut cov_xy = 0.0;
+    let mut var_y = 0.0;
     for i in range(0, n) {
         let dx = values[i] - mean_x;
         let dy = controls[i] - mean_y;
@@ -133,13 +133,13 @@ pub fn monte_carlo_control_variate(
         var_y = var_y + dy * dy;
     }
 
-    var c_star = 0.0;
+    let mut c_star = 0.0;
     if var_y > 0.0 {
         c_star = cov_xy / var_y;
     }
 
     // Compute adjusted values
-    let adjusted = [];
+    let mut adjusted = [];
     for i in range(0, n) {
         adjusted.push(values[i] - c_star * (controls[i] - control_mean));
     }
@@ -147,7 +147,7 @@ pub fn monte_carlo_control_variate(
     let adjusted_mean = __intrinsic_mean(adjusted);
     let raw_var = __intrinsic_std(values);
     let adj_var = __intrinsic_std(adjusted);
-    var var_reduction = 0.0;
+    let mut var_reduction = 0.0;
     if raw_var > 0.0 {
         var_reduction = 1.0 - (adj_var * adj_var) / (raw_var * raw_var);
     }
@@ -181,7 +181,7 @@ pub fn monte_carlo_stratified(
         __intrinsic_random_seed(cfg.seed);
     }
 
-    let results = [];
+    let mut results = [];
     let n = n_sims;
 
     for i in range(0, n) {

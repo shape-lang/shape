@@ -243,7 +243,7 @@ fn result_in_array() {
     ShapeTest::new(
         r#"
         let results = [Ok(1), Ok(2), Err("skip"), Ok(4)]
-        let sum = 0
+        let mut sum = 0
         for r in results {
             match r {
                 Ok(v) => { sum = sum + v }

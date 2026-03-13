@@ -65,4 +65,7 @@ pub struct ProviderOptions {
     pub config_path: Option<PathBuf>,
     /// Directory to scan for extension module shared libraries
     pub extension_dir: Option<PathBuf>,
+    /// When true, skip auto-scanning `~/.shape/extensions/` for globally
+    /// installed extensions.  Useful in tests to avoid environment contamination.
+    pub skip_global_extensions: bool,
 }

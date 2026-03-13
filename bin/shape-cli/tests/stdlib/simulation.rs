@@ -75,7 +75,7 @@ fn test_monte_carlo_and_stats() {
     // Simplified monte_carlo — always collects results (avoids if-inside-for scope issue)
     let code = r#"
         fn monte_carlo(n_sims, sim_fn) {
-            let results = [];
+            let mut results = [];
             for i in range(0, n_sims) {
                 results = results.push(sim_fn(i));
             }
@@ -253,14 +253,14 @@ fn test_monte_carlo_antithetic_reduces_variance() {
         r#"
         // Plain MC
         random_seed(42);
-        let plain = [];
+        let mut plain = [];
         for i in range(0, 1000) {
             plain.push(random());
         }
 
         // Antithetic MC: pair each U with (1-U), average each pair
         random_seed(42);
-        let anti = [];
+        let mut anti = [];
         for i in range(0, 500) {
             let u = random();
             anti.push((u + (1.0 - u)) / 2.0);
@@ -304,7 +304,7 @@ fn test_monte_carlo_stratified() {
         random_seed(42);
         let result = monte_carlo_stratified(100, |i, u| u * u);
         // Should return 100 results, all between 0 and 1
-        var ok = len(result.results) == 100;
+        let mut ok = len(result.results) == 100;
         for r in result.results {
             if r < 0.0 || r > 1.0 {
                 ok = false;
@@ -325,7 +325,7 @@ fn test_monte_carlo_stratified_estimates_mean() {
         r#"
         random_seed(42);
         let strat_n = 1000;
-        let strat_results = [];
+        let mut strat_results = [];
         for i in range(0, strat_n) {
             let u = (i + random()) / strat_n;
             strat_results.push(u * u);

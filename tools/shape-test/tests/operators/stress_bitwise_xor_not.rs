@@ -65,7 +65,7 @@ fn test_xor_toggle_bits_back() {
 /// Verifies XOR swap pattern: a ^= b; b ^= a; a ^= b swaps values.
 #[test]
 fn test_xor_swap_pattern() {
-    ShapeTest::new("fn test() {\n    var a = 10\n    var b = 20\n    a = a ^ b\n    b = b ^ a\n    a = a ^ b\n    a * 100 + b\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut a = 10\n    let mut b = 20\n    a = a ^ b\n    b = b ^ a\n    a = a ^ b\n    a * 100 + b\n}\ntest()")
         .expect_number(2010.0);
 }
 
@@ -259,7 +259,7 @@ fn test_bitwise_xor_with_variables() {
 /// Verifies ^= compound assignment.
 #[test]
 fn test_xor_assign() {
-    ShapeTest::new("fn test() {\n    var x = 0xFF\n    x ^= 0x0F\n    x\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut x = 0xFF\n    x ^= 0x0F\n    x\n}\ntest()")
         .expect_number(0xF0 as f64);
 }
 
@@ -376,7 +376,7 @@ fn test_xor_large_values() {
 /// Verifies bitwise in nested function: set and clear bits.
 #[test]
 fn test_bitwise_in_nested_function() {
-    ShapeTest::new("fn set_bit(val: int, bit: int) -> int {\n    val | (1 << bit)\n}\nfn clear_bit(val: int, bit: int) -> int {\n    val & ~(1 << bit)\n}\nfn test() {\n    var x = 0\n    x = set_bit(x, 0)\n    x = set_bit(x, 3)\n    x = set_bit(x, 7)\n    x = clear_bit(x, 3)\n    x\n}\ntest()")
+    ShapeTest::new("fn set_bit(val: int, bit: int) -> int {\n    val | (1 << bit)\n}\nfn clear_bit(val: int, bit: int) -> int {\n    val & ~(1 << bit)\n}\nfn test() {\n    let mut x = 0\n    x = set_bit(x, 0)\n    x = set_bit(x, 3)\n    x = set_bit(x, 7)\n    x = clear_bit(x, 3)\n    x\n}\ntest()")
         .expect_number(129.0);
 }
 

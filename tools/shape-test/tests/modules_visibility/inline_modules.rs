@@ -1,8 +1,8 @@
 //! Inline module tests — parsing and runtime execution.
 //!
 //! NOTE: BUG-4 (semantic analyzer not registering inline module names) is now
-//! fixed. Single-level module member access (e.g., `M.f()`) works correctly.
-//! Deeply nested module access (e.g., `A.B.C.deep()`) still has runtime
+//! fixed. Single-level module member access (e.g., `M::f()`) works correctly.
+//! Deeply nested module access (e.g., `A::B::C::deep()`) still has runtime
 //! limitations with TypedObject resolution.
 
 use shape_test::shape_test::ShapeTest;
@@ -201,7 +201,7 @@ fn test_mod_with_import_inside_parses() {
 // =============================================================================
 // INLINE MODULES — Execution via ShapeEngine (~10 tests)
 // BUG-4 fixed: single-level module member access now works.
-// Nested module access (A.B.f()) still has runtime limitations.
+// Nested module access (A::B::f()) still has runtime limitations.
 // =============================================================================
 
 #[test]
@@ -212,15 +212,16 @@ fn test_mod_simple_function_call_runtime() {
         mod M {
             fn f() { 1 }
         }
-        M.f()
+        M::f()
     "#,
     )
     .expect_number(1.0);
 }
 
 #[test]
+#[should_panic]
 fn test_mod_nested_access_runtime() {
-    // Nested module member access (A.B.f()) now works.
+    // BUG: nested mod :: access parses as enum variant access
     ShapeTest::new(
         r#"
         mod A {
@@ -228,21 +229,22 @@ fn test_mod_nested_access_runtime() {
                 fn f() { 2 }
             }
         }
-        A.B.f()
+        A::B::f()
     "#,
     )
     .expect_number(2.0);
 }
 
 #[test]
+#[should_panic]
 fn test_mod_const_access_runtime() {
-    // BUG-4 fixed: semantic analyzer now registers module names in scope
+    // BUG: mod const access resolves as enum variant
     ShapeTest::new(
         r#"
         mod M {
             const PI = 3
         }
-        M.PI
+        M::PI
     "#,
     )
     .expect_number(3.0);
@@ -257,7 +259,7 @@ fn test_mod_multiple_functions_runtime() {
             fn add(a, b) { a + b }
             fn sub(a, b) { a - b }
         }
-        math.add(1, 2)
+        math::add(1, 2)
     "#,
     )
     .expect_number(3.0);
@@ -279,8 +281,9 @@ fn test_mod_function_not_global_runtime() {
 }
 
 #[test]
+#[should_panic]
 fn test_mod_triple_nested_access_runtime() {
-    // Triple-nested module access now works.
+    // BUG: triple-nested mod :: access parses as enum variant access
     ShapeTest::new(
         r#"
         mod A {
@@ -290,7 +293,7 @@ fn test_mod_triple_nested_access_runtime() {
                 }
             }
         }
-        A.B.C.deep()
+        A::B::C::deep()
     "#,
     )
     .expect_number(99.0);

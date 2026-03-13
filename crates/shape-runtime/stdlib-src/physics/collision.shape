@@ -132,14 +132,14 @@ pub fn aabb_separation(a, b) {
 
     if overlap_x <= overlap_y {
         // Separate along x (minimum penetration axis)
-        var dir = 1.0;
+        let mut dir = 1.0;
         if ca_x < cb_x {
             dir = -1.0;
         }
         { x: dir * overlap_x, y: 0.0 }
     } else {
         // Separate along y
-        var dir = 1.0;
+        let mut dir = 1.0;
         if ca_y < cb_y {
             dir = -1.0;
         }
@@ -154,12 +154,14 @@ pub fn aabb_separation(a, b) {
 /// @param boxes - array of AABB objects
 /// @returns array of { i, j } index pairs where boxes[i] overlaps boxes[j]
 pub fn find_collisions_brute(boxes) {
-    let pairs = [];
+    let mut pairs = [];
     let n = len(boxes);
 
     for i in range(0, n) {
+        let box_i = boxes[i];
         for j in range(i + 1, n) {
-            if aabb_overlaps(boxes[i], boxes[j]) {
+            let box_j = boxes[j];
+            if aabb_overlaps(box_i, box_j) {
                 pairs.push({ i: i, j: j });
             }
         }
@@ -179,30 +181,44 @@ pub fn find_collisions_sweep(boxes) {
     let n = len(boxes);
 
     // Build index array sorted by min_x
-    let indices = [];
+    let mut indices = [];
     for i in range(0, n) {
-        indices.push({ idx: i, min_x: boxes[i].min_x });
+        let b = boxes[i];
+        indices.push({ idx: i, min_x: b.min_x });
     }
 
     // Simple insertion sort by min_x (sufficient for typical counts)
     for i in range(1, n) {
         let key = indices[i];
-        var j = i - 1;
-        while j >= 0 && indices[j].min_x > key.min_x {
-            indices[j + 1] = indices[j];
+        let mut j = i - 1;
+        let mut cont = j >= 0;
+        if cont {
+            let ej = indices[j];
+            cont = ej.min_x > key.min_x;
+        }
+        while cont {
+            let ej = indices[j];
+            indices[j + 1] = ej;
             j = j - 1;
+            cont = j >= 0;
+            if cont {
+                let ej2 = indices[j];
+                cont = ej2.min_x > key.min_x;
+            }
         }
         indices[j + 1] = key;
     }
 
-    let pairs = [];
+    let mut pairs = [];
 
     for i in range(0, n) {
-        let ai = indices[i].idx;
+        let entry_i = indices[i];
+        let ai = entry_i.idx;
         let a = boxes[ai];
 
         for j in range(i + 1, n) {
-            let bi = indices[j].idx;
+            let entry_j = indices[j];
+            let bi = entry_j.idx;
             let b = boxes[bi];
 
             // If b starts after a ends on x-axis, no more overlaps with a
@@ -212,8 +228,8 @@ pub fn find_collisions_sweep(boxes) {
 
             // Check full AABB overlap (x already overlaps, just check y)
             if a.min_y <= b.max_y && a.max_y >= b.min_y {
-                var lo = ai;
-                var hi = bi;
+                let mut lo = ai;
+                let mut hi = bi;
                 if lo > hi {
                     let tmp = lo;
                     lo = hi;
@@ -238,38 +254,46 @@ pub fn find_collisions_sweep(boxes) {
 /// @param body_b - { aabb, vx, vy, mass }
 /// @returns { a: { vx, vy }, b: { vx, vy } } post-collision velocities
 pub fn elastic_response(body_a, body_b) {
-    let sep = aabb_separation(body_a.aabb, body_b.aabb);
+    // Bind fields to locals to avoid borrow issues with nested field access
+    let aabb_a = body_a.aabb;
+    let aabb_b = body_b.aabb;
+    let vx_a = body_a.vx;
+    let vy_a = body_a.vy;
+    let vx_b = body_b.vx;
+    let vy_b = body_b.vy;
+    let ma = body_a.mass;
+    let mb = body_b.mass;
+
+    let sep = aabb_separation(aabb_a, aabb_b);
     if sep == None {
-        return { a: { vx: body_a.vx, vy: body_a.vy }, b: { vx: body_b.vx, vy: body_b.vy } };
+        return { a: { vx: vx_a, vy: vy_a }, b: { vx: vx_b, vy: vy_b } };
     }
 
     // Normalize separation vector
     let len_sep = sqrt(sep.x * sep.x + sep.y * sep.y);
     if len_sep < 0.000001 {
-        return { a: { vx: body_a.vx, vy: body_a.vy }, b: { vx: body_b.vx, vy: body_b.vy } };
+        return { a: { vx: vx_a, vy: vy_a }, b: { vx: vx_b, vy: vy_b } };
     }
     let nx = sep.x / len_sep;
     let ny = sep.y / len_sep;
 
     // Relative velocity along normal
-    let dvx = body_a.vx - body_b.vx;
-    let dvy = body_a.vy - body_b.vy;
+    let dvx = vx_a - vx_b;
+    let dvy = vy_a - vy_b;
     let dvn = dvx * nx + dvy * ny;
 
     // Don't resolve if separating
     if dvn > 0.0 {
-        return { a: { vx: body_a.vx, vy: body_a.vy }, b: { vx: body_b.vx, vy: body_b.vy } };
+        return { a: { vx: vx_a, vy: vy_a }, b: { vx: vx_b, vy: vy_b } };
     }
 
-    let ma = body_a.mass;
-    let mb = body_b.mass;
     let inv_total = 2.0 / (ma + mb);
 
     let impulse_a = mb * inv_total * dvn;
     let impulse_b = ma * inv_total * dvn;
 
     return {
-        a: { vx: body_a.vx - impulse_a * nx, vy: body_a.vy - impulse_a * ny },
-        b: { vx: body_b.vx + impulse_b * nx, vy: body_b.vy + impulse_b * ny }
+        a: { vx: vx_a - impulse_a * nx, vy: vy_a - impulse_a * ny },
+        b: { vx: vx_b + impulse_b * nx, vy: vy_b + impulse_b * ny }
     };
 }

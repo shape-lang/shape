@@ -38,7 +38,7 @@ fn test_enum_match_unknown_variant_fails() {
 #[test]
 fn test_enum_function_with_accumulator() {
     ShapeTest::new(
-        "enum Op { Add(int), Sub(int), Mul(int) }\nfn apply(val: int, op: Op) -> int { match op { Op::Add(n) => val + n, Op::Sub(n) => val - n, Op::Mul(n) => val * n, } }\nfn test() -> int { var result = 10\nresult = apply(result, Op::Add(5))\nresult = apply(result, Op::Mul(2))\nresult = apply(result, Op::Sub(3))\nresult }\ntest()",
+        "enum Op { Add(int), Sub(int), Mul(int) }\nfn apply(val: int, op: Op) -> int { match op { Op::Add(n) => val + n, Op::Sub(n) => val - n, Op::Mul(n) => val * n, } }\nfn test() -> int { let mut result = 10\nresult = apply(result, Op::Add(5))\nresult = apply(result, Op::Mul(2))\nresult = apply(result, Op::Sub(3))\nresult }\ntest()",
     )
     .expect_number(27.0);
 }
@@ -117,7 +117,7 @@ fn test_enum_state_machine_two_steps() {
 #[test]
 fn test_enum_filter_via_match_in_loop() {
     ShapeTest::new(
-        "enum Kind { Good, Bad }\nfn test() -> int { let items = [Kind::Good, Kind::Bad, Kind::Good, Kind::Good, Kind::Bad]\nvar count = 0\nfor item in items { let is_good = match item { Kind::Good => true, Kind::Bad => false, }\nif is_good { count = count + 1 } }\ncount }\ntest()",
+        "enum Kind { Good, Bad }\nfn test() -> int { let items = [Kind::Good, Kind::Bad, Kind::Good, Kind::Good, Kind::Bad]\nlet mut count = 0\nfor item in items { let is_good = match item { Kind::Good => true, Kind::Bad => false, }\nif is_good { count = count + 1 } }\ncount }\ntest()",
     )
     .expect_number(3.0);
 }
@@ -130,7 +130,7 @@ fn test_enum_filter_via_match_in_loop() {
 #[test]
 fn test_enum_payload_sum_in_loop() {
     ShapeTest::new(
-        "enum Item { Value(int), Skip }\nfn test() -> int { let items = [Item::Value(10), Item::Skip, Item::Value(20), Item::Value(5)]\nvar total = 0\nfor item in items { total = total + match item { Item::Value(n) => n, Item::Skip => 0, } }\ntotal }\ntest()",
+        "enum Item { Value(int), Skip }\nfn test() -> int { let items = [Item::Value(10), Item::Skip, Item::Value(20), Item::Value(5)]\nlet mut total = 0\nfor item in items { total = total + match item { Item::Value(n) => n, Item::Skip => 0, } }\ntotal }\ntest()",
     )
     .expect_number(35.0);
 }
@@ -196,7 +196,7 @@ fn test_builtin_result_err() {
 #[test]
 fn test_enum_variant_in_complex_expression() {
     ShapeTest::new(
-        "enum Grade { A, B, C, D, F }\nfn gpa(g: Grade) -> number { match g { Grade::A => 4.0, Grade::B => 3.0, Grade::C => 2.0, Grade::D => 1.0, Grade::F => 0.0, } }\nlet grades = [Grade::A, Grade::B, Grade::A, Grade::C]\nvar total = 0.0\nfor g in grades { total = total + gpa(g) }\ntotal",
+        "enum Grade { A, B, C, D, F }\nfn gpa(g: Grade) -> number { match g { Grade::A => 4.0, Grade::B => 3.0, Grade::C => 2.0, Grade::D => 1.0, Grade::F => 0.0, } }\nlet grades = [Grade::A, Grade::B, Grade::A, Grade::C]\nlet mut total = 0.0\nfor g in grades { total = total + gpa(g) }\ntotal",
     )
     .expect_number(13.0);
 }

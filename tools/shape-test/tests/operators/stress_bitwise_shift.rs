@@ -297,13 +297,13 @@ fn test_bitwise_shift_with_variables() {
 /// Verifies <<= compound assignment.
 #[test]
 fn test_shl_assign() {
-    ShapeTest::new("fn test() {\n    var x = 1\n    x <<= 4\n    x\n}\ntest()").expect_number(16.0);
+    ShapeTest::new("fn test() {\n    let mut x = 1\n    x <<= 4\n    x\n}\ntest()").expect_number(16.0);
 }
 
 /// Verifies >>= compound assignment.
 #[test]
 fn test_shr_assign() {
-    ShapeTest::new("fn test() {\n    var x = 256\n    x >>= 4\n    x\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut x = 256\n    x >>= 4\n    x\n}\ntest()")
         .expect_number(16.0);
 }
 
@@ -402,7 +402,7 @@ fn test_unpack_rgb_blue() {
 /// Verifies flag register set/clear/toggle operations.
 #[test]
 fn test_flag_register_operations() {
-    ShapeTest::new("fn test() {\n    var flags = 0\n    flags = flags | (1 << 0)\n    flags = flags | (1 << 2)\n    flags = flags | (1 << 4)\n    flags = flags & ~(1 << 2)\n    flags = flags ^ (1 << 0)\n    flags\n}\ntest()")
+    ShapeTest::new("fn test() {\n    let mut flags = 0\n    flags = flags | (1 << 0)\n    flags = flags | (1 << 2)\n    flags = flags | (1 << 4)\n    flags = flags & ~(1 << 2)\n    flags = flags ^ (1 << 0)\n    flags\n}\ntest()")
         .expect_number(16.0);
 }
 

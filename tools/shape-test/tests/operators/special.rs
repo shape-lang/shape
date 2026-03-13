@@ -90,7 +90,7 @@ fn fuzzy_equals_operator() {
 fn range_exclusive_expression() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 0..5 {
             sum = sum + i
         }
@@ -104,7 +104,7 @@ fn range_exclusive_expression() {
 fn range_inclusive_expression() {
     ShapeTest::new(
         r#"
-        var sum = 0
+        let mut sum = 0
         for i in 0..=5 {
             sum = sum + i
         }
