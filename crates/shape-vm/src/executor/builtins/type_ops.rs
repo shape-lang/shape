@@ -432,6 +432,124 @@ impl VirtualMachine {
         }
     }
 
+    // ===== Typed Conversion Opcodes (zero-dispatch, no operand) =====
+
+    /// ConvertToInt: pop value, convert to int, push result. Panics on failure.
+    #[inline]
+    pub(in crate::executor) fn op_convert_to_int(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = Self::convert_to_int_no_checks(&value)
+            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
+        self.push_vw(result)
+    }
+
+    /// ConvertToNumber: pop value, convert to number, push result. Panics on failure.
+    #[inline]
+    pub(in crate::executor) fn op_convert_to_number(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = Self::convert_to_number_no_checks(&value)
+            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
+        self.push_vw(result)
+    }
+
+    /// ConvertToString: pop value, convert to string, push result. Always succeeds.
+    #[inline]
+    pub(in crate::executor) fn op_convert_to_string(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = self.convert_to_string_no_checks(&value);
+        self.push_vw(result)
+    }
+
+    /// ConvertToBool: pop value, convert to bool, push result. Panics on failure.
+    #[inline]
+    pub(in crate::executor) fn op_convert_to_bool(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = Self::convert_to_bool_no_checks(&value)
+            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
+        self.push_vw(result)
+    }
+
+    /// ConvertToDecimal: pop value, convert to decimal, push result. Panics on failure.
+    #[inline]
+    pub(in crate::executor) fn op_convert_to_decimal(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = Self::convert_to_decimal_no_checks(&value)
+            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
+        self.push_vw(result)
+    }
+
+    /// ConvertToChar: pop value, convert to char, push result. Panics on failure.
+    #[inline]
+    pub(in crate::executor) fn op_convert_to_char(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = Self::convert_to_char_no_checks(&value)
+            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
+        self.push_vw(result)
+    }
+
+    /// TryConvertToInt: pop value, try convert to int, push Result<int, AnyError>.
+    #[inline]
+    pub(in crate::executor) fn op_try_convert_to_int(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = match Self::convert_to_int_no_checks(&value) {
+            Ok(v) => ValueWord::from_ok(v),
+            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
+        };
+        self.push_vw(result)
+    }
+
+    /// TryConvertToNumber: pop value, try convert to number, push Result<number, AnyError>.
+    #[inline]
+    pub(in crate::executor) fn op_try_convert_to_number(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = match Self::convert_to_number_no_checks(&value) {
+            Ok(v) => ValueWord::from_ok(v),
+            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
+        };
+        self.push_vw(result)
+    }
+
+    /// TryConvertToString: pop value, try convert to string, push Result<string, AnyError>.
+    #[inline]
+    pub(in crate::executor) fn op_try_convert_to_string(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = ValueWord::from_ok(self.convert_to_string_no_checks(&value));
+        self.push_vw(result)
+    }
+
+    /// TryConvertToBool: pop value, try convert to bool, push Result<bool, AnyError>.
+    #[inline]
+    pub(in crate::executor) fn op_try_convert_to_bool(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = match Self::convert_to_bool_no_checks(&value) {
+            Ok(v) => ValueWord::from_ok(v),
+            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
+        };
+        self.push_vw(result)
+    }
+
+    /// TryConvertToDecimal: pop value, try convert to decimal, push Result<decimal, AnyError>.
+    #[inline]
+    pub(in crate::executor) fn op_try_convert_to_decimal(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = match Self::convert_to_decimal_no_checks(&value) {
+            Ok(v) => ValueWord::from_ok(v),
+            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
+        };
+        self.push_vw(result)
+    }
+
+    /// TryConvertToChar: pop value, try convert to char, push Result<char, AnyError>.
+    #[inline]
+    pub(in crate::executor) fn op_try_convert_to_char(&mut self) -> Result<(), VMError> {
+        let value = self.pop_vw()?;
+        let result = match Self::convert_to_char_no_checks(&value) {
+            Ok(v) => ValueWord::from_ok(v),
+            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
+        };
+        self.push_vw(result)
+    }
+
     fn type_name_to_annotation(name: &str) -> TypeAnnotation {
         match name {
             "number" | "int" | "decimal" | "string" | "bool" | "row" | "pattern" | "function"
@@ -565,16 +683,6 @@ impl VirtualMachine {
             BuiltinFunction::ToString => self.builtin_to_string(args),
             BuiltinFunction::ToNumber => self.builtin_to_number(args),
             BuiltinFunction::ToBool => self.builtin_to_bool(args),
-            BuiltinFunction::IntoInt => self.builtin_into_int(args),
-            BuiltinFunction::IntoNumber => self.builtin_into_number(args),
-            BuiltinFunction::IntoDecimal => self.builtin_into_decimal(args),
-            BuiltinFunction::IntoBool => self.builtin_into_bool(args),
-            BuiltinFunction::IntoString => self.builtin_into_string(args),
-            BuiltinFunction::TryIntoInt => self.builtin_try_into_int(args),
-            BuiltinFunction::TryIntoNumber => self.builtin_try_into_number(args),
-            BuiltinFunction::TryIntoDecimal => self.builtin_try_into_decimal(args),
-            BuiltinFunction::TryIntoBool => self.builtin_try_into_bool(args),
-            BuiltinFunction::TryIntoString => self.builtin_try_into_string(args),
             other => Err(VMError::RuntimeError(format!(
                 "conversion dispatch does not support {:?}",
                 other
@@ -878,110 +986,6 @@ impl VirtualMachine {
     ) -> Result<ValueWord, VMError> {
         check_arity("to_bool", &args, 1)?;
         Ok(ValueWord::from_bool(args[0].is_truthy()))
-    }
-
-    #[inline]
-    fn builtin_into_target(
-        &mut self,
-        args: Vec<ValueWord>,
-        target: &str,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__into_*", &args, 1)?;
-        self.try_convert_no_checks(&args[0], target)
-            .map_err(|message| VMError::RuntimeError(format!("INTO_FAILED: {}", message)))
-    }
-
-    /// Internal helper used by std::core::into impls.
-    pub(in crate::executor) fn builtin_into_int(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_into_target(args, "int")
-    }
-
-    /// Internal helper used by std::core::into impls.
-    pub(in crate::executor) fn builtin_into_number(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_into_target(args, "number")
-    }
-
-    /// Internal helper used by std::core::into impls.
-    pub(in crate::executor) fn builtin_into_decimal(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_into_target(args, "decimal")
-    }
-
-    /// Internal helper used by std::core::into impls.
-    pub(in crate::executor) fn builtin_into_bool(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_into_target(args, "bool")
-    }
-
-    /// Internal helper used by std::core::into impls.
-    pub(in crate::executor) fn builtin_into_string(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_into_target(args, "string")
-    }
-
-    #[inline]
-    fn builtin_try_into_target(
-        &mut self,
-        args: Vec<ValueWord>,
-        target: &str,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__try_into_*", &args, 1)?;
-        Ok(match self.try_convert_no_checks(&args[0], target) {
-            Ok(value) => ValueWord::from_ok(value),
-            Err(message) => self.build_try_into_error_result(message, "TRY_INTO_FAILED"),
-        })
-    }
-
-    /// Internal helper used by std::core::try_into impls.
-    pub(in crate::executor) fn builtin_try_into_int(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_try_into_target(args, "int")
-    }
-
-    /// Internal helper used by std::core::try_into impls.
-    pub(in crate::executor) fn builtin_try_into_number(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_try_into_target(args, "number")
-    }
-
-    /// Internal helper used by std::core::try_into impls.
-    pub(in crate::executor) fn builtin_try_into_decimal(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_try_into_target(args, "decimal")
-    }
-
-    /// Internal helper used by std::core::try_into impls.
-    pub(in crate::executor) fn builtin_try_into_bool(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_try_into_target(args, "bool")
-    }
-
-    /// Internal helper used by std::core::try_into impls.
-    pub(in crate::executor) fn builtin_try_into_string(
-        &mut self,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        self.builtin_try_into_target(args, "string")
     }
 
     /// TypeOf: Get a first-class `Type` value for a runtime value.

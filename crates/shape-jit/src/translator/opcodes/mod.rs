@@ -304,6 +304,23 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // Index reference — pops 2 (base ref, index), pushes 1 (indexed ref) via FFI
             OpCode::MakeIndexRef => self.compile_opcode_via_generic_ffi(instr.opcode, 2, true),
+
+            // Typed conversion opcodes — pops 1, pushes 1 via FFI trampoline.
+            // TODO: add real JIT lowering (inline tag checks, fcvt, etc.)
+            OpCode::ConvertToInt
+            | OpCode::ConvertToNumber
+            | OpCode::ConvertToString
+            | OpCode::ConvertToBool
+            | OpCode::ConvertToDecimal
+            | OpCode::ConvertToChar
+            | OpCode::TryConvertToInt
+            | OpCode::TryConvertToNumber
+            | OpCode::TryConvertToString
+            | OpCode::TryConvertToBool
+            | OpCode::TryConvertToDecimal
+            | OpCode::TryConvertToChar => {
+                self.compile_opcode_via_generic_ffi(instr.opcode, 1, true)
+            }
         }
     }
 }

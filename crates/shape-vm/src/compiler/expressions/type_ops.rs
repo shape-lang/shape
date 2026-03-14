@@ -206,6 +206,34 @@ impl BytecodeCompiler {
         })
     }
 
+    /// Return the typed ConvertTo* opcode for a primitive target type name,
+    /// or None for non-primitive types (which fall through to Convert + trait dispatch).
+    fn convert_opcode_for_primitive(target: &str) -> Option<OpCode> {
+        match target {
+            "int" => Some(OpCode::ConvertToInt),
+            "number" => Some(OpCode::ConvertToNumber),
+            "string" => Some(OpCode::ConvertToString),
+            "bool" => Some(OpCode::ConvertToBool),
+            "decimal" => Some(OpCode::ConvertToDecimal),
+            "char" => Some(OpCode::ConvertToChar),
+            _ => None,
+        }
+    }
+
+    /// Return the typed TryConvertTo* opcode for a primitive target type name,
+    /// or None for non-primitive types (which fall through to Convert + trait dispatch).
+    fn try_convert_opcode_for_primitive(target: &str) -> Option<OpCode> {
+        match target {
+            "int" => Some(OpCode::TryConvertToInt),
+            "number" => Some(OpCode::TryConvertToNumber),
+            "string" => Some(OpCode::TryConvertToString),
+            "bool" => Some(OpCode::TryConvertToBool),
+            "decimal" => Some(OpCode::TryConvertToDecimal),
+            "char" => Some(OpCode::TryConvertToChar),
+            _ => None,
+        }
+    }
+
     /// Compile a type assertion expression (expr as Type)
     ///
     /// This wraps the value with a TypeAnnotatedValue so that meta formatting
@@ -220,6 +248,24 @@ impl BytecodeCompiler {
             && args.len() == 1
         {
             let inner_type = &args[0];
+            let target_selector =
+                Self::try_into_name_from_annotation(inner_type).ok_or_else(|| {
+                    ShapeError::SemanticError {
+                        message: format!(
+                            "`as Type?` target must be a named type selector, found '{}'",
+                            annotation_to_string(inner_type)
+                        ),
+                        location: Some(self.span_to_source_location(expr.span())),
+                    }
+                })?;
+
+            // Fast path: emit typed TryConvertTo* opcode for primitive targets
+            if let Some(try_convert_opcode) = Self::try_convert_opcode_for_primitive(&target_selector) {
+                self.compile_expr(expr)?;
+                self.emit(Instruction::new(try_convert_opcode, None));
+                return Ok(());
+            }
+
             let source_name = self
                 .static_type_annotation_for_expr(expr)
                 .ok()
@@ -235,16 +281,6 @@ impl BytecodeCompiler {
                         annotation_to_string(type_annotation)
                     ),
                     location: Some(self.span_to_source_location(expr.span())),
-                })?;
-            let target_selector =
-                Self::try_into_name_from_annotation(inner_type).ok_or_else(|| {
-                    ShapeError::SemanticError {
-                        message: format!(
-                            "`as Type?` target must be a named type selector, found '{}'",
-                            annotation_to_string(inner_type)
-                        ),
-                        location: Some(self.span_to_source_location(expr.span())),
-                    }
                 })?;
 
             // `as Type?` compiles to trait-dispatch metadata consumed by Convert.
@@ -279,6 +315,13 @@ impl BytecodeCompiler {
         }
 
         if let Some(target_selector) = Self::try_into_name_from_annotation(type_annotation) {
+            // Fast path: emit typed ConvertTo* opcode for primitive targets
+            if let Some(convert_opcode) = Self::convert_opcode_for_primitive(&target_selector) {
+                self.compile_expr(expr)?;
+                self.emit(Instruction::new(convert_opcode, None));
+                return Ok(());
+            }
+
             // `as Type` compiles to Into<Target> dispatch through Convert.
             self.compile_expr(expr)?;
             let dispatch = self

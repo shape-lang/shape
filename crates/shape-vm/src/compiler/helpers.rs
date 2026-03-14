@@ -1652,16 +1652,8 @@ impl BytecodeCompiler {
             "to_string" | "toString" => BuiltinFunction::ToString,
             "to_number" | "toNumber" => BuiltinFunction::ToNumber,
             "to_bool" | "toBool" => BuiltinFunction::ToBool,
-            "__into_int" => BuiltinFunction::IntoInt,
-            "__into_number" => BuiltinFunction::IntoNumber,
-            "__into_decimal" => BuiltinFunction::IntoDecimal,
-            "__into_bool" => BuiltinFunction::IntoBool,
-            "__into_string" => BuiltinFunction::IntoString,
-            "__try_into_int" => BuiltinFunction::TryIntoInt,
-            "__try_into_number" => BuiltinFunction::TryIntoNumber,
-            "__try_into_decimal" => BuiltinFunction::TryIntoDecimal,
-            "__try_into_bool" => BuiltinFunction::TryIntoBool,
-            "__try_into_string" => BuiltinFunction::TryIntoString,
+            // __into_*/__try_into_* builtins removed — primitive conversions now use
+            // typed ConvertTo*/TryConvertTo* opcodes emitted directly by the compiler.
             "__native_ptr_size" => BuiltinFunction::NativePtrSize,
             "__native_ptr_new_cell" => BuiltinFunction::NativePtrNewCell,
             "__native_ptr_free_cell" => BuiltinFunction::NativePtrFreeCell,
@@ -1877,16 +1869,6 @@ impl BytecodeCompiler {
                 | BuiltinFunction::ToString
                 | BuiltinFunction::ToNumber
                 | BuiltinFunction::ToBool
-                | BuiltinFunction::IntoInt
-                | BuiltinFunction::IntoNumber
-                | BuiltinFunction::IntoDecimal
-                | BuiltinFunction::IntoBool
-                | BuiltinFunction::IntoString
-                | BuiltinFunction::TryIntoInt
-                | BuiltinFunction::TryIntoNumber
-                | BuiltinFunction::TryIntoDecimal
-                | BuiltinFunction::TryIntoBool
-                | BuiltinFunction::TryIntoString
                 | BuiltinFunction::NativePtrSize
                 | BuiltinFunction::NativePtrNewCell
                 | BuiltinFunction::NativePtrFreeCell

@@ -160,19 +160,8 @@ builtin fn Ok<T, E>(value: T) -> Result<T, E>;
 /// Wrap error in Result::Err.
 builtin fn Err<T, E>(error: E) -> Result<T, E>;
 
-/// Internal conversion helpers used by std::core::into.
-builtin fn __into_int<T>(value: T) -> int;
-builtin fn __into_number<T>(value: T) -> number;
-builtin fn __into_decimal<T>(value: T) -> decimal;
-builtin fn __into_bool<T>(value: T) -> bool;
-builtin fn __into_string<T>(value: T) -> string;
-
-/// Internal conversion helpers used by std::core::try_into.
-builtin fn __try_into_int<T>(value: T) -> Result<int, AnyError>;
-builtin fn __try_into_number<T>(value: T) -> Result<number, AnyError>;
-builtin fn __try_into_decimal<T>(value: T) -> Result<decimal, AnyError>;
-builtin fn __try_into_bool<T>(value: T) -> Result<bool, AnyError>;
-builtin fn __try_into_string<T>(value: T) -> Result<string, AnyError>;
+/// Note: __into_*/__try_into_* builtin declarations removed — primitive
+/// conversions now use typed ConvertTo*/TryConvertTo* opcodes directly.
 
 /// Native pointer size in bytes for the current host.
 builtin fn __native_ptr_size() -> usize;

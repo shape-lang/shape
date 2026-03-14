@@ -268,17 +268,7 @@ impl VirtualMachine {
                 }
                 b @ (BuiltinFunction::ToString
                 | BuiltinFunction::ToNumber
-                | BuiltinFunction::ToBool
-                | BuiltinFunction::IntoInt
-                | BuiltinFunction::IntoNumber
-                | BuiltinFunction::IntoDecimal
-                | BuiltinFunction::IntoBool
-                | BuiltinFunction::IntoString
-                | BuiltinFunction::TryIntoInt
-                | BuiltinFunction::TryIntoNumber
-                | BuiltinFunction::TryIntoDecimal
-                | BuiltinFunction::TryIntoBool
-                | BuiltinFunction::TryIntoString) => {
+                | BuiltinFunction::ToBool) => {
                     let args = self.pop_builtin_args()?;
                     let result = self.dispatch_conversion_builtin(b, args)?;
                     self.push_vw(result)?;

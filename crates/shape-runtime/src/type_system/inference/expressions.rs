@@ -1608,7 +1608,7 @@ mod tests {
             r#"
 impl TryInto<int> for string as int {
   method tryInto() {
-    __try_into_int(self)
+    self as int?
   }
 }
 
@@ -1637,7 +1637,7 @@ fn parse(raw: string) -> Result<int> {
             r#"
 impl TryInto<int> for string as int {
   method tryInto() {
-    __try_into_int(self)
+    self as int?
   }
 }
 
@@ -1671,7 +1671,7 @@ match parse("not-int") {
             r#"
 impl Into<int> for string as int {
   method into() {
-    __into_int(self)
+    self as int
   }
 }
 

@@ -282,6 +282,32 @@ define_opcodes! {
     /// Check if iterator done
     IterDone = 0x75, Loop, pops: 1, pushes: 1;
 
+    // ===== Typed Conversion Operations (direct, zero-dispatch) =====
+    /// Convert value to int (infallible, panics on failure)
+    ConvertToInt = 0x76, Arithmetic, pops: 1, pushes: 1;
+    /// Convert value to number (infallible, panics on failure)
+    ConvertToNumber = 0x77, Arithmetic, pops: 1, pushes: 1;
+    /// Convert value to string (infallible, always succeeds)
+    ConvertToString = 0x78, Arithmetic, pops: 1, pushes: 1;
+    /// Convert value to bool (infallible, panics on failure)
+    ConvertToBool = 0x79, Arithmetic, pops: 1, pushes: 1;
+    /// Convert value to decimal (infallible, panics on failure)
+    ConvertToDecimal = 0x7A, Arithmetic, pops: 1, pushes: 1;
+    /// Convert value to char (infallible, panics on failure)
+    ConvertToChar = 0x7B, Arithmetic, pops: 1, pushes: 1;
+    /// Try convert value to int (fallible, pushes Result<int, AnyError>)
+    TryConvertToInt = 0x7C, Arithmetic, pops: 1, pushes: 1;
+    /// Try convert value to number (fallible, pushes Result<number, AnyError>)
+    TryConvertToNumber = 0x7D, Arithmetic, pops: 1, pushes: 1;
+    /// Try convert value to string (fallible, pushes Result<string, AnyError>)
+    TryConvertToString = 0x7E, Arithmetic, pops: 1, pushes: 1;
+    /// Try convert value to bool (fallible, pushes Result<bool, AnyError>)
+    TryConvertToBool = 0x7F, Arithmetic, pops: 1, pushes: 1;
+    /// Try convert value to decimal (fallible, pushes Result<decimal, AnyError>)
+    TryConvertToDecimal = 0x80, Arithmetic, pops: 1, pushes: 1;
+    /// Try convert value to char (fallible, pushes Result<char, AnyError>)
+    TryConvertToChar = 0x81, Arithmetic, pops: 1, pushes: 1;
+
     // ===== Method Call =====
     /// Call method on value (array.map(), string.len(), etc.)
     CallMethod = 0x88, Builtin, pops: 0, pushes: 0;
@@ -809,16 +835,6 @@ pub enum BuiltinFunction {
     ToString,
     ToNumber,
     ToBool,
-    IntoInt,
-    IntoNumber,
-    IntoDecimal,
-    IntoBool,
-    IntoString,
-    TryIntoInt,
-    TryIntoNumber,
-    TryIntoDecimal,
-    TryIntoBool,
-    TryIntoString,
 
     // Native C/Arrow interop helpers
     NativePtrSize,
@@ -1100,20 +1116,10 @@ impl BuiltinFunction {
             BuiltinFunction::IsArray,
             BuiltinFunction::IsObject,
             BuiltinFunction::IsDataRow,
-            // Conversion (13)
+            // Conversion (3)
             BuiltinFunction::ToString,
             BuiltinFunction::ToNumber,
             BuiltinFunction::ToBool,
-            BuiltinFunction::IntoInt,
-            BuiltinFunction::IntoNumber,
-            BuiltinFunction::IntoDecimal,
-            BuiltinFunction::IntoBool,
-            BuiltinFunction::IntoString,
-            BuiltinFunction::TryIntoInt,
-            BuiltinFunction::TryIntoNumber,
-            BuiltinFunction::TryIntoDecimal,
-            BuiltinFunction::TryIntoBool,
-            BuiltinFunction::TryIntoString,
             // Native ptr (8)
             BuiltinFunction::NativePtrSize,
             BuiltinFunction::NativePtrNewCell,

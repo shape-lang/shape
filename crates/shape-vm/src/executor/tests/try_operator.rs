@@ -120,7 +120,7 @@ fn test_fallible_type_assertion_accepts_local_try_into_impl() {
     let source = r#"
 impl TryInto<int> for string as int {
     method tryInto() {
-        __try_into_int(self)
+        self as int?
     }
 }
 
@@ -240,24 +240,15 @@ fn test_fallible_type_assertion_compiles_to_try_into_dispatch_metadata() {
     "#;
 
     let bytecode = compile_source(source).expect("compilation should succeed");
-    let convert = bytecode
-        .instructions
-        .iter()
-        .find(|instr| instr.opcode == OpCode::Convert)
-        .expect("expected Convert opcode in compiled bytecode");
-
-    let Some(Operand::Const(idx)) = convert.operand else {
-        panic!("Convert should carry a type-annotation constant operand");
-    };
-
-    match bytecode.constants.get(idx as usize) {
-        Some(Constant::TypeAnnotation(shape_ast::ast::TypeAnnotation::Generic { name, args }))
-            if name == "__TryIntoDispatch" && args.len() == 2 => {}
-        other => panic!(
-            "expected __TryIntoDispatch metadata constant, got {:?}",
-            other
-        ),
-    }
+    // Primitive fallible assertion now emits a typed TryConvertToInt opcode
+    // instead of Convert + __TryIntoDispatch metadata.
+    assert!(
+        bytecode
+            .instructions
+            .iter()
+            .any(|instr| instr.opcode == OpCode::TryConvertToInt),
+        "expected TryConvertToInt opcode in compiled bytecode"
+    );
 }
 
 #[test]
@@ -268,21 +259,15 @@ fn test_infallible_type_assertion_compiles_to_into_dispatch_metadata() {
     "#;
 
     let bytecode = compile_source(source).expect("compilation should succeed");
-    let convert = bytecode
-        .instructions
-        .iter()
-        .find(|instr| instr.opcode == OpCode::Convert)
-        .expect("expected Convert opcode in compiled bytecode");
-
-    let Some(Operand::Const(idx)) = convert.operand else {
-        panic!("Convert should carry a type-annotation constant operand");
-    };
-
-    match bytecode.constants.get(idx as usize) {
-        Some(Constant::TypeAnnotation(shape_ast::ast::TypeAnnotation::Generic { name, args }))
-            if name == "__IntoDispatch" && args.len() == 2 => {}
-        other => panic!("expected __IntoDispatch metadata constant, got {:?}", other),
-    }
+    // Primitive infallible assertion now emits a typed ConvertToInt opcode
+    // instead of Convert + __IntoDispatch metadata.
+    assert!(
+        bytecode
+            .instructions
+            .iter()
+            .any(|instr| instr.opcode == OpCode::ConvertToInt),
+        "expected ConvertToInt opcode in compiled bytecode"
+    );
 }
 
 #[test]

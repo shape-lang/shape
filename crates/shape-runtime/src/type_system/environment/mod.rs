@@ -688,50 +688,8 @@ impl TypeEnvironment {
             ),
         );
 
-        // Internal conversion helpers used by std::core::try_into implementations.
-        let any_error = Type::Concrete(TypeAnnotation::Reference("AnyError".into()));
-        let result_of = |ok: Type| Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
-            args: vec![ok, any_error.clone()],
-        };
-        let define_try_into_input_poly = |this: &mut Self, name: &str, output: Type| {
-            let input = TypeVar::new("Input".to_string());
-            this.define_polymorphic(
-                name,
-                vec![input.clone()],
-                vec![Type::Variable(input)],
-                result_of(output),
-            );
-        };
-        let define_into_input_poly = |this: &mut Self, name: &str, output: Type| {
-            let input = TypeVar::new("Input".to_string());
-            this.define_polymorphic(
-                name,
-                vec![input.clone()],
-                vec![Type::Variable(input)],
-                output,
-            );
-        };
-        define_into_input_poly(self, "__into_int", BuiltinTypes::integer());
-        define_into_input_poly(self, "__into_number", BuiltinTypes::number());
-        define_into_input_poly(
-            self,
-            "__into_decimal",
-            Type::Concrete(TypeAnnotation::Basic("decimal".to_string())),
-        );
-        define_into_input_poly(self, "__into_bool", BuiltinTypes::boolean());
-        define_into_input_poly(self, "__into_string", BuiltinTypes::string());
-        define_try_into_input_poly(self, "__try_into_int", BuiltinTypes::integer());
-        define_try_into_input_poly(self, "__try_into_number", BuiltinTypes::number());
-        define_try_into_input_poly(
-            self,
-            "__try_into_decimal",
-            Type::Concrete(TypeAnnotation::Basic("decimal".to_string())),
-        );
-        define_try_into_input_poly(self, "__try_into_bool", BuiltinTypes::boolean());
-        define_try_into_input_poly(self, "__try_into_string", BuiltinTypes::string());
+        // Note: __into_*/__try_into_* type registrations removed — primitive conversions
+        // now use typed ConvertTo*/TryConvertTo* opcodes emitted directly by the compiler.
 
         // Note: trading builtins (open_position, close_position, etc.) removed — use packages.
         // Note: __intrinsic_* type registrations removed — stdlib has allow_internal_builtins.

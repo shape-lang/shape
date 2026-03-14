@@ -511,6 +511,20 @@ impl VirtualMachine {
                 return self.exec_builtins(instruction, ctx);
             }
 
+            // Typed conversion opcodes (zero-dispatch, no operand)
+            ConvertToInt => return self.op_convert_to_int(),
+            ConvertToNumber => return self.op_convert_to_number(),
+            ConvertToString => return self.op_convert_to_string(),
+            ConvertToBool => return self.op_convert_to_bool(),
+            ConvertToDecimal => return self.op_convert_to_decimal(),
+            ConvertToChar => return self.op_convert_to_char(),
+            TryConvertToInt => return self.op_try_convert_to_int(),
+            TryConvertToNumber => return self.op_try_convert_to_number(),
+            TryConvertToString => return self.op_try_convert_to_string(),
+            TryConvertToBool => return self.op_try_convert_to_bool(),
+            TryConvertToDecimal => return self.op_try_convert_to_decimal(),
+            TryConvertToChar => return self.op_try_convert_to_char(),
+
             // Exception handling
             SetupTry | PopHandler | Throw | TryUnwrap | UnwrapOption | ErrorContext | IsOk
             | IsErr | UnwrapOk | UnwrapErr => {

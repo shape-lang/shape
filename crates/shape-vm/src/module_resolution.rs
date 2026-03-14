@@ -312,13 +312,97 @@ fn annotate_item_native_abi_package_key(item: &mut Item, package_key: &str) {
     }
 }
 
+/// A tree structure for building nested `mod` AST nodes from flat module paths.
+///
+/// Given paths like `std::core::math` and `std::core::display`, the tree
+/// shares common prefixes to produce:
+/// ```text
+/// mod std {
+///   mod core {
+///     mod math { ... }
+///     mod display { ... }
+///   }
+/// }
+/// ```
+#[derive(Default)]
+struct ModuleTree {
+    /// Leaf items at this level of the tree.
+    items: Vec<Item>,
+    /// Sub-modules keyed by segment name.
+    children: std::collections::HashMap<String, ModuleTree>,
+    /// Insertion order for deterministic output.
+    child_order: Vec<String>,
+}
+
+impl ModuleTree {
+    /// Insert items at the given module path (e.g. `["std", "core", "math"]`).
+    fn insert(&mut self, path: &[&str], items: Vec<Item>) {
+        if path.is_empty() {
+            self.items.extend(items);
+            return;
+        }
+        let segment = path[0].to_string();
+        if !self.children.contains_key(&segment) {
+            self.child_order.push(segment.clone());
+        }
+        self.children
+            .entry(segment)
+            .or_default()
+            .insert(&path[1..], items);
+    }
+
+    /// Convert this tree into a list of nested `Item::Module` AST nodes.
+    fn to_ast(mut self) -> Vec<Item> {
+        let mut result = self.items;
+        for name in self.child_order {
+            if let Some(child) = self.children.remove(&name) {
+                let child_items = child.to_ast();
+                result.push(Item::Module(
+                    ModuleDecl {
+                        name,
+                        name_span: Span::DUMMY,
+                        doc_comment: None,
+                        annotations: Vec::new(),
+                        items: child_items,
+                    },
+                    Span::DUMMY,
+                ));
+            }
+        }
+        result
+    }
+}
+
+/// Set `declaring_module_path` on function definitions within items so that
+/// the compiler can gate `__intrinsic_*` access for stdlib functions.
+fn set_declaring_module_path_on_items(items: &mut [Item], module_path: &str) {
+    for item in items {
+        match item {
+            Item::Function(func, _) => {
+                func.declaring_module_path = Some(module_path.to_string());
+            }
+            Item::Export(export, _) => {
+                if let ExportItem::Function(func) = &mut export.item {
+                    func.declaring_module_path = Some(module_path.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Prepend fully-resolved prelude module AST items into the program.
 ///
 /// Loads `std::core::prelude`, parses its import statements to discover which
-/// modules it references, then loads those modules and inlines their AST
-/// definitions into the program. The prelude's own import statements are NOT
-/// included (only the referenced module definitions), so `append_imported_module_items`
-/// will not double-include them.
+/// modules it references, then:
+///
+/// 1. Wraps their items in nested `mod std { mod core { mod math { ... } } }` AST nodes
+///    so that qualified paths (e.g. `std::core::math::sum`) resolve via the normal
+///    module compilation pipeline.
+///
+/// 2. Inlines the same items at root scope (with `declaring_module_path` set for
+///    `__intrinsic_*` access gating) so that bare prelude names (`sum`, `Display`)
+///    remain available without explicit imports.
 ///
 /// The resolved prelude is cached globally via `OnceLock` so parsing + loading
 /// happens only once per process.
@@ -338,29 +422,44 @@ pub fn prepend_prelude_items(program: &mut Program) -> std::collections::HashSet
         }
     }
 
-    static RESOLVED_PRELUDE: OnceLock<(Vec<Item>, std::collections::HashSet<String>)> =
-        OnceLock::new();
+    /// Cached resolved prelude: (module tree items, flat items for bare names, stdlib function names).
+    static RESOLVED_PRELUDE: OnceLock<(
+        Vec<Item>,
+        Vec<Item>,
+        std::collections::HashSet<String>,
+    )> = OnceLock::new();
 
-    let (items, stdlib_names) = RESOLVED_PRELUDE.get_or_init(|| {
+    let (module_items, flat_items, stdlib_names) = RESOLVED_PRELUDE.get_or_init(|| {
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
 
         // Load the prelude module to discover which modules it imports
         let prelude = match loader.load_module("std::core::prelude") {
             Ok(m) => m,
-            Err(_) => return (Vec::new(), std::collections::HashSet::new()),
+            Err(_) => {
+                return (
+                    Vec::new(),
+                    Vec::new(),
+                    std::collections::HashSet::new(),
+                )
+            }
         };
 
-        let mut all_items = Vec::new();
+        let mut module_tree = ModuleTree::default();
+        let mut all_flat_items = Vec::new();
+        let mut all_stdlib_names = std::collections::HashSet::new();
         let mut seen = std::collections::HashSet::new();
 
-        // Load each module referenced by prelude imports, selectively inlining
-        // only the items that match the import's Named spec.
+        // Load each module referenced by prelude imports.
+        // Build a module tree for qualified paths and flat items for bare names.
         for item in &prelude.ast.items {
             if let Item::Import(import_stmt, _) = item {
                 let module_path = &import_stmt.from;
                 if seen.insert(module_path.clone()) {
                     if let Ok(module) = loader.load_module(module_path) {
-                        // Build filter from Named imports
+                        // Split the module path into segments (e.g. "std::core::math" -> ["std", "core", "math"])
+                        let path_segments: Vec<&str> = module_path.split("::").collect();
+
+                        // Get items to include based on the import filter
                         let named_filter: Option<std::collections::HashSet<&str>> =
                             match &import_stmt.items {
                                 ImportItems::Named(specs) => {
@@ -369,26 +468,56 @@ pub fn prepend_prelude_items(program: &mut Program) -> std::collections::HashSet
                                 ImportItems::Namespace { .. } => None,
                             };
 
-                        if let Some(ref names) = named_filter {
-                            for ast_item in &module.ast.items {
-                                if should_include_item(ast_item, names) {
-                                    all_items.push(ast_item.clone());
-                                }
-                            }
+                        let filtered_items: Vec<Item> = if let Some(ref names) = named_filter {
+                            module
+                                .ast
+                                .items
+                                .iter()
+                                .filter(|ast_item| should_include_item(ast_item, names))
+                                .cloned()
+                                .collect()
                         } else {
-                            all_items.extend(module.ast.items.clone());
+                            module.ast.items.clone()
+                        };
+
+                        // Build items for the module tree with declaring_module_path set
+                        let mut tree_items = filtered_items.clone();
+                        set_declaring_module_path_on_items(&mut tree_items, module_path);
+
+                        // Build flat items for bare-name access with declaring_module_path set
+                        let mut flat_copies = filtered_items;
+                        set_declaring_module_path_on_items(&mut flat_copies, module_path);
+
+                        // Collect stdlib function names (both bare and qualified)
+                        for fn_name in collect_function_names_from_items(&flat_copies) {
+                            all_stdlib_names.insert(fn_name.clone());
+                            all_stdlib_names
+                                .insert(format!("{}::{}", module_path, fn_name));
                         }
+
+                        // Insert into module tree for qualified paths
+                        module_tree.insert(&path_segments, tree_items);
+
+                        // Collect flat items for bare-name access
+                        all_flat_items.extend(flat_copies);
                     }
                 }
             }
         }
 
-        let stdlib_names = collect_function_names_from_items(&all_items);
-        (all_items, stdlib_names)
+        // Convert the module tree into nested Item::Module AST nodes
+        let tree_items = module_tree.to_ast();
+
+        (tree_items, all_flat_items, all_stdlib_names)
     });
 
-    if !items.is_empty() {
-        let mut prelude_items = items.clone();
+    if !module_items.is_empty() || !flat_items.is_empty() {
+        let mut prelude_items = Vec::new();
+        // First: flat items for bare-name access (backward compat)
+        prelude_items.extend(flat_items.clone());
+        // Second: nested mod std { ... } items for qualified access
+        prelude_items.extend(module_items.clone());
+        // Third: the user's original program items
         prelude_items.extend(std::mem::take(&mut program.items));
         program.items = prelude_items;
     }
@@ -976,6 +1105,150 @@ mod tests {
         assert!(
             has_fn_defs,
             "prelude should inject function/statement definitions from stdlib modules"
+        );
+    }
+
+    #[test]
+    fn test_prepend_prelude_items_creates_module_tree() {
+        // Verify that prepend_prelude_items creates a nested mod std { ... } tree
+        // in addition to flat items, giving both qualified and bare name access.
+        let mut program = Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        };
+        prepend_prelude_items(&mut program);
+
+        // Should have flat items (functions, traits, impls, etc.) for bare names
+        let has_flat_functions = program.items.iter().any(|item| {
+            matches!(item, shape_ast::ast::Item::Function(..) | shape_ast::ast::Item::Export(..))
+        });
+        assert!(
+            has_flat_functions,
+            "prelude should include flat function items for bare-name access"
+        );
+
+        // Should have a `mod std { ... }` module item for qualified access
+        let has_std_module = program.items.iter().any(|item| {
+            if let shape_ast::ast::Item::Module(module_decl, _) = item {
+                module_decl.name == "std"
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_std_module,
+            "prelude should include a nested `mod std` module for qualified path access"
+        );
+
+        // Verify the mod std contains mod core
+        let std_module = program
+            .items
+            .iter()
+            .find_map(|item| {
+                if let shape_ast::ast::Item::Module(module_decl, _) = item {
+                    if module_decl.name == "std" {
+                        return Some(module_decl);
+                    }
+                }
+                None
+            })
+            .expect("should find mod std");
+
+        let has_core = std_module.items.iter().any(|item| {
+            if let shape_ast::ast::Item::Module(module_decl, _) = item {
+                module_decl.name == "core"
+            } else {
+                false
+            }
+        });
+        assert!(has_core, "mod std should contain mod core");
+
+        // Verify mod core contains mod math (from std::core::math)
+        let core_module = std_module
+            .items
+            .iter()
+            .find_map(|item| {
+                if let shape_ast::ast::Item::Module(module_decl, _) = item {
+                    if module_decl.name == "core" {
+                        return Some(module_decl);
+                    }
+                }
+                None
+            })
+            .expect("should find mod core inside mod std");
+
+        let has_math = core_module.items.iter().any(|item| {
+            if let shape_ast::ast::Item::Module(module_decl, _) = item {
+                module_decl.name == "math"
+            } else {
+                false
+            }
+        });
+        assert!(has_math, "mod std::core should contain mod math");
+    }
+
+    #[test]
+    fn test_prepend_prelude_items_sets_declaring_module_path() {
+        // Verify that stdlib functions have declaring_module_path set
+        // so that __intrinsic_* access is properly gated.
+        let mut program = Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        };
+        prepend_prelude_items(&mut program);
+
+        // Find a flat function item (e.g., `sum` from std::core::math)
+        let sum_fn = program.items.iter().find_map(|item| {
+            if let shape_ast::ast::Item::Export(export, _) = item {
+                if let shape_ast::ast::ExportItem::Function(func) = &export.item {
+                    if func.name == "sum" {
+                        return Some(func);
+                    }
+                }
+            }
+            if let shape_ast::ast::Item::Function(func, _) = item {
+                if func.name == "sum" {
+                    return Some(func);
+                }
+            }
+            None
+        });
+
+        if let Some(sum) = sum_fn {
+            assert!(
+                sum.declaring_module_path.is_some(),
+                "stdlib function 'sum' should have declaring_module_path set"
+            );
+            assert!(
+                sum.declaring_module_path
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("std::"),
+                "declaring_module_path should start with 'std::', got: {:?}",
+                sum.declaring_module_path
+            );
+        }
+    }
+
+    #[test]
+    fn test_prepend_prelude_stdlib_names_include_qualified() {
+        // Verify that the returned stdlib_names set includes both bare and qualified names.
+        let mut program = Program {
+            items: vec![],
+            docs: shape_ast::ast::ProgramDocs::default(),
+        };
+        let stdlib_names = prepend_prelude_items(&mut program);
+
+        // Should include bare name "sum"
+        assert!(
+            stdlib_names.contains("sum"),
+            "stdlib_names should contain bare name 'sum'"
+        );
+
+        // Should include qualified name "std::core::math::sum"
+        assert!(
+            stdlib_names.contains("std::core::math::sum"),
+            "stdlib_names should contain qualified name 'std::core::math::sum'"
         );
     }
 

@@ -331,20 +331,10 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::IsArray,
     BuiltinFunction::IsObject,
     BuiltinFunction::IsDataRow,
-    // Conversion (13)
+    // Conversion (3)
     BuiltinFunction::ToString,
     BuiltinFunction::ToNumber,
     BuiltinFunction::ToBool,
-    BuiltinFunction::IntoInt,
-    BuiltinFunction::IntoNumber,
-    BuiltinFunction::IntoDecimal,
-    BuiltinFunction::IntoBool,
-    BuiltinFunction::IntoString,
-    BuiltinFunction::TryIntoInt,
-    BuiltinFunction::TryIntoNumber,
-    BuiltinFunction::TryIntoDecimal,
-    BuiltinFunction::TryIntoBool,
-    BuiltinFunction::TryIntoString,
     // Native ptr (8)
     BuiltinFunction::NativePtrSize,
     BuiltinFunction::NativePtrNewCell,
