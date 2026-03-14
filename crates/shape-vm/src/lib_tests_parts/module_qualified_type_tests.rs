@@ -178,6 +178,92 @@ mod module_qualified_type_tests {
         );
     }
 
+    // ===== Additional integration tests =====
+
+    #[test]
+    fn test_module_type_alias() {
+        // Type aliases inside modules should be qualified to m::Alias
+        let result = eval(r#"
+            mod m {
+                type Alias = int
+                fn make() -> Alias { 99 }
+            }
+            m::make()
+        "#);
+        assert_eq!(result.as_i64(), Some(99));
+    }
+
+    #[test]
+    fn test_module_enum_struct_variant() {
+        // Enum struct variants should work with qualified names
+        let result = eval(r#"
+            mod m {
+                enum E { V { x: int, y: int } }
+            }
+            match m::E::V { x: 1, y: 2 } {
+                m::E::V { x, y } => x + y,
+            }
+        "#);
+        assert_eq!(result.as_i64(), Some(3));
+    }
+
+    #[test]
+    fn test_module_multiple_types() {
+        // Multiple types in the same module should all be qualified independently
+        let result = eval(r#"
+            mod m {
+                type A { x: int }
+                type B { y: int }
+                fn sum(a: A, b: B) -> int { a.x + b.y }
+            }
+            m::sum(m::A { x: 10 }, m::B { y: 20 })
+        "#);
+        assert_eq!(result.as_i64(), Some(30));
+    }
+
+    #[test]
+    fn test_module_enum_used_in_function_signature() {
+        // Module-qualified enum used as function return type
+        let result = eval(r#"
+            mod m {
+                enum Color { Red, Blue }
+                fn pick() -> Color { Color::Red }
+            }
+            match m::pick() {
+                m::Color::Red => 1,
+                m::Color::Blue => 2,
+            }
+        "#);
+        assert_eq!(result.as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_module_struct_with_method_chaining() {
+        // Extend method chaining on module-qualified types
+        let result = eval(r#"
+            mod m {
+                type Counter { n: int }
+                extend Counter {
+                    method inc() -> Counter { Counter { n: self.n + 1 } }
+                    method value() -> int { self.n }
+                }
+            }
+            m::Counter { n: 0 }.inc().inc().inc().value()
+        "#);
+        assert_eq!(result.as_i64(), Some(3));
+    }
+
+    #[test]
+    fn test_module_type_in_let_binding_annotation() {
+        // Qualified type annotation in let binding
+        let result = eval(r#"
+            mod m { type P { x: int } }
+            let p: m::P = m::P { x: 7 }
+            p.x
+        "#);
+        assert_eq!(result.as_i64(), Some(7));
+    }
+
     // ===== Phase B: qualified trait bounds in dyn/type params =====
 
     #[test]
