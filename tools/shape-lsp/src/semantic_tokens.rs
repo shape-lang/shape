@@ -6,8 +6,8 @@
 use crate::type_inference::unified_metadata;
 use crate::util::{offset_to_line_col, parser_source};
 use shape_ast::ast::{
-    BlockItem, Expr, FunctionDef, InterpolationMode, Item, Literal, Pattern, Span, Spanned,
-    Statement, TypeAnnotation, VarKind,
+    BlockItem, Expr, FunctionDef, InterpolationMode, Item, Literal, OwnershipModifier, Pattern,
+    Span, Spanned, Statement, TypeAnnotation, VarKind,
 };
 use shape_ast::interpolation::split_expression_and_format_spec;
 use shape_ast::parser::{parse_expression_str, parse_program};
@@ -1132,10 +1132,6 @@ fn is_fallback_keyword(word: &str) -> bool {
             | "or"
             | "not"
             | "in"
-            | "find"
-            | "all"
-            | "analyze"
-            | "scan"
             | "type"
             | "interface"
             | "enum"
@@ -1143,9 +1139,7 @@ fn is_fallback_keyword(word: &str) -> bool {
             | "trait"
             | "impl"
             | "method"
-            | "when"
             | "self"
-            | "on"
             | "comptime"
             | "datasource"
             | "query"
@@ -1168,7 +1162,6 @@ fn is_fallback_keyword(word: &str) -> bool {
             | "equals"
             | "dyn"
             | "where"
-            | "extends"
     )
 }
 
@@ -1299,6 +1292,12 @@ impl<'a> Visitor for TokenCollector<'a> {
                     VarKind::Var => "var",
                 };
                 self.add_keyword_token(keyword, *span);
+                // Highlight contextual ownership modifier (move/clone)
+                match decl.ownership {
+                    OwnershipModifier::Move => self.add_keyword_token("move", *span),
+                    OwnershipModifier::Clone => self.add_keyword_token("clone", *span),
+                    OwnershipModifier::Inferred => {}
+                }
                 if let Some(name) = decl.pattern.as_identifier() {
                     let modifiers = match decl.kind {
                         VarKind::Const => 1 | 4, // DECLARATION | READONLY
@@ -2694,7 +2693,8 @@ let s = f"val: {x}""#;
     fn test_fallback_dyn_and_where_keywords() {
         assert!(is_fallback_keyword("dyn"));
         assert!(is_fallback_keyword("where"));
-        assert!(is_fallback_keyword("extends"));
+        // extends was un-reserved (dead code, never used in grammar)
+        assert!(!is_fallback_keyword("extends"));
     }
 
     #[test]

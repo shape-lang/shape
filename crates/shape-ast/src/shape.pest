@@ -1481,13 +1481,19 @@ keyword = {
     "if" | "else" | "for" | "while" | "match" | "return" | "break" | "continue" |
     "true" | "false" | "null" | "None" | "Some" | "and" | "or" |
     "type" | "interface" | "trait" | "impl" | "enum" |
-    "extend" | "method" | "when" | "on" | "in" |
-    "move" | "clone" |
-    "comptime" | "datasource" | "using"
+    "extend" | "method" | "in" |
+    "comptime" | "datasource"
 }
 
-// Query keywords - not reserved as general identifiers since they're
-// only meaningful within from_query_expr context
+// Contextual keywords - not reserved as general identifiers since they're
+// only meaningful within specific syntactic positions:
+//   when  — method guards, alert clauses
+//   on    — query joins, window specs, timeframe expressions
+//   move  — variable declaration ownership modifier
+//   clone — variable declaration ownership modifier
+//   using — join clauses, implementation selector suffix
+//
+// Query keywords (also contextual):
 // "select", "order", "by", "asc", "desc", "group", "into", "join", "equals"
 integer = @{ "-"? ~ (hex_integer | binary_integer | octal_integer | decimal_integer) }
 hex_integer = { ("0x" | "0X") ~ ASCII_HEX_DIGIT+ ~ int_width_suffix? }
