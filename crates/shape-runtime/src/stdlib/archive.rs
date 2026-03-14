@@ -86,7 +86,7 @@ fn make_entry(name: &str, data: &str) -> ValueWord {
 
 /// Create the `archive` module with zip/tar creation and extraction functions.
 pub fn create_archive_module() -> ModuleExports {
-    let mut module = ModuleExports::new("archive");
+    let mut module = ModuleExports::new("std::core::archive");
     module.description = "Archive creation and extraction (zip, tar)".to_string();
 
     // archive.zip_create(entries: Array<{name: string, data: string}>) -> Array<int>
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn test_archive_module_creation() {
         let module = create_archive_module();
-        assert_eq!(module.name, "archive");
+        assert_eq!(module.name, "std::core::archive");
         assert!(module.has_export("zip_create"));
         assert!(module.has_export("zip_extract"));
         assert!(module.has_export("tar_create"));

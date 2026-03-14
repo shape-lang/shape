@@ -196,7 +196,7 @@ fn json_value_to_typed_nb(
 
 /// Create the `json` module with JSON parsing and serialization functions.
 pub fn create_json_module() -> ModuleExports {
-    let mut module = ModuleExports::new("json");
+    let mut module = ModuleExports::new("std::core::json");
     module.description = "JSON parsing and serialization".to_string();
 
     // json.parse(text: string) -> Result<Json>
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn test_json_module_creation() {
         let module = create_json_module();
-        assert_eq!(module.name, "json");
+        assert_eq!(module.name, "std::core::json");
         assert!(module.has_export("parse"));
         assert!(module.has_export("stringify"));
         assert!(module.has_export("is_valid"));

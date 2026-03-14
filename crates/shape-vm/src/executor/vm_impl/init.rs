@@ -73,24 +73,14 @@ impl VirtualMachine {
 
         // VM-native stdlib modules are always available, independent of
         // user-installed extension plugins.
+        // VM-side modules (state, transport, remote) live in shape-vm.
         vm.register_stdlib_module(state_builtins::create_state_module());
         vm.register_stdlib_module(create_transport_module_exports());
         vm.register_stdlib_module(create_remote_module_exports());
-        vm.register_stdlib_module(shape_runtime::stdlib::regex::create_regex_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::http::create_http_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::crypto::create_crypto_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::env::create_env_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::json::create_json_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::toml_module::create_toml_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::yaml::create_yaml_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::xml::create_xml_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::compress::create_compress_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::archive::create_archive_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::parallel::create_parallel_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::unicode::create_unicode_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::csv_module::create_csv_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::msgpack_module::create_msgpack_module());
-        vm.register_stdlib_module(shape_runtime::stdlib::set_module::create_set_module());
+        // shape-runtime canonical registry covers all non-VM modules.
+        for module in shape_runtime::stdlib::all_stdlib_modules() {
+            vm.register_stdlib_module(module);
+        }
 
         // Initialise metrics collector when requested.
         if vm.config.metrics_enabled {

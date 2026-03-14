@@ -23,8 +23,7 @@ impl BytecodeCompiler {
             let Item::Import(import_stmt, _) = item else {
                 continue;
             };
-            let runtime_module_name = super::BytecodeCompiler::extract_module_name(&import_stmt.from);
-            if runtime_module_name.is_empty() {
+            if import_stmt.from.is_empty() {
                 continue;
             }
 
@@ -33,7 +32,7 @@ impl BytecodeCompiler {
                     let local_name = alias.clone().unwrap_or_else(|| name.clone());
                     sources
                         .entry(local_name)
-                        .or_insert_with(|| runtime_module_name.to_string());
+                        .or_insert_with(|| import_stmt.from.clone());
                 }
                 ImportItems::Named(specs) => {
                     if specs.iter().any(|spec| spec.is_annotation) {
@@ -43,7 +42,7 @@ impl BytecodeCompiler {
                             );
                         sources
                             .entry(hidden_module_name)
-                            .or_insert_with(|| runtime_module_name.to_string());
+                            .or_insert_with(|| import_stmt.from.clone());
                     }
                 }
             }

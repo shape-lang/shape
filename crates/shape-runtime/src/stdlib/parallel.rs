@@ -222,7 +222,7 @@ fn compare_values_natural(a: &ValueWord, b: &ValueWord) -> std::cmp::Ordering {
 
 /// Create the `parallel` module.
 pub fn create_parallel_module() -> ModuleExports {
-    let mut module = ModuleExports::new("parallel");
+    let mut module = ModuleExports::new("std::core::parallel");
     module.description = "Data-parallel operations using Rayon thread pool".to_string();
 
     module.add_function_with_schema(
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn test_parallel_module_creation() {
         let module = create_parallel_module();
-        assert_eq!(module.name, "parallel");
+        assert_eq!(module.name, "std::core::parallel");
         assert!(module.has_export("map"));
         assert!(module.has_export("filter"));
         assert!(module.has_export("for_each"));

@@ -414,6 +414,45 @@ fn test_check_net_permission_enforces_scope_constraints() {
 }
 
 #[test]
+fn test_registry_canonical_name_lookup() {
+    let mut registry = ModuleExportRegistry::new();
+    let mut module = ModuleExports::new("std::core::json");
+    module.add_function("parse", |_args: &[ValueWord], _ctx: &ModuleContext| {
+        Ok(ValueWord::none())
+    });
+    registry.register(module);
+
+    // Lookup by canonical name
+    assert!(registry.has("std::core::json"));
+    assert!(registry.get("std::core::json").is_some());
+    assert!(registry.get("std::core::json").unwrap().has_export("parse"));
+    // Leaf name should NOT work — canonical only
+    assert!(!registry.has("json"));
+    assert!(registry.get("json").is_none());
+    // Non-existent
+    assert!(!registry.has("xml"));
+}
+
+#[test]
+fn test_all_stdlib_modules_populated() {
+    let modules = crate::stdlib::all_stdlib_modules();
+    // Should have at least 18 modules (all shape-runtime ones)
+    assert!(
+        modules.len() >= 18,
+        "expected at least 18 stdlib modules, got {}",
+        modules.len()
+    );
+    // All should have canonical names
+    for m in &modules {
+        assert!(
+            m.name.starts_with("std::core::"),
+            "module '{}' should have canonical name starting with 'std::core::'",
+            m.name
+        );
+    }
+}
+
+#[test]
 fn test_check_net_permission_allows_all_when_no_constraints() {
     let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
     let mut perms = shape_abi_v1::PermissionSet::pure();

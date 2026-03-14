@@ -412,14 +412,24 @@ impl BytecodeCompiler {
     fn is_native_module_export(&self, module_name: &str, export_name: &str) -> bool {
         self.extension_registry
             .as_ref()
-            .and_then(|registry| registry.iter().rev().find(|m| m.name == module_name))
+            .and_then(|registry| {
+                registry
+                    .iter()
+                    .rev()
+                    .find(|m| m.name == module_name)
+            })
             .is_some_and(|module| module.has_export(export_name))
     }
 
     fn is_native_module_export_available(&self, module_name: &str, export_name: &str) -> bool {
         self.extension_registry
             .as_ref()
-            .and_then(|registry| registry.iter().rev().find(|m| m.name == module_name))
+            .and_then(|registry| {
+                registry
+                    .iter()
+                    .rev()
+                    .find(|m| m.name == module_name)
+            })
             .is_some_and(|module| module.is_export_available(export_name, self.comptime_mode))
     }
 
@@ -924,7 +934,7 @@ impl BytecodeCompiler {
             });
         }
 
-        // Named import from a native extension module (e.g. `from file use { read_text }`).
+        // Named import from a native extension module (e.g. `from std::core::file use { read_text }`).
         // Native modules have no AST to inline, so the function won't be in program.functions.
         // Keep a private module binding so the imported symbol can dispatch without
         // implicitly creating a user-visible namespace.

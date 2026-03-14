@@ -74,7 +74,7 @@ fn extract_timeout(options: &ValueWord) -> Option<std::time::Duration> {
 
 /// Create the `http` module with async HTTP request functions.
 pub fn create_http_module() -> ModuleExports {
-    let mut module = ModuleExports::new("http");
+    let mut module = ModuleExports::new("std::core::http");
     module.description = "HTTP client for making web requests".to_string();
 
     let url_param = ModuleParam {
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn test_http_module_creation() {
         let module = create_http_module();
-        assert_eq!(module.name, "http");
+        assert_eq!(module.name, "std::core::http");
         assert!(module.has_export("get"));
         assert!(module.has_export("post"));
         assert!(module.has_export("put"));

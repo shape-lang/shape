@@ -38,7 +38,7 @@ fn match_to_nanboxed(m: &regex::Match, captures: &regex::Captures) -> ValueWord 
 
 /// Create the `regex` module with regular expression functions.
 pub fn create_regex_module() -> ModuleExports {
-    let mut module = ModuleExports::new("regex");
+    let mut module = ModuleExports::new("std::core::regex");
     module.description = "Regular expression matching and replacement".to_string();
 
     // regex.is_match(text: string, pattern: string) -> bool
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn test_regex_module_creation() {
         let module = create_regex_module();
-        assert_eq!(module.name, "regex");
+        assert_eq!(module.name, "std::core::regex");
         assert!(module.has_export("is_match"));
         assert!(module.has_export("match"));
         assert!(module.has_export("match_all"));

@@ -34,7 +34,7 @@ fn set_insert(set: &ValueWord, item: &ValueWord) -> Result<ValueWord, String> {
 
 /// Create the `set` module with set operations.
 pub fn create_set_module() -> ModuleExports {
-    let mut module = ModuleExports::new("set");
+    let mut module = ModuleExports::new("std::core::set");
     module.description = "Unordered collection of unique elements".to_string();
 
     // set.new() -> set

@@ -1,0 +1,124 @@
+/// @module std::core::file
+/// High-level Filesystem Operations
+///
+/// Read, write, and append files as text, lines, or raw bytes.
+/// All operations go through the filesystem provider, so sandbox/VFS
+/// modes work transparently.
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::file
+///
+/// file.write_text("hello.txt", "Hello, World!")
+/// let content = file.read_text("hello.txt")
+/// match content {
+///     Ok(text) => print(text)
+///     Err(e) => print(f"Error: {e}")
+/// }
+/// ```
+
+/// Read the entire contents of a file as a UTF-8 string.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file
+///
+/// # Returns
+///
+/// `Ok(text)` with the file contents, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let content = file.read_text("config.toml")
+/// ```
+pub builtin fn read_text(path: string) -> Result<string, string>;
+
+/// Write a string to a file, creating or truncating it.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file
+/// * `content` - Text content to write
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// file.write_text("output.txt", "Hello, World!")
+/// ```
+pub builtin fn write_text(path: string, content: string) -> Result<_, string>;
+
+/// Read a file and return its lines as an array of strings.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file
+///
+/// # Returns
+///
+/// `Ok(lines)` with an array of strings, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let lines = file.read_lines("data.csv")
+/// ```
+pub builtin fn read_lines(path: string) -> Result<Array<string>, string>;
+
+/// Append a string to a file, creating it if it does not exist.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file
+/// * `content` - Text content to append
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// file.append("log.txt", "new log entry\n")
+/// ```
+pub builtin fn append(path: string, content: string) -> Result<_, string>;
+
+/// Read the entire contents of a file as an array of byte values.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file
+///
+/// # Returns
+///
+/// `Ok(bytes)` with an array of numbers (0-255), or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let bytes = file.read_bytes("image.png")
+/// ```
+pub builtin fn read_bytes(path: string) -> Result<Array<float>, string>;
+
+/// Write an array of byte values to a file.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file
+/// * `data` - Array of byte values (0-255)
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// file.write_bytes("output.bin", [0, 127, 255])
+/// ```
+pub builtin fn write_bytes(path: string, data: Array<float>) -> Result<_, string>;

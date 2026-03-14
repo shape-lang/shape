@@ -621,17 +621,10 @@ impl BytecodeExecutor {
             .collect();
 
         for module_path in &import_paths {
-            match loader.load_module_with_context(module_path, context_dir.as_ref()) {
-                Ok(_) => {}
-                Err(e) => {
-                    // Module not found via loader — this is fine, the import might be
-                    // resolved by other means (stdlib, extensions, etc.)
-                    eprintln!(
-                        "Warning: module loader could not resolve '{}': {}",
-                        module_path, e
-                    );
-                }
-            }
+            // Pre-resolution: attempt to load each import path. Failures are
+            // silently ignored here because the module may be resolved later
+            // via virtual modules, embedded stdlib, or extension resolvers.
+            let _ = loader.load_module_with_context(module_path, context_dir.as_ref());
         }
 
         // Track all loaded file modules (including transitive deps). Compilation
@@ -775,23 +768,7 @@ impl BytecodeExecutor {
                     } else {
                         match loader.load_module(&module_path) {
                             Ok(module) => Some(module.ast.clone()),
-                            Err(_) => {
-                                // Module not found on disk — check if it's a native
-                                // extension module (json, file, io, state, etc.) which
-                                // has no Shape source and is handled at runtime.
-                                // Compare both full path and last segment (e.g. "crypto"
-                                // matches "std::core::crypto").
-                                let short_name = module_path.rsplit("::").next().unwrap_or(&module_path);
-                                let is_extension =
-                                    self.extensions.iter().any(|ext| ext.name == *module_path || ext.name == short_name);
-                                if is_extension {
-                                    None
-                                } else {
-                                    // Re-attempt to produce the original error
-                                    let loader = self.module_loader.as_mut().unwrap();
-                                    Some(loader.load_module(&module_path)?.ast.clone())
-                                }
-                            }
+                            Err(_) => None,
                         }
                     }
                 } else {
@@ -846,17 +823,7 @@ impl BytecodeExecutor {
                     } else {
                         match loader.load_module(module_path) {
                             Ok(module) => Some(module.ast.clone()),
-                            Err(_) => {
-                                let short_name = module_path.rsplit("::").next().unwrap_or(module_path);
-                                let is_extension =
-                                    self.extensions.iter().any(|ext| ext.name == *module_path || ext.name == short_name);
-                                if is_extension {
-                                    None
-                                } else {
-                                    let loader = self.module_loader.as_mut().unwrap();
-                                    Some(loader.load_module(module_path)?.ast.clone())
-                                }
-                            }
+                            Err(_) => None,
                         }
                     }
                 } else {

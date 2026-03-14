@@ -198,6 +198,9 @@ pub fn load_specs(
 
 /// Register VM extension modules exported by loaded extension `shape.module` capabilities.
 ///
+/// Also registers `.shape` module artifacts bundled by language runtime extensions
+/// (e.g. Python, TypeScript) under their own namespaces.
+///
 /// Returns number of module namespaces registered.
 pub fn register_extension_capability_modules(
     engine: &ShapeEngine,
@@ -209,6 +212,15 @@ pub fn register_extension_capability_modules(
         executor.register_extension(module);
     }
     count
+}
+
+/// Register `.shape` module artifacts bundled by loaded language runtime extensions.
+///
+/// Language runtime extensions (e.g. Python, TypeScript) may bundle a `.shape` source
+/// that defines their own namespace. This must be called after extension loading
+/// but before compilation, so imports like `import { eval } from python` resolve.
+pub fn register_language_runtime_artifacts(engine: &mut ShapeEngine) {
+    engine.register_language_runtime_artifacts();
 }
 
 /// Resolve a bare extension name (e.g. "python") to its .so path in

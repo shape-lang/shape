@@ -15,10 +15,35 @@ pub mod error_mapping;
 pub mod marshaling;
 pub mod runtime;
 
+/// Bundled `.shape` module artifact for the `python` namespace.
+///
+/// This source is embedded in the extension binary and registered under the
+/// `"python"` namespace (NOT `"std::core::python"`) when the extension is
+/// loaded. Users import it via `import { eval } from python`.
+const PYTHON_SHAPE_SOURCE: &str = r#"/// @module python
+/// Python interop runtime — provides access to the embedded CPython interpreter.
+///
+/// This module is bundled with the Python language runtime extension and is
+/// only available when the extension is loaded. It does NOT live in `std::*`.
+
+/// Evaluate a Python expression and return its result.
+///
+/// The expression is compiled and executed in the extension's embedded CPython
+/// interpreter. The result is marshalled back to a Shape value.
+pub builtin fn eval(code: string) -> _
+
+/// Import a Python module by name and return it as an opaque handle.
+///
+/// The module is imported in the embedded CPython interpreter. Attribute
+/// access and method calls on the returned handle are forwarded to Python.
+pub builtin fn import(module: string) -> _
+"#;
+
 shape_abi_v1::language_runtime_plugin! {
     name: c"python",
     version: c"0.1.0",
     description: c"Python language runtime for foreign function blocks",
+    shape_source: PYTHON_SHAPE_SOURCE,
     vtable: {
         init: runtime::python_init,
         register_types: runtime::python_register_types,

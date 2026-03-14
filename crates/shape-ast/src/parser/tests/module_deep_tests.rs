@@ -214,7 +214,7 @@ fn test_module_import_keyword_import_rejected() {
 #[test]
 fn test_module_import_js_style_from_import_rejected() {
     // JS-style `from X import { ... }` is invalid
-    let result = parse_program("from csv import { load };");
+    let result = parse_program("from std::core::csv import { load };");
     assert!(
         result.is_err(),
         "JS-style 'from X import' should be rejected"
@@ -293,7 +293,7 @@ fn test_module_import_use_hierarchical_binds_tail_segment() {
 fn test_module_import_multiple_import_statements() {
     let code = r#"
         from math use { sum, max };
-        from io use { print };
+        from std::core::io use { print };
         use utils;
     "#;
     let result = parse_program(code);
@@ -1074,11 +1074,11 @@ fn test_module_export_pub_fn_many_params() {
 
 #[test]
 fn test_module_namespace_use_simple() {
-    let result = parse_program("use json;");
+    let result = parse_program("use std::core::json;");
     assert!(result.is_ok(), "simple namespace: {:?}", result.err());
     match &result.unwrap().items[0] {
         crate::ast::Item::Import(stmt, _) => {
-            assert_eq!(stmt.from, "json");
+            assert_eq!(stmt.from, "std::core::json");
             match &stmt.items {
                 crate::ast::ImportItems::Namespace { name, alias } => {
                     assert_eq!(name, "json");
@@ -1130,9 +1130,9 @@ fn test_module_namespace_use_with_alias_and_usage() {
 fn test_module_namespace_multiple_uses() {
     let result = parse_program(
         r#"
-        use json;
-        use csv;
-        use yaml;
+        use std::core::json;
+        use std::core::csv;
+        use std::core::yaml;
     "#,
     );
     assert!(result.is_ok());

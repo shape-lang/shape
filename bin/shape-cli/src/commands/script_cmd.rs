@@ -233,6 +233,7 @@ pub async fn run_script(
             extension_loading::register_extension_capability_modules(&engine, &mut executor);
             let module_info = executor.module_schemas();
             engine.register_extension_modules(&module_info);
+            engine.register_language_runtime_artifacts();
             executor.set_interrupt(interrupt_flag);
             crate::module_loading::wire_vm_executor_module_loading(
                 &mut engine,
@@ -264,6 +265,7 @@ pub async fn run_script(
             extension_loading::register_extension_capability_modules(&engine, &mut executor);
             let module_info = executor.module_schemas();
             engine.register_extension_modules(&module_info);
+            engine.register_language_runtime_artifacts();
             executor.set_interrupt(interrupt_flag);
             crate::module_loading::wire_vm_executor_module_loading(
                 &mut engine,
@@ -1374,6 +1376,7 @@ async fn run_engine(
             extension_loading::register_extension_capability_modules(engine, &mut executor);
             let module_info = executor.module_schemas();
             engine.register_extension_modules(&module_info);
+            engine.register_language_runtime_artifacts();
             executor.set_interrupt(interrupt_flag);
             let context_file = engine.script_path().map(PathBuf::from);
             crate::module_loading::wire_vm_executor_module_loading(

@@ -1,0 +1,87 @@
+/// @module std::core::yaml
+/// YAML Parsing and Serialization
+///
+/// Parse YAML strings into Shape values and serialize Shape values
+/// back to YAML format. Supports multi-document YAML streams.
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::yaml
+///
+/// let config = yaml.parse("name: test\nversion: 42")
+/// match config {
+///     Ok(data) => print(data["name"])
+///     Err(e) => print(f"Parse error: {e}")
+/// }
+/// ```
+
+/// Parse a YAML string into Shape values.
+///
+/// # Arguments
+///
+/// * `text` - YAML string to parse
+///
+/// # Returns
+///
+/// `Ok(value)` with the parsed value, or `Err(message)` on parse failure.
+///
+/// # Example
+///
+/// ```shape
+/// let data = yaml.parse("name: Alice\nage: 30")
+/// ```
+pub builtin fn parse(text: string) -> Result<_, string>;
+
+/// Parse a multi-document YAML string into an array of Shape values.
+///
+/// Each YAML document (separated by `---`) becomes one element in the array.
+///
+/// # Arguments
+///
+/// * `text` - YAML string with one or more documents
+///
+/// # Returns
+///
+/// `Ok(documents)` with an array of parsed values, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let docs = yaml.parse_all("---\nname: doc1\n---\nname: doc2")
+/// ```
+pub builtin fn parse_all(text: string) -> Result<Array<_>, string>;
+
+/// Serialize a Shape value to a YAML string.
+///
+/// # Arguments
+///
+/// * `value` - Value to serialize
+///
+/// # Returns
+///
+/// `Ok(yaml_string)` with the YAML output, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let text = yaml.stringify({ name: "Alice", age: 30 })
+/// ```
+pub builtin fn stringify(value: _) -> Result<string, string>;
+
+/// Check if a string is valid YAML.
+///
+/// # Arguments
+///
+/// * `text` - String to validate as YAML
+///
+/// # Returns
+///
+/// `true` if the string is valid YAML, `false` otherwise.
+///
+/// # Example
+///
+/// ```shape
+/// yaml.is_valid("key: value")  // true
+/// ```
+pub builtin fn is_valid(text: string) -> bool;

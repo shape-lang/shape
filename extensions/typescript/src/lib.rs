@@ -14,10 +14,36 @@ pub mod error_mapping;
 pub mod marshaling;
 pub mod runtime;
 
+/// Bundled `.shape` module artifact for the `typescript` namespace.
+///
+/// This source is embedded in the extension binary and registered under the
+/// `"typescript"` namespace (NOT `"std::core::typescript"`) when the extension
+/// is loaded. Users import it via `import { eval } from typescript`.
+const TYPESCRIPT_SHAPE_SOURCE: &str = r#"/// @module typescript
+/// TypeScript interop runtime — provides access to the embedded V8 engine.
+///
+/// This module is bundled with the TypeScript language runtime extension and
+/// is only available when the extension is loaded. It does NOT live in `std::*`.
+
+/// Evaluate a TypeScript/JavaScript expression and return its result.
+///
+/// The expression is compiled (TS is transpiled to JS) and executed in the
+/// extension's embedded V8 isolate. The result is marshalled back to a Shape
+/// value.
+pub builtin fn eval(code: string) -> _
+
+/// Import a JavaScript/TypeScript module by specifier and return it.
+///
+/// The module is resolved and loaded in the V8 runtime. The returned handle
+/// provides access to the module's exports.
+pub builtin fn import(specifier: string) -> _
+"#;
+
 shape_abi_v1::language_runtime_plugin! {
     name: c"typescript",
     version: c"0.1.0",
     description: c"TypeScript language runtime for foreign function blocks (V8 via deno_core)",
+    shape_source: TYPESCRIPT_SHAPE_SOURCE,
     vtable: {
         init: runtime::ts_init,
         register_types: runtime::ts_register_types,

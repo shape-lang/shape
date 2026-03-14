@@ -48,7 +48,7 @@ fn yaml_value_to_nanboxed(value: serde_yaml::Value) -> ValueWord {
 
 /// Create the `yaml` module with YAML parsing and serialization functions.
 pub fn create_yaml_module() -> ModuleExports {
-    let mut module = ModuleExports::new("yaml");
+    let mut module = ModuleExports::new("std::core::yaml");
     module.description = "YAML parsing and serialization".to_string();
 
     // yaml.parse(text: string) -> Result<HashMap>
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn test_yaml_module_creation() {
         let module = create_yaml_module();
-        assert_eq!(module.name, "yaml");
+        assert_eq!(module.name, "std::core::yaml");
         assert!(module.has_export("parse"));
         assert!(module.has_export("parse_all"));
         assert!(module.has_export("stringify"));

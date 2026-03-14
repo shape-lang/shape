@@ -578,26 +578,13 @@ impl ModuleExports {
         }
     }
 
-    /// Return `ParsedModuleSchema` entries for the VM-native stdlib modules
-    /// (regex, http, crypto, env, json). Used during engine initialization
-    /// to make these globals visible at compile time.
+    /// Return `ParsedModuleSchema` entries for all shipped native stdlib modules.
+    /// Used during engine initialization to make these globals visible at compile time.
     pub fn stdlib_module_schemas() -> Vec<crate::extensions::ParsedModuleSchema> {
-        vec![
-            crate::stdlib::regex::create_regex_module().to_parsed_schema(),
-            crate::stdlib::http::create_http_module().to_parsed_schema(),
-            crate::stdlib::crypto::create_crypto_module().to_parsed_schema(),
-            crate::stdlib::env::create_env_module().to_parsed_schema(),
-            crate::stdlib::json::create_json_module().to_parsed_schema(),
-            crate::stdlib::toml_module::create_toml_module().to_parsed_schema(),
-            crate::stdlib::yaml::create_yaml_module().to_parsed_schema(),
-            crate::stdlib::xml::create_xml_module().to_parsed_schema(),
-            crate::stdlib::compress::create_compress_module().to_parsed_schema(),
-            crate::stdlib::archive::create_archive_module().to_parsed_schema(),
-            crate::stdlib::parallel::create_parallel_module().to_parsed_schema(),
-            crate::stdlib::unicode::create_unicode_module().to_parsed_schema(),
-            crate::stdlib::csv_module::create_csv_module().to_parsed_schema(),
-            crate::stdlib::msgpack_module::create_msgpack_module().to_parsed_schema(),
-        ]
+        crate::stdlib::all_stdlib_modules()
+            .into_iter()
+            .map(|m| m.to_parsed_schema())
+            .collect()
     }
 }
 
@@ -631,6 +618,7 @@ impl std::fmt::Debug for ModuleExports {
 /// Registry of all extension modules.
 ///
 /// Created at startup and populated from loaded plugin capabilities.
+/// Lookup is by canonical path only (e.g. `"std::core::json"`).
 #[derive(Default)]
 pub struct ModuleExportRegistry {
     modules: HashMap<String, ModuleExports>,
@@ -646,17 +634,18 @@ impl ModuleExportRegistry {
 
     /// Register a extension module.
     pub fn register(&mut self, module: ModuleExports) {
-        self.modules.insert(module.name.clone(), module);
+        let canonical = module.name.clone();
+        self.modules.insert(canonical, module);
     }
 
-    /// Get a module by name.
+    /// Get a module by canonical name.
     pub fn get(&self, name: &str) -> Option<&ModuleExports> {
         self.modules.get(name)
     }
 
-    /// Check if a module exists.
+    /// Check if a module exists by canonical name.
     pub fn has(&self, name: &str) -> bool {
-        self.modules.contains_key(name)
+        self.get(name).is_some()
     }
 
     /// List all registered module names.

@@ -215,7 +215,7 @@ fn test_state_diff_patch_roundtrip() {
 #[test]
 fn test_create_state_module_exports() {
     let module = create_state_module();
-    assert_eq!(module.name, "state");
+    assert_eq!(module.name, "std::core::state");
     assert!(module.has_export("hash"));
     assert!(module.has_export("fn_hash"));
     assert!(module.has_export("schema_hash"));

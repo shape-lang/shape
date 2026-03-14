@@ -16,7 +16,7 @@ use crate::module_exports::{ModuleExports, ModuleFunction, ModuleParam};
 
 /// Create the `io` module with file system operations.
 pub fn create_io_module() -> ModuleExports {
-    let mut module = ModuleExports::new("io");
+    let mut module = ModuleExports::new("std::core::io");
     module.description = "File system and path operations".to_string();
 
     // === File handle operations ===
@@ -982,7 +982,7 @@ mod tests {
     #[test]
     fn test_io_module_creation() {
         let module = create_io_module();
-        assert_eq!(module.name, "io");
+        assert_eq!(module.name, "std::core::io");
 
         // File operations
         assert!(module.has_export("open"));

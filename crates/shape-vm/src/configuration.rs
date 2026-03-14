@@ -77,38 +77,10 @@ impl BytecodeExecutor {
     /// Register the VM-native stdlib modules (regex, http, crypto, env, json, etc.)
     /// so the compiler discovers their exports and emits correct module bindings.
     fn register_stdlib_modules(&mut self) {
+        // shape-runtime canonical registry covers all non-VM modules.
         self.extensions
-            .push(shape_runtime::stdlib::regex::create_regex_module());
-        self.extensions
-            .push(shape_runtime::stdlib::http::create_http_module());
-        self.extensions
-            .push(shape_runtime::stdlib::crypto::create_crypto_module());
-        self.extensions
-            .push(shape_runtime::stdlib::env::create_env_module());
-        self.extensions
-            .push(shape_runtime::stdlib::json::create_json_module());
-        self.extensions
-            .push(shape_runtime::stdlib::toml_module::create_toml_module());
-        self.extensions
-            .push(shape_runtime::stdlib::yaml::create_yaml_module());
-        self.extensions
-            .push(shape_runtime::stdlib::xml::create_xml_module());
-        self.extensions
-            .push(shape_runtime::stdlib::compress::create_compress_module());
-        self.extensions
-            .push(shape_runtime::stdlib::archive::create_archive_module());
-        self.extensions
-            .push(shape_runtime::stdlib::unicode::create_unicode_module());
-        self.extensions
-            .push(shape_runtime::stdlib::csv_module::create_csv_module());
-        self.extensions
-            .push(shape_runtime::stdlib::msgpack_module::create_msgpack_module());
-        self.extensions
-            .push(shape_runtime::stdlib::set_module::create_set_module());
-        self.extensions
-            .push(shape_runtime::stdlib::file::create_file_module());
-        self.extensions
-            .push(shape_runtime::stdlib_io::create_io_module());
+            .extend(shape_runtime::stdlib::all_stdlib_modules());
+        // VM-side modules (state, transport, remote) live in shape-vm.
         self.extensions
             .push(crate::executor::state_builtins::create_state_module());
         self.extensions

@@ -1,0 +1,63 @@
+/// @module std::core::xml
+/// XML Parsing and Serialization
+///
+/// Parse XML strings into Shape HashMaps and serialize them back to XML.
+/// XML nodes are represented as HashMaps with the structure:
+/// `{ name: string, attributes: HashMap, children: Array, text?: string }`
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::xml
+///
+/// let doc = xml.parse("<root><child>hello</child></root>")
+/// match doc {
+///     Ok(node) => print(node["name"])  // "root"
+///     Err(e) => print(f"Parse error: {e}")
+/// }
+/// ```
+
+/// Parse an XML string into a Shape HashMap node.
+///
+/// The returned node has fields: `name` (element name), `attributes` (HashMap),
+/// `children` (Array of child nodes), and optionally `text` (text content).
+///
+/// # Arguments
+///
+/// * `text` - XML string to parse
+///
+/// # Returns
+///
+/// `Ok(node)` with the parsed root element, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let node = xml.parse("<person name=\"Alice\" age=\"30\">text</person>")
+/// ```
+pub builtin fn parse(text: string) -> Result<_, string>;
+
+/// Serialize a Shape HashMap node to an XML string.
+///
+/// The input must be a HashMap with `name`, `attributes`, `children`,
+/// and optionally `text` fields.
+///
+/// # Arguments
+///
+/// * `value` - Node value to serialize
+///
+/// # Returns
+///
+/// `Ok(xml_string)` with the XML output, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let xml_str = xml.stringify({
+///     name: "root",
+///     attributes: {},
+///     children: [],
+///     text: "hello"
+/// })
+/// ```
+pub builtin fn stringify(value: _) -> Result<string, string>;

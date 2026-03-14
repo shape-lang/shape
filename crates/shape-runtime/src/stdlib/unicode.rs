@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 /// Create the `unicode` module.
 pub fn create_unicode_module() -> ModuleExports {
-    let mut module = ModuleExports::new("unicode");
+    let mut module = ModuleExports::new("std::core::unicode");
     module.description = "Unicode text processing utilities".to_string();
 
     // unicode.normalize(text: string, form: string) -> string
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn test_unicode_module_creation() {
         let module = create_unicode_module();
-        assert_eq!(module.name, "unicode");
+        assert_eq!(module.name, "std::core::unicode");
         assert!(module.has_export("normalize"));
         assert!(module.has_export("category"));
         assert!(module.has_export("is_letter"));

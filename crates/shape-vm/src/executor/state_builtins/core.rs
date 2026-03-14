@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 /// Create the `state` extension module with all content-addressed builtins.
 pub fn create_state_module() -> ModuleExports {
-    let mut module = ModuleExports::new("state");
+    let mut module = ModuleExports::new("std::core::state");
     module.description = "Content-addressed VM state primitives".to_string();
 
     // -- Type schemas for state introspection types --

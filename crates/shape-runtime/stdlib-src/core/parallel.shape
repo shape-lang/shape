@@ -1,0 +1,94 @@
+/// @module std::core::parallel
+/// Data-Parallel Operations
+///
+/// Parallel map, filter, reduce, sort, and chunking using the Rayon thread pool.
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::parallel
+///
+/// let chunks = parallel.chunks([1, 2, 3, 4, 5], 2)
+/// let threads = parallel.num_threads()
+/// let sorted = parallel.sort([3, 1, 4, 1, 5])
+/// ```
+
+/// Map a function over array elements.
+///
+/// # Arguments
+///
+/// * `array` - Array to map over
+/// * `callback` - Callback function applied to each element
+///
+/// # Returns
+///
+/// New array with mapped results.
+pub builtin fn map(array: Array<_>, callback: _) -> Array<_>;
+
+/// Filter array elements using a predicate.
+///
+/// # Arguments
+///
+/// * `array` - Array to filter
+/// * `callback` - Predicate function returning bool
+///
+/// # Returns
+///
+/// New array with elements that satisfy the predicate.
+pub builtin fn filter(array: Array<_>, callback: _) -> Array<_>;
+
+/// Apply a function to each element for side effects.
+///
+/// # Arguments
+///
+/// * `array` - Array to iterate
+/// * `callback` - Callback function applied to each element
+pub builtin fn for_each(array: Array<_>, callback: _) -> _;
+
+/// Split an array into chunks of a given size.
+///
+/// The last chunk may be smaller if the array length is not evenly divisible.
+///
+/// # Arguments
+///
+/// * `array` - Array to chunk
+/// * `size` - Size of each chunk
+///
+/// # Returns
+///
+/// Array of chunk arrays.
+pub builtin fn chunks(array: Array<_>, size: int) -> Array<Array<_>>;
+
+/// Reduce an array to a single value.
+///
+/// # Arguments
+///
+/// * `array` - Array to reduce
+/// * `callback` - Reducer function (accumulator, element) -> accumulator
+/// * `initial` - Initial accumulator value
+///
+/// # Returns
+///
+/// The final accumulated value.
+pub builtin fn reduce(array: Array<_>, callback: _, initial: _) -> _;
+
+/// Sort an array, optionally with a comparator.
+///
+/// Uses parallel sort for large arrays (1024+ elements).
+///
+/// # Arguments
+///
+/// * `array` - Array to sort
+/// * `comparator` - Optional comparator function (a, b) -> number
+///
+/// # Returns
+///
+/// New sorted array.
+pub builtin fn sort(array: Array<_>, comparator: _) -> Array<_>;
+
+/// Return the number of threads in the Rayon thread pool.
+///
+/// # Returns
+///
+/// Number of available threads.
+pub builtin fn num_threads() -> int;

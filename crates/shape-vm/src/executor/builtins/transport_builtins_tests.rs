@@ -21,7 +21,7 @@ fn test_ctx() -> ModuleContext<'static> {
 #[test]
 fn test_create_transport_module() {
     let module = create_transport_module();
-    assert_eq!(module.name, "transport");
+    assert_eq!(module.name, "std::core::transport");
     assert!(module.has_export("tcp"));
     assert!(module.has_export("send"));
     assert!(module.has_export("connect"));

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 /// Create the `csv` module with CSV parsing and serialization functions.
 pub fn create_csv_module() -> ModuleExports {
-    let mut module = ModuleExports::new("csv");
+    let mut module = ModuleExports::new("std::core::csv");
     module.description = "CSV parsing and serialization".to_string();
 
     // csv.parse(text: string) -> Array<Array<string>>
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn test_csv_module_creation() {
         let module = create_csv_module();
-        assert_eq!(module.name, "csv");
+        assert_eq!(module.name, "std::core::csv");
         assert!(module.has_export("parse"));
         assert!(module.has_export("parse_records"));
         assert!(module.has_export("stringify"));

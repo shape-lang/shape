@@ -345,4 +345,52 @@ impl PluginLanguageRuntime {
             }
         }
     }
+
+    /// Retrieve the bundled `.shape` module source from this language runtime.
+    ///
+    /// Returns `Some((namespace, source))` if the extension bundles a Shape
+    /// module artifact, where `namespace` is the extension's own namespace
+    /// (e.g. `"python"`, `"typescript"`) -- NOT `"std::core::*"`.
+    ///
+    /// Returns `None` if the extension does not bundle any Shape source.
+    pub fn shape_source(&self) -> Result<Option<(String, String)>> {
+        let get_source_fn = match self.state.vtable.get_shape_source {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let rc = unsafe { get_source_fn(self.state.instance, &mut out_ptr, &mut out_len) };
+        if rc != 0 {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "Language runtime '{}' get_shape_source failed (error code {})",
+                    self.language_id, rc
+                ),
+                location: None,
+            });
+        }
+
+        if out_ptr.is_null() || out_len == 0 {
+            return Ok(None);
+        }
+
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) }.to_vec();
+        if let Some(free_fn) = self.state.vtable.free_buffer {
+            unsafe { free_fn(out_ptr, out_len) };
+        }
+
+        let source = String::from_utf8(bytes).map_err(|e| ShapeError::RuntimeError {
+            message: format!(
+                "Language runtime '{}' returned invalid UTF-8 shape source: {}",
+                self.language_id, e
+            ),
+            location: None,
+        })?;
+
+        // The namespace is the language_id itself (e.g. "python", "typescript"),
+        // NOT "std::core::python".
+        Ok(Some((self.language_id.clone(), source)))
+    }
 }

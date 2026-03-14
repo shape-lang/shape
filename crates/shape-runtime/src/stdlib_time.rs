@@ -8,7 +8,7 @@ use shape_value::ValueWord;
 
 /// Create the `time` module with precision timing functions.
 pub fn create_time_module() -> ModuleExports {
-    let mut module = ModuleExports::new("time");
+    let mut module = ModuleExports::new("std::core::time");
     module.description = "Precision timing utilities".to_string();
 
     // time.now() -> Instant
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn test_time_module_creation() {
         let module = create_time_module();
-        assert_eq!(module.name, "time");
+        assert_eq!(module.name, "std::core::time");
         assert!(module.has_export("now"));
         assert!(module.has_export("sleep"));
         assert!(module.has_export("sleep_sync"));

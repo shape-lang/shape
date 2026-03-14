@@ -55,7 +55,7 @@ fn make_object(fields: Vec<(&str, ValueWord)>) -> ValueWord {
 
 /// Create the `remote` module with remote execution functions.
 pub fn create_remote_module() -> ModuleExports {
-    let mut module = ModuleExports::new("remote");
+    let mut module = ModuleExports::new("std::core::remote");
     module.description = "Remote execution on Shape serve instances".to_string();
 
     // remote.execute(addr, code) -> Result<{ value, stdout, error }, string>
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn test_remote_module_creation() {
         let module = create_remote_module();
-        assert_eq!(module.name, "remote");
+        assert_eq!(module.name, "std::core::remote");
         assert!(module.exports.contains_key("execute"));
         assert!(module.exports.contains_key("ping"));
         assert!(module.exports.contains_key("__call"));

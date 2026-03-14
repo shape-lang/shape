@@ -809,6 +809,23 @@ pub struct LanguageRuntimeVTable {
     ///
     /// Defaults to `Dynamic` (0) when zero-initialized.
     pub error_model: ErrorModel,
+
+    /// Return a bundled `.shape` module source for this language runtime.
+    ///
+    /// The returned buffer is a UTF-8 string containing Shape source code
+    /// that defines the extension's namespace (e.g., `python`, `typescript`).
+    /// The host compiles this source and makes it importable under the
+    /// extension's own namespace -- NOT under `std::*`.
+    ///
+    /// Caller frees via `free_buffer`. Returns 0 on success.
+    /// If the extension has no bundled source, set this to `None`.
+    pub get_shape_source: Option<
+        unsafe extern "C" fn(
+            instance: *mut c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32,
+    >,
 }
 
 /// LSP configuration for a language runtime, returned by `get_lsp_config`.
@@ -1474,10 +1491,85 @@ pub type GetAbiVersionFn = unsafe extern "C" fn() -> u32;
 /// ```
 #[macro_export]
 macro_rules! language_runtime_plugin {
+    // Arm WITH shape_source: embeds a `.shape` module artifact in the extension.
     (
         name: $name:expr,
         version: $version:expr,
         description: $description:expr,
+        shape_source: $shape_source:expr,
+        vtable: {
+            init: $init:expr,
+            register_types: $register_types:expr,
+            compile: $compile:expr,
+            invoke: $invoke:expr,
+            dispose_function: $dispose_function:expr,
+            language_id: $language_id:expr,
+            get_lsp_config: $get_lsp_config:expr,
+            free_buffer: $free_buffer:expr,
+            drop: $drop_fn:expr $(,)?
+        } $(,)?
+    ) => {
+        $crate::language_runtime_plugin!(@internal
+            name: $name,
+            version: $version,
+            description: $description,
+            shape_source_opt: Some($shape_source),
+            vtable: {
+                init: $init,
+                register_types: $register_types,
+                compile: $compile,
+                invoke: $invoke,
+                dispose_function: $dispose_function,
+                language_id: $language_id,
+                get_lsp_config: $get_lsp_config,
+                free_buffer: $free_buffer,
+                drop: $drop_fn,
+            }
+        );
+    };
+
+    // Arm WITHOUT shape_source: backward-compatible, no bundled module.
+    (
+        name: $name:expr,
+        version: $version:expr,
+        description: $description:expr,
+        vtable: {
+            init: $init:expr,
+            register_types: $register_types:expr,
+            compile: $compile:expr,
+            invoke: $invoke:expr,
+            dispose_function: $dispose_function:expr,
+            language_id: $language_id:expr,
+            get_lsp_config: $get_lsp_config:expr,
+            free_buffer: $free_buffer:expr,
+            drop: $drop_fn:expr $(,)?
+        } $(,)?
+    ) => {
+        $crate::language_runtime_plugin!(@internal
+            name: $name,
+            version: $version,
+            description: $description,
+            shape_source_opt: None,
+            vtable: {
+                init: $init,
+                register_types: $register_types,
+                compile: $compile,
+                invoke: $invoke,
+                dispose_function: $dispose_function,
+                language_id: $language_id,
+                get_lsp_config: $get_lsp_config,
+                free_buffer: $free_buffer,
+                drop: $drop_fn,
+            }
+        );
+    };
+
+    // Internal implementation arm.
+    (@internal
+        name: $name:expr,
+        version: $version:expr,
+        description: $description:expr,
+        shape_source_opt: $shape_source_opt:expr,
         vtable: {
             init: $init:expr,
             register_types: $register_types:expr,
@@ -1522,6 +1614,42 @@ macro_rules! language_runtime_plugin {
             &MANIFEST
         }
 
+        /// Return the bundled `.shape` source for this language runtime, if any.
+        ///
+        /// Writes a UTF-8 string to `out_ptr`/`out_len`. Caller frees via
+        /// `free_buffer`. Returns 0 on success (even when no source is bundled,
+        /// in which case `out_ptr` is set to null).
+        unsafe extern "C" fn __shape_get_shape_source(
+            _instance: *mut ::std::ffi::c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            const SOURCE: Option<&str> = $shape_source_opt;
+            if out_ptr.is_null() || out_len.is_null() {
+                return 1;
+            }
+            match SOURCE {
+                Some(src) => {
+                    let mut bytes = src.as_bytes().to_vec();
+                    let len = bytes.len();
+                    let ptr = bytes.as_mut_ptr();
+                    ::std::mem::forget(bytes);
+                    unsafe {
+                        *out_ptr = ptr;
+                        *out_len = len;
+                    }
+                    0
+                }
+                None => {
+                    unsafe {
+                        *out_ptr = ::std::ptr::null_mut();
+                        *out_len = 0;
+                    }
+                    0
+                }
+            }
+        }
+
         #[unsafe(no_mangle)]
         pub extern "C" fn shape_language_runtime_vtable() -> *const $crate::LanguageRuntimeVTable {
             static VTABLE: $crate::LanguageRuntimeVTable = $crate::LanguageRuntimeVTable {
@@ -1535,6 +1663,7 @@ macro_rules! language_runtime_plugin {
                 free_buffer: Some($free_buffer),
                 drop: Some($drop_fn),
                 error_model: $crate::ErrorModel::Dynamic,
+                get_shape_source: Some(__shape_get_shape_source),
             };
             &VTABLE
         }

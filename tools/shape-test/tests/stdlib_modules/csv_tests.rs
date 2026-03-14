@@ -2,7 +2,7 @@
 //!
 //! NOTE: The csv module is defined as a ModuleExports but is NOT yet registered
 //! as a VM extension (unlike crypto, json, set, msgpack). These tests verify
-//! the module functions work correctly by using the `use csv` import path
+//! the module functions work correctly by using the `use std::core::csv` import path
 //! which routes through the module loader.
 //!
 //! Currently csv is not registered in the VM, so these tests use the direct

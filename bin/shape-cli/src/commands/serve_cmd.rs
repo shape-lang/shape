@@ -774,6 +774,7 @@ fn execute_code_in_process(
     extension_loading::register_extension_capability_modules(&mut engine, &mut executor);
     let module_info = executor.module_schemas();
     engine.register_extension_modules(&module_info);
+    engine.register_language_runtime_artifacts();
 
     let interrupt = Arc::new(AtomicU8::new(0));
     executor.set_interrupt(interrupt);
@@ -849,6 +850,7 @@ fn execute_file_in_process(
     extension_loading::register_extension_capability_modules(&mut engine, &mut executor);
     let module_info = executor.module_schemas();
     engine.register_extension_modules(&module_info);
+    engine.register_language_runtime_artifacts();
 
     let interrupt = Arc::new(AtomicU8::new(0));
     executor.set_interrupt(interrupt);

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 /// Create the `env` module with environment variable and system info functions.
 pub fn create_env_module() -> ModuleExports {
-    let mut module = ModuleExports::new("env");
+    let mut module = ModuleExports::new("std::core::env");
     module.description = "Environment variables and system information".to_string();
 
     // env.get(name: string) -> Option<string>
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn test_env_module_creation() {
         let module = create_env_module();
-        assert_eq!(module.name, "env");
+        assert_eq!(module.name, "std::core::env");
         assert!(module.has_export("get"));
         assert!(module.has_export("has"));
         assert!(module.has_export("all"));

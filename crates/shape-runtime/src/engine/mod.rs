@@ -345,6 +345,44 @@ impl ShapeEngine {
         self.runtime.register_extension_module_artifacts(modules);
     }
 
+    /// Register Shape source artifacts bundled by loaded language runtime extensions.
+    ///
+    /// Each language runtime extension (e.g. Python, TypeScript) may bundle a
+    /// `.shape` module source that defines the extension's own namespace.
+    /// The namespace is the language identifier itself (e.g. `"python"`,
+    /// `"typescript"`) -- NOT `"std::core::*"`.
+    ///
+    /// Call this after loading extensions but before execute().
+    pub fn register_language_runtime_artifacts(&mut self) {
+        let runtimes = self.language_runtimes();
+        let mut schemas = Vec::new();
+        for (_lang_id, runtime) in &runtimes {
+            match runtime.shape_source() {
+                Ok(Some((namespace, source))) => {
+                    schemas.push(crate::extensions::ParsedModuleSchema {
+                        module_name: namespace.clone(),
+                        functions: Vec::new(),
+                        artifacts: vec![crate::extensions::ParsedModuleArtifact {
+                            module_path: namespace,
+                            source: Some(source),
+                            compiled: None,
+                        }],
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to get shape source from language runtime: {}",
+                        e
+                    );
+                }
+            }
+        }
+        if !schemas.is_empty() {
+            self.runtime.register_extension_module_artifacts(&schemas);
+        }
+    }
+
     /// Set the current source text for error messages
     ///
     /// Call this before execute() to enable source-contextualized error messages.

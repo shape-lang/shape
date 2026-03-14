@@ -79,7 +79,7 @@ fn nanboxed_to_toml_value(nb: &ValueWord) -> toml::Value {
 
 /// Create the `toml` module with TOML parsing and serialization functions.
 pub fn create_toml_module() -> ModuleExports {
-    let mut module = ModuleExports::new("toml");
+    let mut module = ModuleExports::new("std::core::toml");
     module.description = "TOML parsing and serialization".to_string();
 
     // toml.parse(text: string) -> Result<HashMap>
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn test_toml_module_creation() {
         let module = create_toml_module();
-        assert_eq!(module.name, "toml");
+        assert_eq!(module.name, "std::core::toml");
         assert!(module.has_export("parse"));
         assert!(module.has_export("stringify"));
         assert!(module.has_export("is_valid"));

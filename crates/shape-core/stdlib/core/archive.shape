@@ -1,0 +1,58 @@
+/// @module std::core::archive
+/// Archive Creation and Extraction
+///
+/// Create and extract zip and tar archives in memory.
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::archive
+///
+/// let entries = [{ name: "hello.txt", data: "Hello, World!" }]
+/// let zip_bytes = archive.zip_create(entries)
+/// let extracted = archive.zip_extract(zip_bytes)
+/// ```
+
+/// Create a zip archive in memory from an array of entries.
+///
+/// # Arguments
+///
+/// * `entries` - Array of objects with `name` (string) and `data` (string) fields
+///
+/// # Returns
+///
+/// Byte array containing the zip archive.
+pub builtin fn zip_create(entries: Array<_>) -> Array<int>;
+
+/// Extract a zip archive from a byte array into an array of entries.
+///
+/// # Arguments
+///
+/// * `data` - Zip archive as byte array
+///
+/// # Returns
+///
+/// Array of objects with `name` and `data` fields.
+pub builtin fn zip_extract(data: Array<int>) -> Array<_>;
+
+/// Create a tar archive in memory from an array of entries.
+///
+/// # Arguments
+///
+/// * `entries` - Array of objects with `name` (string) and `data` (string) fields
+///
+/// # Returns
+///
+/// Byte array containing the tar archive.
+pub builtin fn tar_create(entries: Array<_>) -> Array<int>;
+
+/// Extract a tar archive from a byte array into an array of entries.
+///
+/// # Arguments
+///
+/// * `data` - Tar archive as byte array
+///
+/// # Returns
+///
+/// Array of objects with `name` and `data` fields.
+pub builtin fn tar_extract(data: Array<int>) -> Array<_>;

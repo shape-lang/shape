@@ -19,7 +19,7 @@ fn pure_module_json_parses_without_permissions() {
     // json is a pure-computation module, no permissions needed
     ShapeTest::new(
         r#"
-        from json use { parse, stringify }
+        from std::core::json use { parse, stringify }
         let data = parse("{\"key\": 42}")
         print(data.key)
     "#,
@@ -51,7 +51,7 @@ fn io_import_denied_with_pure_permissions() {
     // because io.open requires FsRead capability.
     ShapeTest::new(
         r#"
-        from io use { open }
+        from std::core::io use { open }
         let f = open("/tmp/test.txt")
     "#,
     )
@@ -66,7 +66,7 @@ fn net_connect_denied_with_pure_permissions() {
     // because it requires NetConnect capability.
     ShapeTest::new(
         r#"
-        from io use { tcp_connect }
+        from std::core::io use { tcp_connect }
         let conn = tcp_connect("127.0.0.1:8080")
     "#,
     )
@@ -81,7 +81,7 @@ fn process_spawn_denied_with_pure_permissions() {
     // because it requires Process capability.
     ShapeTest::new(
         r#"
-        from io use { spawn }
+        from std::core::io use { spawn }
         let p = spawn("echo", ["hello"])
     "#,
     )

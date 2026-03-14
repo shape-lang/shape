@@ -39,7 +39,7 @@ struct BoxedConnection(std::sync::Mutex<Box<dyn Connection>>);
 
 /// Create the `transport` module with TCP transport functions.
 pub fn create_transport_module() -> ModuleExports {
-    let mut module = ModuleExports::new("transport");
+    let mut module = ModuleExports::new("std::core::transport");
     module.description = "Network transport for distributed Shape".to_string();
 
     // transport.tcp() -> Transport

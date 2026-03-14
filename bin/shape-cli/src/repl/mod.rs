@@ -467,6 +467,7 @@ impl<'a> ReplApp<'a> {
                 );
                 let module_info = executor.module_schemas();
                 self.engine.register_extension_modules(&module_info);
+                self.engine.register_language_runtime_artifacts();
                 let current_file = std::env::current_dir()
                     .unwrap_or_else(|_| PathBuf::from("."))
                     .join("__shape_repl__.shape");

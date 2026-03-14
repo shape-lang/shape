@@ -40,7 +40,7 @@ fn json_value_to_valueword(value: serde_json::Value) -> ValueWord {
 
 /// Create the `msgpack` module with MessagePack encoding and decoding functions.
 pub fn create_msgpack_module() -> ModuleExports {
-    let mut module = ModuleExports::new("msgpack");
+    let mut module = ModuleExports::new("std::core::msgpack");
     module.description = "MessagePack binary serialization".to_string();
 
     // msgpack.encode(value: any) -> Result<string>
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn test_msgpack_module_creation() {
         let module = create_msgpack_module();
-        assert_eq!(module.name, "msgpack");
+        assert_eq!(module.name, "std::core::msgpack");
         assert!(module.has_export("encode"));
         assert!(module.has_export("decode"));
         assert!(module.has_export("encode_bytes"));

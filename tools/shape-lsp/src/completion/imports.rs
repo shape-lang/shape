@@ -507,7 +507,7 @@ fn list_module_children(
     }
 }
 
-/// Completions for `from csv use { <TAB> }` — list module's exports
+/// Completions for `from std::core::csv use { <TAB> }` — list module's exports
 pub fn module_export_completions(module_name: &str) -> Vec<CompletionItem> {
     module_export_completions_with_context(module_name, None, None, None)
 }

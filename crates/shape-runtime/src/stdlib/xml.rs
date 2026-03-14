@@ -218,7 +218,7 @@ fn write_node(writer: &mut Writer<Cursor<Vec<u8>>>, node: &ValueWord) -> Result<
 
 /// Create the `xml` module with XML parsing and serialization functions.
 pub fn create_xml_module() -> ModuleExports {
-    let mut module = ModuleExports::new("xml");
+    let mut module = ModuleExports::new("std::core::xml");
     module.description = "XML parsing and serialization".to_string();
 
     // xml.parse(text: string) -> Result<HashMap>
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_xml_module_creation() {
         let module = create_xml_module();
-        assert_eq!(module.name, "xml");
+        assert_eq!(module.name, "std::core::xml");
         assert!(module.has_export("parse"));
         assert!(module.has_export("stringify"));
     }

@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// The default `create_file_module()` uses [`RealFileSystem`]; callers can
 /// substitute a `PolicyEnforcedFs` or `VirtualFileSystem` for sandboxing.
 pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> ModuleExports {
-    let mut module = ModuleExports::new("file");
+    let mut module = ModuleExports::new("std::core::file");
     module.description = "High-level filesystem operations".to_string();
 
     // file.read_text(path: string) -> Result<string>
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn test_file_module_creation() {
         let module = create_file_module();
-        assert_eq!(module.name, "file");
+        assert_eq!(module.name, "std::core::file");
         assert!(module.has_export("read_text"));
         assert!(module.has_export("write_text"));
         assert!(module.has_export("read_lines"));

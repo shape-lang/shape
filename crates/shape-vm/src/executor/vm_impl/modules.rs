@@ -21,10 +21,12 @@ impl VirtualMachine {
         }
         // Expose module exports as methods on the module object type so
         // `module.fn(...)` dispatches via CallMethod without UFCS rewrites.
-        let module_type_name = format!("__mod_{}", module.name);
-        let module_entry = self.extension_methods.entry(module_type_name).or_default();
+        // Register under the canonical type name only (`__mod_std::core::json`).
+        let canonical_type_name = format!("__mod_{}", module.name);
+
+        let mut sync_methods: Vec<(String, shape_runtime::module_exports::ModuleFn)> = Vec::new();
         for (export_name, func) in &module.exports {
-            module_entry.insert(export_name.clone(), func.clone());
+            sync_methods.push((export_name.clone(), func.clone()));
         }
         for (export_name, async_fn) in &module.async_exports {
             let async_fn = async_fn.clone();
@@ -36,8 +38,17 @@ impl VirtualMachine {
                     })
                 },
             );
-            module_entry.insert(export_name.clone(), wrapped);
+            sync_methods.push((export_name.clone(), wrapped));
         }
+
+        let canonical_entry = self
+            .extension_methods
+            .entry(canonical_type_name)
+            .or_default();
+        for (name, func) in &sync_methods {
+            canonical_entry.insert(name.clone(), func.clone());
+        }
+
         self.module_registry.register(module);
     }
 
@@ -237,14 +248,16 @@ impl VirtualMachine {
                 }
 
                 // Module object schemas must be predeclared at compile time.
+                // Use the canonical module name only.
                 let cache_name = format!("__mod_{}", module_name);
-                let schema_id = if let Some(schema) = self.lookup_schema_by_name(&cache_name) {
-                    schema.id
-                } else {
-                    // Keep execution predictable: no runtime schema synthesis.
-                    // Missing module schema means compiler/loader setup is incomplete.
-                    continue;
-                };
+                let schema_id =
+                    if let Some(schema) = self.lookup_schema_by_name(&cache_name) {
+                        schema.id
+                    } else {
+                        // Keep execution predictable: no runtime schema synthesis.
+                        // Missing module schema means compiler/loader setup is incomplete.
+                        continue;
+                    };
 
                 // Look up schema to get field ordering
                 let Some(schema) = self.lookup_schema(schema_id) else {

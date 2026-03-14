@@ -15,7 +15,7 @@ use shape_ast::ast::{AnnotationDef, FunctionDef, ImportStmt, Program};
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::parser::parse_program;
 use shape_value::ValueWord;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,6 +25,34 @@ pub use resolver::{
 };
 
 include!(concat!(env!("OUT_DIR"), "/embedded_stdlib_modules.rs"));
+
+/// Known stdlib module leaf names that live under `std::core::`.
+///
+/// When a bare-name import like `"file"` fails to resolve, we check this list
+/// and suggest the canonical `std::core::file` path in the error message.
+const KNOWN_STDLIB_LEAF_NAMES: &[&str] = &[
+    "file", "json", "http", "crypto", "env", "toml", "yaml", "xml", "compress", "archive",
+    "unicode", "csv", "msgpack", "regex", "parallel", "time", "io", "set", "state", "transport",
+    "remote",
+];
+
+/// If `module_path` is a single-segment name (no `::`) that matches a known stdlib
+/// module, return a migration hint string. Otherwise return `None`.
+pub fn bare_name_migration_hint(module_path: &str) -> Option<String> {
+    // Only trigger for single-segment paths (no `::` separator).
+    if module_path.contains("::") {
+        return None;
+    }
+    if KNOWN_STDLIB_LEAF_NAMES.contains(&module_path) {
+        let canonical = format!("std::core::{}", module_path);
+        Some(format!(
+            "Module '{}' not found. Did you mean '{}'?\n  Hint: use {}",
+            module_path, canonical, canonical
+        ))
+    } else {
+        None
+    }
+}
 
 /// A compiled module ready for execution
 #[derive(Debug, Clone)]
@@ -605,9 +633,17 @@ impl ModuleLoader {
 
         filesystem
             .resolve(module_path, context)?
-            .ok_or_else(|| ShapeError::ModuleError {
-                message: format!("Module not found: {}", module_path),
-                module_path: None,
+            .ok_or_else(|| {
+                // Check if this is a bare-name import that should use a canonical path.
+                let message = if let Some(hint) = bare_name_migration_hint(module_path) {
+                    hint
+                } else {
+                    format!("Module not found: {}", module_path)
+                };
+                ShapeError::ModuleError {
+                    message,
+                    module_path: None,
+                }
             })
     }
 

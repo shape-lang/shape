@@ -13,14 +13,15 @@ use shape_abi_v1::{Permission, PermissionSet};
 /// diagnostic).
 pub fn required_permissions(module: &str, function: &str) -> PermissionSet {
     match module {
-        "io" => io_permissions(function),
-        "file" => file_permissions(function),
-        "http" => http_permissions(function),
-        "env" => env_permissions(function),
-        "time" => time_permissions(function),
-        "csv" => csv_permissions(function),
+        "std::core::io" => io_permissions(function),
+        "std::core::file" => file_permissions(function),
+        "std::core::http" => http_permissions(function),
+        "std::core::env" => env_permissions(function),
+        "std::core::time" => time_permissions(function),
+        "std::core::csv" => csv_permissions(function),
         // Pure computation — no permissions required.
-        "json" | "crypto" | "testing" | "regex" | "math" => PermissionSet::pure(),
+        "std::core::json" | "std::core::crypto" | "std::core::testing" | "std::core::regex"
+        | "std::core::math" => PermissionSet::pure(),
         _ => PermissionSet::pure(),
     }
 }
@@ -30,7 +31,7 @@ pub fn required_permissions(module: &str, function: &str) -> PermissionSet {
 /// capabilities at all?").
 pub fn module_permissions(module: &str) -> PermissionSet {
     match module {
-        "io" => [
+        "std::core::io" => [
             Permission::FsRead,
             Permission::FsWrite,
             Permission::NetConnect,
@@ -39,15 +40,16 @@ pub fn module_permissions(module: &str) -> PermissionSet {
         ]
         .into_iter()
         .collect(),
-        "file" => [Permission::FsRead, Permission::FsWrite]
+        "std::core::file" => [Permission::FsRead, Permission::FsWrite]
             .into_iter()
             .collect(),
-        "http" => [Permission::NetConnect].into_iter().collect(),
-        "csv" => [Permission::FsRead].into_iter().collect(),
-        "env" => [Permission::Env].into_iter().collect(),
-        "time" => [Permission::Time].into_iter().collect(),
+        "std::core::http" => [Permission::NetConnect].into_iter().collect(),
+        "std::core::csv" => [Permission::FsRead].into_iter().collect(),
+        "std::core::env" => [Permission::Env].into_iter().collect(),
+        "std::core::time" => [Permission::Time].into_iter().collect(),
         // Pure computation modules.
-        "json" | "crypto" | "testing" | "regex" | "math" => PermissionSet::pure(),
+        "std::core::json" | "std::core::crypto" | "std::core::testing" | "std::core::regex"
+        | "std::core::math" => PermissionSet::pure(),
         _ => PermissionSet::pure(),
     }
 }
@@ -118,46 +120,46 @@ mod tests {
 
     #[test]
     fn io_read_requires_fs_read() {
-        let perms = required_permissions("io", "open");
+        let perms = required_permissions("std::core::io", "open");
         assert!(perms.contains(&Permission::FsRead));
         assert_eq!(perms.len(), 1);
 
-        let perms = required_permissions("io", "read_file");
+        let perms = required_permissions("std::core::io", "read_file");
         assert!(perms.contains(&Permission::FsRead));
     }
 
     #[test]
     fn io_write_requires_fs_write() {
-        let perms = required_permissions("io", "write_file");
+        let perms = required_permissions("std::core::io", "write_file");
         assert!(perms.contains(&Permission::FsWrite));
         assert_eq!(perms.len(), 1);
     }
 
     #[test]
     fn io_net_permissions() {
-        let perms = required_permissions("io", "tcp_connect");
+        let perms = required_permissions("std::core::io", "tcp_connect");
         assert!(perms.contains(&Permission::NetConnect));
 
-        let perms = required_permissions("io", "listen");
+        let perms = required_permissions("std::core::io", "listen");
         assert!(perms.contains(&Permission::NetListen));
     }
 
     #[test]
     fn io_process_permissions() {
-        let perms = required_permissions("io", "spawn");
+        let perms = required_permissions("std::core::io", "spawn");
         assert!(perms.contains(&Permission::Process));
 
-        let perms = required_permissions("io", "exec");
+        let perms = required_permissions("std::core::io", "exec");
         assert!(perms.contains(&Permission::Process));
     }
 
     #[test]
     fn file_read_permissions() {
         for func in &["read_text", "read_lines", "read_bytes"] {
-            let perms = required_permissions("file", func);
+            let perms = required_permissions("std::core::file", func);
             assert!(
                 perms.contains(&Permission::FsRead),
-                "file::{func} should require FsRead"
+                "std::core::file::{func} should require FsRead"
             );
             assert_eq!(perms.len(), 1);
         }
@@ -166,10 +168,10 @@ mod tests {
     #[test]
     fn file_write_permissions() {
         for func in &["write_text", "write_bytes", "append"] {
-            let perms = required_permissions("file", func);
+            let perms = required_permissions("std::core::file", func);
             assert!(
                 perms.contains(&Permission::FsWrite),
-                "file::{func} should require FsWrite"
+                "std::core::file::{func} should require FsWrite"
             );
             assert_eq!(perms.len(), 1);
         }
@@ -178,10 +180,10 @@ mod tests {
     #[test]
     fn http_requires_net_connect() {
         for func in &["get", "post", "put", "delete"] {
-            let perms = required_permissions("http", func);
+            let perms = required_permissions("std::core::http", func);
             assert!(
                 perms.contains(&Permission::NetConnect),
-                "http::{func} should require NetConnect"
+                "std::core::http::{func} should require NetConnect"
             );
             assert_eq!(perms.len(), 1);
         }
@@ -190,10 +192,10 @@ mod tests {
     #[test]
     fn env_requires_env_permission() {
         for func in &["get", "has", "all", "args", "cwd"] {
-            let perms = required_permissions("env", func);
+            let perms = required_permissions("std::core::env", func);
             assert!(
                 perms.contains(&Permission::Env),
-                "env::{func} should require Env"
+                "std::core::env::{func} should require Env"
             );
             assert_eq!(perms.len(), 1);
         }
@@ -201,20 +203,26 @@ mod tests {
 
     #[test]
     fn time_millis_requires_time() {
-        let perms = required_permissions("time", "millis");
+        let perms = required_permissions("std::core::time", "millis");
         assert!(perms.contains(&Permission::Time));
         assert_eq!(perms.len(), 1);
     }
 
     #[test]
     fn time_now_is_free() {
-        let perms = required_permissions("time", "now");
+        let perms = required_permissions("std::core::time", "now");
         assert!(perms.is_empty());
     }
 
     #[test]
     fn pure_modules_require_nothing() {
-        for module in &["json", "crypto", "testing", "regex", "math"] {
+        for module in &[
+            "std::core::json",
+            "std::core::crypto",
+            "std::core::testing",
+            "std::core::regex",
+            "std::core::math",
+        ] {
             let perms = required_permissions(module, "any_function");
             assert!(
                 perms.is_empty(),
@@ -231,7 +239,7 @@ mod tests {
 
     #[test]
     fn unknown_function_in_known_module_requires_nothing() {
-        let perms = required_permissions("io", "nonexistent_function");
+        let perms = required_permissions("std::core::io", "nonexistent_function");
         assert!(perms.is_empty());
     }
 
@@ -239,7 +247,7 @@ mod tests {
 
     #[test]
     fn io_module_permissions() {
-        let perms = module_permissions("io");
+        let perms = module_permissions("std::core::io");
         assert!(perms.contains(&Permission::FsRead));
         assert!(perms.contains(&Permission::FsWrite));
         assert!(perms.contains(&Permission::NetConnect));
@@ -250,7 +258,7 @@ mod tests {
 
     #[test]
     fn file_module_permissions() {
-        let perms = module_permissions("file");
+        let perms = module_permissions("std::core::file");
         assert!(perms.contains(&Permission::FsRead));
         assert!(perms.contains(&Permission::FsWrite));
         assert_eq!(perms.len(), 2);
@@ -258,28 +266,34 @@ mod tests {
 
     #[test]
     fn http_module_permissions() {
-        let perms = module_permissions("http");
+        let perms = module_permissions("std::core::http");
         assert!(perms.contains(&Permission::NetConnect));
         assert_eq!(perms.len(), 1);
     }
 
     #[test]
     fn env_module_permissions() {
-        let perms = module_permissions("env");
+        let perms = module_permissions("std::core::env");
         assert!(perms.contains(&Permission::Env));
         assert_eq!(perms.len(), 1);
     }
 
     #[test]
     fn time_module_permissions() {
-        let perms = module_permissions("time");
+        let perms = module_permissions("std::core::time");
         assert!(perms.contains(&Permission::Time));
         assert_eq!(perms.len(), 1);
     }
 
     #[test]
     fn pure_module_permissions() {
-        for module in &["json", "crypto", "testing", "regex", "math"] {
+        for module in &[
+            "std::core::json",
+            "std::core::crypto",
+            "std::core::testing",
+            "std::core::regex",
+            "std::core::math",
+        ] {
             let perms = module_permissions(module);
             assert!(perms.is_empty(), "{module} should require no permissions");
         }
@@ -290,7 +304,7 @@ mod tests {
         // Every function's required permissions should be a subset of the module's.
         let test_cases = [
             (
-                "io",
+                "std::core::io",
                 vec![
                     "open",
                     "read_file",
@@ -302,7 +316,7 @@ mod tests {
                 ],
             ),
             (
-                "file",
+                "std::core::file",
                 vec![
                     "read_text",
                     "read_lines",
@@ -312,9 +326,9 @@ mod tests {
                     "append",
                 ],
             ),
-            ("http", vec!["get", "post", "put", "delete"]),
-            ("env", vec!["get", "has", "all", "args", "cwd"]),
-            ("time", vec!["millis", "now"]),
+            ("std::core::http", vec!["get", "post", "put", "delete"]),
+            ("std::core::env", vec!["get", "has", "all", "args", "cwd"]),
+            ("std::core::time", vec!["millis", "now"]),
         ];
         for (module, functions) in &test_cases {
             let mod_perms = module_permissions(module);

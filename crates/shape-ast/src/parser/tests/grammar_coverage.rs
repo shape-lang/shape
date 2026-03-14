@@ -151,12 +151,12 @@ fn test_old_import_from_syntax_errors() {
 
 #[test]
 fn test_import_from_module() {
-    let input = r#"from csv use { load };"#;
+    let input = r#"from std::core::csv use { load };"#;
     let items = parse_items(input).expect("from-module use should parse");
     assert_eq!(items.len(), 1);
     match &items[0] {
         crate::ast::Item::Import(import_stmt, _) => {
-            assert_eq!(import_stmt.from, "csv");
+            assert_eq!(import_stmt.from, "std::core::csv");
             match &import_stmt.items {
                 crate::ast::ImportItems::Named(specs) => {
                     assert_eq!(specs.len(), 1);
@@ -369,12 +369,12 @@ fn test_import_from_use_syntax() {
 
 #[test]
 fn test_import_from_use_with_alias() {
-    let input = r#"from csv use { load as csvLoad };"#;
+    let input = r#"from std::core::csv use { load as csvLoad };"#;
     let items = parse_items(input).expect("from-module use with alias should parse");
     assert_eq!(items.len(), 1);
     match &items[0] {
         crate::ast::Item::Import(import_stmt, _) => {
-            assert_eq!(import_stmt.from, "csv");
+            assert_eq!(import_stmt.from, "std::core::csv");
             match &import_stmt.items {
                 crate::ast::ImportItems::Named(specs) => {
                     assert_eq!(specs.len(), 1);
@@ -459,7 +459,7 @@ fn test_pub_builtin_function_export_parses() {
 #[test]
 fn test_from_import_syntax_rejected() {
     // The old `from X import { ... }` syntax should no longer parse
-    let input = r#"from csv import { load };"#;
+    let input = r#"from std::core::csv import { load };"#;
     let result = parse_items(input);
     assert!(
         result.is_err(),

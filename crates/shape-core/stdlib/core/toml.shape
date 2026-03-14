@@ -1,0 +1,69 @@
+/// @module std::core::toml
+/// TOML Parsing and Serialization
+///
+/// Parse TOML strings into Shape values and serialize Shape values
+/// back to TOML format.
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::toml
+///
+/// let config = toml.parse("[server]\nhost = \"localhost\"\nport = 8080")
+/// match config {
+///     Ok(data) => print(data["server"]["host"])
+///     Err(e) => print(f"Parse error: {e}")
+/// }
+/// ```
+
+/// Parse a TOML string into Shape values.
+///
+/// # Arguments
+///
+/// * `text` - TOML string to parse
+///
+/// # Returns
+///
+/// `Ok(value)` with the parsed HashMap, or `Err(message)` on parse failure.
+///
+/// # Example
+///
+/// ```shape
+/// let data = toml.parse("name = \"test\"\nversion = 42")
+/// ```
+pub builtin fn parse(text: string) -> Result<_, string>;
+
+/// Serialize a Shape value to a TOML string.
+///
+/// # Arguments
+///
+/// * `value` - Value to serialize (typically a HashMap)
+///
+/// # Returns
+///
+/// `Ok(toml_string)` with the TOML output, or `Err(message)` on failure.
+///
+/// # Example
+///
+/// ```shape
+/// let text = toml.stringify({ name: "test", version: 42 })
+/// ```
+pub builtin fn stringify(value: _) -> Result<string, string>;
+
+/// Check if a string is valid TOML.
+///
+/// # Arguments
+///
+/// * `text` - String to validate as TOML
+///
+/// # Returns
+///
+/// `true` if the string is valid TOML, `false` otherwise.
+///
+/// # Example
+///
+/// ```shape
+/// toml.is_valid("key = \"value\"")  // true
+/// toml.is_valid("= invalid")        // false
+/// ```
+pub builtin fn is_valid(text: string) -> bool;

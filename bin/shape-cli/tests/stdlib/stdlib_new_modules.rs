@@ -51,7 +51,7 @@ fn test_csv_parse() {
     init_runtime();
     assert!(eval_with_csv_to_bool(
         r#"
-        use csv
+        use std::core::csv
         let rows = csv::parse("a,b,c\n1,2,3")
         rows[1][0] == "1"
     "#
@@ -63,7 +63,7 @@ fn test_csv_parse_records() {
     init_runtime();
     assert!(eval_with_csv_to_bool(
         r#"
-        use csv
+        use std::core::csv
         let records = csv::parse_records("name,age\nAlice,30")
         records[0]["name"] == "Alice"
     "#
@@ -75,7 +75,7 @@ fn test_csv_stringify() {
     init_runtime();
     let result = eval_with_csv_to_string(
         r#"
-        use csv
+        use std::core::csv
         csv::stringify([["x", "y"], ["1", "2"]])
     "#,
     );
@@ -87,7 +87,7 @@ fn test_csv_is_valid() {
     init_runtime();
     assert!(eval_with_csv_to_bool(
         r#"
-        use csv
+        use std::core::csv
         csv::is_valid("a,b\n1,2")
     "#
     ));

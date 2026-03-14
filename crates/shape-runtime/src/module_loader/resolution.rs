@@ -206,12 +206,20 @@ pub(super) fn resolve_module_path_with_context(
         searched_paths.push(format!("  {}", path.display()));
     }
 
-    Err(ShapeError::ModuleError {
-        message: format!(
+    // Check if this is a bare-name import that should use a canonical path.
+    let hint = super::bare_name_migration_hint(module_path);
+    let message = if let Some(hint) = hint {
+        format!("{}\nSearched in:\n{}", hint, searched_paths.join("\n"))
+    } else {
+        format!(
             "Module not found: {}\nSearched in:\n{}",
             module_path,
             searched_paths.join("\n")
-        ),
+        )
+    };
+
+    Err(ShapeError::ModuleError {
+        message,
         module_path: None,
     })
 }

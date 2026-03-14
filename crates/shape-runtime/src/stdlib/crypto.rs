@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// Create the `crypto` module with hashing and encoding functions.
 pub fn create_crypto_module() -> ModuleExports {
-    let mut module = ModuleExports::new("crypto");
+    let mut module = ModuleExports::new("std::core::crypto");
     module.description = "Cryptographic hashing and encoding utilities".to_string();
 
     // crypto.sha256(data: string) -> string
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn test_crypto_module_creation() {
         let module = create_crypto_module();
-        assert_eq!(module.name, "crypto");
+        assert_eq!(module.name, "std::core::crypto");
         assert!(module.has_export("sha256"));
         assert!(module.has_export("hmac_sha256"));
         assert!(module.has_export("base64_encode"));

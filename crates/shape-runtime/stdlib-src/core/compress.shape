@@ -1,0 +1,81 @@
+/// @module std::core::compress
+/// Data Compression and Decompression
+///
+/// Provides gzip, zstd, and deflate compression/decompression.
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::compress
+///
+/// let compressed = compress.gzip("hello world")
+/// let original = compress.gunzip(compressed)
+/// print(original) // "hello world"
+/// ```
+
+/// Compress a string using gzip, returning a byte array.
+///
+/// # Arguments
+///
+/// * `data` - String data to compress
+///
+/// # Returns
+///
+/// Array of bytes containing the gzip-compressed data.
+pub builtin fn gzip(data: string) -> Array<int>;
+
+/// Decompress a gzip byte array back to a string.
+///
+/// # Arguments
+///
+/// * `data` - Gzip-compressed byte array
+///
+/// # Returns
+///
+/// The decompressed string.
+pub builtin fn gunzip(data: Array<int>) -> string;
+
+/// Compress a string using Zstandard, returning a byte array.
+///
+/// # Arguments
+///
+/// * `data` - String data to compress
+/// * `level` - Compression level (default: 3)
+///
+/// # Returns
+///
+/// Array of bytes containing the zstd-compressed data.
+pub builtin fn zstd(data: string, level: int) -> Array<int>;
+
+/// Decompress a Zstandard byte array back to a string.
+///
+/// # Arguments
+///
+/// * `data` - Zstd-compressed byte array
+///
+/// # Returns
+///
+/// The decompressed string.
+pub builtin fn unzstd(data: Array<int>) -> string;
+
+/// Compress a string using raw deflate, returning a byte array.
+///
+/// # Arguments
+///
+/// * `data` - String data to compress
+///
+/// # Returns
+///
+/// Array of bytes containing the deflate-compressed data.
+pub builtin fn deflate(data: string) -> Array<int>;
+
+/// Decompress a raw deflate byte array back to a string.
+///
+/// # Arguments
+///
+/// * `data` - Deflate-compressed byte array
+///
+/// # Returns
+///
+/// The decompressed string.
+pub builtin fn inflate(data: Array<int>) -> string;

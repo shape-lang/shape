@@ -33,12 +33,10 @@ impl BytecodeCompiler {
             .unwrap_or(def.name.as_str())
             .to_string();
         let source_module_path = if let Some((owner_module, _)) = def.name.rsplit_once("::") {
-            let source = self
-                .module_scope_sources
+            self.module_scope_sources
                 .get(owner_module)
                 .cloned()
-                .unwrap_or_else(|| owner_module.to_string());
-            Self::extract_module_name(&source).to_string()
+                .unwrap_or_else(|| owner_module.to_string())
         } else {
             return Ok(());
         };
@@ -1086,8 +1084,8 @@ impl BytecodeCompiler {
 
     /// Check whether the imported symbols are allowed by the active permission set.
     ///
-    /// For named imports (`from "file" import { read_text }`), checks each function
-    /// individually. For namespace imports (`use http`), checks the whole module.
+    /// For named imports (`from std::core::file use { read_text }`), checks each function
+    /// individually. For namespace imports (`use std::core::http`), checks the whole module.
     fn check_import_permissions(
         &mut self,
         import_stmt: &shape_ast::ast::ImportStmt,
@@ -1096,9 +1094,8 @@ impl BytecodeCompiler {
         use shape_ast::ast::ImportItems;
         use shape_runtime::stdlib::capability_tags;
 
-        // Extract the module name from the import path.
-        // Paths like "std::file", "file", "std/file" all resolve to "file".
-        let module_name = Self::extract_module_name(&import_stmt.from);
+        // Pass the full canonical path (e.g. "std::core::file") to capability tags.
+        let module_name = &import_stmt.from as &str;
 
         match &import_stmt.items {
             ImportItems::Named(specs) => {
@@ -1150,20 +1147,15 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Extract the leaf module name from an import path.
-    ///
-    /// `"std::file"` → `"file"`, `"file"` → `"file"`, `"std/io"` → `"io"`
-    pub(super) fn extract_module_name(path: &str) -> &str {
-        path.rsplit(|c| c == ':' || c == '/')
-            .find(|s| !s.is_empty())
-            .unwrap_or(path)
-    }
-
     pub(super) fn register_extension_module_schema(&mut self, module_path: &str) {
         let Some(registry) = self.extension_registry.as_ref() else {
             return;
         };
-        let Some(module) = registry.iter().rev().find(|m| m.name == module_path) else {
+        let Some(module) = registry
+            .iter()
+            .rev()
+            .find(|m| m.name == module_path)
+        else {
             return;
         };
 
@@ -4923,18 +4915,9 @@ mod tests {
     // --- Permission checking tests ---
 
     #[test]
-    fn test_extract_module_name() {
-        assert_eq!(BytecodeCompiler::extract_module_name("file"), "file");
-        assert_eq!(BytecodeCompiler::extract_module_name("std::file"), "file");
-        assert_eq!(BytecodeCompiler::extract_module_name("std/io"), "io");
-        assert_eq!(BytecodeCompiler::extract_module_name("a::b::c"), "c");
-        assert_eq!(BytecodeCompiler::extract_module_name(""), "");
-    }
-
-    #[test]
     fn test_permission_check_allows_pure_module_imports() {
         // json is a pure module — should compile even with empty permissions
-        let code = "from json use { parse }";
+        let code = "from std::core::json use { parse }";
         let program = parse_program(code).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         compiler.set_permission_set(Some(shape_abi_v1::PermissionSet::pure()));
@@ -4944,7 +4927,7 @@ mod tests {
 
     #[test]
     fn test_permission_check_blocks_file_import_under_pure() {
-        let code = "from file use { read_text }";
+        let code = "from std::core::file use { read_text }";
         let program = parse_program(code).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         compiler.set_permission_set(Some(shape_abi_v1::PermissionSet::pure()));
@@ -4966,7 +4949,7 @@ mod tests {
 
     #[test]
     fn test_permission_check_allows_file_import_with_fs_read() {
-        let code = "from file use { read_text }";
+        let code = "from std::core::file use { read_text }";
         let program = parse_program(code).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         let pset = shape_abi_v1::PermissionSet::from_iter([shape_abi_v1::Permission::FsRead]);
@@ -4978,7 +4961,7 @@ mod tests {
     #[test]
     fn test_permission_check_no_permission_set_allows_everything() {
         // When permission_set is None (default), no checking is done
-        let code = "from file use { read_text }";
+        let code = "from std::core::file use { read_text }";
         let program = parse_program(code).expect("parse failed");
         let compiler = BytecodeCompiler::new();
         // permission_set is None by default — should compile fine
@@ -4987,14 +4970,14 @@ mod tests {
 
     #[test]
     fn test_permission_check_namespace_import_blocked() {
-        let code = "use http";
+        let code = "use std::core::http";
         let program = parse_program(code).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         compiler.set_permission_set(Some(shape_abi_v1::PermissionSet::pure()));
         let result = compiler.compile(&program);
         assert!(
             result.is_err(),
-            "Expected permission error for `use http` under pure"
+            "Expected permission error for `use std::core::http` under pure"
         );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -5005,7 +4988,7 @@ mod tests {
 
     #[test]
     fn test_permission_check_namespace_import_allowed() {
-        let code = "use http";
+        let code = "use std::core::http";
         let program = parse_program(code).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         compiler.set_permission_set(Some(shape_abi_v1::PermissionSet::full()));

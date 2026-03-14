@@ -1238,7 +1238,7 @@ fn is_param_context(before_colon: &str) -> bool {
 ///   "from "                → FromModule (importable modules for named import)
 ///   "from std."            → FromModulePartial { prefix: "std" }
 ///   "from mydep.tools."    → FromModulePartial { prefix: "mydep.tools" }
-///   "from csv use {"       → ImportItems { module: "csv" }
+///   "from std::core::csv use {"  → ImportItems { module: "std::core::csv" }
 fn detect_import_context(text_before_cursor: &str) -> Option<CompletionContext> {
     let trimmed = text_before_cursor.trim();
 
@@ -1783,10 +1783,10 @@ mod tests {
         // The deprecated `from X import { }` syntax is removed;
         // LSP should fall back to FromModule context
         let context = analyze_context(
-            "from csv import { ",
+            "from std::core::csv import { ",
             Position {
                 line: 0,
-                character: 18,
+                character: 29,
             },
         );
         assert_eq!(context, CompletionContext::FromModule);
@@ -1795,16 +1795,16 @@ mod tests {
     #[test]
     fn test_from_use_items_context() {
         let context = analyze_context(
-            "from csv use { ",
+            "from std::core::csv use { ",
             Position {
                 line: 0,
-                character: 15,
+                character: 26,
             },
         );
         assert_eq!(
             context,
             CompletionContext::ImportItems {
-                module: "csv".to_string()
+                module: "std::core::csv".to_string()
             }
         );
     }

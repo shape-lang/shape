@@ -24,7 +24,7 @@ fn test_import_aliased_parses() {
 
 #[test]
 fn test_import_namespace_parses() {
-    ShapeTest::new("use json").expect_parse_ok();
+    ShapeTest::new("use std::core::json").expect_parse_ok();
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn test_import_multiple_statements_parse() {
     ShapeTest::new(
         r#"
         from math use { sum, max }
-        from io use { print }
+        from std::core::io use { print }
         use utils
     "#,
     )
@@ -103,9 +103,9 @@ fn test_import_use_hierarchical_three_segment_parses() {
 fn test_import_multiple_uses_parse() {
     ShapeTest::new(
         r#"
-        use json
-        use csv
-        use yaml
+        use std::core::json
+        use std::core::csv
+        use std::core::yaml
     "#,
     )
     .expect_parse_ok();
@@ -113,7 +113,7 @@ fn test_import_multiple_uses_parse() {
 
 #[test]
 fn test_import_js_style_rejected() {
-    ShapeTest::new("from csv import { load }").expect_parse_err();
+    ShapeTest::new("from std::core::csv import { load }").expect_parse_err();
 }
 
 #[test]
@@ -387,7 +387,7 @@ fn test_combo_module_then_code_parses() {
 fn test_combo_multiple_imports_and_module_parses() {
     ShapeTest::new(
         r#"
-        from io use { read, write }
+        from std::core::io use { read, write }
         from net use { connect }
         mod server {
             fn start() { "running" }

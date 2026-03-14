@@ -77,6 +77,7 @@ pub async fn run_expand_comptime(
     extension_loading::register_extension_capability_modules(&engine, &mut executor);
     let module_info = executor.module_schemas();
     engine.register_extension_modules(&module_info);
+    engine.register_language_runtime_artifacts();
     module_loading::wire_vm_executor_module_loading(
         &mut engine,
         &mut executor,

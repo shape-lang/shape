@@ -10,7 +10,7 @@ use super::byte_utils::{bytes_from_array, bytes_to_array};
 
 /// Create the `compress` module with compression/decompression functions.
 pub fn create_compress_module() -> ModuleExports {
-    let mut module = ModuleExports::new("compress");
+    let mut module = ModuleExports::new("std::core::compress");
     module.description = "Data compression and decompression (gzip, zstd, deflate)".to_string();
 
     // compress.gzip(data: string) -> Array<int>
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn test_compress_module_creation() {
         let module = create_compress_module();
-        assert_eq!(module.name, "compress");
+        assert_eq!(module.name, "std::core::compress");
         assert!(module.has_export("gzip"));
         assert!(module.has_export("gunzip"));
         assert!(module.has_export("zstd"));
