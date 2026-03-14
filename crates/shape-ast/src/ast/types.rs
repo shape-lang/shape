@@ -3,6 +3,7 @@
 use super::DocComment;
 use super::functions::Annotation;
 use super::span::Span;
+use super::type_path::TypePath;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,11 +28,11 @@ pub enum TypeAnnotation {
     Intersection(Vec<TypeAnnotation>),
     /// Generic type: Map<K, V>
     Generic {
-        name: String,
+        name: TypePath,
         args: Vec<TypeAnnotation>,
     },
     /// Type reference (custom type or type alias)
-    Reference(String),
+    Reference(TypePath),
     /// Void type
     Void,
     /// Never type
@@ -42,20 +43,22 @@ pub enum TypeAnnotation {
     Undefined,
     /// Trait object type: dyn Trait1 + Trait2
     /// Represents a type-erased value that implements the given traits
-    Dyn(Vec<String>),
+    Dyn(Vec<TypePath>),
 }
 
 impl TypeAnnotation {
     pub fn option(inner: TypeAnnotation) -> Self {
         TypeAnnotation::Generic {
-            name: "Option".to_string(),
+            name: TypePath::simple("Option"),
             args: vec![inner],
         }
     }
 
     pub fn option_inner(&self) -> Option<&TypeAnnotation> {
         match self {
-            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
+            TypeAnnotation::Generic { name, args }
+                if name.as_str() == "Option" && args.len() == 1 =>
+            {
                 args.first()
             }
             _ => None,
@@ -64,7 +67,9 @@ impl TypeAnnotation {
 
     pub fn into_option_inner(self) -> Option<TypeAnnotation> {
         match self {
-            TypeAnnotation::Generic { name, mut args } if name == "Option" && args.len() == 1 => {
+            TypeAnnotation::Generic { name, mut args }
+                if name.as_str() == "Option" && args.len() == 1 =>
+            {
                 Some(args.remove(0))
             }
             _ => None,
@@ -78,14 +83,24 @@ impl TypeAnnotation {
     /// Extract a simple type name if this is a Reference or Basic type
     ///
     /// Returns `Some(type_name)` for:
-    /// - `TypeAnnotation::Reference(name)` - e.g., `Currency`, `MyType`
+    /// - `TypeAnnotation::Reference(path)` - e.g., `Currency`, `foo::MyType`
     /// - `TypeAnnotation::Basic(name)` - e.g., `number`, `string`
     ///
     /// Returns `None` for complex types like arrays, tuples, functions, etc.
     pub fn as_simple_name(&self) -> Option<&str> {
         match self {
-            TypeAnnotation::Reference(name) => Some(name.as_str()),
+            TypeAnnotation::Reference(path) => Some(path.as_str()),
             TypeAnnotation::Basic(name) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Extract the type name string for Basic or Reference variants.
+    /// Handles the `Basic(name) | Reference(path)` pattern uniformly.
+    pub fn as_type_name_str(&self) -> Option<&str> {
+        match self {
+            TypeAnnotation::Basic(name) => Some(name.as_str()),
+            TypeAnnotation::Reference(path) => Some(path.as_str()),
             _ => None,
         }
     }
@@ -93,9 +108,12 @@ impl TypeAnnotation {
     /// Convert a type annotation to its full string representation.
     pub fn to_type_string(&self) -> String {
         match self {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
+            TypeAnnotation::Basic(name) => name.clone(),
+            TypeAnnotation::Reference(path) => path.to_string(),
             TypeAnnotation::Array(inner) => format!("Array<{}>", inner.to_type_string()),
-            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
+            TypeAnnotation::Generic { name, args }
+                if name.as_str() == "Option" && args.len() == 1 =>
+            {
                 format!("{}?", args[0].to_type_string())
             }
             TypeAnnotation::Generic { name, args } => {
@@ -178,14 +196,14 @@ pub struct TypeParam {
     pub default_type: Option<TypeAnnotation>,
     /// Trait bounds: `T: Comparable + Displayable`
     #[serde(default)]
-    pub trait_bounds: Vec<String>,
+    pub trait_bounds: Vec<TypePath>,
 }
 
 /// A predicate in a where clause: `T: Comparable + Display`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WherePredicate {
     pub type_name: String,
-    pub bounds: Vec<String>,
+    pub bounds: Vec<TypePath>,
 }
 
 impl PartialEq for TypeParam {
@@ -460,11 +478,11 @@ impl PartialEq for MethodDef {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeName {
-    /// Simple type name (e.g., "Vec", "Table")
-    Simple(String),
+    /// Simple type name (e.g., "Vec", "Table", "foo::Bar")
+    Simple(TypePath),
     /// Generic type name (e.g., "Table<Row>")
     Generic {
-        name: String,
+        name: TypePath,
         type_args: Vec<TypeAnnotation>,
     },
 }

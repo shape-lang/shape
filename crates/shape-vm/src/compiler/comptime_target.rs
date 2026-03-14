@@ -298,7 +298,7 @@ fn expr_to_string_lossy(expr: &Expr) -> String {
 fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
     match ta {
         TypeAnnotation::Basic(name) => name.clone(),
-        TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Array(inner) => format!("[{}]", type_annotation_to_string(inner)),
         TypeAnnotation::Union(types) => types
             .iter()
@@ -544,7 +544,7 @@ mod tests {
         );
         assert_eq!(
             type_annotation_to_string(&TypeAnnotation::Generic {
-                name: "Option".to_string(),
+                name: "Option".into(),
                 args: vec![TypeAnnotation::Basic("number".to_string())],
             }),
             "Option<number>"

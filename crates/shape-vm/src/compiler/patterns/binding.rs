@@ -391,7 +391,8 @@ impl BytecodeCompiler {
                 }
                 (Some(enum_name), _) => {
                     // Look up enum schema - must be registered (no generic fallback)
-                    if let Some(schema) = self.type_tracker.schema_registry().get(enum_name) {
+                    let resolved_name = self.resolve_type_name(enum_name);
+                    if let Some(schema) = self.type_tracker.schema_registry().get(resolved_name.as_str()) {
                         if schema.get_enum_info().is_some() {
                             return self.compile_typed_enum_binding(value_local, schema.id, fields);
                         }

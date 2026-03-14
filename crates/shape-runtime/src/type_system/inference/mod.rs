@@ -333,9 +333,7 @@ impl TypeInferenceEngine {
         match ty {
             Type::Generic { base, .. } => matches!(
                 base.as_ref(),
-                Type::Concrete(TypeAnnotation::Reference(name))
-                    | Type::Concrete(TypeAnnotation::Basic(name))
-                    if name == "Result"
+                Type::Concrete(ann) if ann.as_type_name_str() == Some("Result")
             ),
             Type::Concrete(TypeAnnotation::Generic { name, .. }) => name == "Result",
             _ => false,
@@ -349,14 +347,14 @@ impl TypeInferenceEngine {
     pub(crate) fn wrap_result_type_with_error(&self, inner: Type, err: Type) -> Type {
         Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![inner, err],
         }
     }
 
     pub(crate) fn any_error_type(&self) -> Type {
-        Type::Concrete(TypeAnnotation::Reference("AnyError".to_string()))
+        Type::Concrete(TypeAnnotation::Reference("AnyError".into()))
     }
 
     pub(crate) fn apply_fallibility_to_return_type(
@@ -755,7 +753,7 @@ impl TypeInferenceEngine {
         use shape_ast::ast::TypeAnnotation;
         match ann {
             TypeAnnotation::Basic(name) => name.clone(),
-            TypeAnnotation::Reference(name) => name.clone(),
+            TypeAnnotation::Reference(name) => name.to_string(),
             TypeAnnotation::Array(_) => "array".to_string(),
             TypeAnnotation::Object(_) => "object".to_string(),
             TypeAnnotation::Function { .. } => "function".to_string(),
@@ -848,8 +846,9 @@ impl TypeInferenceEngine {
                     .any(|arg| self.type_contains_unresolved_vars(arg))
                 {
                     let base_name = match base.as_ref() {
-                        Type::Concrete(TypeAnnotation::Reference(name))
-                        | Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+                        Type::Concrete(ann) if ann.as_type_name_str().is_some() => {
+                            ann.as_type_name_str().unwrap().to_string()
+                        }
                         _ => "generic".to_string(),
                     };
                     return Err(TypeError::GenericTypeError {
@@ -881,9 +880,7 @@ impl TypeInferenceEngine {
                 let mut normalized_args = args.clone();
                 if matches!(
                     base.as_ref(),
-                    Type::Concrete(TypeAnnotation::Reference(name))
-                        | Type::Concrete(TypeAnnotation::Basic(name))
-                        if name == "Result"
+                    Type::Concrete(ann) if ann.as_type_name_str() == Some("Result")
                 ) && normalized_args.len() == 1
                 {
                     normalized_args.push(Type::fresh_var());
@@ -967,8 +964,9 @@ impl TypeInferenceEngine {
                 }
 
                 let base_name = match &base {
-                    Type::Concrete(TypeAnnotation::Reference(name))
-                    | Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+                    Type::Concrete(ann) if ann.as_type_name_str().is_some() => {
+                        ann.as_type_name_str().unwrap().to_string()
+                    }
                     _ => "generic".to_string(),
                 };
                 return Err(TypeError::GenericTypeError {

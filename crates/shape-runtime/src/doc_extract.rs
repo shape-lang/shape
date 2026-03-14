@@ -792,7 +792,7 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
             let parts: Vec<String> = args.iter().map(format_type_annotation).collect();
             format!("{}<{}>", name, parts.join(", "))
         }
-        TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Void => "void".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "null".to_string(),

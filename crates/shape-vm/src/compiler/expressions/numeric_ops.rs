@@ -1,7 +1,7 @@
 //! Numeric binary-op helpers shared by expression lowering.
 
 use crate::bytecode::{Instruction, OpCode};
-use crate::type_tracking::{NumericType, StorageHint};
+use crate::type_tracking::NumericType;
 use shape_ast::ast::{BinaryOp, TypeAnnotation};
 use shape_runtime::type_system::{BuiltinTypes, Type};
 
@@ -26,14 +26,17 @@ pub(super) fn is_ordered_comparison(op: &BinaryOp) -> bool {
 
 /// Check if a Type from the inference engine is numeric.
 pub(super) fn is_type_numeric(ty: &Type) -> bool {
-    match ty {
-        Type::Concrete(TypeAnnotation::Basic(name))
-        | Type::Concrete(TypeAnnotation::Reference(name)) => {
-            BuiltinTypes::is_integer_type_name(name)
-                || BuiltinTypes::is_number_type_name(name)
-                || matches!(name.as_str(), "decimal" | "Decimal")
-        }
-        _ => false,
+    let name = match ty {
+        Type::Concrete(TypeAnnotation::Basic(name)) => Some(name.as_str()),
+        Type::Concrete(TypeAnnotation::Reference(name)) => Some(name.as_str()),
+        _ => None,
+    };
+    if let Some(name) = name {
+        BuiltinTypes::is_integer_type_name(name)
+            || BuiltinTypes::is_number_type_name(name)
+            || matches!(name, "decimal" | "Decimal")
+    } else {
+        false
     }
 }
 
@@ -43,24 +46,24 @@ pub(super) fn is_function_type(ty: &Type) -> bool {
 
 /// Map an inferred Type to a NumericType for typed opcode emission.
 pub(super) fn inferred_type_to_numeric(ty: &Type) -> Option<NumericType> {
-    match ty {
-        Type::Concrete(TypeAnnotation::Basic(name))
-        | Type::Concrete(TypeAnnotation::Reference(name)) => {
-            // Check width-specific integer types first
-            if let Some(w) = shape_ast::IntWidth::from_name(name) {
-                return Some(NumericType::IntWidth(w));
-            }
-            if BuiltinTypes::is_integer_type_name(name) {
-                return Some(NumericType::Int);
-            }
-            if BuiltinTypes::is_number_type_name(name) {
-                return Some(NumericType::Number);
-            }
-            match name.as_str() {
-                "decimal" | "Decimal" => Some(NumericType::Decimal),
-                _ => None,
-            }
-        }
+    let name = match ty {
+        Type::Concrete(TypeAnnotation::Basic(name)) => Some(name.as_str()),
+        Type::Concrete(TypeAnnotation::Reference(name)) => Some(name.as_str()),
+        _ => None,
+    };
+    let name = name?;
+    // Check width-specific integer types first
+    if let Some(w) = shape_ast::IntWidth::from_name(name) {
+        return Some(NumericType::IntWidth(w));
+    }
+    if BuiltinTypes::is_integer_type_name(name) {
+        return Some(NumericType::Int);
+    }
+    if BuiltinTypes::is_number_type_name(name) {
+        return Some(NumericType::Number);
+    }
+    match name {
+        "decimal" | "Decimal" => Some(NumericType::Decimal),
         _ => None,
     }
 }
@@ -76,7 +79,7 @@ pub(super) fn type_display_name(ty: &Type) -> String {
         Type::Concrete(TypeAnnotation::Array(inner)) => {
             format!("{}[]", type_display_name(&Type::Concrete(*inner.clone())))
         }
-        Type::Concrete(TypeAnnotation::Generic { name, .. }) => name.clone(),
+        Type::Concrete(TypeAnnotation::Generic { name, .. }) => name.to_string(),
         Type::Variable(v) => format!("?T{}", v.0),
         _ => format!("{:?}", ty),
     }
@@ -310,8 +313,8 @@ mod tests {
     #[test]
     fn width_aware_reference_types_map_to_numeric_hints() {
         use shape_ast::IntWidth;
-        let int_ref = Type::Concrete(TypeAnnotation::Reference("i32".to_string()));
-        let float_ref = Type::Concrete(TypeAnnotation::Reference("f32".to_string()));
+        let int_ref = Type::Concrete(TypeAnnotation::Reference("i32".into()));
+        let float_ref = Type::Concrete(TypeAnnotation::Reference("f32".into()));
 
         assert_eq!(
             inferred_type_to_numeric(&int_ref),

@@ -1067,7 +1067,7 @@ impl BytecodeCompiler {
                 if matches!(payload, shape_ast::ast::EnumConstructorPayload::Unit) {
                     if let Some(comptime_value) = self
                         .comptime_fields
-                        .get(enum_name)
+                        .get(enum_name.as_str())
                         .and_then(|m| m.get(variant))
                         .cloned()
                     {

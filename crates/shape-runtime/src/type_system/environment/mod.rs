@@ -351,7 +351,7 @@ impl TypeEnvironment {
                 name: "into".to_string(),
                 optional: false,
                 params: vec![],
-                return_type: TypeAnnotation::Reference("Target".to_string()),
+                return_type: TypeAnnotation::Reference("Target".into()),
                 is_async: false,
                 span: Span::DUMMY,
                 doc_comment: None,
@@ -384,10 +384,10 @@ impl TypeEnvironment {
                 optional: false,
                 params: vec![],
                 return_type: TypeAnnotation::Generic {
-                    name: "Result".to_string(),
+                    name: "Result".into(),
                     args: vec![
-                        TypeAnnotation::Reference("Target".to_string()),
-                        TypeAnnotation::Reference("AnyError".to_string()),
+                        TypeAnnotation::Reference("Target".into()),
+                        TypeAnnotation::Reference("AnyError".into()),
                     ],
                 },
                 is_async: false,
@@ -426,8 +426,8 @@ impl TypeEnvironment {
                     optional: false,
                 }],
                 return_type: TypeAnnotation::Generic {
-                    name: "Iterator".to_string(),
-                    args: vec![TypeAnnotation::Reference("T".to_string())],
+                    name: "Iterator".into(),
+                    args: vec![TypeAnnotation::Reference("T".into())],
                 },
                 is_async: false,
                 span: Span::DUMMY,
@@ -629,7 +629,7 @@ impl TypeEnvironment {
         self.define_builtin(
             "HashMap",
             vec![],
-            Type::Concrete(TypeAnnotation::Reference("HashMap".to_string())),
+            Type::Concrete(TypeAnnotation::Reference("HashMap".into())),
         );
 
         // Option/Result constructors are polymorphic and must never force `any`.
@@ -637,7 +637,7 @@ impl TypeEnvironment {
         let option_inner = Type::Variable(option_t.clone());
         let option_result = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![option_inner.clone()],
         };
@@ -648,14 +648,14 @@ impl TypeEnvironment {
         let ok_inner = Type::Variable(ok_t.clone());
         let ok_result = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![ok_inner.clone(), Type::Variable(ok_e.clone())],
         };
         let mut ok_defaults = std::collections::HashMap::new();
         ok_defaults.insert(
             ok_e.0.clone(),
-            Type::Concrete(TypeAnnotation::Reference("AnyError".to_string())),
+            Type::Concrete(TypeAnnotation::Reference("AnyError".into())),
         );
         self.builtins.insert(
             "Ok".to_string(),
@@ -671,7 +671,7 @@ impl TypeEnvironment {
         let err_payload_t = TypeVar::new("E".to_string());
         let err_result = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![
                 Type::Variable(err_ok_t.clone()),
@@ -689,10 +689,10 @@ impl TypeEnvironment {
         );
 
         // Internal conversion helpers used by std::core::try_into implementations.
-        let any_error = Type::Concrete(TypeAnnotation::Reference("AnyError".to_string()));
+        let any_error = Type::Concrete(TypeAnnotation::Reference("AnyError".into()));
         let result_of = |ok: Type| Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![ok, any_error.clone()],
         };

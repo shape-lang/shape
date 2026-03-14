@@ -346,7 +346,10 @@ impl<'a> TokenCollector<'a> {
         out: &mut Vec<&'b str>,
     ) {
         match annotation {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
+            TypeAnnotation::Basic(name) => {
+                out.push(name.as_str());
+            }
+            TypeAnnotation::Reference(name) => {
                 out.push(name.as_str());
             }
             TypeAnnotation::Generic { name, args } => {
@@ -488,9 +491,8 @@ impl<'a> TokenCollector<'a> {
                 }
 
                 let type_name = match type_annotation {
-                    TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
-                        Some(name.as_str())
-                    }
+                    TypeAnnotation::Basic(name) => Some(name.as_str()),
+                    TypeAnnotation::Reference(name) => Some(name.as_str()),
                     _ => None,
                 };
                 if let Some(type_name) = type_name {
@@ -505,7 +507,7 @@ impl<'a> TokenCollector<'a> {
                 enum_name, variant, ..
             } => {
                 if let Some(enum_name) = enum_name {
-                    if let Some(rel) = pattern_src.find(enum_name) {
+                    if let Some(rel) = pattern_src.find(enum_name.as_str()) {
                         let start = pattern_span.start + rel;
                         let (line, col) = offset_to_line_col(self.source, start);
                         self.add_token(line, col, enum_name.len() as u32, 3, 0);

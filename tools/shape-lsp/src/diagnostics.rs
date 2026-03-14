@@ -1263,7 +1263,7 @@ pub fn validate_trait_bounds(program: &Program, source: &str) -> Vec<Diagnostic>
             if let Some(type_params) = &func.type_params {
                 for tp in type_params {
                     for bound in &tp.trait_bounds {
-                        if !trait_methods.contains_key(bound) {
+                        if !trait_methods.contains_key(bound.as_str()) {
                             let range = span_to_range(source, span);
                             diagnostics.push(Diagnostic {
                                 range,
@@ -1290,12 +1290,12 @@ pub fn validate_trait_bounds(program: &Program, source: &str) -> Vec<Diagnostic>
     for item in &program.items {
         if let Item::Impl(impl_block, span) = item {
             let trait_name = match &impl_block.trait_name {
-                shape_ast::ast::TypeName::Simple(n) => n.clone(),
-                shape_ast::ast::TypeName::Generic { name, .. } => name.clone(),
+                shape_ast::ast::TypeName::Simple(n) => n.to_string(),
+                shape_ast::ast::TypeName::Generic { name, .. } => name.to_string(),
             };
             let target_type = match &impl_block.target_type {
-                shape_ast::ast::TypeName::Simple(n) => n.clone(),
-                shape_ast::ast::TypeName::Generic { name, .. } => name.clone(),
+                shape_ast::ast::TypeName::Simple(n) => n.to_string(),
+                shape_ast::ast::TypeName::Generic { name, .. } => name.to_string(),
             };
 
             if let Some(required_methods) = trait_methods.get(&trait_name) {

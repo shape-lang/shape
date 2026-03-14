@@ -49,9 +49,8 @@ fn array_type_name_to_numeric(type_name: &str) -> Option<NumericType> {
 
 fn type_annotation_to_numeric(annotation: &TypeAnnotation) -> Option<NumericType> {
     match annotation {
-        TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
-            basic_name_to_numeric(name)
-        }
+        TypeAnnotation::Basic(name) => basic_name_to_numeric(name),
+        TypeAnnotation::Reference(name) => basic_name_to_numeric(name),
         TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
             type_annotation_to_numeric(&args[0])
         }

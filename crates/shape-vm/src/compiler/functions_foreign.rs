@@ -648,7 +648,28 @@ impl BytecodeCompiler {
                 let elem = Self::native_slice_elem_ctype_from_annotation(inner)?;
                 Some(format!("cslice<{elem}>"))
             }
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => match name.as_str() {
+            TypeAnnotation::Basic(name) => match name.as_str() {
+                "number" | "Number" | "float" | "f64" => Some("f64".to_string()),
+                "f32" => Some("f32".to_string()),
+                "int" | "integer" | "Int" | "Integer" | "i64" => Some("i64".to_string()),
+                "i32" => Some("i32".to_string()),
+                "i16" => Some("i16".to_string()),
+                "i8" => Some("i8".to_string()),
+                "u64" => Some("u64".to_string()),
+                "u32" => Some("u32".to_string()),
+                "u16" => Some("u16".to_string()),
+                "u8" | "byte" => Some("u8".to_string()),
+                "isize" => Some("isize".to_string()),
+                "usize" => Some("usize".to_string()),
+                "char" => Some("i8".to_string()),
+                "bool" | "boolean" => Some("bool".to_string()),
+                "string" | "str" => Some("cstring".to_string()),
+                "cstring" => Some("cstring".to_string()),
+                "ptr" | "pointer" => Some("ptr".to_string()),
+                "void" if is_return => Some("void".to_string()),
+                _ => None,
+            },
+            TypeAnnotation::Reference(name) => match name.as_str() {
                 "number" | "Number" | "float" | "f64" => Some("f64".to_string()),
                 "f32" => Some("f32".to_string()),
                 "int" | "integer" | "Int" | "Integer" | "i64" => Some("i64".to_string()),
@@ -693,9 +714,8 @@ impl BytecodeCompiler {
                 if (name == "CView" || name == "CMut") && args.len() == 1 =>
             {
                 let inner = match &args[0] {
-                    TypeAnnotation::Reference(type_name) | TypeAnnotation::Basic(type_name) => {
-                        type_name.clone()
-                    }
+                    TypeAnnotation::Basic(type_name) => type_name.clone(),
+                    TypeAnnotation::Reference(type_name) => type_name.to_string(),
                     _ => return None,
                 };
                 if name == "CView" {

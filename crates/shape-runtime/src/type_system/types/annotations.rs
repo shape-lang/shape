@@ -9,10 +9,11 @@ use shape_ast::ast::TypeAnnotation;
 /// Convert a type annotation to canonical source-like text.
 pub fn annotation_to_string(ann: &TypeAnnotation) -> String {
     match ann {
-        TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Basic(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Generic { name, args } => {
             if args.is_empty() {
-                name.clone()
+                name.to_string()
             } else {
                 let rendered: Vec<String> = args.iter().map(annotation_to_string).collect();
                 format!("{}<{}>", name, rendered.join(", "))
@@ -117,7 +118,7 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
                     args: semantic_args,
                 },
                 _ => SemanticType::Generic {
-                    name: name.clone(),
+                    name: name.to_string(),
                     args: semantic_args,
                 },
             }
@@ -195,7 +196,7 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
         SemanticType::Bool => TypeAnnotation::Basic("bool".to_string()),
         SemanticType::String => TypeAnnotation::Basic("string".to_string()),
         SemanticType::Option(inner) => TypeAnnotation::Generic {
-            name: "Option".to_string(),
+            name: "Option".into(),
             args: vec![semantic_to_annotation(inner)],
         },
         SemanticType::Result { ok_type, err_type } => {
@@ -204,13 +205,13 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
                 args.push(semantic_to_annotation(err));
             }
             TypeAnnotation::Generic {
-                name: "Result".to_string(),
+                name: "Result".into(),
                 args,
             }
         }
         SemanticType::Array(elem) => TypeAnnotation::Array(Box::new(semantic_to_annotation(elem))),
         SemanticType::Generic { name, args } => TypeAnnotation::Generic {
-            name: name.clone(),
+            name: name.as_str().into(),
             args: args.iter().map(semantic_to_annotation).collect(),
         },
         SemanticType::Named(name) => {
@@ -221,10 +222,10 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
             {
                 TypeAnnotation::Basic(name.clone())
             } else {
-                TypeAnnotation::Reference(name.clone())
+                TypeAnnotation::Reference(name.as_str().into())
             }
         }
-        SemanticType::TypeVar(id) => TypeAnnotation::Reference(format!("T{}", id.0)),
+        SemanticType::TypeVar(id) => TypeAnnotation::Reference(format!("T{}", id.0).into()),
         SemanticType::Void => TypeAnnotation::Void,
         SemanticType::Never => TypeAnnotation::Never,
         SemanticType::Function(sig) => {
@@ -256,11 +257,11 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
                         .collect(),
                 )
             } else {
-                TypeAnnotation::Reference(name.clone())
+                TypeAnnotation::Reference(name.as_str().into())
             }
         }
         SemanticType::Enum { name, .. } | SemanticType::Interface { name, .. } => {
-            TypeAnnotation::Reference(name.clone())
+            TypeAnnotation::Reference(name.as_str().into())
         }
         SemanticType::Ref(inner) => {
             // Map &T to the annotation for T — references don't have a distinct
@@ -279,7 +280,7 @@ mod tests {
     fn test_table_one_arg() {
         // Table<Number> -> SemanticType::Generic
         let ann = TypeAnnotation::Generic {
-            name: "Table".to_string(),
+            name: "Table".into(),
             args: vec![TypeAnnotation::Basic("Number".to_string())],
         };
         let semantic = annotation_to_semantic(&ann);
@@ -297,7 +298,7 @@ mod tests {
     #[test]
     fn test_table_annotation_maps_to_table() {
         let ann = TypeAnnotation::Generic {
-            name: "Table".to_string(),
+            name: "Table".into(),
             args: vec![TypeAnnotation::Basic("Number".to_string())],
         };
         let semantic = annotation_to_semantic(&ann);

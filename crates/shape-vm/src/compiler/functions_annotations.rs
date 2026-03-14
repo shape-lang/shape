@@ -900,10 +900,10 @@ impl BytecodeCompiler {
     ) -> Result<()> {
         match &mut extend.type_name {
             shape_ast::ast::TypeName::Simple(name) if name == "target" => {
-                *name = target_name.to_string();
+                *name = target_name.into();
             }
             shape_ast::ast::TypeName::Generic { name, .. } if name == "target" => {
-                *name = target_name.to_string();
+                *name = target_name.into();
             }
             _ => {}
         }

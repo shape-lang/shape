@@ -31,12 +31,12 @@ impl TypeMethodRegistry {
 
         // Get the type name as a string
         let type_str = match type_name {
-            TypeName::Simple(name) => name.clone(),
+            TypeName::Simple(name) => name.to_string(),
             TypeName::Generic { name, type_args } => {
                 // Convert generic types with their full signature
                 // e.g., "Table<Row>", "Vec<Number>"
                 if type_args.is_empty() {
-                    name.clone()
+                    name.to_string()
                 } else {
                     // Convert type arguments to strings
                     let type_arg_strs: Vec<String> =

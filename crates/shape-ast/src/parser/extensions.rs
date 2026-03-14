@@ -230,9 +230,9 @@ pub fn parse_extend_statement(pair: Pair<Rule>) -> Result<crate::ast::ExtendStat
             .map(|p| parse_type_annotation(p))
             .collect::<Result<Vec<_>>>()?;
         if type_args.is_empty() {
-            TypeName::Simple(name)
+            TypeName::Simple(name.into())
         } else {
-            TypeName::Generic { name, type_args }
+            TypeName::Generic { name: name.into(), type_args }
         }
     };
 
@@ -359,9 +359,9 @@ fn parse_type_name(pair: Pair<Rule>) -> Result<crate::ast::types::TypeName> {
         .map(|p| super::types::parse_type_annotation(p))
         .collect::<Result<Vec<_>>>()?;
     if type_args.is_empty() {
-        Ok(TypeName::Simple(name))
+        Ok(TypeName::Simple(name.into()))
     } else {
-        Ok(TypeName::Generic { name, type_args })
+        Ok(TypeName::Generic { name: name.into(), type_args })
     }
 }
 

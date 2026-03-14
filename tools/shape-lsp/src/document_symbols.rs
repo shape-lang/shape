@@ -137,7 +137,7 @@ fn format_type_annotation(ty: &shape_ast::ast::TypeAnnotation) -> String {
     use shape_ast::ast::TypeAnnotation;
     match ty {
         TypeAnnotation::Basic(name) => name.clone(),
-        TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Generic { name, args } => {
             let args_str: Vec<String> = args.iter().map(format_type_annotation).collect();
             format!("{}<{}>", name, args_str.join(", "))

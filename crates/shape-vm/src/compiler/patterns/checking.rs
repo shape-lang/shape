@@ -269,7 +269,8 @@ impl BytecodeCompiler {
                     }
                     (Some(enum_name), _) => {
                         // Look up enum schema - must be registered
-                        let schema = self.type_tracker.schema_registry().get(enum_name);
+                        let resolved_name = self.resolve_type_name(enum_name);
+                        let schema = self.type_tracker.schema_registry().get(resolved_name.as_str());
                         let enum_info = schema.and_then(|s| s.get_enum_info());
                         let variant_info = enum_info.and_then(|e| e.variant_by_name(variant));
 

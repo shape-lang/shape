@@ -195,9 +195,9 @@ impl VirtualMachine {
             TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
                 Self::annotation_conversion_name(&args[0])
             }
-            TypeAnnotation::Basic(name)
-            | TypeAnnotation::Reference(name)
-            | TypeAnnotation::Generic { name, .. } => Some(Self::canonical_try_into_name(name)),
+            TypeAnnotation::Basic(name) => Some(Self::canonical_try_into_name(name)),
+            TypeAnnotation::Reference(name) => Some(Self::canonical_try_into_name(name)),
+            TypeAnnotation::Generic { name, .. } => Some(Self::canonical_try_into_name(name)),
             _ => None,
         }
     }
@@ -442,7 +442,7 @@ impl VirtualMachine {
             }
             "()" | "unit" => TypeAnnotation::Void,
             "None" => TypeAnnotation::Null,
-            _ => TypeAnnotation::Reference(name.to_string()),
+            _ => TypeAnnotation::Reference(name.into()),
         }
     }
 
@@ -452,7 +452,7 @@ impl VirtualMachine {
             NanTag::I48 => TypeAnnotation::Basic("int".to_string()),
             NanTag::Bool => TypeAnnotation::Basic("bool".to_string()),
             NanTag::None => TypeAnnotation::Generic {
-                name: "Option".to_string(),
+                name: "Option".into(),
                 args: vec![TypeAnnotation::Basic("unknown".to_string())],
             },
             NanTag::Unit => TypeAnnotation::Void,
@@ -462,7 +462,7 @@ impl VirtualMachine {
             NanTag::Ref => TypeAnnotation::Basic("reference".to_string()),
             NanTag::Heap => {
                 if let Some(shape_value::HeapValue::TypeAnnotation(_)) = nb.as_heap_ref() {
-                    return TypeAnnotation::Reference("Type".to_string());
+                    return TypeAnnotation::Reference("Type".into());
                 }
 
                 if let Some(shape_value::HeapValue::TypedObject { schema_id, .. }) =

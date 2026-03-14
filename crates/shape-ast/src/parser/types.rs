@@ -109,10 +109,10 @@ pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
         Rule::object_type => parse_object_type(pair),
         Rule::function_type => parse_function_type(pair),
         Rule::dyn_type => {
-            let trait_names: Vec<String> = pair
+            let trait_names: Vec<_> = pair
                 .into_inner()
-                .filter(|p| p.as_rule() == Rule::ident)
-                .map(|p| p.as_str().to_string())
+                .filter(|p| p.as_rule() == Rule::qualified_ident)
+                .map(|p| p.as_str().into())
                 .collect();
             Ok(TypeAnnotation::Dyn(trait_names))
         }
@@ -122,7 +122,7 @@ pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
             let param = parse_type_param(pair)?;
             Ok(param.type_annotation)
         }
-        Rule::ident => Ok(TypeAnnotation::Reference(pair.as_str().to_string())),
+        Rule::ident => Ok(TypeAnnotation::Reference(pair.as_str().into())),
         _ => Err(ShapeError::ParseError {
             message: format!("invalid type annotation: {:?}", pair.as_rule()),
             location: Some(pair_loc),
@@ -136,6 +136,7 @@ pub fn parse_basic_type(name: &str) -> Result<TypeAnnotation> {
         "void" => TypeAnnotation::Void,
         "never" => TypeAnnotation::Never,
         "undefined" => TypeAnnotation::Undefined,
+        other if other.contains("::") => TypeAnnotation::Reference(other.into()),
         other => TypeAnnotation::Basic(other.to_string()),
     })
 }
@@ -339,8 +340,8 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
                     }
                     Rule::trait_bound_list => {
                         for bound_ident in remaining.into_inner() {
-                            if bound_ident.as_rule() == Rule::ident {
-                                trait_bounds.push(bound_ident.as_str().to_string());
+                            if bound_ident.as_rule() == Rule::qualified_ident {
+                                trait_bounds.push(bound_ident.as_str().into());
                             }
                         }
                     }
@@ -426,7 +427,7 @@ pub fn parse_generic_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
     if (name == "Vec" || name == "Array") && args.len() == 1 {
         Ok(TypeAnnotation::Array(Box::new(args.remove(0))))
     } else {
-        Ok(TypeAnnotation::Generic { name, args })
+        Ok(TypeAnnotation::Generic { name: name.into(), args })
     }
 }
 
@@ -1049,7 +1050,7 @@ fn parse_associated_type_decl(pair: Pair<Rule>) -> Result<(String, Vec<TypeAnnot
     for remaining in inner {
         if remaining.as_rule() == Rule::trait_bound_list {
             for bound_ident in remaining.into_inner() {
-                if bound_ident.as_rule() == Rule::ident {
+                if bound_ident.as_rule() == Rule::qualified_ident {
                     bounds.push(TypeAnnotation::Basic(bound_ident.as_str().to_string()));
                 }
             }

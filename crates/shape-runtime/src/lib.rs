@@ -506,8 +506,8 @@ impl Runtime {
                             }
 
                             let base_type = match &alias_def.type_annotation {
-                                shape_ast::ast::TypeAnnotation::Basic(n)
-                                | shape_ast::ast::TypeAnnotation::Reference(n) => n.clone(),
+                                shape_ast::ast::TypeAnnotation::Basic(n) => n.clone(),
+                                shape_ast::ast::TypeAnnotation::Reference(n) => n.to_string(),
                                 _ => "any".to_string(),
                             };
 
@@ -540,8 +540,8 @@ impl Runtime {
                     }
 
                     let base_type = match &alias_def.type_annotation {
-                        shape_ast::ast::TypeAnnotation::Basic(n)
-                        | shape_ast::ast::TypeAnnotation::Reference(n) => n.clone(),
+                        shape_ast::ast::TypeAnnotation::Basic(n) => n.clone(),
+                        shape_ast::ast::TypeAnnotation::Reference(n) => n.to_string(),
                         _ => "any".to_string(),
                     };
 

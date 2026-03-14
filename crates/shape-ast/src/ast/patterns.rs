@@ -26,7 +26,7 @@ pub enum Pattern {
     Wildcard,
     /// Match a constructor pattern
     Constructor {
-        enum_name: Option<String>,
+        enum_name: Option<super::type_path::TypePath>,
         variant: String,
         fields: PatternConstructorFields,
     },

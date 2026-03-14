@@ -212,24 +212,37 @@ fn parse_constructor_pattern(pair: Pair<Rule>) -> Result<Pattern> {
     let pair_loc = pair_location(&pair);
     match pair.as_rule() {
         Rule::pattern_qualified_constructor => {
-            let mut inner = pair.into_inner();
-            let enum_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-                message: "expected enum name in constructor pattern".to_string(),
-                location: Some(pair_loc.clone()),
-            })?;
-            let variant_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-                message: "expected variant name in constructor pattern".to_string(),
-                location: Some(pair_loc.clone()),
-            })?;
-            let enum_name = Some(enum_pair.as_str().to_string());
-            let variant = variant_pair.as_str().to_string();
-            let fields = if let Some(payload) = inner.next() {
+            let inner = pair.into_inner();
+            let mut ident_segments = Vec::new();
+            let mut payload_pair = None;
+            for child in inner {
+                match child.as_rule() {
+                    Rule::ident | Rule::variant_ident => {
+                        ident_segments.push(child.as_str().to_string())
+                    }
+                    Rule::pattern_constructor_payload => payload_pair = Some(child),
+                    _ => {}
+                }
+            }
+            if ident_segments.len() < 2 {
+                return Err(ShapeError::ParseError {
+                    message: "expected Enum::Variant in constructor pattern".to_string(),
+                    location: Some(pair_loc),
+                });
+            }
+            let variant = ident_segments.pop().unwrap();
+            let enum_path = if ident_segments.len() == 1 {
+                crate::ast::TypePath::simple(ident_segments.remove(0))
+            } else {
+                crate::ast::TypePath::from_segments(ident_segments)
+            };
+            let fields = if let Some(payload) = payload_pair {
                 parse_constructor_payload(payload)?
             } else {
                 crate::ast::PatternConstructorFields::Unit
             };
             Ok(Pattern::Constructor {
-                enum_name,
+                enum_name: Some(enum_path),
                 variant,
                 fields,
             })

@@ -974,7 +974,7 @@ fn test_trait_bound_single() {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
             assert_eq!(tp.name, "T");
-            assert_eq!(tp.trait_bounds, vec!["Comparable".to_string()]);
+            assert_eq!(tp.trait_bounds, vec![crate::ast::type_path::TypePath::from("Comparable")]);
         }
         other => panic!("Expected Function, got {:?}", other),
     }
@@ -994,7 +994,7 @@ fn test_trait_bound_multiple() {
             assert_eq!(tp.name, "T");
             assert_eq!(
                 tp.trait_bounds,
-                vec!["Serializable".to_string(), "Display".to_string()]
+                vec![crate::ast::type_path::TypePath::from("Serializable"), crate::ast::type_path::TypePath::from("Display")]
             );
         }
         other => panic!("Expected Function, got {:?}", other),
@@ -1053,7 +1053,7 @@ fn test_type_param_bounds_with_default_type_parses() {
         crate::ast::Item::Function(func, _) => {
             let tp = &func.type_params.as_ref().expect("expected type params")[0];
             assert_eq!(tp.name, "T");
-            assert_eq!(tp.trait_bounds, vec!["Numeric".to_string()]);
+            assert_eq!(tp.trait_bounds, vec![crate::ast::type_path::TypePath::from("Numeric")]);
             assert_eq!(
                 tp.default_type,
                 Some(crate::ast::TypeAnnotation::Basic("int".to_string()))

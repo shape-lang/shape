@@ -490,7 +490,8 @@ impl BytecodeCompiler {
     /// canonical runtime representation for it.
     pub(super) fn tracked_type_name_from_annotation(type_ann: &TypeAnnotation) -> Option<String> {
         match type_ann {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => Some(name.clone()),
+            TypeAnnotation::Basic(name) => Some(name.clone()),
+            TypeAnnotation::Reference(name) => Some(name.to_string()),
             TypeAnnotation::Array(inner) => Some(format!("Vec<{}>", inner.to_type_string())),
             // Keep the canonical Vec<T> naming even if a Generic slips through.
             TypeAnnotation::Generic { name, args } if name == "Vec" && args.len() == 1 => {
@@ -501,6 +502,60 @@ impl BytecodeCompiler {
             }
             _ => None,
         }
+    }
+
+    /// Resolve a type name through the module scope stack and imports.
+    ///
+    /// If the name is already directly known (in struct_types, type_aliases, etc.),
+    /// returns it as-is. Otherwise, tries prefixing with each module scope from
+    /// innermost to outermost, then checks imported names to find a match.
+    pub(super) fn resolve_type_name(&self, name: &str) -> String {
+        // Already qualified or directly found
+        if name.contains("::") || self.is_type_known_direct(name) {
+            return name.to_string();
+        }
+        // Try module scope prefixes (innermost to outermost)
+        for scope in self.module_scope_stack.iter().rev() {
+            let qualified = format!("{}::{}", scope, name);
+            if self.is_type_known_direct(&qualified) {
+                return qualified;
+            }
+        }
+        // Check imported names (from `from ... use { Name }` imports)
+        if let Some(imported) = self.imported_names.get(name) {
+            let qualified = &imported.original_name;
+            if self.is_type_known_direct(qualified) {
+                return qualified.clone();
+            }
+        }
+        // Try namespace module prefixes (from `use module` imports)
+        for ns in &self.module_namespace_bindings {
+            let qualified = format!("{}::{}", ns, name);
+            if self.is_type_known_direct(&qualified) {
+                return qualified;
+            }
+        }
+        // Return as-is (may be a forward reference or builtin)
+        name.to_string()
+    }
+
+    /// Direct type lookup without scope resolution
+    fn is_type_known_direct(&self, name: &str) -> bool {
+        self.struct_types.contains_key(name)
+            || self.type_aliases.contains_key(name)
+            || self
+                .type_inference
+                .env
+                .lookup_type_alias(name)
+                .is_some()
+            || self.type_inference.env.get_enum(name).is_some()
+            || self
+                .type_inference
+                .env
+                .lookup_interface(name)
+                .is_some()
+            || self.type_inference.env.lookup_trait(name).is_some()
+            || self.type_tracker.schema_registry().get(name).is_some()
     }
 
     /// Mark a local/module binding slot as an array with numeric element type.
@@ -2189,7 +2244,7 @@ impl BytecodeCompiler {
                 // to enable typed field access on nested structs.
                 other => FieldType::Object(other.to_string()),
             },
-            TypeAnnotation::Reference(s) => FieldType::Object(s.clone()),
+            TypeAnnotation::Reference(s) => FieldType::Object(s.to_string()),
             TypeAnnotation::Array(inner) => {
                 FieldType::Array(Box::new(Self::type_annotation_to_field_type(inner)))
             }
@@ -2228,7 +2283,8 @@ impl BytecodeCompiler {
         if let TypeAnnotation::Generic { name, args } = type_ann {
             if name == "Table" && args.len() == 1 {
                 let inner_name = match &args[0] {
-                    TypeAnnotation::Reference(t) | TypeAnnotation::Basic(t) => Some(t.as_str()),
+                    TypeAnnotation::Basic(t) => Some(t.as_str()),
+                    TypeAnnotation::Reference(t) => Some(t.as_str()),
                     _ => None,
                 };
                 if let Some(type_name) = inner_name {
@@ -2381,7 +2437,7 @@ mod tests {
     #[test]
     fn test_type_annotation_to_field_type_optional() {
         let ann = TypeAnnotation::Generic {
-            name: "Option".to_string(),
+            name: "Option".into(),
             args: vec![TypeAnnotation::Basic("int".to_string())],
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
@@ -2391,7 +2447,7 @@ mod tests {
     #[test]
     fn test_type_annotation_to_field_type_generic_hashmap() {
         let ann = TypeAnnotation::Generic {
-            name: "HashMap".to_string(),
+            name: "HashMap".into(),
             args: vec![
                 TypeAnnotation::Basic("string".to_string()),
                 TypeAnnotation::Basic("int".to_string()),
@@ -2404,7 +2460,7 @@ mod tests {
     #[test]
     fn test_type_annotation_to_field_type_generic_user_struct() {
         let ann = TypeAnnotation::Generic {
-            name: "MyContainer".to_string(),
+            name: "MyContainer".into(),
             args: vec![TypeAnnotation::Basic("string".to_string())],
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);

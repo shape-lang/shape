@@ -443,10 +443,9 @@ impl TypeRegistry {
             .super_traits
             .iter()
             .filter_map(|ann| match ann {
-                TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
-                    Some(name.clone())
-                }
-                TypeAnnotation::Generic { name, .. } => Some(name.clone()),
+                TypeAnnotation::Basic(name) => Some(name.clone()),
+                TypeAnnotation::Reference(name) => Some(name.to_string()),
+                TypeAnnotation::Generic { name, .. } => Some(name.to_string()),
                 _ => None,
             })
             .collect()

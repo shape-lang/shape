@@ -22,6 +22,7 @@ pub mod statements;
 pub mod streams;
 pub mod tests;
 pub mod time;
+pub mod type_path;
 pub mod types;
 pub mod windows;
 
@@ -52,6 +53,9 @@ pub use docs::{
     extend_method_doc_path, impl_method_doc_path, qualify_doc_owner_path, type_annotation_doc_path,
     type_name_doc_path,
 };
+
+// From type_path.rs
+pub use type_path::TypePath;
 
 // From types.rs
 pub use types::{

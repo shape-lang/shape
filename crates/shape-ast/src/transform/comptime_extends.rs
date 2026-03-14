@@ -59,7 +59,7 @@ pub fn collect_generated_annotation_extends(program: &Program) -> Vec<crate::ast
     methods_by_type
         .into_iter()
         .map(|(type_name, methods)| crate::ast::ExtendStatement {
-            type_name: TypeName::Simple(type_name),
+            type_name: TypeName::Simple(type_name.into()),
             methods,
         })
         .collect()
@@ -164,10 +164,10 @@ fn collect_extend_methods_from_stmt(
     match stmt {
         Statement::Extend(extend, _) => {
             let resolved_type = match &extend.type_name {
-                TypeName::Simple(name) if name == "target" => target_name.to_string(),
-                TypeName::Generic { name, .. } if name == "target" => target_name.to_string(),
-                TypeName::Simple(name) => name.clone(),
-                TypeName::Generic { name, .. } => name.clone(),
+                TypeName::Simple(name) if name.as_str() == "target" => target_name.to_string(),
+                TypeName::Generic { name, .. } if name.as_str() == "target" => target_name.to_string(),
+                TypeName::Simple(name) => name.to_string(),
+                TypeName::Generic { name, .. } => name.to_string(),
             };
             let entry = methods_by_type.entry(resolved_type).or_default();
             for method in &extend.methods {

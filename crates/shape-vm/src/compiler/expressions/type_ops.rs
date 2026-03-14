@@ -21,7 +21,7 @@ fn type_name_to_annotation(name: &str) -> TypeAnnotation {
         }
         "()" | "unit" => TypeAnnotation::Void,
         "None" => TypeAnnotation::Null,
-        _ => TypeAnnotation::Reference(name.to_string()),
+        _ => TypeAnnotation::Reference(name.into()),
     }
 }
 
@@ -46,9 +46,8 @@ impl BytecodeCompiler {
 
     fn annotation_contains_type_param(ann: &TypeAnnotation, type_params: &HashSet<String>) -> bool {
         match ann {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
-                type_params.contains(name)
-            }
+            TypeAnnotation::Basic(name) => type_params.contains(name),
+            TypeAnnotation::Reference(name) => type_params.contains(name.as_str()),
             TypeAnnotation::Array(inner) => {
                 Self::annotation_contains_type_param(inner, type_params)
             }
@@ -67,7 +66,7 @@ impl BytecodeCompiler {
                     || Self::annotation_contains_type_param(returns, type_params)
             }
             TypeAnnotation::Generic { name, args } => {
-                type_params.contains(name)
+                type_params.contains(name.as_str())
                     || args
                         .iter()
                         .any(|arg| Self::annotation_contains_type_param(arg, type_params))
@@ -110,24 +109,32 @@ impl BytecodeCompiler {
 
     fn try_into_name_from_annotation(annotation: &TypeAnnotation) -> Option<String> {
         match annotation {
-            TypeAnnotation::Basic(name)
-            | TypeAnnotation::Reference(name)
-            | TypeAnnotation::Generic { name, .. } => Some(Self::canonical_try_into_name(name)),
+            TypeAnnotation::Basic(name) => Some(Self::canonical_try_into_name(name)),
+            TypeAnnotation::Reference(name) => Some(Self::canonical_try_into_name(name)),
+            TypeAnnotation::Generic { name, .. } => Some(Self::canonical_try_into_name(name)),
             _ => None,
         }
     }
 
     fn try_into_name_from_type(ty: &Type) -> Option<String> {
         match ty {
-            Type::Concrete(TypeAnnotation::Basic(name))
-            | Type::Concrete(TypeAnnotation::Reference(name))
-            | Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
+            Type::Concrete(TypeAnnotation::Basic(name)) => {
+                Some(Self::canonical_try_into_name(name))
+            }
+            Type::Concrete(TypeAnnotation::Reference(name)) => {
+                Some(Self::canonical_try_into_name(name))
+            }
+            Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
                 Some(Self::canonical_try_into_name(name))
             }
             Type::Generic { base, .. } => match base.as_ref() {
-                Type::Concrete(TypeAnnotation::Basic(name))
-                | Type::Concrete(TypeAnnotation::Reference(name))
-                | Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
+                Type::Concrete(TypeAnnotation::Basic(name)) => {
+                    Some(Self::canonical_try_into_name(name))
+                }
+                Type::Concrete(TypeAnnotation::Reference(name)) => {
+                    Some(Self::canonical_try_into_name(name))
+                }
+                Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
                     Some(Self::canonical_try_into_name(name))
                 }
                 _ => None,
@@ -142,10 +149,10 @@ impl BytecodeCompiler {
         target_selector: &str,
     ) -> TypeAnnotation {
         TypeAnnotation::Generic {
-            name: tag.to_string(),
+            name: tag.into(),
             args: vec![
-                TypeAnnotation::Reference(source_name.to_string()),
-                TypeAnnotation::Reference(target_selector.to_string()),
+                TypeAnnotation::Reference(source_name.into()),
+                TypeAnnotation::Reference(target_selector.into()),
             ],
         }
     }
@@ -165,7 +172,7 @@ impl BytecodeCompiler {
         // Support type symbols directly (e.g. Point.type()).
         if let Expr::Identifier(name, _) = expr {
             if self.is_type_symbol_name(name) {
-                return Ok(TypeAnnotation::Reference(name.clone()));
+                return Ok(TypeAnnotation::Reference(name.as_str().into()));
             }
 
             // Prefer compiler-tracked local/module_binding types for identifiers.

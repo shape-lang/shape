@@ -380,7 +380,7 @@ let a = MyType { x: 1 }
     assert_eq!(
         types.get("a"),
         Some(&Type::Concrete(TypeAnnotation::Reference(
-            "MyType".to_string()
+            "MyType".into()
         )))
     );
 }
@@ -823,7 +823,7 @@ fn test_exhaustiveness_check_missing_variant() {
         scrutinee: Box::new(Expr::Identifier("status".to_string(), span.clone())),
         arms: vec![MatchArm {
             pattern: Pattern::Constructor {
-                enum_name: Some("Status".to_string()),
+                enum_name: Some("Status".into()),
                 variant: "Active".to_string(),
                 fields: PatternConstructorFields::Unit,
             },
@@ -846,9 +846,9 @@ fn test_exhaustiveness_check_missing_variant() {
                         kind: VarKind::Let,
                         is_mut: false,
                         pattern: DestructurePattern::Identifier("status".to_string(), span.clone()),
-                        type_annotation: Some(TypeAnnotation::Reference("Status".to_string())),
+                        type_annotation: Some(TypeAnnotation::Reference("Status".into())),
                         value: Some(Expr::EnumConstructor {
-                            enum_name: "Status".to_string(),
+                            enum_name: "Status".into(),
                             variant: "Active".to_string(),
                             payload: EnumConstructorPayload::Unit,
                             span: span.clone(),
@@ -1168,10 +1168,10 @@ fn test_union_name_with_reference_types() {
 
     let types = vec![
         Type::Concrete(shape_ast::ast::TypeAnnotation::Reference(
-            "Currency".to_string(),
+            "Currency".into(),
         )),
         Type::Concrete(shape_ast::ast::TypeAnnotation::Reference(
-            "Percent".to_string(),
+            "Percent".into(),
         )),
     ];
 
@@ -1312,7 +1312,7 @@ fn test_type_name_for_various_types() {
 
     // Test reference types
     let ref_type = Type::Concrete(shape_ast::ast::TypeAnnotation::Reference(
-        "MyType".to_string(),
+        "MyType".into(),
     ));
     assert_eq!(engine.type_name_for_union(&ref_type), "MyType");
 

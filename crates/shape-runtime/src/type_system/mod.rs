@@ -80,7 +80,7 @@ mod tests {
     fn test_type_to_semantic_option() {
         let option_num = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![BuiltinTypes::number()],
         };
@@ -95,7 +95,7 @@ mod tests {
     fn test_type_to_semantic_result() {
         let result_num = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![BuiltinTypes::number()],
         };
@@ -113,7 +113,7 @@ mod tests {
     fn test_type_to_semantic_generic_table() {
         let table_num = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Table".to_string(),
+                "Table".into(),
             ))),
             args: vec![BuiltinTypes::number()],
         };

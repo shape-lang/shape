@@ -423,7 +423,8 @@ impl TypeInferenceEngine {
     pub(crate) fn resolve_type_annotation(&self, ann: &TypeAnnotation) -> Type {
         match ann {
             // Check if this is a type parameter reference
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
+            ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)) => {
+                let name = ann.as_type_name_str().unwrap();
                 if let Some(scheme) = self.env.lookup(name) {
                     // If it's a type parameter (a type variable), use it
                     if let Type::Variable(_) = &scheme.ty {
@@ -677,8 +678,8 @@ impl TypeInferenceEngine {
     /// Extract the simple type name string from a TypeName
     fn type_name_str(tn: &TypeName) -> String {
         match tn {
-            TypeName::Simple(n) => n.clone(),
-            TypeName::Generic { name, .. } => name.clone(),
+            TypeName::Simple(n) => n.to_string(),
+            TypeName::Generic { name, .. } => name.to_string(),
         }
     }
 
@@ -689,14 +690,13 @@ impl TypeInferenceEngine {
     }
 
     fn conversion_name_from_annotation_for_impl(annotation: &TypeAnnotation) -> Option<String> {
-        match annotation {
-            TypeAnnotation::Basic(name)
-            | TypeAnnotation::Reference(name)
-            | TypeAnnotation::Generic { name, .. } => {
-                Some(Self::canonical_conversion_name_for_impl(name))
-            }
+        let name = match annotation {
+            TypeAnnotation::Basic(name) => Some(name.as_str()),
+            TypeAnnotation::Reference(path) => Some(path.as_str()),
+            TypeAnnotation::Generic { name, .. } => Some(name.as_str()),
             _ => None,
-        }
+        };
+        name.map(Self::canonical_conversion_name_for_impl)
     }
 
     fn validate_conversion_impl_shape(
@@ -780,11 +780,11 @@ impl TypeInferenceEngine {
             // Collect inline bounds from type params: <T: Comparable>
             for tp in type_params {
                 if !tp.trait_bounds.is_empty() {
-                    let mut expanded = tp.trait_bounds.clone();
+                    let mut expanded: Vec<String> = tp.trait_bounds.iter().map(|t| t.to_string()).collect();
                     // Transitively include supertrait bounds:
                     // If T: Foo and trait Foo: Bar + Baz, also add Bar and Baz.
                     for trait_name in &tp.trait_bounds {
-                        let supers = self.env.get_transitive_supertrait_names(trait_name);
+                        let supers = self.env.get_transitive_supertrait_names(trait_name.as_str());
                         for st in supers {
                             if !expanded.contains(&st) {
                                 expanded.push(st);
@@ -801,10 +801,10 @@ impl TypeInferenceEngine {
             // Merge where clause predicates: where T: Display + Serializable
             if let Some(where_preds) = &func.where_clause {
                 for pred in where_preds {
-                    let mut expanded = pred.bounds.clone();
+                    let mut expanded: Vec<String> = pred.bounds.iter().map(|t| t.to_string()).collect();
                     // Transitively include supertrait bounds from where clauses too
                     for trait_name in &pred.bounds {
-                        let supers = self.env.get_transitive_supertrait_names(trait_name);
+                        let supers = self.env.get_transitive_supertrait_names(trait_name.as_str());
                         for st in supers {
                             if !expanded.contains(&st) {
                                 expanded.push(st);
@@ -966,7 +966,7 @@ mod tests {
         );
 
         // Method should be registered in the method table
-        let table_type = Type::Concrete(TypeAnnotation::Reference("Table".to_string()));
+        let table_type = Type::Concrete(TypeAnnotation::Reference("Table".into()));
         let sig = engine.method_table.lookup(&table_type, "apply");
         assert!(
             sig.is_some(),
@@ -1122,7 +1122,7 @@ mod tests {
         );
 
         // Method should be registered
-        let table_type = Type::Concrete(TypeAnnotation::Reference("Table".to_string()));
+        let table_type = Type::Concrete(TypeAnnotation::Reference("Table".into()));
         assert!(
             engine.method_table.lookup(&table_type, "smooth").is_some(),
             "smooth method should be in method table for Table"
@@ -1232,7 +1232,7 @@ mod tests {
         );
 
         // Verify the method is registered and callable on Person
-        let person_type = Type::Concrete(TypeAnnotation::Reference("Person".to_string()));
+        let person_type = Type::Concrete(TypeAnnotation::Reference("Person".into()));
         let sig = engine.method_table.lookup(&person_type, "greet");
         assert!(
             sig.is_some(),
@@ -1256,7 +1256,7 @@ mod tests {
         if let shape_ast::ast::Item::Function(func, _) = &program.items[0] {
             let tp = &func.type_params.as_ref().unwrap()[0];
             assert_eq!(tp.name, "T");
-            assert_eq!(tp.trait_bounds, vec!["Comparable".to_string()]);
+            assert_eq!(tp.trait_bounds, vec![shape_ast::ast::type_path::TypePath::from("Comparable")]);
         } else {
             panic!("Expected function item");
         }
@@ -1278,7 +1278,7 @@ mod tests {
             assert_eq!(tp.name, "T");
             assert_eq!(
                 tp.trait_bounds,
-                vec!["Comparable".to_string(), "Displayable".to_string()]
+                vec![shape_ast::ast::type_path::TypePath::from("Comparable"), shape_ast::ast::type_path::TypePath::from("Displayable")]
             );
         } else {
             panic!("Expected function item");
@@ -1532,7 +1532,7 @@ mod tests {
         );
 
         // The default method "describe" should be registered on Widget
-        let widget_type = Type::Concrete(TypeAnnotation::Reference("Widget".to_string()));
+        let widget_type = Type::Concrete(TypeAnnotation::Reference("Widget".into()));
         assert!(
             engine
                 .method_table
@@ -1579,7 +1579,7 @@ mod tests {
         );
 
         // Both methods should be registered
-        let button_type = Type::Concrete(TypeAnnotation::Reference("Button".to_string()));
+        let button_type = Type::Concrete(TypeAnnotation::Reference("Button".into()));
         assert!(
             engine.method_table.lookup(&button_type, "format").is_some(),
             "format should be in method table for Button"
@@ -1648,7 +1648,7 @@ mod tests {
         );
 
         // Default methods should be registered
-        let my_type = Type::Concrete(TypeAnnotation::Reference("MyType".to_string()));
+        let my_type = Type::Concrete(TypeAnnotation::Reference("MyType".into()));
         assert!(
             engine.method_table.lookup(&my_type, "greet").is_some(),
             "Default greet should be in method table for MyType"

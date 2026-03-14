@@ -193,13 +193,10 @@ impl Unifier {
         match (&t1, &t2) {
             (Type::Variable(_), _) | (_, Type::Variable(_)) => Ok(()),
             (Type::Generic { base: b1, args: a1 }, Type::Generic { base: b2, args: a2 }) => {
-                let is_result_base = |base: &Type| {
-                    matches!(
-                        base,
-                        Type::Concrete(TypeAnnotation::Reference(name))
-                            | Type::Concrete(TypeAnnotation::Basic(name))
-                            if name == "Result"
-                    )
+                let is_result_base = |base: &Type| match base {
+                    Type::Concrete(TypeAnnotation::Reference(name)) => name == "Result",
+                    Type::Concrete(TypeAnnotation::Basic(name)) => name == "Result",
+                    _ => false,
                 };
 
                 self.try_unify(b1, b2)?;

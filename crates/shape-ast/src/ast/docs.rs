@@ -270,7 +270,7 @@ pub fn qualify_doc_owner_path(module_path: &[String], owner: &str) -> String {
 
 pub fn type_name_doc_path(type_name: &TypeName) -> String {
     match type_name {
-        TypeName::Simple(name) => name.clone(),
+        TypeName::Simple(name) => name.to_string(),
         TypeName::Generic { name, type_args } => {
             let args = type_args
                 .iter()

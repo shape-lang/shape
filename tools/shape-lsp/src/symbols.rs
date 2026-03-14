@@ -14,10 +14,10 @@ use tower_lsp_server::ls_types::{
 fn format_type_annotation(annotation: &TypeAnnotation) -> String {
     match annotation {
         TypeAnnotation::Basic(name) => name.clone(),
-        TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Generic { name, args } => {
             if args.is_empty() {
-                name.clone()
+                name.to_string()
             } else {
                 let arg_list: Vec<String> = args.iter().map(format_type_annotation).collect();
                 format!("{}<{}>", name, arg_list.join(", "))
@@ -54,7 +54,7 @@ fn format_type_annotation(annotation: &TypeAnnotation) -> String {
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "None".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),
-        TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.join(" + ")),
+        TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" + ")),
     }
 }
 

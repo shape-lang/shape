@@ -175,7 +175,8 @@ fn format_type(ty: &Type) -> String {
 
 fn format_annotation(ann: &TypeAnnotation) -> String {
     match ann {
-        TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Basic(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Array(inner) => format!("Vec<{}>", format_annotation(inner)),
         TypeAnnotation::Tuple(items) => format!(
             "({})",

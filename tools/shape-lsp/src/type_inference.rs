@@ -37,7 +37,7 @@ pub fn type_annotation_to_string(ta: &TypeAnnotation) -> Option<String> {
         TypeAnnotation::Array(inner) => {
             type_annotation_to_string(inner).map(|s| format!("{}[]", s))
         }
-        TypeAnnotation::Reference(s) => Some(s.clone()),
+        TypeAnnotation::Reference(s) => Some(s.to_string()),
         TypeAnnotation::Generic { name, args } => {
             let arg_strs: Vec<String> = args.iter().filter_map(type_annotation_to_string).collect();
             Some(format!("{}<{}>", name, arg_strs.join(", ")))
@@ -77,7 +77,7 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
         Expr::QualifiedFunctionCall {
             namespace, function, ..
         } => infer_function_return_type(&format!("{}::{}", namespace, function)),
-        Expr::EnumConstructor { enum_name, .. } => Some(enum_name.clone()),
+        Expr::EnumConstructor { enum_name, .. } => Some(enum_name.to_string()),
         Expr::MethodCall {
             receiver, method, ..
         } => match method.as_str() {
@@ -231,7 +231,7 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
         Expr::WindowExpr(_, _) => Some("Number".to_string()),
         Expr::FuzzyComparison { .. } => Some("bool".to_string()),
         Expr::FromQuery(_, _) => Some("Array".to_string()),
-        Expr::StructLiteral { type_name, .. } => Some(type_name.clone()),
+        Expr::StructLiteral { type_name, .. } => Some(type_name.to_string()),
         Expr::Await(inner, _) => infer_expr_type_with_env(inner, env),
         Expr::Join(_, _) => Some("Array".to_string()),
         Expr::Annotated { target, .. } => infer_expr_type_with_env(target, env),
@@ -586,7 +586,7 @@ pub fn extract_struct_fields(
             type_name, fields, ..
         }) = value_expr
         {
-            if !result.contains_key(type_name) {
+            if !result.contains_key(type_name.as_str()) {
                 let inferred: Vec<(String, String)> = fields
                     .iter()
                     .map(|(name, expr)| {
@@ -595,7 +595,7 @@ pub fn extract_struct_fields(
                         (name.clone(), type_str)
                     })
                     .collect();
-                result.insert(type_name.clone(), inferred);
+                result.insert(type_name.to_string(), inferred);
             }
         }
     }
@@ -1626,12 +1626,12 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
         match item {
             Item::Impl(impl_block, _) => {
                 let target_type = match &impl_block.target_type {
-                    shape_ast::ast::TypeName::Simple(name) => name.clone(),
-                    shape_ast::ast::TypeName::Generic { name, .. } => name.clone(),
+                    shape_ast::ast::TypeName::Simple(name) => name.to_string(),
+                    shape_ast::ast::TypeName::Generic { name, .. } => name.to_string(),
                 };
                 let trait_name = match &impl_block.trait_name {
-                    shape_ast::ast::TypeName::Simple(name) => name.clone(),
-                    shape_ast::ast::TypeName::Generic { name, .. } => name.clone(),
+                    shape_ast::ast::TypeName::Simple(name) => name.to_string(),
+                    shape_ast::ast::TypeName::Generic { name, .. } => name.to_string(),
                 };
 
                 // Add ALL methods from the trait (the impl means the type has them all)
@@ -1671,8 +1671,8 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
             }
             Item::Extend(extend, _) => {
                 let type_name = match &extend.type_name {
-                    shape_ast::ast::TypeName::Simple(name) => name.clone(),
-                    shape_ast::ast::TypeName::Generic { name, .. } => name.clone(),
+                    shape_ast::ast::TypeName::Simple(name) => name.to_string(),
+                    shape_ast::ast::TypeName::Generic { name, .. } => name.to_string(),
                 };
                 let entry = result.entry(type_name).or_default();
                 for method in &extend.methods {
@@ -2089,7 +2089,7 @@ mod tests {
         let receiver = Box::new(Expr::TypeAssertion {
             expr: Box::new(Expr::Identifier("x".to_string(), Span::default())),
             type_annotation: TypeAnnotation::Generic {
-                name: "Result".to_string(),
+                name: "Result".into(),
                 args: vec![TypeAnnotation::Basic("Foo".to_string())],
             },
             meta_param_overrides: None,

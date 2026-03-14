@@ -210,7 +210,8 @@ fn format_union_type_name(types: &[TypeAnnotation]) -> String {
 
 fn format_type_annotation(ann: &TypeAnnotation) -> String {
     match ann {
-        TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Basic(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Array(inner) => format!("Vec<{}>", format_type_annotation(inner)),
         TypeAnnotation::Tuple(elems) => format!(
             "[{}]",
@@ -234,7 +235,7 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
             .join(" + "),
         TypeAnnotation::Generic { name, args } => {
             if args.is_empty() {
-                name.clone()
+                name.to_string()
             } else {
                 format!(
                     "{}<{}>",
@@ -355,7 +356,7 @@ mod tests {
 
     fn make_constructor_pattern(enum_name: Option<&str>, variant: &str) -> Pattern {
         Pattern::Constructor {
-            enum_name: enum_name.map(|s| s.to_string()),
+            enum_name: enum_name.map(|s| s.into()),
             variant: variant.to_string(),
             fields: shape_ast::ast::PatternConstructorFields::Unit,
         }

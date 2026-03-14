@@ -1294,8 +1294,8 @@ fn method_body_contains_offset(method: &MethodDef, offset: usize) -> bool {
 
 fn type_name_base_name(type_name: &TypeName) -> String {
     match type_name {
-        TypeName::Simple(name) => name.clone(),
-        TypeName::Generic { name, .. } => name.clone(),
+        TypeName::Simple(name) => name.to_string(),
+        TypeName::Generic { name, .. } => name.to_string(),
     }
 }
 

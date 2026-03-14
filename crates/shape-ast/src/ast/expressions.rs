@@ -97,7 +97,7 @@ pub enum Expr {
     },
     /// Enum constructor: Enum::Variant, Enum::Variant(...), Enum::Variant { ... }
     EnumConstructor {
-        enum_name: String,
+        enum_name: super::type_path::TypePath,
         variant: String,
         payload: EnumConstructorPayload,
         span: Span,
@@ -236,7 +236,7 @@ pub enum Expr {
 
     /// Struct literal: TypeName { field: value, ... }
     StructLiteral {
-        type_name: String,
+        type_name: super::type_path::TypePath,
         fields: Vec<(String, Expr)>,
         span: Span,
     },

@@ -38,7 +38,7 @@ impl TypeInferenceEngine {
                     if self.struct_type_defs.contains_key(name.as_str())
                         || self.env.lookup_type_alias(name).is_some()
                     {
-                        Some(Type::Concrete(TypeAnnotation::Reference(name.clone())))
+                        Some(Type::Concrete(TypeAnnotation::Reference(name.as_str().into())))
                     } else {
                         None
                     }
@@ -48,7 +48,7 @@ impl TypeInferenceEngine {
                     // constructor methods (e.g. DateTime.now(), Content.chart()).
                     match name.as_str() {
                         "DateTime" | "Content" => {
-                            Some(Type::Concrete(TypeAnnotation::Reference(name.clone())))
+                            Some(Type::Concrete(TypeAnnotation::Reference(name.as_str().into())))
                         }
                         _ => None,
                     }
@@ -139,7 +139,7 @@ impl TypeInferenceEngine {
                     for arg in args {
                         self.infer_expr(arg)?;
                     }
-                    Ok(Type::Concrete(TypeAnnotation::Reference(namespace.clone())))
+                    Ok(Type::Concrete(TypeAnnotation::Reference(namespace.as_str().into())))
                 } else if self.env.lookup(namespace).is_some()
                     || self.struct_type_defs.contains_key(namespace.as_str())
                     || self.env.lookup_type_alias(namespace).is_some()
@@ -158,7 +158,7 @@ impl TypeInferenceEngine {
                     for arg in args {
                         self.infer_expr(arg)?;
                     }
-                    Ok(Type::Concrete(TypeAnnotation::Reference(namespace.clone())))
+                    Ok(Type::Concrete(TypeAnnotation::Reference(namespace.as_str().into())))
                 }
             }
 
@@ -774,7 +774,7 @@ impl TypeInferenceEngine {
                     Type::fresh_var()
                 };
                 Ok(Type::Concrete(TypeAnnotation::Generic {
-                    name: "Range".to_string(),
+                    name: "Range".into(),
                     args: vec![
                         element_type
                             .to_annotation()
@@ -956,14 +956,14 @@ impl TypeInferenceEngine {
 
         let Some(struct_def) = self.struct_type_defs.get(type_name).cloned() else {
             return Ok(Type::Concrete(TypeAnnotation::Reference(
-                type_name.to_string(),
+                type_name.into(),
             )));
         };
 
         let type_params = struct_def.type_params.unwrap_or_default();
         if type_params.is_empty() {
             return Ok(Type::Concrete(TypeAnnotation::Reference(
-                type_name.to_string(),
+                type_name.into(),
             )));
         }
 
@@ -996,27 +996,24 @@ impl TypeInferenceEngine {
                         if self.types_equal(&default_type, arg) {
                             return true;
                         }
-                        matches!(
-                            (&default_type, arg),
-                            (
-                                Type::Concrete(TypeAnnotation::Reference(a)),
-                                Type::Concrete(TypeAnnotation::Basic(b)),
-                            ) | (
-                                Type::Concrete(TypeAnnotation::Basic(a)),
-                                Type::Concrete(TypeAnnotation::Reference(b)),
-                            ) if a == b
-                        )
+                        match (&default_type, arg) {
+                            (Type::Concrete(a), Type::Concrete(b)) => {
+                                a.as_type_name_str().is_some()
+                                    && a.as_type_name_str() == b.as_type_name_str()
+                            }
+                            _ => false,
+                        }
                     })
             });
 
         if all_default {
             Ok(Type::Concrete(TypeAnnotation::Reference(
-                type_name.to_string(),
+                type_name.into(),
             )))
         } else {
             Ok(Type::Generic {
                 base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                    type_name.to_string(),
+                    type_name.into(),
                 ))),
                 args: resolved_args,
             })
@@ -1033,10 +1030,11 @@ impl TypeInferenceEngine {
         let is_type_param = |name: &str| type_params.iter().any(|tp| tp.name == name);
 
         match annotation {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name)
-                if is_type_param(name) =>
+            ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_))
+                if ann.as_type_name_str().is_some_and(|n| is_type_param(n)) =>
             {
-                let entry = bindings.entry(name.clone()).or_default();
+                let name = ann.as_type_name_str().unwrap();
+                let entry = bindings.entry(name.to_string()).or_default();
                 if !entry
                     .iter()
                     .any(|existing| self.types_equal(existing, actual))
@@ -1061,8 +1059,7 @@ impl TypeInferenceEngine {
                 } = actual
                 {
                     let base_name = match base.as_ref() {
-                        Type::Concrete(TypeAnnotation::Reference(n))
-                        | Type::Concrete(TypeAnnotation::Basic(n)) => Some(n.as_str()),
+                        Type::Concrete(ann) => ann.as_type_name_str(),
                         _ => None,
                     };
                     if base_name == Some(name.as_str()) {
@@ -1240,9 +1237,8 @@ impl TypeInferenceEngine {
     fn try_unwrap_inner_type(&self, ty: &Type) -> Option<Type> {
         match ty {
             Type::Generic { base, args } if !args.is_empty() => match base.as_ref() {
-                Type::Concrete(TypeAnnotation::Reference(name))
-                | Type::Concrete(TypeAnnotation::Basic(name))
-                    if name == "Result" || name == "Option" =>
+                Type::Concrete(ann)
+                    if ann.as_type_name_str().is_some_and(|n| n == "Result" || n == "Option") =>
                 {
                     Some(args[0].clone())
                 }
@@ -1328,8 +1324,10 @@ impl TypeInferenceEngine {
             return "unknown".to_string();
         }
         ty.to_annotation()
-            .map(|ann| match ann {
-                TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name,
+            .map(|ann| match &ann {
+                _ if ann.as_type_name_str().is_some() => {
+                    ann.as_type_name_str().unwrap().to_string()
+                }
                 other => format!("{other:?}"),
             })
             .unwrap_or_else(|| format!("{ty:?}"))
@@ -1350,17 +1348,21 @@ impl TypeInferenceEngine {
     }
 
     fn try_into_type_name(&self, ty: &Type) -> Option<String> {
+        fn extract_name(ann: &TypeAnnotation) -> Option<&str> {
+            match ann {
+                TypeAnnotation::Basic(name) => Some(name.as_str()),
+                TypeAnnotation::Reference(path) => Some(path.as_str()),
+                TypeAnnotation::Generic { name, .. } => Some(name.as_str()),
+                _ => None,
+            }
+        }
         match ty {
-            Type::Concrete(TypeAnnotation::Basic(name))
-            | Type::Concrete(TypeAnnotation::Reference(name))
-            | Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
-                Some(Self::canonical_try_into_name(name))
+            Type::Concrete(ann) => {
+                extract_name(ann).map(TypeInferenceEngine::canonical_try_into_name)
             }
             Type::Generic { base, .. } => match base.as_ref() {
-                Type::Concrete(TypeAnnotation::Basic(name))
-                | Type::Concrete(TypeAnnotation::Reference(name))
-                | Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
-                    Some(Self::canonical_try_into_name(name))
+                Type::Concrete(ann) => {
+                    extract_name(ann).map(TypeInferenceEngine::canonical_try_into_name)
                 }
                 _ => None,
             },
@@ -1369,17 +1371,21 @@ impl TypeInferenceEngine {
     }
 
     fn try_into_selector(&self, ty: &Type) -> Option<String> {
+        fn extract_name(ann: &TypeAnnotation) -> Option<&str> {
+            match ann {
+                TypeAnnotation::Basic(name) => Some(name.as_str()),
+                TypeAnnotation::Reference(path) => Some(path.as_str()),
+                TypeAnnotation::Generic { name, .. } => Some(name.as_str()),
+                _ => None,
+            }
+        }
         match ty {
-            Type::Concrete(TypeAnnotation::Basic(name))
-            | Type::Concrete(TypeAnnotation::Reference(name))
-            | Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
-                Some(Self::canonical_try_into_name(name))
+            Type::Concrete(ann) => {
+                extract_name(ann).map(TypeInferenceEngine::canonical_try_into_name)
             }
             Type::Generic { base, .. } => match base.as_ref() {
-                Type::Concrete(TypeAnnotation::Basic(name))
-                | Type::Concrete(TypeAnnotation::Reference(name))
-                | Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
-                    Some(Self::canonical_try_into_name(name))
+                Type::Concrete(ann) => {
+                    extract_name(ann).map(TypeInferenceEngine::canonical_try_into_name)
                 }
                 _ => None,
             },
@@ -1415,7 +1421,7 @@ mod tests {
 
         let result_number = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![BuiltinTypes::number()],
         };
@@ -1437,7 +1443,7 @@ mod tests {
         engine.push_fallible_scope();
 
         let optional_number = Type::Concrete(TypeAnnotation::Generic {
-            name: "Option".to_string(),
+            name: "Option".into(),
             args: vec![TypeAnnotation::Basic("number".to_string())],
         });
         engine
@@ -1507,7 +1513,7 @@ mod tests {
                 assert_eq!(args[0], BuiltinTypes::integer());
                 assert_eq!(
                     args[1],
-                    Type::Concrete(TypeAnnotation::Reference("AnyError".to_string()))
+                    Type::Concrete(TypeAnnotation::Reference("AnyError".into()))
                 );
             }
             other => panic!("expected Result<int, AnyError>, got {:?}", other),
@@ -1557,7 +1563,7 @@ mod tests {
         engine.env.define(
             "value",
             TypeScheme::mono(Type::Concrete(TypeAnnotation::Reference(
-                "Price".to_string(),
+                "Price".into(),
             ))),
         );
 

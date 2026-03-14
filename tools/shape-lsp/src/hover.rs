@@ -1112,7 +1112,7 @@ fn get_type_param_hover(text: &str, word: &str, position: Position) -> Option<Ho
         if let Some(params) = type_params {
             for tp in params {
                 if tp.name == word && !tp.trait_bounds.is_empty() {
-                    let bounds_str = tp.trait_bounds.join(" + ");
+                    let bounds_str = tp.trait_bounds.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" + ");
                     let content = format!(
                         "**Type Parameter**: `{}`\n\n**Bounds:** `{}: {}`\n\nMust implement: {}",
                         word,
@@ -1804,8 +1804,8 @@ fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> 
 /// Find the 0-based line number where a symbol is defined in the source text.
 fn type_name_base_name(type_name: &TypeName) -> String {
     match type_name {
-        TypeName::Simple(name) => name.clone(),
-        TypeName::Generic { name, .. } => name.clone(),
+        TypeName::Simple(name) => name.to_string(),
+        TypeName::Generic { name, .. } => name.to_string(),
     }
 }
 

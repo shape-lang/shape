@@ -43,8 +43,8 @@ impl TypeInferenceEngine {
     fn unwrap_option_type(ty: &Type) -> Option<Type> {
         match ty {
             Type::Generic { base, args } if args.len() == 1 => {
-                if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {
-                    if name == "Option" {
+                if let Type::Concrete(ann) = base.as_ref() {
+                    if ann.as_type_name_str() == Some("Option") {
                         return Some(args[0].clone());
                     }
                 }
@@ -64,7 +64,7 @@ impl TypeInferenceEngine {
     fn wrap_in_option(ty: Type) -> Type {
         Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![ty],
         }
@@ -74,9 +74,8 @@ impl TypeInferenceEngine {
     fn unwrap_result_or_option_type(ty: &Type) -> Option<Type> {
         match ty {
             Type::Generic { base, args } if !args.is_empty() => match base.as_ref() {
-                Type::Concrete(TypeAnnotation::Reference(name))
-                | Type::Concrete(TypeAnnotation::Basic(name))
-                    if name == "Result" || name == "Option" =>
+                Type::Concrete(ann)
+                    if ann.as_type_name_str().is_some_and(|n| n == "Result" || n == "Option") =>
                 {
                     Some(args[0].clone())
                 }
@@ -122,22 +121,17 @@ impl TypeInferenceEngine {
 
     fn is_string_like(ty: &Type) -> bool {
         match ty {
-            Type::Concrete(TypeAnnotation::Basic(name))
-            | Type::Concrete(TypeAnnotation::Reference(name)) => name == "string",
+            Type::Concrete(ann) if ann.as_type_name_str() == Some("string") => true,
             Type::Concrete(TypeAnnotation::Union(types)) => types.iter().any(|ann| {
-                matches!(ann, TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) if name == "string")
+                ann.as_type_name_str() == Some("string")
             }),
             Type::Generic { base, args } if args.len() == 1 => {
                 matches!(
                     base.as_ref(),
-                    Type::Concrete(TypeAnnotation::Reference(name))
-                        | Type::Concrete(TypeAnnotation::Basic(name))
-                        if name == "Option"
+                    Type::Concrete(ann) if ann.as_type_name_str() == Some("Option")
                 ) && matches!(
                     &args[0],
-                    Type::Concrete(TypeAnnotation::Basic(name))
-                        | Type::Concrete(TypeAnnotation::Reference(name))
-                        if name == "string"
+                    Type::Concrete(ann) if ann.as_type_name_str() == Some("string")
                 )
             }
             _ => false,
@@ -146,28 +140,21 @@ impl TypeInferenceEngine {
 
     fn is_vec_number(ty: &Type) -> bool {
         match ty {
-            Type::Concrete(TypeAnnotation::Array(inner)) => matches!(
-                inner.as_ref(),
-                TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name)
-                    if BuiltinTypes::is_numeric_type_name(name)
-            ),
+            Type::Concrete(TypeAnnotation::Array(inner)) => {
+                inner.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
+            }
             Type::Concrete(TypeAnnotation::Generic { name, args }) if name == "Vec" => {
                 args.first().is_some_and(|arg| {
-                    matches!(arg, TypeAnnotation::Basic(n) | TypeAnnotation::Reference(n)
-                        if BuiltinTypes::is_numeric_type_name(n))
+                    arg.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
                 })
             }
             Type::Generic { base, args } if args.len() == 1 => {
                 matches!(
                     base.as_ref(),
-                    Type::Concrete(TypeAnnotation::Reference(name))
-                        | Type::Concrete(TypeAnnotation::Basic(name))
-                        if name == "Vec"
+                    Type::Concrete(ann) if ann.as_type_name_str() == Some("Vec")
                 ) && matches!(
                     &args[0],
-                    Type::Concrete(TypeAnnotation::Basic(name))
-                        | Type::Concrete(TypeAnnotation::Reference(name))
-                        if BuiltinTypes::is_numeric_type_name(name)
+                    Type::Concrete(ann) if ann.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
                 )
             }
             _ => false,
@@ -178,21 +165,16 @@ impl TypeInferenceEngine {
         match ty {
             Type::Concrete(TypeAnnotation::Generic { name, args }) if name == "Mat" => {
                 args.first().is_some_and(|arg| {
-                    matches!(arg, TypeAnnotation::Basic(n) | TypeAnnotation::Reference(n)
-                        if BuiltinTypes::is_numeric_type_name(n))
+                    arg.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
                 })
             }
             Type::Generic { base, args } if args.len() == 1 => {
                 matches!(
                     base.as_ref(),
-                    Type::Concrete(TypeAnnotation::Reference(name))
-                        | Type::Concrete(TypeAnnotation::Basic(name))
-                        if name == "Mat"
+                    Type::Concrete(ann) if ann.as_type_name_str() == Some("Mat")
                 ) && matches!(
                     &args[0],
-                    Type::Concrete(TypeAnnotation::Basic(name))
-                        | Type::Concrete(TypeAnnotation::Reference(name))
-                        if BuiltinTypes::is_numeric_type_name(name)
+                    Type::Concrete(ann) if ann.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
                 )
             }
             _ => false,
@@ -201,14 +183,14 @@ impl TypeInferenceEngine {
 
     fn mat_number_type() -> Type {
         Type::Concrete(TypeAnnotation::Generic {
-            name: "Mat".to_string(),
+            name: "Mat".into(),
             args: vec![TypeAnnotation::Basic("number".to_string())],
         })
     }
 
     fn vec_number_type() -> Type {
         Type::Concrete(TypeAnnotation::Generic {
-            name: "Vec".to_string(),
+            name: "Vec".into(),
             args: vec![TypeAnnotation::Basic("number".to_string())],
         })
     }
@@ -505,8 +487,7 @@ impl TypeInferenceEngine {
     /// If so, returns the result type (the operand type itself for Self-returning traits).
     fn check_operator_trait(&self, operand_type: &Type, trait_name: &str) -> Option<Type> {
         let type_name = match operand_type {
-            Type::Concrete(TypeAnnotation::Basic(name))
-            | Type::Concrete(TypeAnnotation::Reference(name)) => name.as_str(),
+            Type::Concrete(ann) => ann.as_type_name_str()?,
             _ => return None,
         };
         // Skip primitive/numeric types — they use the built-in arithmetic path
@@ -532,7 +513,7 @@ mod tests {
     fn test_unwrap_option_generic() {
         let option_num = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![BuiltinTypes::number()],
         };
@@ -544,7 +525,7 @@ mod tests {
     #[test]
     fn test_unwrap_option_annotation() {
         let option_num = Type::Concrete(TypeAnnotation::Generic {
-            name: "Option".to_string(),
+            name: "Option".into(),
             args: vec![TypeAnnotation::Basic("number".to_string())],
         });
         let inner = TypeInferenceEngine::unwrap_option_type(&option_num);
@@ -573,7 +554,7 @@ mod tests {
     fn test_error_context_promotes_option_to_result() {
         let mut engine = TypeInferenceEngine::new();
         let option_num = Type::Concrete(TypeAnnotation::Generic {
-            name: "Option".to_string(),
+            name: "Option".into(),
             args: vec![TypeAnnotation::Basic("number".to_string())],
         });
         let inferred = engine
@@ -587,11 +568,11 @@ mod tests {
 
         let expected = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![
                 BuiltinTypes::number(),
-                Type::Concrete(TypeAnnotation::Reference("AnyError".to_string())),
+                Type::Concrete(TypeAnnotation::Reference("AnyError".into())),
             ],
         };
         assert_eq!(inferred, expected);
@@ -602,11 +583,11 @@ mod tests {
         let mut engine = TypeInferenceEngine::new();
         let result_num = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![
                 BuiltinTypes::number(),
-                Type::Concrete(TypeAnnotation::Reference("AnyError".to_string())),
+                Type::Concrete(TypeAnnotation::Reference("AnyError".into())),
             ],
         };
         let inferred = engine

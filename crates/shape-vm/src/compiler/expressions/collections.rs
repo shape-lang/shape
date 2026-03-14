@@ -74,23 +74,23 @@ fn type_annotations_equivalent(left: &TypeAnnotation, right: &TypeAnnotation) ->
     if left == right {
         return true;
     }
-    matches!(
-        (left, right),
-        (TypeAnnotation::Basic(a), TypeAnnotation::Reference(b))
-            | (TypeAnnotation::Reference(a), TypeAnnotation::Basic(b))
-            if a == b
-    )
+    match (left, right) {
+        (TypeAnnotation::Basic(a), TypeAnnotation::Reference(b)) => a.as_str() == b.as_str(),
+        (TypeAnnotation::Reference(a), TypeAnnotation::Basic(b)) => a.as_str() == b.as_str(),
+        _ => false,
+    }
 }
 
 fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
     match annotation {
-        TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Basic(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Array(inner) => {
             format!("Vec<{}>", type_annotation_to_compact_string(inner))
         }
         TypeAnnotation::Generic { name, args } => {
             if args.is_empty() {
-                name.clone()
+                name.to_string()
             } else {
                 let rendered = args
                     .iter()
@@ -529,15 +529,12 @@ impl BytecodeCompiler {
                 continue;
             };
 
-            match expected_ann {
-                TypeAnnotation::Basic(param_name) | TypeAnnotation::Reference(param_name)
-                    if info.type_params.iter().any(|tp| tp.name == *param_name) =>
-                {
+            if let Some(param_name) = expected_ann.as_type_name_str() {
+                if info.type_params.iter().any(|tp| tp.name == param_name) {
                     inferred_args
-                        .entry(param_name.clone())
+                        .entry(param_name.to_string())
                         .or_insert(inferred_ann);
                 }
-                _ => {}
             }
         }
 
@@ -587,10 +584,12 @@ impl BytecodeCompiler {
             self.reject_direct_reference_storage(value, OBJECT_REF_STORAGE_ERROR)?;
         }
         let literal_loc = self.span_to_source_location(literal_span);
+        // Resolve through module scope for qualified type lookups
+        let type_name = &self.resolve_type_name(type_name);
         // Look up struct type definition, resolving through type aliases if needed
-        let struct_info = self.struct_types.get(type_name).cloned().or_else(|| {
+        let struct_info = self.struct_types.get(type_name.as_str()).cloned().or_else(|| {
             self.type_aliases
-                .get(type_name)
+                .get(type_name.as_str())
                 .and_then(|resolved| self.struct_types.get(resolved).cloned())
         });
 
@@ -700,7 +699,7 @@ impl BytecodeCompiler {
                     self.type_tracker.schema_registry().get(&runtime_type_name)
                 {
                     schema.id
-                } else if runtime_type_name != type_name {
+                } else if runtime_type_name != *type_name {
                     if let Some(base_schema) = self.type_tracker.schema_registry().get(type_name) {
                         let fields = base_schema
                             .fields
@@ -780,11 +779,35 @@ impl BytecodeCompiler {
         payload: &EnumConstructorPayload,
     ) -> Result<()> {
         const ENUM_REF_STORAGE_ERROR: &str = "cannot store a reference in an enum payload — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
+        // Resolve through module scope for qualified enum lookups
+        let enum_name = &self.resolve_type_name(enum_name);
+
+        // Check if this is actually a qualified struct literal: `mod::Type { fields }`
+        // The grammar parses `mod::Type { ... }` as EnumConstructor(enum=mod, variant=Type, payload=Struct)
+        // If `enum_name::variant` resolves to a known struct type, reinterpret as struct literal.
+        if let EnumConstructorPayload::Struct(fields) = payload {
+            let qualified_struct_name = format!("{}::{}", enum_name, variant);
+            let resolved = self.resolve_type_name(&qualified_struct_name);
+            if self.struct_types.contains_key(resolved.as_str())
+                || self.type_aliases.contains_key(resolved.as_str())
+            {
+                let fields_as_exprs: Vec<(String, Expr)> =
+                    fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                return self.compile_struct_literal(
+                    &resolved,
+                    &fields_as_exprs,
+                    shape_ast::ast::Span::default(),
+                );
+            }
+        }
+        // Also handle unit-payload case: `mod::Type` where Type is a struct with no fields
+        // (but this is unusual, most struct types have fields)
+
         // Look up enum schema - must be registered
         let schema = self
             .type_tracker
             .schema_registry()
-            .get(enum_name)
+            .get(enum_name.as_str())
             .ok_or_else(|| ShapeError::SemanticError {
                 message: format!("Unknown enum type: {}", enum_name),
                 location: None,
@@ -878,7 +901,8 @@ impl BytecodeCompiler {
         let inner_type_name = match type_annotation {
             Some(TypeAnnotation::Generic { name, args }) if name == "Table" && args.len() == 1 => {
                 match &args[0] {
-                    TypeAnnotation::Reference(t) | TypeAnnotation::Basic(t) => t.clone(),
+                    TypeAnnotation::Basic(t) => t.clone(),
+                    TypeAnnotation::Reference(t) => t.to_string(),
                     _ => {
                         return Err(ShapeError::SemanticError {
                             message: "Table row literal requires a concrete type parameter, e.g. Table<MyType>".to_string(),

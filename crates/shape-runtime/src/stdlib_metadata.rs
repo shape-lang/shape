@@ -333,7 +333,8 @@ impl StdlibMetadata {
 
     fn format_type_annotation(ty: &TypeAnnotation) -> String {
         match ty {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
+            TypeAnnotation::Basic(name) => name.clone(),
+            TypeAnnotation::Reference(path) => path.to_string(),
             TypeAnnotation::Array(inner) => format!("{}[]", Self::format_type_annotation(inner)),
             TypeAnnotation::Tuple(items) => format!(
                 "[{}]",

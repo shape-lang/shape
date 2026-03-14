@@ -294,12 +294,16 @@ impl BytecodeCompiler {
         }
 
         match &args[0] {
-            shape_ast::ast::TypeAnnotation::Reference(name)
-            | shape_ast::ast::TypeAnnotation::Basic(name) => self
+            shape_ast::ast::TypeAnnotation::Basic(name) => self
                 .type_tracker
                 .schema_registry()
-                .get(name)
+                .get(name.as_str())
                 .map(|schema| (schema.id, name.clone())),
+            shape_ast::ast::TypeAnnotation::Reference(name) => self
+                .type_tracker
+                .schema_registry()
+                .get(name.as_str())
+                .map(|schema| (schema.id, name.to_string())),
             shape_ast::ast::TypeAnnotation::Object(fields) => {
                 let field_refs: Vec<&str> =
                     fields.iter().map(|field| field.name.as_str()).collect();
@@ -352,12 +356,16 @@ impl BytecodeCompiler {
                     .unwrap_or_else(|| format!("__anon_{}", schema_id));
                 Some(VariableTypeInfo::known(schema_id, schema_name))
             }
-            shape_ast::ast::TypeAnnotation::Reference(name)
-            | shape_ast::ast::TypeAnnotation::Basic(name) => self
+            shape_ast::ast::TypeAnnotation::Basic(name) => self
                 .type_tracker
                 .schema_registry()
-                .get(name)
+                .get(name.as_str())
                 .map(|schema| VariableTypeInfo::known(schema.id, name.clone())),
+            shape_ast::ast::TypeAnnotation::Reference(name) => self
+                .type_tracker
+                .schema_registry()
+                .get(name.as_str())
+                .map(|schema| VariableTypeInfo::known(schema.id, name.to_string())),
             _ => None,
         }
     }

@@ -678,7 +678,7 @@ fn parse_struct_literal(pair: Pair<Rule>) -> Result<Expr> {
     }
 
     Ok(Expr::StructLiteral {
-        type_name,
+        type_name: type_name.into(),
         fields,
         span,
     })
@@ -724,7 +724,7 @@ fn parse_enum_constructor_expr(pair: Pair<Rule>) -> Result<Expr> {
     };
 
     Ok(Expr::EnumConstructor {
-        enum_name,
+        enum_name: enum_name.into(),
         variant,
         payload,
         span,
@@ -733,19 +733,20 @@ fn parse_enum_constructor_expr(pair: Pair<Rule>) -> Result<Expr> {
 
 fn parse_enum_variant_path(pair: Pair<Rule>) -> Result<(String, String)> {
     let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-    let enum_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected enum name".to_string(),
-        location: Some(pair_loc.clone()),
-    })?;
-    let variant_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected enum variant name".to_string(),
-        location: Some(pair_loc),
-    })?;
-    Ok((
-        enum_pair.as_str().to_string(),
-        variant_pair.as_str().to_string(),
-    ))
+    let segments: Vec<&str> = pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::ident || p.as_rule() == Rule::variant_ident)
+        .map(|p| p.as_str())
+        .collect();
+    if segments.len() < 2 {
+        return Err(ShapeError::ParseError {
+            message: "expected at least Enum::Variant in path".to_string(),
+            location: Some(pair_loc),
+        });
+    }
+    let variant = segments.last().unwrap().to_string();
+    let enum_path = segments[..segments.len() - 1].join("::");
+    Ok((enum_path, variant))
 }
 
 fn parse_enum_struct_payload(pair: Pair<Rule>) -> Result<Vec<(String, Expr)>> {

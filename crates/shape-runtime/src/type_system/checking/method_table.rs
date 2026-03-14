@@ -136,7 +136,7 @@ impl MethodTable {
             UNIVERSAL_RECEIVER,
             "type",
             vec![],
-            Type::Concrete(TypeAnnotation::Reference("Type".to_string())),
+            Type::Concrete(TypeAnnotation::Reference("Type".into())),
             false,
         );
         self.register_method(
@@ -1275,11 +1275,11 @@ impl MethodTable {
         // Try to extract the type name from the receiver
         let type_name = match receiver_type {
             Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
-            Type::Concrete(TypeAnnotation::Reference(name)) => name.clone(),
+            Type::Concrete(TypeAnnotation::Reference(name)) => name.to_string(),
             Type::Concrete(TypeAnnotation::Array(_)) => "Vec".to_string(),
             Type::Generic { base, .. } => {
                 if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {
-                    name.clone()
+                    name.to_string()
                 } else {
                     return None;
                 }
@@ -1349,7 +1349,7 @@ impl MethodTable {
                     })
                     .collect();
                 Type::Generic {
-                    base: Box::new(Type::Concrete(TypeAnnotation::Reference(name.clone()))),
+                    base: Box::new(Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))),
                     args: resolved_args,
                 }
             }
@@ -1364,10 +1364,10 @@ impl MethodTable {
                     let mut params = args.clone();
                     if name == "Result" && params.len() == 1 {
                         params.push(Type::Concrete(TypeAnnotation::Reference(
-                            "AnyError".to_string(),
+                            "AnyError".into(),
                         )));
                     }
-                    (Some(name.clone()), params)
+                    (Some(name.to_string()), params)
                 } else {
                     (None, vec![])
                 }
@@ -1376,16 +1376,16 @@ impl MethodTable {
                 (Some("Vec".to_string()), vec![Type::Concrete(*elem.clone())])
             }
             Type::Concrete(TypeAnnotation::Basic(name)) => (Some(name.clone()), vec![]),
-            Type::Concrete(TypeAnnotation::Reference(name)) => (Some(name.clone()), vec![]),
+            Type::Concrete(TypeAnnotation::Reference(name)) => (Some(name.to_string()), vec![]),
             Type::Concrete(TypeAnnotation::Generic { name, args }) => {
                 let mut params: Vec<Type> =
                     args.iter().map(|a| Type::Concrete(a.clone())).collect();
                 if name == "Result" && params.len() == 1 {
                     params.push(Type::Concrete(TypeAnnotation::Reference(
-                        "AnyError".to_string(),
+                        "AnyError".into(),
                     )));
                 }
-                (Some(name.clone()), params)
+                (Some(name.to_string()), params)
             }
             _ => (None, vec![]),
         }
@@ -1532,7 +1532,7 @@ mod tests {
     #[test]
     fn test_lookup_universal_methods() {
         let table = MethodTable::new();
-        let user_type = Type::Concrete(TypeAnnotation::Reference("User".to_string()));
+        let user_type = Type::Concrete(TypeAnnotation::Reference("User".into()));
         let sig = table.lookup(&user_type, "type");
         assert!(sig.is_some(), "type() should resolve on any receiver");
         assert!(matches!(
@@ -1547,7 +1547,7 @@ mod tests {
     fn test_resolve_array_first() {
         let table = MethodTable::new();
         let array_type = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".to_string()))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![BuiltinTypes::number()],
         };
 
@@ -1571,7 +1571,7 @@ mod tests {
             BuiltinTypes::any(),
         );
 
-        let table_type = Type::Concrete(TypeAnnotation::Reference("Table".to_string()));
+        let table_type = Type::Concrete(TypeAnnotation::Reference("Table".into()));
         let sig = table.lookup(&table_type, "query");
         assert!(
             sig.is_some(),
@@ -1602,10 +1602,10 @@ mod tests {
             "Table",
             "smooth",
             vec![BuiltinTypes::number()],
-            Type::Concrete(TypeAnnotation::Reference("Table".to_string())),
+            Type::Concrete(TypeAnnotation::Reference("Table".into())),
         );
 
-        let table_type = Type::Concrete(TypeAnnotation::Reference("Table".to_string()));
+        let table_type = Type::Concrete(TypeAnnotation::Reference("Table".into()));
         assert!(table.lookup(&table_type, "smooth").is_some());
 
         let methods = table.methods_for_type("Table");
@@ -1617,7 +1617,7 @@ mod tests {
     fn test_resolve_generic_array_filter() {
         let table = MethodTable::new();
         let array_type = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".to_string()))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let result = table.resolve_method_call(&array_type, "filter", &[]);
@@ -1635,7 +1635,7 @@ mod tests {
     fn test_resolve_generic_array_map() {
         let table = MethodTable::new();
         let array_type = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".to_string()))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![BuiltinTypes::string()],
         };
         let result = table.resolve_method_call(&array_type, "map", &[]);
@@ -1654,7 +1654,7 @@ mod tests {
         let table = MethodTable::new();
         let option_type = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![BuiltinTypes::number()],
         };
@@ -1671,7 +1671,7 @@ mod tests {
         let table = MethodTable::new();
         let map_type = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "HashMap".to_string(),
+                "HashMap".into(),
             ))),
             args: vec![BuiltinTypes::string(), BuiltinTypes::number()],
         };
@@ -1694,7 +1694,7 @@ mod tests {
         let table = MethodTable::new();
         let map_type = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "HashMap".to_string(),
+                "HashMap".into(),
             ))),
             args: vec![BuiltinTypes::string(), BuiltinTypes::number()],
         };
@@ -1717,10 +1717,10 @@ mod tests {
         let table = MethodTable::new();
         let table_type = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Table".to_string(),
+                "Table".into(),
             ))),
             args: vec![Type::Concrete(TypeAnnotation::Reference(
-                "Candle".to_string(),
+                "Candle".into(),
             ))],
         };
         let result = table.resolve_method_call(&table_type, "filter", &[]);

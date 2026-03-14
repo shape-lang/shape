@@ -282,7 +282,7 @@ fn format_function_signature(func: &FunctionDef) -> String {
 
 fn type_name_to_string(ty: &TypeName) -> String {
     match ty {
-        TypeName::Simple(name) => name.clone(),
+        TypeName::Simple(name) => name.to_string(),
         TypeName::Generic {
             name, type_args, ..
         } => {
@@ -299,7 +299,7 @@ fn type_name_to_string(ty: &TypeName) -> String {
 fn format_type_annotation(ta: &TypeAnnotation) -> String {
     match ta {
         TypeAnnotation::Basic(name) => name.clone(),
-        TypeAnnotation::Reference(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
         TypeAnnotation::Generic { name, args } => {
             let args = args
                 .iter()
@@ -347,6 +347,6 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "null".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),
-        TypeAnnotation::Dyn(bounds) => format!("dyn {}", bounds.join(" + ")),
+        TypeAnnotation::Dyn(bounds) => format!("dyn {}", bounds.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" + ")),
     }
 }

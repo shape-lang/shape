@@ -44,7 +44,7 @@ impl TypeInferenceEngine {
                     }
                 }
                 return Err(TypeError::UnknownProperty(
-                    name.clone(),
+                    name.to_string(),
                     property.to_string(),
                 ));
             }
@@ -108,9 +108,9 @@ impl TypeInferenceEngine {
                 {
                     return Ok(field_type);
                 }
-                if self.struct_type_defs.contains_key(name) {
+                if self.struct_type_defs.contains_key(name.as_str()) {
                     return Err(TypeError::UnknownProperty(
-                        name.clone(),
+                        name.to_string(),
                         property.to_string(),
                     ));
                 }
@@ -217,8 +217,7 @@ impl TypeInferenceEngine {
 
     fn generic_base_name(base: &Type) -> Option<&str> {
         match base {
-            Type::Concrete(TypeAnnotation::Reference(name))
-            | Type::Concrete(TypeAnnotation::Basic(name)) => Some(name.as_str()),
+            Type::Concrete(ann) => ann.as_type_name_str(),
             _ => None,
         }
     }
@@ -256,10 +255,13 @@ impl TypeInferenceEngine {
         bindings: &HashMap<String, TypeAnnotation>,
     ) -> TypeAnnotation {
         match annotation {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => bindings
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| annotation.clone()),
+            ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)) => {
+                let name = ann.as_type_name_str().unwrap();
+                bindings
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| annotation.clone())
+            }
             TypeAnnotation::Array(inner) => TypeAnnotation::Array(Box::new(
                 Self::substitute_type_params_in_annotation(inner, bindings),
             )),
@@ -560,7 +562,7 @@ impl TypeInferenceEngine {
                 if name == "Table" && args.len() == 1 =>
             {
                 Ok(Type::Concrete(TypeAnnotation::Generic {
-                    name: "Row".to_string(),
+                    name: "Row".into(),
                     args: args.clone(),
                 }))
             }
@@ -648,14 +650,14 @@ mod tests {
 
     fn table_type(inner: &str) -> Type {
         Type::Concrete(TypeAnnotation::Generic {
-            name: "Table".to_string(),
+            name: "Table".into(),
             args: vec![TypeAnnotation::Basic(inner.to_string())],
         })
     }
 
     fn row_type(inner: &str) -> Type {
         Type::Concrete(TypeAnnotation::Generic {
-            name: "Row".to_string(),
+            name: "Row".into(),
             args: vec![TypeAnnotation::Basic(inner.to_string())],
         })
     }

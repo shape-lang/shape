@@ -494,7 +494,7 @@ mod tests {
             None,
         );
 
-        let ty = Type::Concrete(TypeAnnotation::Reference("Point".to_string()));
+        let ty = Type::Concrete(TypeAnnotation::Reference("Point".into()));
         let fields = engine.extract_object_fields(&ty);
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "x");

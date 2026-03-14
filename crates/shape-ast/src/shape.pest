@@ -174,7 +174,7 @@ type_param_name = {
 }
 
 trait_bound_list = {
-    ident ~ ("+" ~ ident)*
+    qualified_ident ~ ("+" ~ qualified_ident)*
 }
 
 interface_body = {
@@ -271,7 +271,7 @@ extend_statement = {
 }
 
 type_name = {
-    ident ~ ("<" ~ type_annotation ~ ("," ~ type_annotation)* ~ ">")?
+    qualified_ident ~ ("<" ~ type_annotation ~ ("," ~ type_annotation)* ~ ">")?
 }
 
 documented_method_def = {
@@ -853,7 +853,7 @@ non_array_type = {
 unit_type = { "(" ~ ")" }
 
 // Trait object type: dyn Trait1 + Trait2
-dyn_type = { "dyn" ~ ident ~ ("+" ~ ident)* }
+dyn_type = { "dyn" ~ qualified_ident ~ ("+" ~ qualified_ident)* }
 
 basic_type = {
     "number"
@@ -866,7 +866,7 @@ basic_type = {
     | "undefined"
     | "never"
     | "pattern"
-    | ident
+    | qualified_ident
 }
 
 tuple_type = {
@@ -901,7 +901,7 @@ type_param = {
 }
 
 generic_type = {
-    ident ~ "<" ~ type_annotation ~ ("," ~ type_annotation)* ~ ">"
+    qualified_ident ~ "<" ~ type_annotation ~ ("," ~ type_annotation)* ~ ">"
 }
 
 expression = { assignment_expr }
@@ -1142,7 +1142,7 @@ struct_literal = { ident ~ "{" ~ object_fields? ~ "}" }
 // Enum constructor: Enum::Variant, Enum::Variant(...), Enum::Variant { ... }
 qualified_function_call_expr = { enum_variant_path ~ function_call }
 enum_constructor_expr = { enum_variant_path ~ (enum_tuple_payload | enum_struct_payload)? }
-enum_variant_path = { ident ~ "::" ~ variant_ident }
+enum_variant_path = { ident ~ ("::" ~ variant_ident)+ }
 enum_tuple_payload = { "(" ~ arg_list? ~ ")" }
 enum_struct_payload = { "{" ~ object_fields? ~ "}" }
 
@@ -1227,7 +1227,7 @@ pattern_constructor = {
     pattern_qualified_constructor
     | pattern_unqualified_constructor
 }
-pattern_qualified_constructor = { ident ~ "::" ~ variant_ident ~ pattern_constructor_payload? }
+pattern_qualified_constructor = { ident ~ ("::" ~ variant_ident)+ ~ pattern_constructor_payload? }
 // Constructor with payload (any name), or a known keyword without payload
 pattern_unqualified_constructor = {
     pattern_constructor_name ~ pattern_constructor_payload
@@ -1468,9 +1468,10 @@ select_query_clause = { "select" ~ query_expr_inner }
 pattern_name = { "pattern::" ~ ident }
 
 // ===== Lexical Elements =====
-ident = @{ 
-    !(keyword ~ !(ASCII_ALPHANUMERIC | "_")) ~ 
-    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* 
+qualified_ident = @{ ident ~ ("::" ~ ident)* }
+ident = @{
+    !(keyword ~ !(ASCII_ALPHANUMERIC | "_")) ~
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
 }
 
 keyword = {

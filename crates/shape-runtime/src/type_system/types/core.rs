@@ -297,7 +297,7 @@ impl Type {
                             Some(SemanticType::Array(Box::new(semantic_args[0].clone())))
                         }
                         _ => Some(SemanticType::Generic {
-                            name: name.clone(),
+                            name: name.to_string(),
                             args: semantic_args,
                         }),
                     }
@@ -348,7 +348,7 @@ impl SemanticType {
             SemanticType::String => Type::Concrete(TypeAnnotation::Basic("string".to_string())),
             SemanticType::Option(inner) => Type::Generic {
                 base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                    "Option".to_string(),
+                    "Option".into(),
                 ))),
                 args: vec![inner.to_inference_type()],
             },
@@ -359,13 +359,13 @@ impl SemanticType {
                 }
                 Type::Generic {
                     base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                        "Result".to_string(),
+                        "Result".into(),
                     ))),
                     args,
                 }
             }
             SemanticType::Array(elem) => Type::Generic {
-                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".to_string()))),
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
                 args: vec![elem.to_inference_type()],
             },
             SemanticType::TypeVar(id) => Type::Variable(TypeVar(format!("T{}", id.0))),
@@ -377,11 +377,11 @@ impl SemanticType {
                 {
                     Type::Concrete(TypeAnnotation::Basic(name.clone()))
                 } else {
-                    Type::Concrete(TypeAnnotation::Reference(name.clone()))
+                    Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))
                 }
             }
             SemanticType::Generic { name, args } => Type::Generic {
-                base: Box::new(Type::Concrete(TypeAnnotation::Reference(name.clone()))),
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))),
                 args: args.iter().map(|a| a.to_inference_type()).collect(),
             },
             SemanticType::Void => Type::Concrete(TypeAnnotation::Void),
@@ -410,14 +410,14 @@ impl SemanticType {
                 if name == "Object" || name == "Tuple" {
                     Type::Concrete(TypeAnnotation::Object(obj_fields))
                 } else {
-                    Type::Concrete(TypeAnnotation::Reference(name.clone()))
+                    Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))
                 }
             }
             SemanticType::Enum { name, .. } => {
-                Type::Concrete(TypeAnnotation::Reference(name.clone()))
+                Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))
             }
             SemanticType::Interface { name, .. } => {
-                Type::Concrete(TypeAnnotation::Reference(name.clone()))
+                Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))
             }
             // References: convert to the inner type for inference purposes.
             // The reference wrapper is tracked separately by the compiler.
@@ -450,7 +450,7 @@ mod tests {
     fn test_type_to_semantic_option() {
         let option_num = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![BuiltinTypes::number()],
         };
@@ -465,7 +465,7 @@ mod tests {
     fn test_type_to_semantic_result() {
         let result_num = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".to_string(),
+                "Result".into(),
             ))),
             args: vec![BuiltinTypes::number()],
         };

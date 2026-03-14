@@ -246,7 +246,7 @@ module.exports = grammar({
       optional(seq(':', $.trait_bound_list)),
     ),
 
-    trait_bound_list: $ => sep1($.identifier, '+'),
+    trait_bound_list: $ => sep1($.qualified_identifier, '+'),
 
     extends_clause: $ => seq('extends', commaSep1($.type_annotation)),
 
@@ -806,12 +806,12 @@ module.exports = grammar({
       seq('(', $.type_annotation, ')'),
     ),
 
-    dyn_type: $ => seq('dyn', sep1($.identifier, '+')),
+    dyn_type: $ => seq('dyn', sep1($.qualified_identifier, '+')),
 
     basic_type: $ => choice(
       'number', 'string', 'bool', 'boolean', 'void',
       'option', 'timestamp', 'undefined', 'any', 'never', 'pattern',
-      $.identifier,
+      $.qualified_identifier,
     ),
 
     tuple_type: $ => seq('[', $.type_annotation, repeat1(seq(',', $.type_annotation)), ']'),
@@ -837,7 +837,7 @@ module.exports = grammar({
       $.type_annotation,
     ),
 
-    generic_type: $ => seq($.identifier, '<', commaSep1($.type_annotation), '>'),
+    generic_type: $ => seq($.qualified_identifier, '<', commaSep1($.type_annotation), '>'),
 
     // ========================================================
     // Expressions
@@ -1323,6 +1323,8 @@ module.exports = grammar({
     // Identifier
     // ========================================================
     identifier: $ => token(/[a-zA-Z_][a-zA-Z0-9_]*/),
+
+    qualified_identifier: $ => seq($.identifier, repeat(seq('::', $.identifier))),
   },
 });
 

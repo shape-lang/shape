@@ -1151,11 +1151,11 @@ fn test_impl_basic() {
         Item::Impl(impl_block, _) => {
             assert_eq!(
                 impl_block.trait_name,
-                crate::ast::TypeName::Simple("Queryable".to_string())
+                crate::ast::TypeName::Simple("Queryable".into())
             );
             assert_eq!(
                 impl_block.target_type,
-                crate::ast::TypeName::Simple("Table".to_string())
+                crate::ast::TypeName::Simple("Table".into())
             );
             assert_eq!(impl_block.methods.len(), 2);
             assert_eq!(impl_block.methods[0].name, "filter");

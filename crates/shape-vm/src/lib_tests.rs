@@ -12,3 +12,5 @@ mod typed_object_regression_tests;
 mod extension_integration_tests;
 #[path = "lib_tests_parts/full_loop_tests.rs"]
 mod full_loop_tests;
+#[path = "lib_tests_parts/module_qualified_type_tests.rs"]
+mod module_qualified_type_tests;

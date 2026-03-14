@@ -248,19 +248,19 @@ mod tests {
     fn test_generic_type_equality() {
         let opt1 = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![Type::Concrete(TypeAnnotation::Basic("number".to_string()))],
         };
         let opt2 = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![Type::Concrete(TypeAnnotation::Basic("number".to_string()))],
         };
         let opt3 = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".to_string(),
+                "Option".into(),
             ))),
             args: vec![Type::Concrete(TypeAnnotation::Basic("string".to_string()))],
         };

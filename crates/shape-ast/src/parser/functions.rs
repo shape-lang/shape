@@ -516,8 +516,8 @@ fn parse_where_predicate(pair: Pair<Rule>) -> Result<crate::ast::types::WherePre
     for remaining in inner {
         if remaining.as_rule() == Rule::trait_bound_list {
             for bound_ident in remaining.into_inner() {
-                if bound_ident.as_rule() == Rule::ident {
-                    bounds.push(bound_ident.as_str().to_string());
+                if bound_ident.as_rule() == Rule::qualified_ident {
+                    bounds.push(bound_ident.as_str().into());
                 }
             }
         }

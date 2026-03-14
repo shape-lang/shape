@@ -37,8 +37,8 @@ use std::collections::{HashMap, HashSet};
 /// Check if a Type::Generic base is "Array" or "Vec".
 fn is_array_or_vec_base(base: &Type) -> bool {
     match base {
-        Type::Concrete(TypeAnnotation::Reference(name))
-        | Type::Concrete(TypeAnnotation::Basic(name)) => name == "Array" || name == "Vec",
+        Type::Concrete(TypeAnnotation::Reference(name)) => name == "Array" || name == "Vec",
+        Type::Concrete(TypeAnnotation::Basic(name)) => name == "Array" || name == "Vec",
         _ => false,
     }
 }
@@ -180,13 +180,10 @@ impl ConstraintSolver {
             (Type::Generic { base: b1, args: a1 }, Type::Generic { base: b2, args: a2 }) => {
                 self.solve_constraint(*b1.clone(), *b2.clone())?;
 
-                let is_result_base = |base: &Type| {
-                    matches!(
-                        base,
-                        Type::Concrete(TypeAnnotation::Reference(name))
-                            | Type::Concrete(TypeAnnotation::Basic(name))
-                            if name == "Result"
-                    )
+                let is_result_base = |base: &Type| match base {
+                    Type::Concrete(TypeAnnotation::Reference(name)) => name == "Result",
+                    Type::Concrete(TypeAnnotation::Basic(name)) => name == "Result",
+                    _ => false,
                 };
 
                 if a1.len() != a2.len() {
@@ -306,11 +303,13 @@ impl ConstraintSolver {
     /// (different precision semantics).
     fn can_numeric_widen(from: &TypeAnnotation, to: &TypeAnnotation) -> bool {
         let from_name = match from {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => Some(name.as_str()),
+            TypeAnnotation::Basic(name) => Some(name.as_str()),
+            TypeAnnotation::Reference(name) => Some(name.as_str()),
             _ => None,
         };
         let to_name = match to {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => Some(name.as_str()),
+            TypeAnnotation::Basic(name) => Some(name.as_str()),
+            TypeAnnotation::Reference(name) => Some(name.as_str()),
             _ => None,
         };
 
@@ -773,7 +772,8 @@ impl ConstraintSolver {
                     }
                     Type::Concrete(ann) => {
                         let type_name = match ann {
-                            TypeAnnotation::Basic(n) | TypeAnnotation::Reference(n) => n.clone(),
+                            TypeAnnotation::Basic(n) => n.clone(),
+                            TypeAnnotation::Reference(n) => n.to_string(),
                             _ => format!("{:?}", ann),
                         };
                         if self.has_trait_impl(trait_name, &type_name) {
@@ -786,13 +786,10 @@ impl ConstraintSolver {
                         }
                     }
                     Type::Generic { base, .. } => {
-                        let type_name = if let Type::Concrete(
-                            TypeAnnotation::Reference(n) | TypeAnnotation::Basic(n),
-                        ) = base.as_ref()
-                        {
-                            n.clone()
-                        } else {
-                            format!("{:?}", base)
+                        let type_name = match base.as_ref() {
+                            Type::Concrete(TypeAnnotation::Reference(n)) => n.to_string(),
+                            Type::Concrete(TypeAnnotation::Basic(n)) => n.clone(),
+                            _ => format!("{:?}", base),
                         };
                         if self.has_trait_impl(trait_name, &type_name) {
                             Ok(())
@@ -821,9 +818,8 @@ impl ConstraintSolver {
                         Type::Variable(_) => Ok(()), // Unresolved type var, defer
                         Type::Concrete(ann) => {
                             let type_name = match ann {
-                                TypeAnnotation::Basic(n) | TypeAnnotation::Reference(n) => {
-                                    n.clone()
-                                }
+                                TypeAnnotation::Basic(n) => n.clone(),
+                                TypeAnnotation::Reference(n) => n.to_string(),
                                 TypeAnnotation::Array(_) => "Vec".to_string(),
                                 _ => return Ok(()), // Complex types: accept
                             };
@@ -844,7 +840,7 @@ impl ConstraintSolver {
                                     if let Type::Concrete(TypeAnnotation::Reference(n)) =
                                         base.as_ref()
                                     {
-                                        n.clone()
+                                        n.to_string()
                                     } else {
                                         format!("{:?}", base)
                                     };

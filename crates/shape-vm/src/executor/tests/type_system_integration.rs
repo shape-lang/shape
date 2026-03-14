@@ -146,7 +146,7 @@ fn test_resolve_result_unwrap() {
     let table = MethodTable::new();
     let result_type = Type::Generic {
         base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-            "Result".to_string(),
+            "Result".into(),
         ))),
         args: vec![BuiltinTypes::string()],
     };
@@ -171,7 +171,7 @@ fn test_resolve_option_map() {
     let table = MethodTable::new();
     let option_type = Type::Generic {
         base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-            "Option".to_string(),
+            "Option".into(),
         ))),
         args: vec![BuiltinTypes::number()],
     };
@@ -198,9 +198,9 @@ fn test_resolve_table_map_returns_table_u() {
     let table = MethodTable::new();
     let table_type = Type::Generic {
         base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-            "Table".to_string(),
+            "Table".into(),
         ))),
-        args: vec![Type::Concrete(TypeAnnotation::Reference("Row".to_string()))],
+        args: vec![Type::Concrete(TypeAnnotation::Reference("Row".into()))],
     };
 
     let resolved = table.resolve_method_call(&table_type, "map", &[]);

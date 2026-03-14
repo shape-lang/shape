@@ -467,10 +467,9 @@ impl BytecodeCompiler {
                 if let Some(trait_def) = self.trait_defs.get(trait_name).cloned() {
                     for super_ann in &trait_def.super_traits {
                         let super_name = match super_ann {
-                            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
-                                name.clone()
-                            }
-                            TypeAnnotation::Generic { name, .. } => name.clone(),
+                            TypeAnnotation::Basic(name) => name.clone(),
+                            TypeAnnotation::Reference(name) => name.to_string(),
+                            TypeAnnotation::Generic { name, .. } => name.to_string(),
                             _ => continue,
                         };
                         if !self
@@ -813,9 +812,8 @@ impl BytecodeCompiler {
             Item::TypeAlias(type_alias, _) => {
                 // Track type alias for meta validation
                 let base_type_name = match &type_alias.type_annotation {
-                    TypeAnnotation::Reference(name) | TypeAnnotation::Basic(name) => {
-                        Some(name.clone())
-                    }
+                    TypeAnnotation::Basic(name) => Some(name.clone()),
+                    TypeAnnotation::Reference(name) => Some(name.to_string()),
                     _ => None,
                 };
                 self.type_aliases.insert(
@@ -1435,7 +1433,8 @@ impl BytecodeCompiler {
         let source_type = match &impl_block.trait_name {
             shape_ast::ast::types::TypeName::Generic { type_args, .. } if !type_args.is_empty() => {
                 match &type_args[0] {
-                    TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
+                    TypeAnnotation::Basic(name) => name.clone(),
+                    TypeAnnotation::Reference(name) => name.to_string(),
                     other => {
                         return Err(ShapeError::SemanticError {
                             message: format!(
@@ -1558,7 +1557,8 @@ impl BytecodeCompiler {
         let source_type = match &impl_block.trait_name {
             shape_ast::ast::types::TypeName::Generic { type_args, .. } if !type_args.is_empty() => {
                 match &type_args[0] {
-                    TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => name.clone(),
+                    TypeAnnotation::Basic(name) => name.clone(),
+                    TypeAnnotation::Reference(name) => name.to_string(),
                     _ => return Ok(()), // error already reported in registration
                 }
             }
@@ -1703,7 +1703,7 @@ impl BytecodeCompiler {
     ) -> shape_ast::ast::TypeAnnotation {
         match type_name {
             shape_ast::ast::TypeName::Simple(name) => {
-                shape_ast::ast::TypeAnnotation::Basic(name.clone())
+                shape_ast::ast::TypeAnnotation::Basic(name.to_string())
             }
             shape_ast::ast::TypeName::Generic { name, type_args } => {
                 shape_ast::ast::TypeAnnotation::Generic {
@@ -2262,22 +2262,21 @@ impl BytecodeCompiler {
             })
         };
 
-        match ann {
-            TypeAnnotation::Basic(name) | TypeAnnotation::Reference(name) => {
+        if let Some(name) = ann.as_type_name_str() {
                 if let Some(existing) = self
                     .program
                     .native_struct_layouts
                     .iter()
-                    .find(|layout| &layout.name == name)
+                    .find(|layout| layout.name == name)
                 {
                     return Ok(NativeFieldLayoutSpec {
-                        c_type: name.clone(),
+                        c_type: name.to_string(),
                         size: existing.size as u64,
                         align: existing.align as u64,
                     });
                 }
 
-                let spec = match name.as_str() {
+                let spec = match name {
                     "f64" | "number" | "Number" | "float" => ("f64", 8, 8),
                     "f32" => ("f32", 4, 4),
                     "i64" | "int" | "integer" | "Int" | "Integer" => ("i64", 8, 8),
@@ -2294,12 +2293,13 @@ impl BytecodeCompiler {
                     "string" | "str" | "cstring" => ("cstring", pointer, pointer),
                     _ => return fail(),
                 };
-                Ok(NativeFieldLayoutSpec {
+                return Ok(NativeFieldLayoutSpec {
                     c_type: spec.0.to_string(),
                     size: spec.1,
                     align: spec.2,
-                })
-            }
+                });
+        }
+        match ann {
             TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
                 let inner = self.native_field_layout_spec(&args[0], span, struct_name)?;
                 if inner.c_type == "cstring" {
@@ -2564,7 +2564,7 @@ impl BytecodeCompiler {
             .collect::<Vec<_>>();
         let body = vec![Statement::Return(
             Some(Expr::StructLiteral {
-                type_name: target_type.to_string(),
+                type_name: target_type.into(),
                 fields: struct_fields,
                 span,
             }),
@@ -2581,10 +2581,10 @@ impl BytecodeCompiler {
                 is_reference: false,
                 is_mut_reference: false,
                 is_out: false,
-                type_annotation: Some(TypeAnnotation::Reference(source_type.to_string())),
+                type_annotation: Some(TypeAnnotation::Reference(source_type.into())),
                 default_value: None,
             }],
-            return_type: Some(TypeAnnotation::Reference(target_type.to_string())),
+            return_type: Some(TypeAnnotation::Reference(target_type.into())),
             body,
             type_params: Some(Vec::new()),
             annotations: Vec::new(),
@@ -2719,6 +2719,26 @@ impl BytecodeCompiler {
         format!("{}::{}", module_path, name)
     }
 
+    fn qualify_type_name(
+        type_name: &shape_ast::ast::TypeName,
+        module_path: &str,
+    ) -> shape_ast::ast::TypeName {
+        match type_name {
+            shape_ast::ast::TypeName::Simple(path) if !path.is_qualified() => {
+                shape_ast::ast::TypeName::Simple(
+                    Self::qualify_module_symbol(module_path, path.as_str()).into(),
+                )
+            }
+            shape_ast::ast::TypeName::Generic { name, type_args } if !name.is_qualified() => {
+                shape_ast::ast::TypeName::Generic {
+                    name: Self::qualify_module_symbol(module_path, name.as_str()).into(),
+                    type_args: type_args.clone(),
+                }
+            }
+            _ => type_name.clone(),
+        }
+    }
+
     fn qualify_module_item(&self, item: &Item, module_path: &str) -> Result<Item> {
         match item {
             Item::Function(func, span) => {
@@ -2741,6 +2761,21 @@ impl BytecodeCompiler {
                     ExportItem::Annotation(annotation) => {
                         annotation.name =
                             Self::qualify_module_symbol(module_path, &annotation.name);
+                    }
+                    ExportItem::Struct(def) => {
+                        def.name = Self::qualify_module_symbol(module_path, &def.name);
+                    }
+                    ExportItem::Enum(def) => {
+                        def.name = Self::qualify_module_symbol(module_path, &def.name);
+                    }
+                    ExportItem::TypeAlias(def) => {
+                        def.name = Self::qualify_module_symbol(module_path, &def.name);
+                    }
+                    ExportItem::Trait(def) => {
+                        def.name = Self::qualify_module_symbol(module_path, &def.name);
+                    }
+                    ExportItem::Interface(def) => {
+                        def.name = Self::qualify_module_symbol(module_path, &def.name);
                     }
                     _ => {}
                 }
@@ -2842,6 +2877,42 @@ impl BytecodeCompiler {
                     *span,
                 );
                 Ok(Item::VariableDecl(qualified, *span))
+            }
+            Item::StructType(def, span) => {
+                let mut q = def.clone();
+                q.name = Self::qualify_module_symbol(module_path, &def.name);
+                Ok(Item::StructType(q, *span))
+            }
+            Item::Enum(def, span) => {
+                let mut q = def.clone();
+                q.name = Self::qualify_module_symbol(module_path, &def.name);
+                Ok(Item::Enum(q, *span))
+            }
+            Item::TypeAlias(def, span) => {
+                let mut q = def.clone();
+                q.name = Self::qualify_module_symbol(module_path, &def.name);
+                Ok(Item::TypeAlias(q, *span))
+            }
+            Item::Trait(def, span) => {
+                let mut q = def.clone();
+                q.name = Self::qualify_module_symbol(module_path, &def.name);
+                Ok(Item::Trait(q, *span))
+            }
+            Item::Interface(def, span) => {
+                let mut q = def.clone();
+                q.name = Self::qualify_module_symbol(module_path, &def.name);
+                Ok(Item::Interface(q, *span))
+            }
+            Item::Extend(extend, span) => {
+                let mut q = extend.clone();
+                q.type_name = Self::qualify_type_name(&extend.type_name, module_path);
+                Ok(Item::Extend(q, *span))
+            }
+            Item::Impl(impl_block, span) => {
+                let mut q = impl_block.clone();
+                q.target_type = Self::qualify_type_name(&impl_block.target_type, module_path);
+                // Do NOT qualify trait_name — traits may be imported from other scopes
+                Ok(Item::Impl(q, *span))
             }
             _ => Ok(item.clone()),
         }
@@ -2969,6 +3040,10 @@ impl BytecodeCompiler {
                         Self::qualify_module_symbol(module_path, &ann_def.name),
                     ));
                 }
+                // Note: Type items (StructType, Enum, TypeAlias, Trait, Interface) are NOT
+                // included as runtime exports. They are resolved through the type system
+                // (struct_types, schema_registry, type_aliases) via resolve_type_name(),
+                // not through runtime module bindings.
                 _ => {}
             }
         }
