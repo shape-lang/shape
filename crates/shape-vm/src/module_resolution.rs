@@ -560,18 +560,9 @@ impl BytecodeExecutor {
                 loader.register_extension_module(artifact.module_path.clone(), code);
             }
 
-            // Legacy fallback path mappings for extensions still using shape_sources.
-            if !module.shape_sources.is_empty() {
-                let legacy_path = format!("std::loaders::{}", module.name);
-                if !loader.has_extension_module(&legacy_path) {
-                    let source = &module.shape_sources[0].1;
-                    loader.register_extension_module(
-                        legacy_path,
-                        ModuleCode::Source(std::sync::Arc::from(source.as_str())),
-                    );
-                }
+            // Register shape_sources under the module's canonical name only.
+            for (_filename, source) in &module.shape_sources {
                 if !loader.has_extension_module(&module.name) {
-                    let source = &module.shape_sources[0].1;
                     loader.register_extension_module(
                         module.name.clone(),
                         ModuleCode::Source(std::sync::Arc::from(source.as_str())),

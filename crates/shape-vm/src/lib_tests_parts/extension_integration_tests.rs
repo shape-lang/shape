@@ -18,16 +18,10 @@ mod extension_integration_tests {
         let mut executor = BytecodeExecutor::new();
         executor.register_extension(module);
 
-        // Shape source should be stored as a virtual module at std::loaders::test_ext
-        assert!(
-            executor
-                .virtual_modules
-                .contains_key("std::loaders::test_ext"),
-            "Extension shape source should be registered as virtual module"
-        );
+        // Shape source should be stored as a virtual module under the module's canonical name.
         assert!(
             executor.virtual_modules.contains_key("test_ext"),
-            "Extension shape source should also be available at module root path"
+            "Extension shape source should be registered under canonical name"
         );
     }
 
@@ -43,10 +37,8 @@ mod extension_integration_tests {
 
         // Virtual module is still registered (error happens when imported)
         assert!(
-            executor
-                .virtual_modules
-                .contains_key("std::loaders::bad_ext"),
-            "Even broken source should be registered as virtual module"
+            executor.virtual_modules.contains_key("bad_ext"),
+            "Even broken source should be registered under canonical name"
         );
     }
 
@@ -69,17 +61,12 @@ mod extension_integration_tests {
         let mut executor = BytecodeExecutor::new();
         executor.register_extension(module);
 
-        // Virtual module should be registered
+        // Virtual module should be registered under canonical name
         assert!(
-            executor
-                .virtual_modules
-                .contains_key("std::loaders::test_ext"),
-            "Extension with enum should be registered as virtual module"
+            executor.virtual_modules.contains_key("test_ext"),
+            "Extension with enum should be registered under canonical name"
         );
-        let source = executor
-            .virtual_modules
-            .get("std::loaders::test_ext")
-            .unwrap();
+        let source = executor.virtual_modules.get("test_ext").unwrap();
         assert!(
             source.contains("Direction"),
             "Virtual module source should contain enum"
@@ -362,20 +349,12 @@ let rows = conn.candles().filter(|u| u.open >= 18)
         executor.register_extension(ext2);
 
         assert!(
-            executor.virtual_modules.contains_key("std::loaders::ext1"),
+            executor.virtual_modules.contains_key("ext1"),
             "Should have virtual module for ext1"
         );
         assert!(
-            executor.virtual_modules.contains_key("ext1"),
-            "Should have root virtual module for ext1"
-        );
-        assert!(
-            executor.virtual_modules.contains_key("std::loaders::ext2"),
-            "Should have virtual module for ext2"
-        );
-        assert!(
             executor.virtual_modules.contains_key("ext2"),
-            "Should have root virtual module for ext2"
+            "Should have virtual module for ext2"
         );
     }
 }

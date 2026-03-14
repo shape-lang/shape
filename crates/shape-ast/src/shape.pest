@@ -1480,9 +1480,7 @@ keyword = {
     "let" | "var" | "const" | "mut" | "function" | "async" | "await" |
     "if" | "else" | "for" | "while" | "match" | "return" | "break" | "continue" |
     "true" | "false" | "null" | "None" | "Some" | "and" | "or" |
-    "typeof" |
     "type" | "interface" | "trait" | "impl" | "enum" |
-    "extends" |
     "extend" | "method" | "when" | "on" | "in" |
     "move" | "clone" |
     "comptime" | "datasource" | "using"

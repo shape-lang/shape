@@ -107,30 +107,12 @@ impl BytecodeExecutor {
                 .or_insert_with(|| source.clone());
         }
 
-        // Legacy compatibility path mappings for shape_sources.
-        let mut registered_primary_path = false;
-        for (filename, source) in &module.shape_sources {
-            // Backward-compatible import path.
-            let legacy_path = format!("std::loaders::{}", module_name);
+        // Register shape_sources under the module's canonical name only.
+        // No legacy std::loaders:: paths — extensions use module_artifacts now.
+        for (_filename, source) in &module.shape_sources {
             self.virtual_modules
-                .entry(legacy_path)
+                .entry(module_name.clone())
                 .or_insert_with(|| source.clone());
-
-            // Primary resolver path for extension modules (`use duckdb`, `from duckdb use { ... }`).
-            if !registered_primary_path {
-                self.virtual_modules
-                    .entry(module_name.clone())
-                    .or_insert_with(|| source.clone());
-                registered_primary_path = true;
-            } else if let Some(stem) = std::path::Path::new(filename)
-                .file_stem()
-                .and_then(|s| s.to_str())
-            {
-                let extra_path = format!("{}::{}", module_name, stem);
-                self.virtual_modules
-                    .entry(extra_path)
-                    .or_insert_with(|| source.clone());
-            }
         }
         self.extensions.push(module);
     }

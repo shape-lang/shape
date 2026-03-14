@@ -1778,7 +1778,14 @@ impl BytecodeCompiler {
         // Detect json.parse(text, TypeName) → rewrite to json.__parse_typed(text, schema_id).
         // When the second arg is a type identifier with a registered schema, we compile
         // a typed deserialization call that uses @alias annotations and field types.
-        if namespace_name == "json" && method == "parse" && args.len() == 2 {
+        // Resolve canonical module path: namespace_name may be a local alias ("json")
+        // or already canonical ("std::core::json").
+        let canonical_module = self
+            .module_scope_sources
+            .get(namespace_name)
+            .cloned()
+            .unwrap_or_else(|| namespace_name.to_string());
+        if canonical_module == "std::core::json" && method == "parse" && args.len() == 2 {
             if let Expr::Identifier(type_name, _) = &args[1] {
                 if let Some(target_schema) = self.type_tracker.schema_registry().get(type_name) {
                     let target_schema_id = target_schema.id;

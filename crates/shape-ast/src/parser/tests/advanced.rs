@@ -84,14 +84,15 @@ fn test_legacy_at_annotation_definition_is_rejected() {
 }
 
 #[test]
-fn test_typeof_expression_is_rejected() {
+fn test_typeof_is_valid_identifier() {
+    // typeof is no longer a reserved keyword — it parses as a regular function call.
     let content = r#"
         function test() {
             return typeof(1)
         }
     "#;
     let result = parse_program_helper(content);
-    assert!(result.is_err(), "typeof must be removed from grammar");
+    assert!(result.is_ok(), "typeof should parse as a regular identifier/function call");
 }
 
 #[test]
