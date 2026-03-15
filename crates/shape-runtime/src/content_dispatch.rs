@@ -175,6 +175,25 @@ fn render_heap_as_content(value: &ValueWord) -> ContentNode {
                 .collect();
             ContentNode::plain(format!("[{}]", elems.join(", ")))
         }
+        Some(HeapValue::FloatArraySlice {
+            parent,
+            offset,
+            len,
+        }) => {
+            let start = *offset as usize;
+            let end = start + *len as usize;
+            let elems: Vec<String> = parent.data[start..end]
+                .iter()
+                .map(|v| {
+                    if *v == v.trunc() && v.abs() < 1e15 {
+                        format!("{}", *v as i64)
+                    } else {
+                        format!("{}", v)
+                    }
+                })
+                .collect();
+            ContentNode::plain(format!("[{}]", elems.join(", ")))
+        }
         Some(HeapValue::BoolArray(a)) => {
             let elems: Vec<String> = a
                 .iter()

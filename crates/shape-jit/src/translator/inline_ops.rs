@@ -172,6 +172,436 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     }
 
     // ========================================================================
+    // Typed-array numeric fast paths — load from typed_data directly
+    // ========================================================================
+
+    /// Fast path for f64-typed arrays: when element_kind == Float64 and
+    /// typed_data is non-null, load directly from typed_data[idx*8].
+    /// The typed_data buffer stores raw f64 values which are valid NaN-boxed
+    /// numbers (plain f64 = no tag bits), so no conversion is needed.
+    fn inline_array_get_f64_at_index(
+        &mut self,
+        arr_ptr: Value,
+        data_ptr: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let (typed_data, element_kind) = self.emit_array_typed_meta(arr_ptr);
+        let zero_ptr = self.builder.ins().iconst(types::I64, 0);
+        let has_typed = self
+            .builder
+            .ins()
+            .icmp(IntCC::NotEqual, typed_data, zero_ptr);
+        let f64_kind = self.builder.ins().iconst(
+            types::I8,
+            crate::jit_array::ArrayElementKind::Float64.as_byte() as i64,
+        );
+        let is_f64 = self
+            .builder
+            .ins()
+            .icmp(IntCC::Equal, element_kind, f64_kind);
+        let use_typed = self.builder.ins().band(has_typed, is_f64);
+
+        let typed_block = self.builder.create_block();
+        let fallback_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+        self.builder
+            .ins()
+            .brif(use_typed, typed_block, &[], fallback_block, &[]);
+
+        // Typed fast path: load raw f64 from typed_data[idx*8]
+        self.builder.switch_to_block(typed_block);
+        self.builder.seal_block(typed_block);
+        let typed_addr = self.emit_array_element_addr(typed_data, idx_i64);
+        let raw_f64 = self
+            .builder
+            .ins()
+            .load(types::F64, MemFlags::trusted(), typed_addr, 0);
+        // f64 → i64 bitcast: raw f64 bits are already valid NaN-boxed numbers
+        let typed_val = self.f64_to_i64(raw_f64);
+        self.builder.ins().jump(merge_block, &[typed_val]);
+
+        // Fallback: load from generic NaN-boxed data buffer
+        self.builder.switch_to_block(fallback_block);
+        self.builder.seal_block(fallback_block);
+        let element_addr = self.emit_array_element_addr(data_ptr, idx_i64);
+        let boxed = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), element_addr, 0);
+        self.builder.ins().jump(merge_block, &[boxed]);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        self.builder.block_params(merge_block)[0]
+    }
+
+    /// Leaner f64-read fast path for trusted sites:
+    /// check only `element_kind == Float64` and skip the extra typed-pointer compare.
+    fn inline_array_get_f64_at_index_trusted(
+        &mut self,
+        arr_ptr: Value,
+        data_ptr: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let element_kind = self
+            .builder
+            .ins()
+            .load(types::I8, MemFlags::trusted(), arr_ptr, 32);
+        let f64_kind = self.builder.ins().iconst(
+            types::I8,
+            crate::jit_array::ArrayElementKind::Float64.as_byte() as i64,
+        );
+        let is_f64 = self
+            .builder
+            .ins()
+            .icmp(IntCC::Equal, element_kind, f64_kind);
+
+        let typed_block = self.builder.create_block();
+        let fallback_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+        self.builder
+            .ins()
+            .brif(is_f64, typed_block, &[], fallback_block, &[]);
+
+        self.builder.switch_to_block(typed_block);
+        self.builder.seal_block(typed_block);
+        let typed_data = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 24);
+        let typed_addr = self.emit_array_element_addr(typed_data, idx_i64);
+        let raw_f64 = self
+            .builder
+            .ins()
+            .load(types::F64, MemFlags::trusted(), typed_addr, 0);
+        let typed_val = self.f64_to_i64(raw_f64);
+        self.builder.ins().jump(merge_block, &[typed_val]);
+
+        self.builder.switch_to_block(fallback_block);
+        self.builder.seal_block(fallback_block);
+        let element_addr = self.emit_array_element_addr(data_ptr, idx_i64);
+        let boxed = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), element_addr, 0);
+        self.builder.ins().jump(merge_block, &[boxed]);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        self.builder.block_params(merge_block)[0]
+    }
+
+    /// Fast path for i64-typed arrays: when element_kind == Int64 and
+    /// typed_data is non-null, load raw i64 from typed_data[idx*8] and
+    /// convert to NaN-boxed f64 via fcvt_from_sint.
+    fn inline_array_get_i64_at_index(
+        &mut self,
+        arr_ptr: Value,
+        data_ptr: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let (typed_data, element_kind) = self.emit_array_typed_meta(arr_ptr);
+        let zero_ptr = self.builder.ins().iconst(types::I64, 0);
+        let has_typed = self
+            .builder
+            .ins()
+            .icmp(IntCC::NotEqual, typed_data, zero_ptr);
+        let int_kind = self.builder.ins().iconst(
+            types::I8,
+            crate::jit_array::ArrayElementKind::Int64.as_byte() as i64,
+        );
+        let is_int = self
+            .builder
+            .ins()
+            .icmp(IntCC::Equal, element_kind, int_kind);
+        let use_typed = self.builder.ins().band(has_typed, is_int);
+
+        let typed_block = self.builder.create_block();
+        let fallback_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+        self.builder
+            .ins()
+            .brif(use_typed, typed_block, &[], fallback_block, &[]);
+
+        // Typed fast path: load raw i64 from typed_data[idx*8], convert to f64
+        self.builder.switch_to_block(typed_block);
+        self.builder.seal_block(typed_block);
+        let typed_addr = self.emit_array_element_addr(typed_data, idx_i64);
+        let raw_i64 = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), typed_addr, 0);
+        // i64 → f64 → NaN-boxed: convert integer to f64 then bitcast
+        let as_f64 = self.builder.ins().fcvt_from_sint(types::F64, raw_i64);
+        let typed_val = self.f64_to_i64(as_f64);
+        self.builder.ins().jump(merge_block, &[typed_val]);
+
+        // Fallback: load from generic NaN-boxed data buffer
+        self.builder.switch_to_block(fallback_block);
+        self.builder.seal_block(fallback_block);
+        let element_addr = self.emit_array_element_addr(data_ptr, idx_i64);
+        let boxed = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), element_addr, 0);
+        self.builder.ins().jump(merge_block, &[boxed]);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        self.builder.block_params(merge_block)[0]
+    }
+
+    /// Leaner i64-read fast path for trusted sites.
+    fn inline_array_get_i64_at_index_trusted(
+        &mut self,
+        arr_ptr: Value,
+        data_ptr: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let element_kind = self
+            .builder
+            .ins()
+            .load(types::I8, MemFlags::trusted(), arr_ptr, 32);
+        let int_kind = self.builder.ins().iconst(
+            types::I8,
+            crate::jit_array::ArrayElementKind::Int64.as_byte() as i64,
+        );
+        let is_int = self
+            .builder
+            .ins()
+            .icmp(IntCC::Equal, element_kind, int_kind);
+
+        let typed_block = self.builder.create_block();
+        let fallback_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder.append_block_param(merge_block, types::I64);
+        self.builder
+            .ins()
+            .brif(is_int, typed_block, &[], fallback_block, &[]);
+
+        self.builder.switch_to_block(typed_block);
+        self.builder.seal_block(typed_block);
+        let typed_data = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 24);
+        let typed_addr = self.emit_array_element_addr(typed_data, idx_i64);
+        let raw_i64 = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), typed_addr, 0);
+        let as_f64 = self.builder.ins().fcvt_from_sint(types::F64, raw_i64);
+        let typed_val = self.f64_to_i64(as_f64);
+        self.builder.ins().jump(merge_block, &[typed_val]);
+
+        self.builder.switch_to_block(fallback_block);
+        self.builder.seal_block(fallback_block);
+        let element_addr = self.emit_array_element_addr(data_ptr, idx_i64);
+        let boxed = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), element_addr, 0);
+        self.builder.ins().jump(merge_block, &[boxed]);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        self.builder.block_params(merge_block)[0]
+    }
+
+    // ========================================================================
+    // Public wrappers: f64-typed array get (non-hoisted)
+    // ========================================================================
+
+    /// Array get with i64 index, f64 typed fast path, full bounds checking.
+    pub(in crate::translator) fn inline_array_get_i64_f64(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let data_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+        let length = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 8);
+        let final_idx = self.normalize_array_index(idx_i64, length);
+        let safe_idx = self.emit_bounds_check(final_idx, length);
+        self.inline_array_get_f64_at_index(arr_ptr, data_ptr, safe_idx)
+    }
+
+    pub(in crate::translator) fn inline_array_get_i64_non_negative_f64(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let data_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+        let length = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 8);
+        let safe_idx = self.emit_bounds_check(idx_i64, length);
+        self.inline_array_get_f64_at_index(arr_ptr, data_ptr, safe_idx)
+    }
+
+    pub(in crate::translator) fn inline_array_get_i64_trusted_f64(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let data_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+        self.inline_array_get_f64_at_index_trusted(arr_ptr, data_ptr, idx_i64)
+    }
+
+    // ========================================================================
+    // Public wrappers: f64-typed array get (hoisted)
+    // ========================================================================
+
+    pub(in crate::translator) fn inline_array_get_hoisted_i64_f64(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+        data_ptr: Value,
+        length: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let final_idx = self.normalize_array_index(idx_i64, length);
+        let safe_idx = self.emit_bounds_check(final_idx, length);
+        self.inline_array_get_f64_at_index(arr_ptr, data_ptr, safe_idx)
+    }
+
+    pub(in crate::translator) fn inline_array_get_hoisted_i64_non_negative_f64(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+        data_ptr: Value,
+        length: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let safe_idx = self.emit_bounds_check(idx_i64, length);
+        self.inline_array_get_f64_at_index(arr_ptr, data_ptr, safe_idx)
+    }
+
+    pub(in crate::translator) fn inline_array_get_hoisted_i64_trusted_f64(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+        data_ptr: Value,
+        _length: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        self.inline_array_get_f64_at_index_trusted(arr_ptr, data_ptr, idx_i64)
+    }
+
+    // ========================================================================
+    // Public wrappers: i64-typed array get (non-hoisted)
+    // ========================================================================
+
+    /// Array get with i64 index, i64 typed fast path, full bounds checking.
+    pub(in crate::translator) fn inline_array_get_i64_int(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let data_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+        let length = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 8);
+        let final_idx = self.normalize_array_index(idx_i64, length);
+        let safe_idx = self.emit_bounds_check(final_idx, length);
+        self.inline_array_get_i64_at_index(arr_ptr, data_ptr, safe_idx)
+    }
+
+    pub(in crate::translator) fn inline_array_get_i64_non_negative_int(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let data_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+        let length = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 8);
+        let safe_idx = self.emit_bounds_check(idx_i64, length);
+        self.inline_array_get_i64_at_index(arr_ptr, data_ptr, safe_idx)
+    }
+
+    pub(in crate::translator) fn inline_array_get_i64_trusted_int(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let data_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+        self.inline_array_get_i64_at_index_trusted(arr_ptr, data_ptr, idx_i64)
+    }
+
+    // ========================================================================
+    // Public wrappers: i64-typed array get (hoisted)
+    // ========================================================================
+
+    pub(in crate::translator) fn inline_array_get_hoisted_i64_int(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+        data_ptr: Value,
+        length: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let final_idx = self.normalize_array_index(idx_i64, length);
+        let safe_idx = self.emit_bounds_check(final_idx, length);
+        self.inline_array_get_i64_at_index(arr_ptr, data_ptr, safe_idx)
+    }
+
+    pub(in crate::translator) fn inline_array_get_hoisted_i64_non_negative_int(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+        data_ptr: Value,
+        length: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        let safe_idx = self.emit_bounds_check(idx_i64, length);
+        self.inline_array_get_i64_at_index(arr_ptr, data_ptr, safe_idx)
+    }
+
+    pub(in crate::translator) fn inline_array_get_hoisted_i64_trusted_int(
+        &mut self,
+        arr_boxed: Value,
+        idx_i64: Value,
+        data_ptr: Value,
+        _length: Value,
+    ) -> Value {
+        let arr_ptr = self.emit_array_ptr(arr_boxed);
+        self.inline_array_get_i64_at_index_trusted(arr_ptr, data_ptr, idx_i64)
+    }
+
+    // ========================================================================
     // Inline Array Operations — direct memory access, no FFI
     // ========================================================================
 

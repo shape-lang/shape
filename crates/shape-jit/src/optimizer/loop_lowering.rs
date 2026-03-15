@@ -214,6 +214,7 @@ mod tests {
             invariant_locals: HashSet::new(),
             invariant_module_bindings: HashSet::new(),
             body_can_allocate: false,
+            hoistable_calls: Vec::new(),
         }
     }
 

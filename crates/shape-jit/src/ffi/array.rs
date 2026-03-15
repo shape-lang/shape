@@ -424,6 +424,9 @@ pub extern "C" fn jit_array_filled(size_bits: u64, value_bits: u64) -> u64 {
         typed_storage_kind,
         element_kind,
         _padding: [0; 6],
+        slice_parent_arc: std::ptr::null(),
+        slice_offset: 0,
+        slice_len: 0,
     };
     jit_box(HK_ARRAY, arr)
 }

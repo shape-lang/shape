@@ -17,6 +17,64 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     pub(crate) fn compile_new_array(&mut self, instr: &Instruction) -> Result<(), String> {
         if let Some(Operand::Count(count)) = &instr.operand {
             let count_usize = *count as usize;
+
+            // Escape analysis: check if this NewArray is eligible for scalar replacement.
+            if let Some(entry) = self
+                .optimization_plan
+                .escape_analysis
+                .scalar_arrays
+                .get(&self.current_instr_idx)
+                .cloned()
+            {
+                // Scalar replacement: allocate Cranelift variables for each element.
+                let mut element_vars = Vec::with_capacity(entry.element_count);
+                for _ in 0..entry.element_count {
+                    let var = Variable::new(self.next_var);
+                    self.next_var += 1;
+                    self.builder.declare_var(var, types::I64);
+                    element_vars.push(var);
+                }
+
+                if count_usize > 0 && count_usize <= entry.element_count {
+                    // Pop initial elements directly from the JIT operand stack.
+                    // Stack order: elem_0 is deepest, elem_{n-1} is TOS.
+                    // Pop in reverse: pop -> elem[n-1], ..., pop -> elem[0].
+                    let mut popped = Vec::with_capacity(count_usize);
+                    for _ in 0..count_usize {
+                        if let Some(val) = self.stack_pop_boxed() {
+                            popped.push(val);
+                        }
+                    }
+                    // popped[0] = elem[n-1], popped[n-1] = elem[0]
+                    for (i, val) in popped.into_iter().rev().enumerate() {
+                        self.builder.def_var(element_vars[i], val);
+                    }
+                    // Initialize any remaining slots to TAG_NULL.
+                    let null_val = self.builder.ins().iconst(types::I64, TAG_NULL as i64);
+                    for var in element_vars.iter().skip(count_usize) {
+                        self.builder.def_var(*var, null_val);
+                    }
+                } else {
+                    // Zero-element array: initialize all slots to TAG_NULL.
+                    let null_val = self.builder.ins().iconst(types::I64, TAG_NULL as i64);
+                    for var in &element_vars {
+                        self.builder.def_var(*var, null_val);
+                    }
+                }
+
+                // Register this array for scalar replacement.
+                self.scalar_replaced_arrays
+                    .insert(entry.local_slot, element_vars);
+
+                // Push a sentinel value (TAG_NULL) onto the stack.
+                // The StoreLocal that follows will consume it, but the actual
+                // array operations will use the scalar variables instead.
+                let sentinel = self.builder.ins().iconst(types::I64, TAG_NULL as i64);
+                self.stack_push(sentinel);
+
+                return Ok(());
+            }
+
             self.materialize_to_stack(count_usize);
 
             let count_val = self.builder.ins().iconst(types::I64, *count as i64);
@@ -54,6 +112,36 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         // Generic property access - field names are resolved via schema at compile time
         // Clear any pending data offset since we're using standard property access
         self.pending_data_offset = None;
+
+        // Escape analysis: scalar-replaced array read.
+        // Check if this GetProp is a planned scalar read site.
+        if instr.operand.is_none() {
+            let scalar_var = self
+                .optimization_plan
+                .escape_analysis
+                .scalar_arrays
+                .values()
+                .find_map(|entry| {
+                    entry
+                        .get_sites
+                        .get(&self.current_instr_idx)
+                        .map(|&elem_idx| (entry.local_slot, elem_idx))
+                })
+                .and_then(|(local_slot, elem_idx)| {
+                    self.scalar_replaced_arrays
+                        .get(&local_slot)
+                        .and_then(|vars| vars.get(elem_idx).copied())
+                });
+            if let Some(var) = scalar_var {
+                // Pop the index and array sentinel from the stack.
+                let _key = self.stack_pop();
+                let _arr = self.stack_pop();
+                // Read from the scalar variable.
+                let val = self.builder.use_var(var);
+                self.stack_push(val);
+                return Ok(());
+            }
+        }
 
         {
             // Check if we're in a try block - need to handle "not found" as exception
@@ -356,6 +444,39 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
     pub(crate) fn compile_set_local_index(&mut self, instr: &Instruction) -> Result<(), String> {
         if let Some(Operand::Local(idx)) = &instr.operand {
+            // Escape analysis: scalar-replaced array write.
+            // Look up the element index from the plan and the scalar variable.
+            let scalar_var = self
+                .optimization_plan
+                .escape_analysis
+                .scalar_arrays
+                .values()
+                .find_map(|entry| {
+                    if entry.local_slot == *idx {
+                        entry
+                            .set_sites
+                            .get(&self.current_instr_idx)
+                            .copied()
+                    } else {
+                        None
+                    }
+                })
+                .and_then(|elem_idx| {
+                    self.scalar_replaced_arrays
+                        .get(idx)
+                        .and_then(|vars| vars.get(elem_idx).copied())
+                });
+            if let Some(var) = scalar_var {
+                if self.stack_len() >= 2 {
+                    // Pop the value and index from the stack.
+                    let value = self.stack_pop_boxed().unwrap();
+                    let _key = self.stack_pop();
+                    // Write to the scalar variable.
+                    self.builder.def_var(var, value);
+                    return Ok(());
+                }
+            }
+
             if self.stack_len() >= 2 {
                 let value = self.stack_pop_boxed().unwrap();
                 let key_hint = self.peek_stack_type();

@@ -131,6 +131,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // Array LICM
             hoisted_array_info: HashMap::new(),
             hoisted_ref_array_info: HashMap::new(),
+            // Call LICM
+            licm_hoisted_results: HashMap::new(),
+            licm_skip_indices: std::collections::HashSet::new(),
             // Numeric parameter hints (compile-time)
             numeric_param_hints: std::collections::HashSet::new(),
             deopt_block: None,
@@ -150,6 +153,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // Multi-frame inline deopt
             compiling_function_id: 0, // Set by caller (compile_optimizing_function)
             inline_frame_stack: Vec::new(),
+            // Escape analysis / scalar replacement
+            scalar_replaced_arrays: HashMap::new(),
         }
     }
 
@@ -275,6 +280,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // Array LICM
             hoisted_array_info: HashMap::new(),
             hoisted_ref_array_info: HashMap::new(),
+            // Call LICM
+            licm_hoisted_results: HashMap::new(),
+            licm_skip_indices: std::collections::HashSet::new(),
             // Numeric parameter hints (compile-time)
             numeric_param_hints: std::collections::HashSet::new(),
             deopt_block: None,
@@ -294,6 +302,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // Multi-frame inline deopt (not used in kernel mode)
             compiling_function_id: 0,
             inline_frame_stack: Vec::new(),
+            // Escape analysis / scalar replacement (not used in kernel mode)
+            scalar_replaced_arrays: HashMap::new(),
         }
     }
 
@@ -459,6 +469,18 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             }
 
             if block_terminated {
+                continue;
+            }
+
+            // Call LICM: skip instructions that are part of a hoisted call sequence
+            // (arg pushes and argc push), and replace the call instruction itself
+            // with a push of the pre-computed result.
+            if self.licm_skip_indices.contains(&i) {
+                continue;
+            }
+            if let Some(&result_var) = self.licm_hoisted_results.get(&i) {
+                let result_val = self.builder.use_var(result_var);
+                self.stack_push(result_val);
                 continue;
             }
 

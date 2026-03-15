@@ -402,6 +402,14 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
             ExternalValue::Opaque("<lazy:uninitialized>".to_string())
         }
         HeapValue::Char(c) => ExternalValue::String(c.to_string()),
+        HeapValue::FloatArraySlice {
+            parent,
+            offset,
+            len,
+        } => {
+            let slice = &parent.data[*offset as usize..(*offset + *len) as usize];
+            ExternalValue::Array(slice.iter().map(|&v| ExternalValue::Number(v)).collect())
+        }
     }
 }
 

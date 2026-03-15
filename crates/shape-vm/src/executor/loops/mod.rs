@@ -106,6 +106,7 @@ impl VirtualMachine {
             Some(HeapValue::Array(arr)) => idx < 0 || idx as usize >= arr.len(),
             Some(HeapValue::IntArray(arr)) => idx < 0 || idx as usize >= arr.len(),
             Some(HeapValue::FloatArray(arr)) => idx < 0 || idx as usize >= arr.len(),
+            Some(HeapValue::FloatArraySlice { len, .. }) => idx < 0 || idx as usize >= *len as usize,
             Some(HeapValue::BoolArray(arr)) => idx < 0 || idx as usize >= arr.len(),
             Some(HeapValue::String(s)) => idx < 0 || idx as usize >= s.len(),
             Some(HeapValue::Range {
@@ -180,6 +181,15 @@ impl VirtualMachine {
                     ValueWord::none()
                 } else {
                     ValueWord::from_f64(arr[idx as usize])
+                }
+            }
+            Some(HeapValue::FloatArraySlice { parent, offset, len }) => {
+                let slice_len = *len as usize;
+                if idx < 0 || idx as usize >= slice_len {
+                    ValueWord::none()
+                } else {
+                    let off = *offset as usize;
+                    ValueWord::from_f64(parent.data[off + idx as usize])
                 }
             }
             Some(HeapValue::BoolArray(arr)) => {

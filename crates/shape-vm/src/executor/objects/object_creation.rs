@@ -145,7 +145,7 @@ impl VirtualMachine {
         }
 
         let mat = shape_value::heap_value::MatrixData::from_flat(data, rows, cols);
-        self.push_vw(ValueWord::from_matrix(Box::new(mat)))
+        self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(mat)))
     }
 
     pub(in crate::executor) fn op_new_array(

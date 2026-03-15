@@ -7,12 +7,14 @@ mod bounds;
 mod call_path;
 mod correctness;
 mod cross_function;
+pub mod escape_analysis;
 mod hof_inline;
+pub mod licm;
 mod loop_lowering;
 mod numeric_arrays;
 mod table_queryable;
 mod typed_mir;
-mod vectorization;
+pub(crate) mod vectorization;
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,11 +27,14 @@ pub use call_path::CallPathPlan;
 pub use cross_function::{
     CallGraph, DeoptTracker, DevirtAnalysis, InlinePolicy, OptimizationDependencies, Tier2CacheKey,
 };
+pub use escape_analysis::EscapeAnalysisPlan;
 pub use hof_inline::{HofInlinePlan, HofInlineSite};
+pub use licm::LicmPlan;
 pub use loop_lowering::LoopLoweringPlan;
 pub use numeric_arrays::NumericArrayPlan;
 pub use table_queryable::TableQueryablePlan;
 pub use typed_mir::TypedMirFunction;
+pub use vectorization::SIMDPlan;
 
 /// Function-level optimization plan consumed by bytecode->IR lowering.
 #[derive(Debug, Clone, Default)]
@@ -56,6 +61,8 @@ pub struct FunctionOptimizationPlan {
     pub affine_square_guards_by_loop: HashMap<usize, Vec<AffineSquareGuard>>,
     /// Phase 5: vectorization candidates (strip-mining width keyed by loop header).
     pub vector_width_by_loop: HashMap<usize, u8>,
+    /// Phase 5b: SIMD F64X2 lowering plans for eligible typed-data array loops.
+    pub simd_plans: HashMap<usize, SIMDPlan>,
     /// Phase 4: typed numeric array access/write opportunities.
     pub numeric_arrays: NumericArrayPlan,
     /// Phase 6: call-path optimization decisions.
@@ -65,6 +72,10 @@ pub struct FunctionOptimizationPlan {
     pub table_queryable: TableQueryablePlan,
     /// Phase 8: HOF method inlining opportunities (map/filter/reduce/find/some/every/forEach/findIndex).
     pub hof_inline: HofInlinePlan,
+    /// Call LICM: hoistable pure function/method calls per loop.
+    pub licm: LicmPlan,
+    /// Escape analysis: arrays eligible for scalar replacement (heap elision).
+    pub escape_analysis: EscapeAnalysisPlan,
 }
 
 /// Build a plan for one function/sub-program.
@@ -84,9 +95,12 @@ pub fn build_function_plan(
     );
     let vector_width_by_loop =
         vectorization::analyze_vectorization(program, loop_info, &loops, &typed_mir);
+    let simd_plans = vectorization::analyze_simd(program, loop_info, &loops);
     let call_path = call_path::analyze_call_path(program, &loops);
     let table_queryable = table_queryable::analyze_table_queryable(program);
     let hof_inline = hof_inline::analyze_hof_inline(program);
+    let licm = licm::analyze_licm(program, loop_info);
+    let escape_analysis = escape_analysis::analyze_escape(program);
 
     let plan = FunctionOptimizationPlan {
         typed_mir,
@@ -100,10 +114,13 @@ pub fn build_function_plan(
         linear_bound_guards_by_loop: bounds.linear_bound_guards_by_loop,
         affine_square_guards_by_loop: bounds.affine_square_guards_by_loop,
         vector_width_by_loop,
+        simd_plans,
         numeric_arrays,
         call_path,
         table_queryable,
         hof_inline,
+        licm,
+        escape_analysis,
     };
 
     // Keep invariants explicit even in release builds; this catches accidental

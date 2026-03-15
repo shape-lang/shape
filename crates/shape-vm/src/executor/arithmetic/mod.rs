@@ -13,6 +13,25 @@ use std::sync::Arc;
 
 use crate::constants::EXACT_F64_INT_LIMIT;
 
+/// Materialize a `FloatArraySlice` into a `FloatArray` so that downstream
+/// arithmetic paths (which match on `HeapValue::FloatArray`) work unchanged.
+/// Non-slice values pass through unmodified.
+#[inline]
+fn materialize_float_slice(vw: ValueWord) -> ValueWord {
+    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) = vw.as_heap_ref() {
+        let off = *offset as usize;
+        let slice_len = *len as usize;
+        let data = &parent.data[off..off + slice_len];
+        let mut aligned = shape_value::aligned_vec::AlignedVec::with_capacity(slice_len);
+        for &v in data {
+            aligned.push(v);
+        }
+        ValueWord::from_float_array(Arc::new(aligned.into()))
+    } else {
+        vw
+    }
+}
+
 /// Produce a `VMError::RuntimeError` for mixed int/float operations where the
 /// integer operand is too large to convert losslessly to f64.
 fn cannot_apply_without_cast(op: &str, value: i128) -> VMError {
@@ -1093,6 +1112,8 @@ impl VirtualMachine {
                 )? {
                     return self.push_vw(result);
                 }
+                let a_nb = materialize_float_slice(a_nb);
+                let b_nb = materialize_float_slice(b_nb);
                 match (a_nb.tag(), b_nb.tag()) {
                     // Both inline numeric: int-preserving arithmetic
                     (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
@@ -1264,7 +1285,7 @@ impl VirtualMachine {
                                     a_mat, b_mat,
                                 )
                                 .map_err(|e| VMError::RuntimeError(e))?;
-                                return self.push_vw(ValueWord::from_matrix(Box::new(result)));
+                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                             (HeapValue::Array(arr_a), HeapValue::Array(arr_b)) => {
                                 let mut result_arr = Vec::with_capacity(arr_a.len() + arr_b.len());
@@ -1586,6 +1607,8 @@ impl VirtualMachine {
                 )? {
                     return self.push_vw(result);
                 }
+                let a_nb = materialize_float_slice(a_nb);
+                let b_nb = materialize_float_slice(b_nb);
                 match (a_nb.tag(), b_nb.tag()) {
                     (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
                         if let (Some(a_num), Some(b_num)) =
@@ -1721,7 +1744,7 @@ impl VirtualMachine {
                                     a_mat, b_mat,
                                 )
                                 .map_err(|e| VMError::RuntimeError(e))?;
-                                return self.push_vw(ValueWord::from_matrix(Box::new(result)));
+                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                             _ => {}
                         }
@@ -1824,6 +1847,8 @@ impl VirtualMachine {
                 )? {
                     return self.push_vw(result);
                 }
+                let a_nb = materialize_float_slice(a_nb);
+                let b_nb = materialize_float_slice(b_nb);
                 match (a_nb.tag(), b_nb.tag()) {
                     (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
                         if let (Some(a_num), Some(b_num)) =
@@ -1935,7 +1960,7 @@ impl VirtualMachine {
                                         a_mat, b_mat,
                                     )
                                     .map_err(|e| VMError::RuntimeError(e))?;
-                                return self.push_vw(ValueWord::from_matrix(Box::new(result)));
+                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                             // Matrix * FloatArray => matvec
                             (HeapValue::Matrix(mat), HeapValue::FloatArray(vec_data)) => {
@@ -1970,7 +1995,7 @@ impl VirtualMachine {
                                     shape_runtime::intrinsics::matrix_kernels::matrix_scale(
                                         a_mat, scalar,
                                     );
-                                return self.push_vw(ValueWord::from_matrix(Box::new(result)));
+                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                         }
                         if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
@@ -2020,7 +2045,7 @@ impl VirtualMachine {
                                     shape_runtime::intrinsics::matrix_kernels::matrix_scale(
                                         b_mat, scalar,
                                     );
-                                return self.push_vw(ValueWord::from_matrix(Box::new(result)));
+                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                         }
                         if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
@@ -2112,6 +2137,8 @@ impl VirtualMachine {
                 if let Some(result) = Self::numeric_div_result(&a_nb, &b_nb)? {
                     return self.push_vw(result);
                 }
+                let a_nb = materialize_float_slice(a_nb);
+                let b_nb = materialize_float_slice(b_nb);
                 match (a_nb.tag(), b_nb.tag()) {
                     (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
                         if let (Some(a_num), Some(b_num)) =

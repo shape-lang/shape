@@ -7,6 +7,15 @@
 //! `extern "C" fn(ctx_ptr: *mut u8, _unused: *const u8) -> u64`
 //! - Returns 0 on normal loop exit (locals written back to ctx).
 //! - Returns `u64::MAX` on deoptimization (locals partially written back).
+//!
+//! # Escape Analysis / Scalar Replacement
+//! The escape analysis pass (Phase 5) identifies small non-escaping arrays
+//! for scalar replacement in the whole-function JIT compiler. OSR compilation
+//! does NOT support NewArray/GetProp/SetLocalIndex opcodes (they fail the
+//! preflight check in `is_osr_supported_opcode`), so scalar replacement does
+//! not apply to OSR-compiled loop bodies. If OSR support for array opcodes is
+//! added in the future, deopt materialization must reconstruct scalar-replaced
+//! arrays from their SSA variable elements before writing locals back to ctx.
 
 use std::collections::{HashMap, HashSet};
 

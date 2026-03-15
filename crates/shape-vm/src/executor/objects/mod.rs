@@ -74,7 +74,9 @@ use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,
 };
+use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
+use std::sync::Arc;
 impl VirtualMachine {
     #[inline(always)]
     pub(in crate::executor) fn exec_objects(
@@ -426,6 +428,35 @@ impl VirtualMachine {
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
                         // Fallback: promote to generic array for standard array methods
+                        args_nb[0] =
+                            ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
+                        handler(self, args_nb, ctx)?;
+                    } else {
+                        return Err(VMError::RuntimeError(format!(
+                            "Unknown method '{}' on Vec<number> type",
+                            method_name
+                        )));
+                    }
+                }
+                HeapKind::FloatArraySlice => {
+                    // Materialize the slice as a FloatArray, then dispatch
+                    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) = args_nb[0].as_heap_ref() {
+                        let off = *offset as usize;
+                        let slice_len = *len as usize;
+                        let data = &parent.data[off..off + slice_len];
+                        let mut aligned = shape_value::aligned_vec::AlignedVec::with_capacity(slice_len);
+                        for &v in data {
+                            aligned.push(v);
+                        }
+                        args_nb[0] = ValueWord::from_float_array(Arc::new(aligned.into()));
+                    }
+                    if let Some(handler) =
+                        method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str())
+                    {
+                        handler(self, args_nb, ctx)?;
+                    } else if let Some(handler) =
+                        method_registry::ARRAY_METHODS.get(method_name.as_str())
+                    {
                         args_nb[0] =
                             ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
                         handler(self, args_nb, ctx)?;

@@ -102,6 +102,7 @@ macro_rules! define_heap_types {
             Channel,            // 68
             Char,               // 69
             ProjectedRef,       // 70
+            FloatArraySlice,    // 71
         }
 
         /// Compact heap-allocated value for ValueWord TAG_HEAP.
@@ -152,7 +153,7 @@ macro_rules! define_heap_types {
             IntArray(std::sync::Arc<$crate::typed_buffer::TypedBuffer<i64>>),
             FloatArray(std::sync::Arc<$crate::typed_buffer::AlignedTypedBuffer>),
             BoolArray(std::sync::Arc<$crate::typed_buffer::TypedBuffer<u8>>),
-            Matrix(Box<$crate::heap_value::MatrixData>),
+            Matrix(std::sync::Arc<$crate::heap_value::MatrixData>),
             // ===== Width-specific typed arrays =====
             I8Array(std::sync::Arc<$crate::typed_buffer::TypedBuffer<i8>>),
             I16Array(std::sync::Arc<$crate::typed_buffer::TypedBuffer<i16>>),
@@ -171,6 +172,12 @@ macro_rules! define_heap_types {
             Channel(Box<$crate::heap_value::ChannelData>),
             Char(char),
             ProjectedRef(Box<$crate::heap_value::ProjectedRefData>),
+            /// Zero-copy read-only slice into a parent matrix row.
+            FloatArraySlice {
+                parent: std::sync::Arc<$crate::heap_value::MatrixData>,
+                offset: u32,
+                len: u32,
+            },
             // ===== Struct variants =====
             TypedObject {
                 schema_id: u64,
@@ -261,6 +268,7 @@ macro_rules! define_heap_types {
                     HeapValue::Channel(..) => HeapKind::Channel,
                     HeapValue::Char(..) => HeapKind::Char,
                     HeapValue::ProjectedRef(..) => HeapKind::ProjectedRef,
+                    HeapValue::FloatArraySlice { .. } => HeapKind::FloatArraySlice,
                     HeapValue::I8Array(..) => HeapKind::I8Array,
                     HeapValue::I16Array(..) => HeapKind::I16Array,
                     HeapValue::I32Array(..) => HeapKind::I32Array,
@@ -345,6 +353,7 @@ macro_rules! define_heap_types {
                     HeapValue::Channel(_v) => !_v.is_closed(),
                     HeapValue::Char(_) => true,
                     HeapValue::ProjectedRef(_) => true,
+                    HeapValue::FloatArraySlice { len, .. } => *len > 0,
                     HeapValue::Enum(_) => true,
                     HeapValue::Some(_) => true,
                     HeapValue::Ok(_) => true,
@@ -425,6 +434,7 @@ macro_rules! define_heap_types {
                     HeapValue::Channel(_) => "channel",
                     HeapValue::Char(_) => "char",
                     HeapValue::ProjectedRef(_) => "reference",
+                    HeapValue::FloatArraySlice { .. } => "Vec<number>",
                     HeapValue::Enum(_) => "enum",
                     HeapValue::Some(_) => "option",
                     HeapValue::Ok(_) => "result",

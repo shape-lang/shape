@@ -316,6 +316,34 @@ impl VirtualMachine {
 
                 self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
             }
+            Some(HeapValue::FloatArraySlice { parent, offset, len: slice_len }) => {
+                let total = *slice_len as usize;
+                let off = *offset as usize;
+                let data = &parent.data[off..off + total];
+                let len_i32 = total as i32;
+                let actual_start = if start < 0 {
+                    (len_i32 + start).max(0) as usize
+                } else {
+                    start as usize
+                };
+                let actual_end = if end < 0 {
+                    (len_i32 + end).max(0) as usize
+                } else {
+                    (end as usize).min(total)
+                };
+
+                let slice: Vec<ValueWord> = if actual_start < actual_end && actual_start < total
+                {
+                    data[actual_start..actual_end]
+                        .iter()
+                        .map(|&v| ValueWord::from_f64(v))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
+            }
             Some(HeapValue::BoolArray(arr)) => {
                 let len = arr.len() as i32;
                 let actual_start = if start < 0 {

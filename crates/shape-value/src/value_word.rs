@@ -911,8 +911,22 @@ impl ValueWord {
 
     /// Create a ValueWord Matrix from MatrixData.
     #[inline]
-    pub fn from_matrix(m: Box<crate::heap_value::MatrixData>) -> Self {
+    pub fn from_matrix(m: Arc<crate::heap_value::MatrixData>) -> Self {
         Self::heap_box(HeapValue::Matrix(m))
+    }
+
+    /// Create a ValueWord FloatArraySlice — a zero-copy view into a parent matrix.
+    #[inline]
+    pub fn from_float_array_slice(
+        parent: Arc<crate::heap_value::MatrixData>,
+        offset: u32,
+        len: u32,
+    ) -> Self {
+        Self::heap_box(HeapValue::FloatArraySlice {
+            parent,
+            offset,
+            len,
+        })
     }
 
     /// Create a ValueWord Iterator from IteratorState.
@@ -3047,6 +3061,26 @@ impl std::fmt::Display for ValueWord {
                             write!(f, ", ")?;
                         }
                         write!(f, "{}", v)?;
+                    }
+                    write!(f, "]")
+                }
+                HeapValue::FloatArraySlice {
+                    parent,
+                    offset,
+                    len,
+                } => {
+                    let slice =
+                        &parent.data[*offset as usize..(*offset + *len) as usize];
+                    write!(f, "Vec<number>[")?;
+                    for (i, v) in slice.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        if *v == v.trunc() && v.abs() < 1e15 {
+                            write!(f, "{}", *v as i64)?;
+                        } else {
+                            write!(f, "{}", v)?;
+                        }
                     }
                     write!(f, "]")
                 }

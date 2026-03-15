@@ -61,7 +61,7 @@ pub mod string_interpolation;
 pub(crate) struct LoopContext {
     /// Break jump targets
     pub(crate) break_jumps: Vec<usize>,
-    /// Continue jump target
+    /// Continue jump target (usize::MAX = deferred, use continue_jumps)
     pub(crate) continue_target: usize,
     /// Optional local to store break values for expression loops
     pub(crate) break_value_local: Option<u16>,
@@ -69,6 +69,9 @@ pub(crate) struct LoopContext {
     pub(crate) iterator_on_stack: bool,
     /// Drop scope depth when the loop was entered (for break/continue early exit drops)
     pub(crate) drop_scope_depth: usize,
+    /// Forward-patched continue jumps for range counter loops where the
+    /// increment block is after the body (so continue must forward-jump).
+    pub(crate) continue_jumps: Vec<usize>,
 }
 
 /// Information about an imported symbol (fields used for diagnostics/LSP)

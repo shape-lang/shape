@@ -255,7 +255,7 @@ pub(crate) fn handle_to_mat(
         }
     }
     let mat = shape_value::heap_value::MatrixData::from_flat(data, row_count as u32, n_cols as u32);
-    vm.push_vw(ValueWord::from_matrix(Box::new(mat)))
+    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(mat)))
 }
 
 /// `dt.tail(n)` — last n rows (default 5).

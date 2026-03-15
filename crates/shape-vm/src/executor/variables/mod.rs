@@ -90,6 +90,36 @@ impl VirtualMachine {
                     }
                     Ok(ValueWord::none())
                 }
+                RefProjection::MatrixRow { row_index } => {
+                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "internal error: projected reference base is not a reference"
+                                .to_string(),
+                        )
+                    })?;
+                    // Return the row as a FloatArraySlice (read-only view)
+                    if let Some(HeapValue::Matrix(mat_arc)) = base_value.as_heap_ref() {
+                        let cols = mat_arc.cols;
+                        let offset = *row_index * cols;
+                        if *row_index < mat_arc.rows {
+                            return Ok(ValueWord::from_heap_value(
+                                HeapValue::FloatArraySlice {
+                                    parent: mat_arc.clone(),
+                                    offset,
+                                    len: cols,
+                                },
+                            ));
+                        }
+                        return Err(VMError::RuntimeError(format!(
+                            "Matrix row index {} out of bounds for {}x{} matrix",
+                            row_index, mat_arc.rows, mat_arc.cols
+                        )));
+                    }
+                    Err(VMError::RuntimeError(
+                        "cannot read through a MatrixRow reference: base is not a matrix"
+                            .to_string(),
+                    ))
+                }
             },
         }
     }
@@ -190,6 +220,13 @@ impl VirtualMachine {
                     )?;
                     self.write_ref_value(&data.base, base_value)
                 }
+                RefProjection::MatrixRow { .. } => {
+                    Err(VMError::RuntimeError(
+                        "cannot assign a whole value to a matrix row reference; \
+                         use row[col] = value to mutate individual elements"
+                            .to_string(),
+                    ))
+                }
             },
         }
     }
@@ -208,6 +245,103 @@ impl VirtualMachine {
     pub(in crate::executor) fn resolve_ref_value(&self, value: &ValueWord) -> Option<ValueWord> {
         let target = value.as_ref_target()?;
         self.read_ref_target(&target).ok()
+    }
+
+    /// Write a single element in a matrix row through a borrow reference.
+    ///
+    /// `base_ref` is a TAG_REF pointing at the stack slot or module binding
+    /// holding the `Matrix(Arc<MatrixData>)`. We resolve it, call
+    /// `Arc::make_mut` for COW semantics, then write
+    /// `data[row_index * cols + col_index]`.
+    fn set_matrix_row_element(
+        &mut self,
+        base_ref: &ValueWord,
+        row_index: u32,
+        col_index_nb: &ValueWord,
+        value: ValueWord,
+    ) -> Result<(), VMError> {
+        let col_idx = col_index_nb
+            .as_i64()
+            .or_else(|| col_index_nb.as_f64().map(|f| f as i64))
+            .ok_or_else(|| {
+                VMError::RuntimeError("matrix column index must be a number".to_string())
+            })?;
+
+        let val_f64 = value.as_f64().or_else(|| value.as_i64().map(|i| i as f64)).ok_or_else(|| {
+            VMError::RuntimeError(
+                "matrix element must be a number".to_string(),
+            )
+        })?;
+
+        // Resolve the base ref to find which slot holds the matrix.
+        let base_target = base_ref.as_ref_target().ok_or_else(|| {
+            VMError::RuntimeError(
+                "internal error: MatrixRow base is not a reference".to_string(),
+            )
+        })?;
+
+        // Get mutable access to the matrix slot and do COW mutation.
+        match base_target {
+            RefTarget::Stack(slot) => {
+                let matrix_vw = &mut self.stack[slot];
+                Self::cow_matrix_write(matrix_vw, row_index, col_idx, val_f64)
+            }
+            RefTarget::ModuleBinding(slot) => {
+                if slot >= self.module_bindings.len() {
+                    return Err(VMError::RuntimeError(format!(
+                        "ModuleBinding index {} out of bounds",
+                        slot
+                    )));
+                }
+                let matrix_vw = &mut self.module_bindings[slot];
+                Self::cow_matrix_write(matrix_vw, row_index, col_idx, val_f64)
+            }
+            RefTarget::Projected(_) => Err(VMError::RuntimeError(
+                "nested projected references for matrix row mutation are not supported"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Perform COW write into a matrix ValueWord at `data[row * cols + col]`.
+    fn cow_matrix_write(
+        matrix_vw: &mut ValueWord,
+        row_index: u32,
+        col_idx: i64,
+        val: f64,
+    ) -> Result<(), VMError> {
+        let heap = matrix_vw.as_heap_mut().ok_or_else(|| {
+            VMError::RuntimeError(
+                "cannot write through MatrixRow reference: target is not a heap value".to_string(),
+            )
+        })?;
+
+        match heap {
+            HeapValue::Matrix(arc) => {
+                let mat = Arc::make_mut(arc);
+                let cols = mat.cols as i64;
+                let actual_col = if col_idx < 0 { cols + col_idx } else { col_idx };
+                if actual_col < 0 || actual_col >= cols {
+                    return Err(VMError::RuntimeError(format!(
+                        "Matrix column index {} out of bounds for {} columns",
+                        col_idx, mat.cols
+                    )));
+                }
+                if row_index >= mat.rows {
+                    return Err(VMError::RuntimeError(format!(
+                        "Matrix row index {} out of bounds for {} rows",
+                        row_index, mat.rows
+                    )));
+                }
+                let flat_idx = (row_index as usize) * (mat.cols as usize) + (actual_col as usize);
+                record_heap_write();
+                mat.data[flat_idx] = val;
+                Ok(())
+            }
+            _ => Err(VMError::RuntimeError(
+                "cannot write through MatrixRow reference: target is not a Matrix".to_string(),
+            )),
+        }
     }
 
     #[inline(always)]
@@ -526,6 +660,9 @@ impl VirtualMachine {
 
     /// MakeIndexRef: pop an index value and a base reference, push a projected
     /// `RefProjection::Index` reference that points to `base[index]`.
+    ///
+    /// If the base value is a Matrix, a `MatrixRow` projection is created instead
+    /// so that `SetIndexRef` can do COW element-level mutation through the row ref.
     pub(in crate::executor) fn op_make_index_ref(
         &mut self,
         _instruction: &Instruction,
@@ -537,10 +674,40 @@ impl VirtualMachine {
                 "internal error: MakeIndexRef expected a base reference".to_string(),
             ));
         }
-        self.push_vw(ValueWord::from_projected_ref(
-            base_ref,
-            RefProjection::Index { index },
-        ))?;
+
+        // Check if the base is a matrix — if so, create a MatrixRow projection
+        // for borrow-based row mutation.
+        let base_value = self.resolve_ref_value(&base_ref);
+        let is_matrix = base_value
+            .as_ref()
+            .and_then(|v| v.as_heap_ref())
+            .is_some_and(|hv| matches!(hv, HeapValue::Matrix(_)));
+
+        let projection = if is_matrix {
+            // Convert index to row index
+            let row_idx = index
+                .as_i64()
+                .or_else(|| index.as_f64().map(|f| f as i64))
+                .ok_or_else(|| {
+                    VMError::RuntimeError(
+                        "matrix row index must be a number".to_string(),
+                    )
+                })?;
+            let mat = base_value.as_ref().unwrap().as_matrix().unwrap();
+            let rows = mat.rows as i64;
+            let actual = if row_idx < 0 { rows + row_idx } else { row_idx };
+            if actual < 0 || actual >= rows {
+                return Err(VMError::RuntimeError(format!(
+                    "Matrix row index {} out of bounds for {}x{} matrix",
+                    row_idx, mat.rows, mat.cols
+                )));
+            }
+            RefProjection::MatrixRow { row_index: actual as u32 }
+        } else {
+            RefProjection::Index { index }
+        };
+
+        self.push_vw(ValueWord::from_projected_ref(base_ref, projection))?;
         Ok(())
     }
 
@@ -640,10 +807,15 @@ impl VirtualMachine {
                     *target_slot = object_nb;
                     result
                 }
-                RefTarget::Projected(_) => {
-                    let mut object_nb = self.read_ref_target(&target)?;
-                    Self::set_array_index_on_object(&mut object_nb, &index_nb, value)?;
-                    self.write_ref_target(&target, object_nb)
+                RefTarget::Projected(ref proj_data) => {
+                    if let RefProjection::MatrixRow { row_index } = proj_data.projection {
+                        // Matrix row mutation: COW write directly into the backing matrix.
+                        self.set_matrix_row_element(&proj_data.base, row_index, &index_nb, value)
+                    } else {
+                        let mut object_nb = self.read_ref_target(&target)?;
+                        Self::set_array_index_on_object(&mut object_nb, &index_nb, value)?;
+                        self.write_ref_target(&target, object_nb)
+                    }
                 }
             }
         } else {

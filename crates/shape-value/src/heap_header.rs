@@ -231,7 +231,7 @@ impl HeapHeader {
 impl HeapKind {
     /// The last (highest-numbered) variant in HeapKind.
     /// IMPORTANT: Update this when adding new HeapKind variants.
-    pub const MAX_VARIANT: Self = HeapKind::ProjectedRef;
+    pub const MAX_VARIANT: Self = HeapKind::FloatArraySlice;
 
     /// Convert a u16 discriminant to a HeapKind, returning None if out of range.
     #[inline]

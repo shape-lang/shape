@@ -8,11 +8,15 @@
 //!
 //! Memory layout (`#[repr(C)]`, all offsets guaranteed):
 //! ```text
-//!   offset  0: data         — *mut u64 (boxed element buffer)
-//!   offset  8: len          — u64 (number of elements)
-//!   offset 16: cap          — u64 (allocated capacity)
-//!   offset 24: typed_data   — *mut u64 (raw typed payload mirror, optional)
-//!   offset 32: element_kind — u8  (ArrayElementKind tag)
+//!   offset  0: data              — *mut u64 (boxed element buffer)
+//!   offset  8: len               — u64 (number of elements)
+//!   offset 16: cap               — u64 (allocated capacity)
+//!   offset 24: typed_data        — *mut u64 (raw typed payload mirror, optional)
+//!   offset 32: element_kind      — u8  (ArrayElementKind tag)
+//!   offset 33: typed_storage_kind— u8
+//!   offset 40: slice_parent_arc  — *const () (leaked Arc<MatrixData> for FloatArraySlice round-trip)
+//!   offset 48: slice_offset      — u32 (row offset into parent matrix data)
+//!   offset 52: slice_len         — u32 (number of elements in the slice)
 //! ```
 
 use crate::nan_boxing::{TAG_BOOL_FALSE, TAG_BOOL_TRUE, is_number, unbox_number};
@@ -32,6 +36,14 @@ pub enum ArrayElementKind {
     Float64 = 1,
     Int64 = 2,
     Bool = 3,
+    I8 = 4,
+    I16 = 5,
+    I32 = 6,
+    U8 = 7,
+    U16 = 8,
+    U32 = 9,
+    U64 = 10,
+    F32 = 11,
 }
 
 impl ArrayElementKind {
@@ -41,6 +53,14 @@ impl ArrayElementKind {
             1 => Self::Float64,
             2 => Self::Int64,
             3 => Self::Bool,
+            4 => Self::I8,
+            5 => Self::I16,
+            6 => Self::I32,
+            7 => Self::U8,
+            8 => Self::U16,
+            9 => Self::U32,
+            10 => Self::U64,
+            11 => Self::F32,
             _ => Self::Untyped,
         }
     }
@@ -68,6 +88,14 @@ pub struct JitArray {
     pub typed_storage_kind: u8,
     /// Keep struct alignment stable and explicit.
     pub _padding: [u8; 6],
+    /// For FloatArraySlice round-trip: leaked `Arc<MatrixData>` pointer.
+    /// Null for non-slice arrays. On JIT exit, this is reconstituted into
+    /// an Arc to rebuild the FloatArraySlice with correct parent linkage.
+    pub slice_parent_arc: *const (),
+    /// Row offset into the parent matrix's data buffer (for FloatArraySlice).
+    pub slice_offset: u32,
+    /// Element count of the slice (for FloatArraySlice).
+    pub slice_len: u32,
 }
 
 impl JitArray {
@@ -81,6 +109,9 @@ impl JitArray {
             element_kind: ArrayElementKind::Untyped.as_byte(),
             typed_storage_kind: ArrayElementKind::Untyped.as_byte(),
             _padding: [0; 6],
+            slice_parent_arc: std::ptr::null(),
+            slice_offset: 0,
+            slice_len: 0,
         }
     }
 
@@ -98,6 +129,9 @@ impl JitArray {
             element_kind: ArrayElementKind::Untyped.as_byte(),
             typed_storage_kind: ArrayElementKind::Untyped.as_byte(),
             _padding: [0; 6],
+            slice_parent_arc: std::ptr::null(),
+            slice_offset: 0,
+            slice_len: 0,
         }
     }
 
@@ -121,6 +155,9 @@ impl JitArray {
             element_kind: ArrayElementKind::Untyped.as_byte(),
             typed_storage_kind: ArrayElementKind::Untyped.as_byte(),
             _padding: [0; 6],
+            slice_parent_arc: std::ptr::null(),
+            slice_offset: 0,
+            slice_len: 0,
         };
         arr.initialize_typed_from_boxed(elements);
         arr
@@ -146,6 +183,9 @@ impl JitArray {
             element_kind: ArrayElementKind::Untyped.as_byte(),
             typed_storage_kind: ArrayElementKind::Untyped.as_byte(),
             _padding: [0; 6],
+            slice_parent_arc: std::ptr::null(),
+            slice_offset: 0,
+            slice_len: 0,
         };
 
         let elements = unsafe { slice::from_raw_parts(data, len) };
@@ -190,8 +230,16 @@ impl JitArray {
         }
         match kind {
             ArrayElementKind::Untyped => None,
-            ArrayElementKind::Bool => Layout::array::<u8>(cap.div_ceil(8)).ok(),
-            ArrayElementKind::Float64 | ArrayElementKind::Int64 => Layout::array::<u64>(cap).ok(),
+            ArrayElementKind::Bool | ArrayElementKind::I8 | ArrayElementKind::U8 => {
+                Layout::array::<u8>(cap.div_ceil(if kind == ArrayElementKind::Bool { 8 } else { 1 })).ok()
+            }
+            ArrayElementKind::I16 | ArrayElementKind::U16 => Layout::array::<u16>(cap).ok(),
+            ArrayElementKind::I32 | ArrayElementKind::U32 | ArrayElementKind::F32 => {
+                Layout::array::<u32>(cap).ok()
+            }
+            ArrayElementKind::Float64 | ArrayElementKind::Int64 | ArrayElementKind::U64 => {
+                Layout::array::<u64>(cap).ok()
+            }
         }
     }
 
@@ -358,6 +406,19 @@ impl JitArray {
                 } else {
                     return false;
                 }
+            }
+            // Width-specific types: extract f64, cast to target type.
+            ArrayElementKind::I8 | ArrayElementKind::I16 | ArrayElementKind::I32
+            | ArrayElementKind::U8 | ArrayElementKind::U16 | ArrayElementKind::U32
+            | ArrayElementKind::U64 | ArrayElementKind::F32 => {
+                if !is_number(boxed_value) {
+                    return false;
+                }
+                let f = unbox_number(boxed_value);
+                // Store the truncated integer or f32 bits in the low bytes.
+                // The write below uses typed_data stride = 8 bytes per slot,
+                // which is correct for all types (overallocated for < 8-byte types).
+                f as i64 as u64
             }
         };
 
@@ -604,6 +665,14 @@ impl Drop for JitArray {
             let typed_kind = self.typed_storage_kind();
             Self::dealloc_typed_buffer(self.typed_data, typed_kind, self.cap as usize);
         }
+        // Drop the leaked Arc<MatrixData> if this was a FloatArraySlice.
+        if !self.slice_parent_arc.is_null() {
+            unsafe {
+                let _ = std::sync::Arc::from_raw(
+                    self.slice_parent_arc as *const shape_value::heap_value::MatrixData,
+                );
+            }
+        }
     }
 }
 
@@ -644,7 +713,8 @@ mod tests {
             std::mem::offset_of!(JitArray, element_kind),
             ELEMENT_KIND_OFFSET as usize
         );
-        assert_eq!(std::mem::size_of::<JitArray>(), 40);
+        // 40 base + 8 (slice_parent_arc ptr) + 4 (slice_offset) + 4 (slice_len) = 56
+        assert_eq!(std::mem::size_of::<JitArray>(), 56);
     }
 
     #[test]

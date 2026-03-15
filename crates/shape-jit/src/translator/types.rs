@@ -541,6 +541,20 @@ pub struct BytecodeToIR<'a, 'b> {
     /// Eliminates redundant deref + tag check + pointer extraction per iteration.
     pub(crate) hoisted_ref_array_info: HashMap<u16, (Value, Value)>,
 
+    // ========================================================================
+    // Call LICM (Loop-Invariant Code Motion for Pure Calls)
+    // ========================================================================
+    /// Pre-computed results for hoisted pure function calls.
+    /// Maps the call instruction index to a Cranelift Variable holding the
+    /// result computed once in the loop pre-header.
+    pub(crate) licm_hoisted_results: HashMap<usize, Variable>,
+
+    /// Instruction indices that should be skipped because they are part of a
+    /// hoisted call sequence (arg pushes + argc push + call instruction).
+    /// The call instruction itself is NOT in this set -- it's handled by
+    /// `licm_hoisted_results` to push the pre-computed result.
+    pub(crate) licm_skip_indices: std::collections::HashSet<usize>,
+
     /// Function parameters inferred as numeric by local bytecode analysis.
     /// These are used as compile-time hints for LoadLocal typed-stack tracking.
     pub(crate) numeric_param_hints: std::collections::HashSet<u16>,
@@ -608,4 +622,12 @@ pub struct BytecodeToIR<'a, 'b> {
     /// Pushed when entering an inline call, popped when exiting.
     /// Used to reconstruct the full call stack on guard failure inside inlined code.
     pub(crate) inline_frame_stack: Vec<InlineFrameContext>,
+
+    // ========================================================================
+    // Escape Analysis / Scalar Replacement
+    // ========================================================================
+    /// Scalar-replaced arrays: maps local slot -> Vec of Cranelift Variables,
+    /// one per array element. When an array is scalar-replaced, its elements
+    /// live in SSA variables instead of a heap-allocated array.
+    pub(crate) scalar_replaced_arrays: HashMap<u16, Vec<Variable>>,
 }

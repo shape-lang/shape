@@ -183,6 +183,13 @@ pub const HEAP_KIND_U16_ARRAY: u8 = 61;
 pub const HEAP_KIND_U32_ARRAY: u8 = 62;
 pub const HEAP_KIND_U64_ARRAY: u8 = 63;
 pub const HEAP_KIND_F32_ARRAY: u8 = 64;
+pub const HEAP_KIND_SET: u8 = 65;
+pub const HEAP_KIND_DEQUE: u8 = 66;
+pub const HEAP_KIND_PRIORITY_QUEUE: u8 = 67;
+pub const HEAP_KIND_CHANNEL: u8 = 68;
+pub const HEAP_KIND_CHAR: u8 = 69;
+pub const HEAP_KIND_PROJECTED_REF: u8 = 70;
+pub const HEAP_KIND_FLOAT_ARRAY_SLICE: u8 = 71;
 
 #[cfg(test)]
 mod tests {
@@ -307,5 +314,15 @@ mod tests {
         assert_eq!(HEAP_KIND_U32_ARRAY, HeapKind::U32Array as u8);
         assert_eq!(HEAP_KIND_U64_ARRAY, HeapKind::U64Array as u8);
         assert_eq!(HEAP_KIND_F32_ARRAY, HeapKind::F32Array as u8);
+        assert_eq!(HEAP_KIND_SET, HeapKind::Set as u8);
+        assert_eq!(HEAP_KIND_DEQUE, HeapKind::Deque as u8);
+        assert_eq!(HEAP_KIND_PRIORITY_QUEUE, HeapKind::PriorityQueue as u8);
+        assert_eq!(HEAP_KIND_CHANNEL, HeapKind::Channel as u8);
+        assert_eq!(HEAP_KIND_CHAR, HeapKind::Char as u8);
+        assert_eq!(HEAP_KIND_PROJECTED_REF, HeapKind::ProjectedRef as u8);
+        assert_eq!(
+            HEAP_KIND_FLOAT_ARRAY_SLICE,
+            HeapKind::FloatArraySlice as u8
+        );
     }
 }

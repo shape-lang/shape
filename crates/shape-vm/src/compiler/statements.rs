@@ -3527,11 +3527,20 @@ impl BytecodeCompiler {
                     if scopes_to_exit > 0 {
                         self.emit_drops_for_early_exit(scopes_to_exit)?;
                     }
-                    let offset = continue_target as i32 - self.program.current_offset() as i32 - 1;
-                    self.emit(Instruction::new(
-                        OpCode::Jump,
-                        Some(Operand::Offset(offset)),
-                    ));
+                    if continue_target == usize::MAX {
+                        // Deferred continue: emit placeholder forward jump
+                        let jump_idx = self.emit_jump(OpCode::Jump, 0);
+                        if let Some(loop_ctx) = self.loop_stack.last_mut() {
+                            loop_ctx.continue_jumps.push(jump_idx);
+                        }
+                    } else {
+                        let offset =
+                            continue_target as i32 - self.program.current_offset() as i32 - 1;
+                        self.emit(Instruction::new(
+                            OpCode::Jump,
+                            Some(Operand::Offset(offset)),
+                        ));
+                    }
                 } else {
                     return Err(ShapeError::RuntimeError {
                         message: "continue statement outside of loop".to_string(),

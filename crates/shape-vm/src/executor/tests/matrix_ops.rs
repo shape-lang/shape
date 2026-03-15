@@ -7,8 +7,21 @@
 use super::*;
 use shape_value::ValueWord;
 use shape_value::aligned_vec::AlignedVec;
-use shape_value::heap_value::MatrixData;
+use shape_value::heap_value::{HeapValue, MatrixData};
 use std::sync::Arc;
+
+/// Extract f64 slice data from either a FloatArray or FloatArraySlice.
+fn extract_float_data(vw: &ValueWord) -> Vec<f64> {
+    match vw.as_heap_ref() {
+        Some(HeapValue::FloatArray(arr)) => arr.as_slice().to_vec(),
+        Some(HeapValue::FloatArraySlice { parent, offset, len }) => {
+            let off = *offset as usize;
+            let slice_len = *len as usize;
+            parent.data[off..off + slice_len].to_vec()
+        }
+        _ => panic!("expected FloatArray or FloatArraySlice, got {}", vw.type_name()),
+    }
+}
 
 /// Build a 2x3 matrix [[1,2,3],[4,5,6]]
 fn test_matrix_2x3() -> ValueWord {
@@ -16,7 +29,7 @@ fn test_matrix_2x3() -> ValueWord {
     for v in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] {
         data.push(v);
     }
-    ValueWord::from_matrix(Box::new(MatrixData::from_flat(data, 2, 3)))
+    ValueWord::from_matrix(std::sync::Arc::new(MatrixData::from_flat(data, 2, 3)))
 }
 
 /// Build a 2x2 matrix [[a,b],[c,d]]
@@ -25,7 +38,7 @@ fn test_matrix_2x2(a: f64, b: f64, c: f64, d: f64) -> ValueWord {
     for v in [a, b, c, d] {
         data.push(v);
     }
-    ValueWord::from_matrix(Box::new(MatrixData::from_flat(data, 2, 2)))
+    ValueWord::from_matrix(std::sync::Arc::new(MatrixData::from_flat(data, 2, 2)))
 }
 
 /// Build a 3x2 matrix [[1,2],[3,4],[5,6]]
@@ -34,7 +47,7 @@ fn test_matrix_3x2() -> ValueWord {
     for v in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] {
         data.push(v);
     }
-    ValueWord::from_matrix(Box::new(MatrixData::from_flat(data, 3, 2)))
+    ValueWord::from_matrix(std::sync::Arc::new(MatrixData::from_flat(data, 3, 2)))
 }
 
 // ============================================================
@@ -126,8 +139,8 @@ fn test_matrix_index_access() {
     ];
     let constants = vec![Constant::Value(test_matrix_2x3()), Constant::Number(0.0)];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().expect("should be FloatArray");
-    assert_eq!(&arr[..], &[1.0, 2.0, 3.0]);
+    let data = extract_float_data(&result);
+    assert_eq!(&data[..], &[1.0, 2.0, 3.0]);
 }
 
 #[test]
@@ -140,8 +153,8 @@ fn test_matrix_negative_index() {
     ];
     let constants = vec![Constant::Value(test_matrix_2x3()), Constant::Number(-1.0)];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_float_array().expect("should be FloatArray");
-    assert_eq!(&arr[..], &[4.0, 5.0, 6.0]);
+    let data = extract_float_data(&result);
+    assert_eq!(&data[..], &[4.0, 5.0, 6.0]);
 }
 
 #[test]
@@ -228,8 +241,8 @@ fn test_matrix_reshape() {
 fn test_matrix_row() {
     // [[1,2,3],[4,5,6]].row(1) => [4,5,6]
     let result = method_call(test_matrix_2x3(), "row", vec![ValueWord::from_f64(1.0)]);
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(&arr[..], &[4.0, 5.0, 6.0]);
+    let data = extract_float_data(&result);
+    assert_eq!(&data[..], &[4.0, 5.0, 6.0]);
 }
 
 #[test]
@@ -480,8 +493,8 @@ fn test_matrix_dimension_mismatch_add() {
 fn test_matrix_row_negative_index() {
     // [[1,2,3],[4,5,6]].row(-1) => [4,5,6]
     let result = method_call(test_matrix_2x3(), "row", vec![ValueWord::from_f64(-1.0)]);
-    let arr = result.as_float_array().unwrap();
-    assert_eq!(&arr[..], &[4.0, 5.0, 6.0]);
+    let data = extract_float_data(&result);
+    assert_eq!(&data[..], &[4.0, 5.0, 6.0]);
 }
 
 #[test]
@@ -553,4 +566,308 @@ fn test_matrix_identity_inverse() {
     assert!((mat.data[1] - 0.0).abs() < 1e-10);
     assert!((mat.data[2] - 0.0).abs() < 1e-10);
     assert!((mat.data[3] - 1.0).abs() < 1e-10);
+}
+
+// ============================================================
+// Borrow-checked matrix row mutation (Phase 2B)
+// ============================================================
+
+use crate::VMConfig;
+use crate::executor::VirtualMachine;
+use crate::bytecode::BytecodeProgram;
+
+/// Execute bytecode with a specified number of top-level locals.
+/// Needed for tests that use StoreLocal/LoadLocal, so that the SP
+/// starts above the locals region.
+fn execute_bytecode_with_locals(
+    instructions: Vec<Instruction>,
+    constants: Vec<Constant>,
+    num_locals: u16,
+) -> Result<ValueWord, shape_value::VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        top_level_locals_count: num_locals,
+        ..Default::default()
+    };
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None).map(|nb| nb.clone())
+}
+
+/// Test: MakeIndexRef on a matrix creates a MatrixRow projection that
+/// can be read via DerefLoad as a FloatArraySlice.
+#[test]
+fn test_matrix_row_ref_deref_load() {
+    // local[0] = matrix, local[1] = unused, local[2] = row ref
+    // DerefLoad local[2] => FloatArraySlice [3, 4]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 1
+        Instruction::simple(OpCode::MakeIndexRef),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))),
+        Instruction::new(OpCode::DerefLoad, Some(Operand::Local(2))),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Number(1.0),
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 3).unwrap();
+    let data = extract_float_data(&result);
+    assert_eq!(&data[..], &[3.0, 4.0]);
+}
+
+/// Test: SetIndexRef through a MatrixRow ref writes a single element with COW.
+#[test]
+fn test_matrix_row_ref_set_index_ref() {
+    // local[0] = matrix, local[1] = unused, local[2] = row ref
+    // SetIndexRef: row[1] = 99.0 => [[1,99],[3,4]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 0
+        Instruction::simple(OpCode::MakeIndexRef),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))),
+        // SetIndexRef: push col_index=1, value=99.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // col 1
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 99.0
+        Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(2))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Number(0.0),  // row index 0
+        Constant::Number(1.0),  // col index 1
+        Constant::Number(99.0), // value
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 3).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(&mat.data[..], &[1.0, 99.0, 3.0, 4.0]);
+}
+
+/// Test: Multiple mutations through the same row ref.
+#[test]
+fn test_matrix_row_ref_multiple_writes() {
+    // local[0] = [[10,20,30],[40,50,60]]
+    // local[1] = row ref to row 1
+    // row[0] = 100.0, row[2] = 200.0
+    // => [[10,20,30],[100,50,200]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 1
+        Instruction::simple(OpCode::MakeIndexRef),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+        // row[0] = 100.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // col 0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 100.0
+        Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(1))),
+        // row[2] = 200.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(4))), // col 2
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(5))), // 200.0
+        Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(1))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+    ];
+    let mat_val = {
+        let mut data = AlignedVec::with_capacity(6);
+        for v in [10.0, 20.0, 30.0, 40.0, 50.0, 60.0] {
+            data.push(v);
+        }
+        ValueWord::from_matrix(Arc::new(MatrixData::from_flat(data, 2, 3)))
+    };
+    let constants = vec![
+        Constant::Value(mat_val),
+        Constant::Number(1.0),   // row index
+        Constant::Number(0.0),   // col 0
+        Constant::Number(100.0), // value
+        Constant::Number(2.0),   // col 2
+        Constant::Number(200.0), // value
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 2).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(mat.rows, 2);
+    assert_eq!(mat.cols, 3);
+    assert_eq!(&mat.data[..], &[10.0, 20.0, 30.0, 100.0, 50.0, 200.0]);
+}
+
+/// Test: COW semantics — sharing matrix then mutating through row ref only
+/// affects the local copy.
+#[test]
+fn test_matrix_row_ref_cow_semantics() {
+    // local[0] = matrix (original)
+    // local[1] = local[0] (shares Arc)
+    // local[2] = MatrixRow ref to local[0] row 0
+    // row[0] = 99.0 (COW: detaches local[0] from local[1])
+    // return local[1] => [[1,2],[3,4]] (unchanged)
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 0
+        Instruction::simple(OpCode::MakeIndexRef),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))),
+        // row[0] = 99.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // col 0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 99.0
+        Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(2))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Number(0.0),  // row/col 0
+        Constant::Number(99.0), // value
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 3).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(&mat.data[..], &[1.0, 2.0, 3.0, 4.0]);
+}
+
+/// Test: Negative column index in SetIndexRef.
+#[test]
+fn test_matrix_row_ref_negative_col_index() {
+    // [[1,2,3],[4,5,6]], row_ref = &mut m[0], row_ref[-1] = 99.0
+    // => [[1,2,99],[4,5,6]]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 0
+        Instruction::simple(OpCode::MakeIndexRef),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+        // row[-1] = 99.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // col -1
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 99.0
+        Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(1))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+    ];
+    let mat_val = {
+        let mut data = AlignedVec::with_capacity(6);
+        for v in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            data.push(v);
+        }
+        ValueWord::from_matrix(Arc::new(MatrixData::from_flat(data, 2, 3)))
+    };
+    let constants = vec![
+        Constant::Value(mat_val),
+        Constant::Number(0.0),   // row 0
+        Constant::Number(-1.0),  // col -1
+        Constant::Number(99.0),  // value
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 2).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(&mat.data[..], &[1.0, 2.0, 99.0, 4.0, 5.0, 6.0]);
+}
+
+/// Test: Out-of-bounds column index in SetIndexRef produces an error.
+#[test]
+fn test_matrix_row_ref_col_oob_error() {
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 0
+        Instruction::simple(OpCode::MakeIndexRef),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+        // col 5 is out of bounds for 2-col matrix
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // col 5
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 99.0
+        Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(1))),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Number(0.0),   // row 0
+        Constant::Number(5.0),   // col 5 (out of bounds!)
+        Constant::Number(99.0),  // value
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 2);
+    assert!(result.is_err());
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(err_msg.contains("column index") || err_msg.contains("out of bounds"));
+}
+
+/// Test: Out-of-bounds row index in MakeIndexRef produces an error.
+#[test]
+fn test_matrix_row_ref_row_oob_error() {
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 10 (OOB)
+        Instruction::simple(OpCode::MakeIndexRef),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Number(10.0), // row 10 (out of bounds for 2-row matrix)
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 1);
+    assert!(result.is_err());
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(err_msg.contains("row index") || err_msg.contains("out of bounds"));
+}
+
+/// Test: Verify that mutation through row ref is visible via subsequent row read.
+#[test]
+fn test_matrix_row_ref_read_after_write() {
+    // local[0] = matrix, local[1] = row ref
+    // row[1] = 77.0 => [[1,77],[3,4]]
+    // GetProp local[0][0] => FloatArraySlice [1, 77]
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 0
+        Instruction::simple(OpCode::MakeIndexRef),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+        // row[1] = 77.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // col 1
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 77.0
+        Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(1))),
+        // Read local[0][0] via GetProp
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // index 0
+        Instruction::simple(OpCode::GetProp),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Number(0.0),  // row/col 0
+        Constant::Number(1.0),  // col 1
+        Constant::Number(77.0), // value
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 2).unwrap();
+    let data = extract_float_data(&result);
+    assert_eq!(&data[..], &[1.0, 77.0]);
+}
+
+/// Test: Integer index values work for SetIndexRef (not just floats).
+#[test]
+fn test_matrix_row_ref_int_index() {
+    // Use integer constants for row and column indices
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::MakeRef, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // row 0 (int)
+        Instruction::simple(OpCode::MakeIndexRef),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+        // row[1] = 42.0
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // col 1 (int)
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 42.0
+        Instruction::new(OpCode::SetIndexRef, Some(Operand::Local(1))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+    ];
+    let constants = vec![
+        Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
+        Constant::Int(0),    // row 0
+        Constant::Int(1),    // col 1
+        Constant::Number(42.0),
+    ];
+    let result = execute_bytecode_with_locals(instructions, constants, 2).unwrap();
+    let mat = result.as_matrix().unwrap();
+    assert_eq!(&mat.data[..], &[1.0, 42.0, 3.0, 4.0]);
 }

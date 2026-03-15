@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -1052,6 +1053,26 @@ fn heap_value_to_serializable(
                 cols: m.cols,
             }
         }
+        HeapValue::FloatArraySlice {
+            parent,
+            offset,
+            len,
+        } => {
+            // Materialize the slice to an owned float array for serialization
+            let start = *offset as usize;
+            let end = start + *len as usize;
+            let owned: Vec<f64> = parent.data[start..end].to_vec();
+            let blob = store_chunked_bytes(slice_as_bytes(&owned), store)?;
+            let hash = store.put_struct(&blob)?;
+            SerializableVMValue::TypedArray {
+                element_kind: TypedArrayElementKind::F64,
+                blob: BlobRef {
+                    hash,
+                    kind: BlobKind::TypedArray(TypedArrayElementKind::F64),
+                },
+                len: *len as usize,
+            }
+        }
         HeapValue::Char(c) => SerializableVMValue::String(c.to_string()),
         HeapValue::Iterator(_)
         | HeapValue::Generator(_)
@@ -1272,7 +1293,7 @@ pub fn serializable_to_nanboxed(
             let data: Vec<f64> = bytes_as_slice::<f64>(&raw).to_vec();
             let aligned = shape_value::AlignedVec::from_vec(data);
             let matrix = shape_value::heap_value::MatrixData::from_flat(aligned, *rows, *cols);
-            ValueWord::from_matrix(Box::new(matrix))
+            ValueWord::from_matrix(std::sync::Arc::new(matrix))
         }
         SerializableVMValue::HashMap { keys, values } => {
             let mut k_out = Vec::with_capacity(keys.len());
@@ -1782,7 +1803,7 @@ mod tests {
         let data: Vec<f64> = (0..12).map(|i| i as f64).collect();
         let aligned = shape_value::AlignedVec::from_vec(data.clone());
         let matrix = shape_value::heap_value::MatrixData::from_flat(aligned, 3, 4);
-        let nb = ValueWord::from_matrix(Box::new(matrix));
+        let nb = ValueWord::from_matrix(std::sync::Arc::new(matrix));
 
         let serialized = nanboxed_to_serializable(&nb, &store).unwrap();
         match &serialized {

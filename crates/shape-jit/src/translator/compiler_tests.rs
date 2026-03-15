@@ -358,6 +358,7 @@ fn test_compile_osr_loop_out_of_bounds() {
         invariant_locals: Default::default(),
         invariant_module_bindings: Default::default(),
         body_can_allocate: false,
+        hoistable_calls: Vec::new(),
     };
 
     let mut jit = JITCompiler::new(JITConfig::default()).expect("JITCompiler::new should succeed");

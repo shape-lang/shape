@@ -38,6 +38,10 @@ pub struct LoopInfo {
     /// When false, the GC safepoint poll at the loop header can be skipped,
     /// eliminating a load + compare + branch per iteration (~3 cycles saved).
     pub body_can_allocate: bool,
+    /// Bytecode indices of calls that the LICM pass identified as hoistable.
+    /// Populated by the optimizer's LICM analysis after loop detection.
+    /// The translator consults this to emit hoisted calls in the loop pre-header.
+    pub hoistable_calls: Vec<usize>,
 }
 
 /// An induction variable: a local or module binding that follows the pattern
@@ -96,6 +100,7 @@ pub fn analyze_loops(program: &BytecodeProgram) -> HashMap<usize, LoopInfo> {
             induction_vars: Vec::new(),
             invariant_locals: HashSet::new(),
             invariant_module_bindings: HashSet::new(),
+            hoistable_calls: Vec::new(),
             body_can_allocate,
         };
 

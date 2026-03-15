@@ -27,7 +27,7 @@ pub fn handle_transpose(
 ) -> Result<(), VMError> {
     let m = extract_matrix(&args[0])?;
     let result = matrix_kernels::matrix_transpose(m);
-    vm.push_vw(ValueWord::from_matrix(Box::new(result)))
+    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)))
 }
 
 /// mat.inverse() -> Matrix (errors if singular)
@@ -38,7 +38,7 @@ pub fn handle_inverse(
 ) -> Result<(), VMError> {
     let m = extract_matrix(&args[0])?;
     let result = matrix_kernels::matrix_inverse(m).map_err(|e| VMError::RuntimeError(e))?;
-    vm.push_vw(ValueWord::from_matrix(Box::new(result)))
+    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)))
 }
 
 /// mat.det() or mat.determinant() -> number
@@ -113,12 +113,12 @@ pub fn handle_reshape(
     for v in m.data.iter() {
         data.push(*v);
     }
-    vm.push_vw(ValueWord::from_matrix(Box::new(MatrixData::from_flat(
+    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(MatrixData::from_flat(
         data, new_rows, new_cols,
     ))))
 }
 
-/// mat.row(i) -> FloatArray
+/// mat.row(i) -> FloatArraySlice (zero-copy view into matrix row)
 pub fn handle_row(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
@@ -132,6 +132,7 @@ pub fn handle_row(
         as i64;
 
     let rows = m.rows as i64;
+    let cols = m.cols;
     let actual = if i < 0 { rows + i } else { i };
     if actual < 0 || actual >= rows {
         return Err(VMError::RuntimeError(format!(
@@ -140,14 +141,17 @@ pub fn handle_row(
         )));
     }
 
-    let row_data = m.row_slice(actual as u32);
-    let mut aligned = AlignedVec::with_capacity(row_data.len());
-    for &v in row_data {
-        aligned.push(v);
-    }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(
-        AlignedTypedBuffer::from_aligned(aligned),
-    )))
+    // Extract the Arc<MatrixData> from the receiver HeapValue
+    let parent_arc = match args[0].as_heap_ref() {
+        Some(shape_value::heap_value::HeapValue::Matrix(arc)) => arc.clone(),
+        _ => unreachable!("extract_matrix succeeded so this must be Matrix"),
+    };
+
+    let offset = actual as u32 * cols;
+    let len = cols;
+    vm.push_vw(ValueWord::from_heap_value(
+        shape_value::heap_value::HeapValue::FloatArraySlice { parent: parent_arc, offset, len },
+    ))
 }
 
 /// mat.col(j) -> FloatArray
@@ -240,7 +244,7 @@ pub fn handle_map(
         result.push(val);
     }
 
-    vm.push_vw(ValueWord::from_matrix(Box::new(MatrixData::from_flat(
+    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(MatrixData::from_flat(
         result, m.rows, m.cols,
     ))))
 }

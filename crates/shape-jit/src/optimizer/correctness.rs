@@ -211,6 +211,29 @@ pub fn validate_plan(program: &BytecodeProgram, plan: &FunctionOptimizationPlan)
         );
     }
 
+    for (header, simd_plan) in &plan.simd_plans {
+        debug_assert!(
+            plan.loops.contains_key(header),
+            "SIMD plan loop missing loop plan: {header}"
+        );
+        debug_assert_eq!(
+            simd_plan.loop_header, *header,
+            "SIMD plan loop_header mismatch: {} vs {header}",
+            simd_plan.loop_header
+        );
+        let loop_plan = plan.loops.get(header).unwrap();
+        debug_assert_eq!(
+            loop_plan.canonical_iv,
+            Some(simd_plan.iv_slot),
+            "SIMD plan IV slot mismatch at loop {header}"
+        );
+        debug_assert_eq!(
+            loop_plan.bound_slot,
+            Some(simd_plan.bound_slot),
+            "SIMD plan bound slot mismatch at loop {header}"
+        );
+    }
+
     for idx in &plan.call_path.prefer_direct_call_sites {
         debug_assert!(
             *idx < program.instructions.len(),

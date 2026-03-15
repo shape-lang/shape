@@ -68,6 +68,12 @@ impl MatrixData {
     pub fn shape(&self) -> (u32, u32) {
         (self.rows, self.cols)
     }
+
+    /// Get a row's data as a slice (alias for `row_slice`).
+    #[inline]
+    pub fn row_data(&self, row: u32) -> &[f64] {
+        self.row_slice(row)
+    }
 }
 
 /// Lazy iterator state — supports chained transforms without materializing intermediates.
@@ -125,6 +131,14 @@ pub enum RefProjection {
     /// so it can be an int or string key at runtime.
     Index {
         index: ValueWord,
+    },
+    /// Matrix row projection: `&mut m[i]` — borrow-based row projection for
+    /// write-through mutation. The `row_index` identifies which row of the
+    /// matrix is borrowed. Reads through this ref return a `FloatArraySlice`;
+    /// writes via `SetIndexRef` do COW `Arc::make_mut` on the `MatrixData`
+    /// and update `matrix.data[row_index * cols + col_index]` in place.
+    MatrixRow {
+        row_index: u32,
     },
 }
 
@@ -1009,6 +1023,22 @@ impl HeapValue {
             (HeapValue::U64Array(a), HeapValue::U64Array(b)) => a == b,
             (HeapValue::F32Array(a), HeapValue::F32Array(b)) => a == b,
             (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
+            (
+                HeapValue::FloatArraySlice {
+                    parent: p1,
+                    offset: o1,
+                    len: l1,
+                },
+                HeapValue::FloatArraySlice {
+                    parent: p2,
+                    offset: o2,
+                    len: l2,
+                },
+            ) => {
+                let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
+                let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
+                s1 == s2
+            }
             _ => false,
         }
     }
@@ -1180,6 +1210,22 @@ impl HeapValue {
             (HeapValue::U64Array(a), HeapValue::U64Array(b)) => a == b,
             (HeapValue::F32Array(a), HeapValue::F32Array(b)) => a == b,
             (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
+            (
+                HeapValue::FloatArraySlice {
+                    parent: p1,
+                    offset: o1,
+                    len: l1,
+                },
+                HeapValue::FloatArraySlice {
+                    parent: p2,
+                    offset: o2,
+                    len: l2,
+                },
+            ) => {
+                let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
+                let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
+                s1 == s2
+            }
             // Cross-type numeric
             (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => native_scalar_bigint_eq(a, b),
             (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => native_scalar_bigint_eq(b, a),

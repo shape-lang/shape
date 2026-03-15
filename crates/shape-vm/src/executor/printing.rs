@@ -320,6 +320,22 @@ impl<'a> ValueFormatter<'a> {
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
+            Some(HeapValue::FloatArraySlice { parent, offset, len }) => {
+                let off = *offset as usize;
+                let slice_len = *len as usize;
+                let data = &parent.data[off..off + slice_len];
+                let elems: Vec<String> = data
+                    .iter()
+                    .map(|v| {
+                        if *v == v.trunc() && v.abs() < 1e15 {
+                            format!("{}.0", *v as i64)
+                        } else {
+                            format!("{}", v)
+                        }
+                    })
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
             Some(HeapValue::BoolArray(a)) => {
                 let elems: Vec<String> = a
                     .iter()

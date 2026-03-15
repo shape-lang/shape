@@ -24,6 +24,7 @@ mod ffi_symbols;
 mod foreign_bridge;
 pub mod jit_array;
 pub mod jit_cache;
+pub mod jit_matrix;
 pub mod mixed_table;
 pub mod nan_boxing;
 mod numeric_compiler;

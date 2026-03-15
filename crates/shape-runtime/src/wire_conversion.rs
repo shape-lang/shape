@@ -536,6 +536,16 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
         HeapValue::FloatArray(a) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Number(v)).collect())
         }
+        HeapValue::FloatArraySlice {
+            parent,
+            offset,
+            len,
+        } => {
+            let start = *offset as usize;
+            let end = start + *len as usize;
+            let slice = &parent.data[start..end];
+            WireValue::Array(slice.iter().map(|&v| WireValue::Number(v)).collect())
+        }
         HeapValue::BoolArray(a) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Bool(v != 0)).collect())
         }

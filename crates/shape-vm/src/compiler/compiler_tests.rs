@@ -3012,3 +3012,220 @@ fn test_supertrait_satisfied_impl_is_ok() {
         result.err()
     );
 }
+
+// =========================================================================
+// Range counter loop specialization tests
+// =========================================================================
+
+#[test]
+fn test_range_counter_loop_exclusive() {
+    // Basic exclusive range: for i in 0..5 sums to 0+1+2+3+4=10
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let mut sum = 0
+            for i in 0..5 {
+                sum = sum + i
+            }
+            sum
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(10));
+}
+
+#[test]
+fn test_range_counter_loop_inclusive() {
+    // Inclusive range: for i in 0..=5 sums to 0+1+2+3+4+5=15
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let mut sum = 0
+            for i in 0..=5 {
+                sum = sum + i
+            }
+            sum
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(15));
+}
+
+#[test]
+fn test_range_counter_loop_empty() {
+    // Empty range: 5..0 should not execute body
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let mut sum = 0
+            for i in 5..0 {
+                sum = sum + i
+            }
+            sum
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+#[test]
+fn test_range_counter_loop_break() {
+    // Break exits the loop early
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let mut sum = 0
+            for i in 0..100 {
+                if i == 5 { break }
+                sum = sum + i
+            }
+            sum
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(10)); // 0+1+2+3+4
+}
+
+#[test]
+fn test_range_counter_loop_continue() {
+    // Continue skips even numbers, sums odd: 1+3+5+7+9=25
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let mut sum = 0
+            for i in 0..10 {
+                if i % 2 == 0 { continue }
+                sum = sum + i
+            }
+            sum
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(25));
+}
+
+#[test]
+fn test_range_counter_loop_emits_typed_opcodes() {
+    // Range counter loops with int literals should emit AddInt, LtInt
+    let code = r#"
+    fn test() {
+        let mut sum = 0
+        for i in 0..10 {
+            sum = sum + i
+        }
+        sum
+    }
+    "#;
+    let program = parse_program(code).unwrap();
+    let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+    let opcodes: Vec<_> = bytecode.instructions.iter().map(|ins| ins.opcode).collect();
+    assert!(
+        opcodes.contains(&OpCode::LtInt),
+        "Range counter loop should emit LtInt, got opcodes: {:?}",
+        opcodes
+    );
+    assert!(
+        opcodes.contains(&OpCode::AddInt),
+        "Range counter loop should emit AddInt for increment, got opcodes: {:?}",
+        opcodes
+    );
+    // Should NOT emit MakeRange, IterDone, IterNext
+    assert!(
+        !opcodes.contains(&OpCode::MakeRange),
+        "Range counter loop should NOT emit MakeRange"
+    );
+    assert!(
+        !opcodes.contains(&OpCode::IterDone),
+        "Range counter loop should NOT emit IterDone"
+    );
+    assert!(
+        !opcodes.contains(&OpCode::IterNext),
+        "Range counter loop should NOT emit IterNext"
+    );
+}
+
+#[test]
+fn test_range_counter_loop_for_expr() {
+    // For expression: last body value is the expression result
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let result = for i in 0..5 { i * 2 }
+            result
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(8)); // Last iteration: 4 * 2
+}
+
+#[test]
+fn test_range_counter_loop_comprehension() {
+    // List comprehension with range: [i * 2 for i in 0..5]
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let arr = [i * 2 for i in 0..5]
+            arr.len()
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(5));
+}
+
+#[test]
+fn test_range_counter_loop_spread() {
+    // Spread-over-range: [...0..5] → [0, 1, 2, 3, 4]
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let arr = [...0..5]
+            arr.len()
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(5));
+}
+
+#[test]
+fn test_range_counter_non_range_fallback() {
+    // Non-range iterable should still work (uses generic path)
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let mut sum = 0
+            for x in [10, 20, 30] {
+                sum = sum + x
+            }
+            sum
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(60));
+}
+
+#[test]
+fn test_range_counter_string_fallback() {
+    // String iteration should still work (no specialization)
+    let result = compile_and_run(
+        r#"
+        fn test() {
+            let mut count = 0
+            for c in "abc" {
+                count = count + 1
+            }
+            count
+        }
+        test()
+        "#,
+    );
+    assert_eq!(result.as_i64(), Some(3));
+}

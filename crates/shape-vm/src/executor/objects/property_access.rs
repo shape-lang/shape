@@ -488,6 +488,29 @@ impl VirtualMachine {
                     }
                 }
 
+                // FloatArraySlice: zero-copy read-only view into matrix row
+                HeapValue::FloatArraySlice { parent, offset, len } => {
+                    let slice_len = *len as usize;
+                    let off = *offset as usize;
+                    if let Some(ks) = key_str {
+                        if ks == "length" {
+                            return self.push_vw(ValueWord::from_i64(slice_len as i64));
+                        }
+                        return Err(VMError::UndefinedProperty(ks.to_string()));
+                    }
+                    let idx_opt = key_nb
+                        .as_i64()
+                        .or_else(|| key_nb.as_f64().map(|f| f as i64));
+                    if let Some(idx) = idx_opt {
+                        let actual = if idx < 0 { slice_len as i64 + idx } else { idx };
+                        if actual >= 0 && (actual as usize) < slice_len {
+                            return self.push_vw(ValueWord::from_f64(parent.data[off + actual as usize]));
+                        } else {
+                            return self.push_vw(ValueWord::none());
+                        }
+                    }
+                }
+
                 // BoolArray: typed array indexing
                 HeapValue::BoolArray(arr) => {
                     if let Some(ks) = key_str {
@@ -546,22 +569,21 @@ impl VirtualMachine {
                             _ => return Err(VMError::UndefinedProperty(ks.to_string())),
                         }
                     }
-                    // Numeric index => extract row as FloatArray
+                    // Numeric index => extract row as zero-copy FloatArraySlice
                     let idx_opt = key_nb
                         .as_i64()
                         .or_else(|| key_nb.as_f64().map(|f| f as i64));
                     if let Some(idx) = idx_opt {
                         let rows = mat.rows as i64;
+                        let cols = mat.cols;
                         let actual = if idx < 0 { rows + idx } else { idx };
                         if actual >= 0 && (actual as u32) < mat.rows {
-                            let row_data = mat.row_slice(actual as u32);
-                            let mut aligned =
-                                shape_value::aligned_vec::AlignedVec::with_capacity(row_data.len());
-                            for &v in row_data {
-                                aligned.push(v);
-                            }
-                            return self
-                                .push_vw(ValueWord::from_float_array(Arc::new(aligned.into())));
+                            let parent_arc = mat.clone();
+                            let offset = actual as u32 * cols;
+                            let len = cols;
+                            return self.push_vw(ValueWord::from_heap_value(
+                                HeapValue::FloatArraySlice { parent: parent_arc, offset, len },
+                            ));
                         } else {
                             return self.push_vw(ValueWord::none());
                         }
@@ -858,6 +880,11 @@ impl VirtualMachine {
                     arr_mut.data.as_mut_slice()[actual as usize] = val;
                     return Ok(());
                 }
+                HeapValue::FloatArraySlice { .. } => {
+                    return Err(VMError::RuntimeError(
+                        "cannot mutate read-only row view".to_string(),
+                    ));
+                }
                 HeapValue::BoolArray(arr) => {
                     let idx = Self::parse_array_index(key_nb)?;
                     let len = arr.len() as i64;
@@ -957,6 +984,7 @@ impl VirtualMachine {
                 HeapValue::Array(arr) => arr.len(),
                 HeapValue::IntArray(arr) => arr.len(),
                 HeapValue::FloatArray(arr) => arr.len(),
+                HeapValue::FloatArraySlice { len, .. } => *len as usize,
                 HeapValue::BoolArray(arr) => arr.len(),
                 HeapValue::TypedObject { slots, .. } => slots.len(),
                 HeapValue::NativeView(view) => view.layout.fields.len(),
