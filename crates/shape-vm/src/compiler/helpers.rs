@@ -523,9 +523,18 @@ impl BytecodeCompiler {
         }
         // Check imported names (from `from ... use { Name }` imports)
         if let Some(imported) = self.imported_names.get(name) {
-            let qualified = &imported.original_name;
-            if self.is_type_known_direct(qualified) {
-                return qualified.clone();
+            // When module_path is set (graph-compiled dependency), prefer
+            // module-qualified name. This prevents accidental binding to an
+            // unrelated local/bare type of the same name.
+            if !imported.module_path.is_empty() {
+                let qualified = format!("{}::{}", imported.module_path, imported.original_name);
+                if self.is_type_known_direct(&qualified) {
+                    return qualified;
+                }
+            }
+            // Fall back to bare original name (legacy imports without module_path)
+            if self.is_type_known_direct(&imported.original_name) {
+                return imported.original_name.clone();
             }
         }
         // Try namespace module prefixes (from `use module` imports)
@@ -533,6 +542,13 @@ impl BytecodeCompiler {
             let qualified = format!("{}::{}", ns, name);
             if self.is_type_known_direct(&qualified) {
                 return qualified;
+            }
+            // Try canonical path for graph-compiled modules
+            if let Some(canonical) = self.graph_namespace_map.get(ns) {
+                let cq = format!("{}::{}", canonical, name);
+                if self.is_type_known_direct(&cq) {
+                    return cq;
+                }
             }
         }
         // Return as-is (may be a forward reference or builtin)
@@ -556,6 +572,54 @@ impl BytecodeCompiler {
                 .is_some()
             || self.type_inference.env.lookup_trait(name).is_some()
             || self.type_tracker.schema_registry().get(name).is_some()
+    }
+
+    /// Resolve a trait name to its canonical form for definition lookup.
+    ///
+    /// Returns `(canonical_name, basename)` where `canonical_name` is used for
+    /// `trait_defs` lookup and `basename` is used for dispatch registration
+    /// (runtime dispatch keys are always bare basenames).
+    pub(super) fn resolve_trait_name(&self, name: &str) -> (String, String) {
+        let basename = name.rsplit("::").next().unwrap_or(name).to_string();
+        // Check trait_defs in priority order
+        if self.trait_defs.contains_key(name) {
+            return (name.to_string(), basename);
+        }
+        for scope in self.module_scope_stack.iter().rev() {
+            let q = format!("{}::{}", scope, name);
+            if self.trait_defs.contains_key(&q) {
+                return (q, basename);
+            }
+        }
+        if let Some(imported) = self.imported_names.get(name) {
+            if !imported.module_path.is_empty() {
+                let q = format!("{}::{}", imported.module_path, imported.original_name);
+                if self.trait_defs.contains_key(&q) {
+                    return (q, basename);
+                }
+            }
+        }
+        for ns in &self.module_namespace_bindings {
+            let q = format!("{}::{}", ns, name);
+            if self.trait_defs.contains_key(&q) {
+                return (q, basename);
+            }
+            if let Some(canonical) = self.graph_namespace_map.get(ns) {
+                let cq = format!("{}::{}", canonical, name);
+                if self.trait_defs.contains_key(&cq) {
+                    return (cq, basename);
+                }
+            }
+        }
+        // Fall back to type_inference.env for built-in traits (Into, From, etc.)
+        // registered bare in mod.rs but not in trait_defs.
+        if self.type_inference.env.lookup_trait(name).is_some() {
+            return (name.to_string(), basename);
+        }
+        if self.type_inference.env.lookup_trait(&basename).is_some() {
+            return (basename.clone(), basename);
+        }
+        (name.to_string(), basename)
     }
 
     /// Mark a local/module binding slot as an array with numeric element type.
@@ -1288,6 +1352,17 @@ impl BytecodeCompiler {
     }
 
     /// Get the type tracker (for external configuration)
+    /// Resolve a local namespace name to its canonical module path.
+    ///
+    /// Checks `graph_namespace_map` first (populated by graph-driven compilation),
+    /// then falls back to `module_scope_sources` (legacy AST inlining path).
+    pub(crate) fn resolve_canonical_module_path(&self, local_name: &str) -> Option<String> {
+        self.graph_namespace_map
+            .get(local_name)
+            .or_else(|| self.module_scope_sources.get(local_name))
+            .cloned()
+    }
+
     pub fn type_tracker(&self) -> &TypeTracker {
         &self.type_tracker
     }
@@ -1438,6 +1513,20 @@ impl BytecodeCompiler {
                     .functions
                     .iter()
                     .position(|f| f.name == resolved)
+                {
+                    return Some(idx);
+                }
+            }
+            // Try module-qualified name: module_path::original_name
+            // This is needed for graph-compiled dependencies where functions
+            // are registered with their module-qualified names.
+            if !imported.module_path.is_empty() {
+                let qualified = format!("{}::{}", imported.module_path, original);
+                if let Some(idx) = self
+                    .program
+                    .functions
+                    .iter()
+                    .position(|f| f.name == qualified)
                 {
                     return Some(idx);
                 }
@@ -1746,6 +1835,7 @@ impl BytecodeCompiler {
             "clamp" => BuiltinFunction::Clamp,
             "isNaN" | "is_nan" => BuiltinFunction::IsNaN,
             "isFinite" | "is_finite" => BuiltinFunction::IsFinite,
+            "mat" => BuiltinFunction::MatFromFlat,
             _ => return None,
         };
 
@@ -1943,6 +2033,7 @@ impl BytecodeCompiler {
                 | BuiltinFunction::Clamp
                 | BuiltinFunction::IsNaN
                 | BuiltinFunction::IsFinite
+                | BuiltinFunction::MatFromFlat
         )
     }
 
@@ -2040,6 +2131,9 @@ impl BytecodeCompiler {
                         } else {
                             self.type_tracker.set_binding_type(slot, info);
                         }
+                    } else if type_name.len() == 1 && type_name.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                        // Generic type parameter (e.g., T) — skip DataTable tracking,
+                        // the concrete type will be determined at the call site.
                     } else {
                         return Err(shape_ast::error::ShapeError::SemanticError {
                             message: format!(

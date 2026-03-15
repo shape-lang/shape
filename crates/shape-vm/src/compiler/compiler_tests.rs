@@ -2612,7 +2612,7 @@ fn test_push_inplace_top_level() {
     // Standalone push at top-level script
     let result = compile_and_run(
         r#"
-        let out = [];
+        let mut out = [];
         out.push(1);
         out.push(2);
         out.push(3);
@@ -2628,7 +2628,7 @@ fn test_push_inplace_in_function() {
     let result = compile_and_run_fn(
         r#"
         fn build() {
-            let out = [];
+            let mut out = [];
             out.push(10);
             out.push(20);
             out.push(30);
@@ -2648,8 +2648,8 @@ fn test_push_inplace_in_while_loop() {
     let result = compile_and_run_fn(
         r#"
         fn build() {
-            let out = [];
-            let i = 0;
+            let mut out = [];
+            let mut i = 0;
             while i < 5 {
                 out.push(i);
                 i = i + 1;
@@ -2668,7 +2668,7 @@ fn test_push_inplace_in_for_loop() {
     let result = compile_and_run_fn(
         r#"
         fn build() {
-            let out = [];
+            let mut out = [];
             for x in [10, 20, 30] {
                 out.push(x);
             }
@@ -2686,7 +2686,7 @@ fn test_push_inplace_nested_loop() {
     let result = compile_and_run_fn(
         r#"
         fn build() {
-            let out = [];
+            let mut out = [];
             for i in [1, 2, 3] {
                 for j in [10, 20] {
                     out.push(i + j);
@@ -3229,3 +3229,4 @@ fn test_range_counter_string_fallback() {
     );
     assert_eq!(result.as_i64(), Some(3));
 }
+

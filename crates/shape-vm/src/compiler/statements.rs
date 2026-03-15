@@ -33,9 +33,7 @@ impl BytecodeCompiler {
             .unwrap_or(def.name.as_str())
             .to_string();
         let source_module_path = if let Some((owner_module, _)) = def.name.rsplit_once("::") {
-            self.module_scope_sources
-                .get(owner_module)
-                .cloned()
+            self.resolve_canonical_module_path(owner_module)
                 .unwrap_or_else(|| owner_module.to_string())
         } else {
             return Ok(());
@@ -357,7 +355,7 @@ impl BytecodeCompiler {
                 // - default impl: "Type::method" (legacy compatibility)
                 // - named impl: "Trait::Type::ImplName::method"
                 // This prevents conflicts when multiple named impls exist.
-                let trait_name = match &impl_block.trait_name {
+                let raw_trait_name = match &impl_block.trait_name {
                     shape_ast::ast::types::TypeName::Simple(n) => n.as_str(),
                     shape_ast::ast::types::TypeName::Generic { name, .. } => name.as_str(),
                 };
@@ -367,11 +365,14 @@ impl BytecodeCompiler {
                 };
                 let impl_name = impl_block.impl_name.as_deref();
 
+                // Resolve trait name: canonical for def lookup, basename for dispatch
+                let (canonical_trait, trait_basename) = self.resolve_trait_name(raw_trait_name);
+
                 // From/TryFrom impls use reverse-conversion desugaring:
                 // the method takes an explicit `value` param (no implicit self),
                 // and we auto-derive Into/TryInto trait symbols on the source type.
-                if trait_name == "From" || trait_name == "TryFrom" {
-                    return self.compile_from_impl(impl_block, trait_name, type_name);
+                if trait_basename == "From" || trait_basename == "TryFrom" {
+                    return self.compile_from_impl(impl_block, &trait_basename, type_name);
                 }
 
                 // Collect names of methods explicitly provided in the impl block
@@ -381,13 +382,13 @@ impl BytecodeCompiler {
                 for method in &impl_block.methods {
                     let func_def = self.desugar_impl_method(
                         method,
-                        trait_name,
+                        &trait_basename,
                         type_name,
                         impl_name,
                         &impl_block.target_type,
                     )?;
                     self.program.register_trait_method_symbol(
-                        trait_name,
+                        &trait_basename,
                         type_name,
                         impl_name,
                         &method.name,
@@ -396,7 +397,7 @@ impl BytecodeCompiler {
                     self.register_function(&func_def)?;
 
                     // Track drop kind per type (sync, async, or both)
-                    if trait_name == "Drop" && method.name == "drop" {
+                    if trait_basename == "Drop" && method.name == "drop" {
                         let type_key = type_name.to_string();
                         let existing = self.drop_type_info.get(&type_key).copied();
                         let new_kind = if method.is_async {
@@ -415,20 +416,20 @@ impl BytecodeCompiler {
                 }
 
                 // Install default methods from the trait definition that were not overridden
-                if let Some(trait_def) = self.trait_defs.get(trait_name).cloned() {
+                if let Some(trait_def) = self.trait_defs.get(&canonical_trait).cloned() {
                     for member in &trait_def.members {
                         if let shape_ast::ast::types::TraitMember::Default(default_method) = member
                         {
                             if !overridden.contains(default_method.name.as_str()) {
                                 let func_def = self.desugar_impl_method(
                                     default_method,
-                                    trait_name,
+                                    &trait_basename,
                                     type_name,
                                     impl_name,
                                     &impl_block.target_type,
                                 )?;
                                 self.program.register_trait_method_symbol(
-                                    trait_name,
+                                    &trait_basename,
                                     type_name,
                                     impl_name,
                                     &default_method.name,
@@ -446,14 +447,14 @@ impl BytecodeCompiler {
                     impl_block.methods.iter().map(|m| m.name.clone()).collect();
                 if let Some(selector) = impl_name {
                     let _ = self.type_inference.env.register_trait_impl_named(
-                        trait_name,
+                        &trait_basename,
                         type_name,
                         selector,
                         all_method_names,
                     );
                 } else {
                     let _ = self.type_inference.env.register_trait_impl(
-                        trait_name,
+                        &trait_basename,
                         type_name,
                         all_method_names,
                     );
@@ -462,7 +463,7 @@ impl BytecodeCompiler {
                 // C3: Verify supertrait constraints.
                 // If the trait has supertraits (e.g. `trait Foo: Bar + Baz`),
                 // check that the target type also implements each supertrait.
-                if let Some(trait_def) = self.trait_defs.get(trait_name).cloned() {
+                if let Some(trait_def) = self.trait_defs.get(&canonical_trait).cloned() {
                     for super_ann in &trait_def.super_traits {
                         let super_name = match super_ann {
                             TypeAnnotation::Basic(name) => name.clone(),
@@ -470,15 +471,16 @@ impl BytecodeCompiler {
                             TypeAnnotation::Generic { name, .. } => name.to_string(),
                             _ => continue,
                         };
+                        let (_canonical_super, super_basename) = self.resolve_trait_name(&super_name);
                         if !self
                             .type_inference
                             .env
-                            .type_implements_trait(type_name, &super_name)
+                            .type_implements_trait(type_name, &super_basename)
                         {
                             return Err(ShapeError::SemanticError {
                                 message: format!(
                                     "impl {} for {} requires supertrait '{}' to be implemented first",
-                                    trait_name, type_name, super_name
+                                    trait_basename, type_name, super_basename
                                 ),
                                 location: None,
                             });
@@ -820,6 +822,12 @@ impl BytecodeCompiler {
                         .clone()
                         .unwrap_or_else(|| format!("{:?}", type_alias.type_annotation)),
                 );
+                // Register in type inference environment so lookup_type_alias works
+                self.type_inference.env.define_type_alias(
+                    &type_alias.name,
+                    &type_alias.type_annotation,
+                    type_alias.meta_param_overrides.clone(),
+                );
 
                 // Apply comptime field overrides from type alias
                 // e.g., type EUR = Currency { symbol: "€" } overrides Currency's comptime symbol
@@ -879,14 +887,10 @@ impl BytecodeCompiler {
             }
             // Meta/Format definitions removed — formatting now uses Display trait
             Item::Import(import_stmt, _) => {
-                // Import handling is now done by executor pre-resolution
-                // via the unified runtime module loader.
-                // Imported module AST items are inlined via prelude injection
-                // before compilation (single-pass, no index remapping).
-                //
-                // At self point in compile_item, imports should already have been
-                // processed by pre-resolution. If we reach here, the import
-                // is either:
+                // Import resolution is handled by the module graph pipeline
+                // before compilation. At this point imports should already
+                // have been resolved via `register_graph_imports_for_module`.
+                // If we reach here, the import is either:
                 // 1. Being compiled standalone (no module context) - skip for now
                 // 2. A future extension point for runtime imports
                 //
@@ -903,7 +907,7 @@ impl BytecodeCompiler {
             }
             Item::Impl(impl_block, _) => {
                 // Compile impl block methods with scoped names
-                let trait_name = match &impl_block.trait_name {
+                let raw_trait_name = match &impl_block.trait_name {
                     shape_ast::ast::types::TypeName::Simple(n) => n.as_str(),
                     shape_ast::ast::types::TypeName::Generic { name, .. } => name.as_str(),
                 };
@@ -913,9 +917,12 @@ impl BytecodeCompiler {
                 };
                 let impl_name = impl_block.impl_name.as_deref();
 
+                // Resolve trait name: canonical for def lookup, basename for dispatch
+                let (canonical_trait, trait_basename) = self.resolve_trait_name(raw_trait_name);
+
                 // From/TryFrom: compile the from/tryFrom method + synthetic wrapper
-                if trait_name == "From" || trait_name == "TryFrom" {
-                    return self.compile_from_impl_bodies(impl_block, trait_name, type_name);
+                if trait_basename == "From" || trait_basename == "TryFrom" {
+                    return self.compile_from_impl_bodies(impl_block, &trait_basename, type_name);
                 }
 
                 // Collect names of methods explicitly provided in the impl block
@@ -925,7 +932,7 @@ impl BytecodeCompiler {
                 for method in &impl_block.methods {
                     let func_def = self.desugar_impl_method(
                         method,
-                        trait_name,
+                        &trait_basename,
                         type_name,
                         impl_name,
                         &impl_block.target_type,
@@ -934,14 +941,14 @@ impl BytecodeCompiler {
                 }
 
                 // Compile default methods from the trait definition that were not overridden
-                if let Some(trait_def) = self.trait_defs.get(trait_name).cloned() {
+                if let Some(trait_def) = self.trait_defs.get(&canonical_trait).cloned() {
                     for member in &trait_def.members {
                         if let shape_ast::ast::types::TraitMember::Default(default_method) = member
                         {
                             if !overridden.contains(default_method.name.as_str()) {
                                 let func_def = self.desugar_impl_method(
                                     default_method,
-                                    trait_name,
+                                    &trait_basename,
                                     type_name,
                                     impl_name,
                                     &impl_block.target_type,
@@ -1045,6 +1052,7 @@ impl BytecodeCompiler {
                         ImportedSymbol {
                             original_name: spec.name.clone(),
                             module_path: import_stmt.from.clone(),
+                            kind: None, // legacy path
                         },
                     );
                 }
@@ -1147,6 +1155,143 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// Register imports for a module from the module graph.
+    ///
+    /// This is the graph-driven replacement for `register_import_names`.
+    /// For each `ResolvedImport` on the node:
+    /// - Namespace: creates canonical + alias bindings, registers schemas
+    /// - Named: populates `imported_names`, `imported_annotations`, `module_builtin_functions`
+    pub(super) fn register_graph_imports_for_module(
+        &mut self,
+        module_id: crate::module_graph::ModuleId,
+        graph: &crate::module_graph::ModuleGraph,
+    ) -> Result<()> {
+        use crate::module_graph::{ModuleSourceKind, ResolvedImport};
+
+        let node = graph.node(module_id);
+        let resolved_imports = node.resolved_imports.clone();
+
+        for ri in &resolved_imports {
+            match ri {
+                ResolvedImport::Namespace {
+                    local_name,
+                    canonical_path,
+                    module_id: dep_id,
+                } => {
+                    let dep_node = graph.node(*dep_id);
+
+                    // 1. Ensure canonical binding exists
+                    let canonical_idx = self.get_or_create_module_binding(canonical_path);
+
+                    // Register native schema on canonical binding for NativeModule/Hybrid
+                    if matches!(
+                        dep_node.source_kind,
+                        ModuleSourceKind::NativeModule | ModuleSourceKind::Hybrid
+                    ) {
+                        self.register_extension_module_schema(canonical_path);
+                        let module_schema_name = format!("__mod_{}", canonical_path);
+                        if self
+                            .type_tracker
+                            .schema_registry()
+                            .get(&module_schema_name)
+                            .is_some()
+                        {
+                            self.set_module_binding_type_info(canonical_idx, &module_schema_name);
+                        }
+                    }
+
+                    // 2. Create alias binding if local_name != canonical_path
+                    if local_name != canonical_path {
+                        let alias_idx = self.get_or_create_module_binding(local_name);
+
+                        // Copy type info from canonical to alias
+                        let module_schema_name = format!("__mod_{}", canonical_path);
+                        if self
+                            .type_tracker
+                            .schema_registry()
+                            .get(&module_schema_name)
+                            .is_some()
+                        {
+                            self.set_module_binding_type_info(alias_idx, &module_schema_name);
+                        }
+
+                        // Emit runtime binding copy: alias = canonical
+                        self.emit(Instruction::new(
+                            OpCode::LoadModuleBinding,
+                            Some(Operand::ModuleBinding(canonical_idx)),
+                        ));
+                        self.emit(Instruction::new(
+                            OpCode::StoreModuleBinding,
+                            Some(Operand::ModuleBinding(alias_idx)),
+                        ));
+                    }
+
+                    // 3. Register namespace
+                    self.module_namespace_bindings.insert(local_name.clone());
+                    self.graph_namespace_map
+                        .insert(local_name.clone(), canonical_path.clone());
+                }
+                ResolvedImport::Named {
+                    canonical_path,
+                    module_id: dep_id,
+                    symbols,
+                } => {
+                    let dep_node = graph.node(*dep_id);
+
+                    for sym in symbols {
+                        if sym.is_annotation {
+                            let hidden_module_name =
+                                crate::module_resolution::hidden_annotation_import_module_name(
+                                    canonical_path,
+                                );
+                            self.module_scope_sources
+                                .entry(hidden_module_name.clone())
+                                .or_insert_with(|| canonical_path.clone());
+                            // Vacant-only: explicit imports win over prelude
+                            self.imported_annotations
+                                .entry(sym.local_name.clone())
+                                .or_insert_with(|| ImportedAnnotationSymbol {
+                                    original_name: sym.original_name.clone(),
+                                    module_path: canonical_path.clone(),
+                                    hidden_module_name,
+                                });
+                            continue;
+                        }
+
+                        // Register as imported name (vacant-only: explicit imports
+                        // are processed first and win over prelude entries)
+                        self.imported_names
+                            .entry(sym.local_name.clone())
+                            .or_insert_with(|| ImportedSymbol {
+                                original_name: sym.original_name.clone(),
+                                module_path: canonical_path.clone(),
+                                kind: Some(sym.kind),
+                            });
+
+                        // For native exports, register as module builtin function
+                        if matches!(
+                            dep_node.source_kind,
+                            ModuleSourceKind::NativeModule | ModuleSourceKind::Hybrid
+                        ) && matches!(
+                            sym.kind,
+                            shape_ast::module_utils::ModuleExportKind::Function
+                                | shape_ast::module_utils::ModuleExportKind::BuiltinFunction
+                        ) {
+                            self.module_builtin_functions
+                                .entry(sym.local_name.clone())
+                                .or_insert_with(|| ModuleBuiltinFunction {
+                                    export_name: sym.original_name.clone(),
+                                    source_module_path: canonical_path.clone(),
+                                });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub(super) fn register_extension_module_schema(&mut self, module_path: &str) {
         let Some(registry) = self.extension_registry.as_ref() else {
             return;
@@ -1233,8 +1378,24 @@ impl BytecodeCompiler {
             })
             .collect();
 
-        let schema = shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants);
+        let schema = shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants.clone());
         self.type_tracker.schema_registry_mut().register(schema);
+
+        // Also register under bare name if the qualified name contains "::"
+        // so runtime code that uses bare enum names (e.g., "Snapshot") can find the schema.
+        if let Some(basename) = enum_def.name.rsplit("::").next() {
+            if basename != enum_def.name
+                && self
+                    .type_tracker
+                    .schema_registry()
+                    .get(basename)
+                    .is_none()
+            {
+                let alias_schema =
+                    shape_runtime::type_schema::TypeSchema::new_enum(basename, variants);
+                self.type_tracker.schema_registry_mut().register(alias_schema);
+            }
+        }
         Ok(())
     }
 
@@ -2711,17 +2872,38 @@ impl BytecodeCompiler {
         format!("{}::{}", module_path, name)
     }
 
+    /// Returns true if a name refers to a builtin/primitive type that should
+    /// not be module-qualified.
+    fn is_builtin_type_name(name: &str) -> bool {
+        matches!(
+            name,
+            "int" | "number" | "string" | "bool" | "decimal" | "bigint"
+                | "Array" | "HashMap" | "Option" | "Result" | "DateTime"
+                | "Content" | "Table" | "DataTable" | "Mat"
+                | "Json" | "Duration" | "Regex"
+                | "Vec"
+                | "int8" | "int16" | "int32" | "int64"
+                | "uint8" | "uint16" | "uint32" | "uint64"
+                | "float32" | "float64"
+                | "IoHandle"
+        )
+    }
+
     fn qualify_type_name(
         type_name: &shape_ast::ast::TypeName,
         module_path: &str,
     ) -> shape_ast::ast::TypeName {
         match type_name {
-            shape_ast::ast::TypeName::Simple(path) if !path.is_qualified() => {
+            shape_ast::ast::TypeName::Simple(path)
+                if !path.is_qualified() && !Self::is_builtin_type_name(path.as_str()) =>
+            {
                 shape_ast::ast::TypeName::Simple(
                     Self::qualify_module_symbol(module_path, path.as_str()).into(),
                 )
             }
-            shape_ast::ast::TypeName::Generic { name, type_args } if !name.is_qualified() => {
+            shape_ast::ast::TypeName::Generic { name, type_args }
+                if !name.is_qualified() && !Self::is_builtin_type_name(name.as_str()) =>
+            {
                 shape_ast::ast::TypeName::Generic {
                     name: Self::qualify_module_symbol(module_path, name.as_str()).into(),
                     type_args: type_args.clone(),
@@ -2731,7 +2913,7 @@ impl BytecodeCompiler {
         }
     }
 
-    fn qualify_module_item(&self, item: &Item, module_path: &str) -> Result<Item> {
+    pub(super) fn qualify_module_item(&self, item: &Item, module_path: &str) -> Result<Item> {
         match item {
             Item::Function(func, span) => {
                 let mut qualified = func.clone();
@@ -2910,7 +3092,7 @@ impl BytecodeCompiler {
         }
     }
 
-    fn collect_module_runtime_exports(
+    pub(super) fn collect_module_runtime_exports(
         &self,
         items: &[Item],
         module_path: &str,
@@ -3290,11 +3472,94 @@ impl BytecodeCompiler {
         Ok(false)
     }
 
-    fn register_missing_module_functions(&mut self, item: &Item) -> Result<()> {
+    pub(super) fn register_missing_module_items(&mut self, item: &Item) -> Result<()> {
         match item {
             Item::Function(func, _) => {
                 if !self.function_defs.contains_key(&func.name) {
                     self.register_function(func)?;
+                }
+                Ok(())
+            }
+            Item::Trait(trait_def, _) => {
+                if !self.trait_defs.contains_key(&trait_def.name) {
+                    self.known_traits.insert(trait_def.name.clone());
+                    self.trait_defs
+                        .insert(trait_def.name.clone(), trait_def.clone());
+                    self.type_inference.env.define_trait(trait_def);
+                }
+                Ok(())
+            }
+            Item::Enum(enum_def, _) => {
+                self.register_enum(enum_def)?;
+                Ok(())
+            }
+            Item::StructType(struct_def, span) => {
+                // Pre-declare struct type layout without running full
+                // register_struct_type (which does annotation validation,
+                // comptime handlers, native layout, and schema registration).
+                // This makes the type name resolvable for forward references
+                // during first-pass registration.
+                if !self.struct_types.contains_key(&struct_def.name) {
+                    let runtime_field_names: Vec<String> = struct_def
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_comptime)
+                        .map(|f| f.name.clone())
+                        .collect();
+                    let runtime_field_types = struct_def
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_comptime)
+                        .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                        .collect::<std::collections::HashMap<_, _>>();
+                    self.struct_types.insert(
+                        struct_def.name.clone(),
+                        (runtime_field_names, *span),
+                    );
+                    self.struct_generic_info.insert(
+                        struct_def.name.clone(),
+                        StructGenericInfo {
+                            type_params: struct_def.type_params.clone().unwrap_or_default(),
+                            runtime_field_types,
+                        },
+                    );
+                }
+                Ok(())
+            }
+            Item::TypeAlias(type_alias, _) => {
+                if !self.type_aliases.contains_key(&type_alias.name) {
+                    let base_type_name = match &type_alias.type_annotation {
+                        TypeAnnotation::Basic(name) => Some(name.clone()),
+                        TypeAnnotation::Reference(name) => Some(name.to_string()),
+                        _ => None,
+                    };
+                    self.type_aliases.insert(
+                        type_alias.name.clone(),
+                        base_type_name.unwrap_or_else(|| {
+                            format!("{:?}", type_alias.type_annotation)
+                        }),
+                    );
+                    self.type_inference.env.define_type_alias(
+                        &type_alias.name,
+                        &type_alias.type_annotation,
+                        type_alias.meta_param_overrides.clone(),
+                    );
+                }
+                Ok(())
+            }
+            Item::BuiltinFunctionDecl(def, _) => {
+                self.register_builtin_function_decl(def)
+            }
+            Item::ForeignFunction(def, _) => {
+                if !self.function_defs.contains_key(&def.name) {
+                    // Register arity + foreign def (same as register_item_functions)
+                    let caller_visible = def.params.iter().filter(|p| !p.is_out).count();
+                    self.function_arity_bounds
+                        .insert(def.name.clone(), (caller_visible, caller_visible));
+                    self.function_const_params
+                        .insert(def.name.clone(), Vec::new());
+                    self.foreign_function_defs
+                        .insert(def.name.clone(), def.clone());
                 }
                 Ok(())
             }
@@ -3305,15 +3570,99 @@ impl BytecodeCompiler {
                     }
                     Ok(())
                 }
+                ExportItem::Trait(trait_def) => {
+                    if !self.trait_defs.contains_key(&trait_def.name) {
+                        self.known_traits.insert(trait_def.name.clone());
+                        self.trait_defs
+                            .insert(trait_def.name.clone(), trait_def.clone());
+                        self.type_inference.env.define_trait(trait_def);
+                    }
+                    Ok(())
+                }
+                ExportItem::Enum(enum_def) => {
+                    self.register_enum(enum_def)?;
+                    Ok(())
+                }
+                ExportItem::Struct(struct_def) => {
+                    // Pre-declare only — full registration happens in second pass
+                    if !self.struct_types.contains_key(&struct_def.name) {
+                        let runtime_field_names: Vec<String> = struct_def
+                            .fields
+                            .iter()
+                            .filter(|f| !f.is_comptime)
+                            .map(|f| f.name.clone())
+                            .collect();
+                        let runtime_field_types = struct_def
+                            .fields
+                            .iter()
+                            .filter(|f| !f.is_comptime)
+                            .map(|f| (f.name.clone(), f.type_annotation.clone()))
+                            .collect::<std::collections::HashMap<_, _>>();
+                        self.struct_types.insert(
+                            struct_def.name.clone(),
+                            (runtime_field_names, Span::DUMMY),
+                        );
+                        self.struct_generic_info.insert(
+                            struct_def.name.clone(),
+                            StructGenericInfo {
+                                type_params: struct_def.type_params.clone().unwrap_or_default(),
+                                runtime_field_types,
+                            },
+                        );
+                    }
+                    Ok(())
+                }
+                ExportItem::TypeAlias(type_alias) => {
+                    if !self.type_aliases.contains_key(&type_alias.name) {
+                        let base_type_name = match &type_alias.type_annotation {
+                            TypeAnnotation::Basic(name) => Some(name.clone()),
+                            TypeAnnotation::Reference(name) => Some(name.to_string()),
+                            _ => None,
+                        };
+                        self.type_aliases.insert(
+                            type_alias.name.clone(),
+                            base_type_name.unwrap_or_else(|| {
+                                format!("{:?}", type_alias.type_annotation)
+                            }),
+                        );
+                        self.type_inference.env.define_type_alias(
+                            &type_alias.name,
+                            &type_alias.type_annotation,
+                            type_alias.meta_param_overrides.clone(),
+                        );
+                    }
+                    Ok(())
+                }
+                ExportItem::BuiltinFunction(def) => {
+                    self.register_builtin_function_decl(def)
+                }
+                ExportItem::ForeignFunction(def) => {
+                    if !self.function_defs.contains_key(&def.name) {
+                        let caller_visible = def.params.iter().filter(|p| !p.is_out).count();
+                        self.function_arity_bounds
+                            .insert(def.name.clone(), (caller_visible, caller_visible));
+                        self.function_const_params
+                            .insert(def.name.clone(), Vec::new());
+                        self.foreign_function_defs
+                            .insert(def.name.clone(), def.clone());
+                    }
+                    Ok(())
+                }
                 _ => Ok(()),
             },
+            // Impl and Extend blocks: delegate to register_item_functions
+            // which handles the full registration (desugar methods, trait symbols,
+            // type inference impls, drop tracking, etc.)
+            Item::Impl(..) | Item::Extend(..) => {
+                self.register_item_functions(item)
+            }
             Item::Module(module, _) => {
                 let module_path = self.current_module_path_for(module.name.as_str());
                 self.module_scope_stack.push(module_path.clone());
                 let register_result = (|| -> Result<()> {
                     for inner in &module.items {
                         let qualified = self.qualify_module_item(inner, &module_path)?;
-                        self.register_missing_module_functions(&qualified)?;
+                        self.register_missing_module_items(&qualified)?;
                     }
                     Ok(())
                 })();
@@ -3331,7 +3680,7 @@ impl BytecodeCompiler {
 
         let module_path = self.current_module_path_for(&module_def.name);
         if let Some(parent_path) = self.module_scope_stack.last().cloned()
-            && let Some(parent_source) = self.module_scope_sources.get(&parent_path).cloned()
+            && let Some(parent_source) = self.resolve_canonical_module_path(&parent_path)
         {
             self.module_scope_sources
                 .entry(module_path.clone())
@@ -3358,7 +3707,7 @@ impl BytecodeCompiler {
         }
 
         for qualified in &qualified_items {
-            self.register_missing_module_functions(qualified)?;
+            self.register_missing_module_items(qualified)?;
         }
 
         self.non_function_mir_context_stack

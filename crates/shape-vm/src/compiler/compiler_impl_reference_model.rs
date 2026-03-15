@@ -1047,8 +1047,33 @@ impl BytecodeCompiler {
         // proven reliable in the compiler execution path.
         let mut known_bindings: Vec<String> = self.module_bindings.keys().cloned().collect();
         let namespace_bindings = Self::collect_namespace_import_bindings(&analysis_program);
-        self.module_scope_sources
-            .extend(Self::collect_import_module_scope_sources(&analysis_program));
+        // Inline: collect namespace and annotation import scope sources
+        for item in &analysis_program.items {
+            if let shape_ast::ast::Item::Import(import_stmt, _) = item {
+                if import_stmt.from.is_empty() {
+                    continue;
+                }
+                match &import_stmt.items {
+                    shape_ast::ast::ImportItems::Namespace { name, alias } => {
+                        let local_name = alias.clone().unwrap_or_else(|| name.clone());
+                        self.module_scope_sources
+                            .entry(local_name)
+                            .or_insert_with(|| import_stmt.from.clone());
+                    }
+                    shape_ast::ast::ImportItems::Named(specs) => {
+                        if specs.iter().any(|spec| spec.is_annotation) {
+                            let hidden_module_name =
+                                crate::module_resolution::hidden_annotation_import_module_name(
+                                    &import_stmt.from,
+                                );
+                            self.module_scope_sources
+                                .entry(hidden_module_name)
+                                .or_insert_with(|| import_stmt.from.clone());
+                        }
+                    }
+                }
+            }
+        }
         known_bindings.extend(namespace_bindings.iter().cloned());
         self.module_namespace_bindings
             .extend(namespace_bindings.into_iter());
@@ -1275,6 +1300,167 @@ impl BytecodeCompiler {
     ) -> Result<BytecodeProgram> {
         self.set_source(source);
         self.compile(program)
+    }
+
+    /// Compile a program using the module graph for import resolution.
+    ///
+    /// This is the graph-driven compilation pipeline. Modules compile in
+    /// topological order using the graph for cross-module name resolution.
+    /// No AST inlining occurs — each module's imports are resolved from
+    /// the graph's `ResolvedImport` entries.
+    pub fn compile_with_graph(
+        mut self,
+        root_program: &Program,
+        graph: std::sync::Arc<crate::module_graph::ModuleGraph>,
+    ) -> Result<BytecodeProgram> {
+        self.compile_with_graph_and_prelude(root_program, graph, &[])
+    }
+
+    /// Compile with graph and prelude information.
+    ///
+    /// All modules (including prelude dependencies) compile uniformly
+    /// through the normal module path. The `prelude_paths` parameter is
+    /// retained for API compatibility but no longer used.
+    pub fn compile_with_graph_and_prelude(
+        mut self,
+        root_program: &Program,
+        graph: std::sync::Arc<crate::module_graph::ModuleGraph>,
+        _prelude_paths: &[String],
+    ) -> Result<BytecodeProgram> {
+        use crate::module_graph::ModuleSourceKind;
+
+        self.module_graph = Some(graph.clone());
+
+        // Phase 1: Compile dependency modules in topological order.
+        for &dep_id in graph.topo_order() {
+            let dep_node = graph.node(dep_id);
+            match dep_node.source_kind {
+                ModuleSourceKind::NativeModule => {
+                    self.register_graph_imports_for_module(dep_id, &graph)?;
+                }
+                ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid => {
+                    self.compile_module_from_graph(dep_id, &graph)?;
+                }
+                ModuleSourceKind::CompiledBytecode => {
+                    // Should have been rejected during graph construction.
+                    return Err(shape_ast::error::ShapeError::ModuleError {
+                        message: format!(
+                            "Module '{}' is only available as pre-compiled bytecode",
+                            dep_node.canonical_path
+                        ),
+                        module_path: None,
+                    });
+                }
+            }
+        }
+
+        // Phase 2: Compile the root module using the graph for its imports.
+        // Register root's imports from the graph
+        self.register_graph_imports_for_module(graph.root_id(), &graph)?;
+
+        // Strip import items from root program (imports already resolved via graph)
+        let mut stripped_program = root_program.clone();
+        stripped_program.items.retain(|item| !matches!(item, shape_ast::ast::Item::Import(..)));
+
+        // Compile the stripped root program using the standard two-pass pipeline
+        self.compile(&stripped_program)
+    }
+
+    /// Compile a single module from the graph.
+    ///
+    /// All modules (including prelude dependencies) compile uniformly:
+    /// pushes the module scope, qualifies items, registers all symbol kinds,
+    /// compiles bodies, creates module binding object.
+    fn compile_module_from_graph(
+        &mut self,
+        module_id: crate::module_graph::ModuleId,
+        graph: &crate::module_graph::ModuleGraph,
+    ) -> Result<()> {
+        let node = graph.node(module_id);
+        let ast = match &node.ast {
+            Some(ast) => ast.clone(),
+            None => return Ok(()), // NativeModule / CompiledBytecode
+        };
+
+        let module_path = node.canonical_path.clone();
+
+        // All modules compile uniformly through the normal module path.
+        // Set allow_internal_builtins for stdlib modules.
+        let prev_allow = self.allow_internal_builtins;
+        if module_path.starts_with("std::") {
+            self.allow_internal_builtins = true;
+        }
+
+        self.module_scope_stack.push(module_path.clone());
+
+        // 1. Register this module's imports from the graph
+        self.register_graph_imports_for_module(module_id, graph)?;
+
+        // 2. Filter out import statements, qualify remaining items
+        let mut qualified_items = Vec::new();
+        for item in &ast.items {
+            if matches!(item, shape_ast::ast::Item::Import(..)) {
+                continue;
+            }
+            qualified_items.push(self.qualify_module_item(item, &module_path)?);
+        }
+
+        // 3. Phase 1: Register functions in global table with qualified names
+        for item in &qualified_items {
+            self.register_missing_module_items(item)?;
+        }
+
+        // 4. Phase 2: Compile function bodies
+        self.non_function_mir_context_stack
+            .push(module_path.clone());
+        let compile_result = (|| -> Result<()> {
+            for (idx, qualified) in qualified_items.iter().enumerate() {
+                let future_names = self
+                    .future_reference_use_names_for_remaining_items(&qualified_items[idx + 1..]);
+                self.push_future_reference_use_names(future_names);
+                let result = self.compile_item_with_context(qualified, false);
+                self.pop_future_reference_use_names();
+                result?;
+                self.release_unused_module_reference_borrows_for_remaining_items(
+                    &qualified_items[idx + 1..],
+                );
+            }
+            Ok(())
+        })();
+        self.non_function_mir_context_stack.pop();
+        compile_result?;
+
+        // 5. Build module object and store in canonical binding
+        let exports = self.collect_module_runtime_exports(
+            &ast.items
+                .iter()
+                .filter(|i| !matches!(i, shape_ast::ast::Item::Import(..)))
+                .cloned()
+                .collect::<Vec<_>>(),
+            &module_path,
+        );
+        let span = shape_ast::ast::Span::default();
+        let entries: Vec<shape_ast::ast::ObjectEntry> = exports
+            .into_iter()
+            .map(|(name, value_ident)| shape_ast::ast::ObjectEntry::Field {
+                key: name,
+                value: shape_ast::ast::Expr::Identifier(value_ident, span),
+                type_annotation: None,
+            })
+            .collect();
+        let module_object = shape_ast::ast::Expr::Object(entries, span);
+        self.compile_expr(&module_object)?;
+
+        let binding_idx = self.get_or_create_module_binding(&module_path);
+        self.emit(Instruction::new(
+            OpCode::StoreModuleBinding,
+            Some(Operand::ModuleBinding(binding_idx)),
+        ));
+        self.propagate_initializer_type_to_slot(binding_idx, false, false);
+
+        self.module_scope_stack.pop();
+        self.allow_internal_builtins = prev_allow;
+        Ok(())
     }
 
     /// Compile an imported module's AST to a standalone BytecodeProgram.

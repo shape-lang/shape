@@ -1781,9 +1781,7 @@ impl BytecodeCompiler {
         // Resolve canonical module path: namespace_name may be a local alias ("json")
         // or already canonical ("std::core::json").
         let canonical_module = self
-            .module_scope_sources
-            .get(namespace_name)
-            .cloned()
+            .resolve_canonical_module_path(namespace_name)
             .unwrap_or_else(|| namespace_name.to_string());
         if canonical_module == "std::core::json" && method == "parse" && args.len() == 2 {
             if let Expr::Identifier(type_name, _) = &args[1] {
