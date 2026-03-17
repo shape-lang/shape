@@ -24,7 +24,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 authors = ["Daniel Amesberger"]
 license = "MIT OR Apache-2.0"
@@ -44,15 +44,15 @@ env_logger = "0.11"
 
 # Internal crates
 shape-macros = { version = "=0.1.2", path = "crates/shape-macros" }
-shape-ast = { version = "=0.1.7", path = "crates/shape-ast" }
+shape-ast = { version = "=0.1.8", path = "crates/shape-ast" }
 shape-value = { version = "=0.1.3", path = "crates/shape-value" }
-shape-wire = { version = "=0.1.7", path = "crates/shape-wire" }
-shape-runtime = { version = "=0.1.7", path = "crates/shape-runtime" }
-shape-vm = { version = "=0.1.7", path = "crates/shape-vm" }
-shape-jit = { version = "=0.1.7", path = "crates/shape-jit" }
+shape-wire = { version = "=0.1.8", path = "crates/shape-wire" }
+shape-runtime = { version = "=0.1.8", path = "crates/shape-runtime" }
+shape-vm = { version = "=0.1.8", path = "crates/shape-vm" }
+shape-jit = { version = "=0.1.8", path = "crates/shape-jit" }
 shape-abi-v1 = { version = "=0.1.3", path = "crates/shape-abi-v1" }
 shape-gc = { version = "=0.1.2", path = "crates/shape-gc" }
-shape-lsp = { version = "=0.1.7", path = "tools/shape-lsp" }
+shape-lsp = { version = "=0.1.8", path = "tools/shape-lsp" }
 shape-viz-core = { version = "=0.1.1", path = "crates/shape-viz/shape-viz-core" }
 
 # Arrow columnar format

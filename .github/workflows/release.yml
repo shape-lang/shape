@@ -92,6 +92,7 @@ jobs:
           files: dist/*
 
   publish-crates:
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -128,7 +129,7 @@ jobs:
           for crate in "${crates[@]}"; do
             echo "::group::Publishing $crate"
             for attempt in 1 2 3; do
-              output=$(cargo publish -p "$crate" --no-verify 2>&1) && {
+              output=$(cargo publish -p "$crate" 2>&1) && {
                 echo "$crate published successfully"
                 break
               }
