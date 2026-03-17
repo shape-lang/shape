@@ -1,0 +1,18 @@
+/// @module std::core::column_methods
+/// Method definitions for Column (vectorized column operations).
+///
+/// All methods delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+extend Column {
+    method len() -> int { self.len() }
+    method first() -> number { self.first() }
+    method last() -> number { self.last() }
+    method sum() -> number { self.sum() }
+    method mean() -> number { self.mean() }
+    method min() -> number { self.min() }
+    method max() -> number { self.max() }
+    method std() -> number { self.std() }
+    method abs() -> Vec<number> { self.abs() }
+    method toArray() -> Vec<number> { self.toArray() }
+}

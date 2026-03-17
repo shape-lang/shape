@@ -78,59 +78,42 @@ fn test_parse_extend_with_multi_generic() {
 
 // =============================================================================
 // SECTION D: Compiler heuristic tests (MethodTable-driven)
+// Methods are now registered from Shape stdlib, not at MethodTable::new().
+// These tests manually register the methods they need to verify the
+// MethodTable infrastructure still works correctly.
 // =============================================================================
 
 #[test]
 fn test_method_table_is_self_returning() {
-    use shape_runtime::type_system::checking::MethodTable;
-    let table = MethodTable::new();
-
-    // Type-preserving methods should return true
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
+    let mut table = MethodTable::new();
+    table.register_user_generic_method(
+        "Vec", "filter", 0, vec![], TypeParamExpr::SelfType, vec![],
+    );
+    table.register_user_generic_method(
+        "Vec", "map", 1, vec![],
+        TypeParamExpr::GenericContainer { name: "Vec".to_string(), args: vec![TypeParamExpr::MethodParam(0)] },
+        vec![],
+    );
     assert!(table.is_self_returning("Vec", "filter"));
-    assert!(table.is_self_returning("Vec", "sort"));
-    assert!(table.is_self_returning("Table", "filter"));
-    assert!(table.is_self_returning("Table", "orderBy"));
-    assert!(table.is_self_returning("Table", "head"));
-    assert!(table.is_self_returning("Table", "tail"));
-    assert!(table.is_self_returning("Table", "limit"));
-    assert!(table.is_self_returning("HashMap", "filter"));
-
-    // Non-preserving methods should return false
     assert!(!table.is_self_returning("Vec", "map"));
-    assert!(!table.is_self_returning("Vec", "find"));
-    assert!(!table.is_self_returning("Vec", "reduce"));
-    assert!(!table.is_self_returning("Table", "count"));
-    assert!(!table.is_self_returning("Table", "map"));
-    assert!(!table.is_self_returning("HashMap", "map"));
-    assert!(!table.is_self_returning("HashMap", "keys"));
 }
 
 #[test]
 fn test_method_table_takes_closure_with_receiver_param() {
-    use shape_runtime::type_system::checking::MethodTable;
-    let table = MethodTable::new();
-
-    // Methods that take closure with receiver element type
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
+    use shape_runtime::type_system::BuiltinTypes;
+    let mut table = MethodTable::new();
+    table.register_user_generic_method(
+        "Vec", "filter", 0,
+        vec![TypeParamExpr::Function {
+            params: vec![TypeParamExpr::ReceiverParam(0)],
+            returns: Box::new(TypeParamExpr::Concrete(BuiltinTypes::boolean())),
+        }],
+        TypeParamExpr::SelfType, vec![],
+    );
     assert!(table.takes_closure_with_receiver_param("Vec", "filter"));
-    assert!(table.takes_closure_with_receiver_param("Vec", "map"));
-    assert!(table.takes_closure_with_receiver_param("Vec", "forEach"));
-    assert!(table.takes_closure_with_receiver_param("Vec", "some"));
-    assert!(table.takes_closure_with_receiver_param("Vec", "every"));
-    assert!(table.takes_closure_with_receiver_param("Vec", "find"));
-    assert!(table.takes_closure_with_receiver_param("Vec", "reduce"));
-    assert!(table.takes_closure_with_receiver_param("Table", "filter"));
-    assert!(table.takes_closure_with_receiver_param("Table", "map"));
-    assert!(table.takes_closure_with_receiver_param("Table", "forEach"));
-
-    // Methods that DON'T take closures
-    assert!(!table.takes_closure_with_receiver_param("Vec", "length"));
-    assert!(!table.takes_closure_with_receiver_param("Vec", "first"));
-    assert!(!table.takes_closure_with_receiver_param("Vec", "last"));
-    assert!(!table.takes_closure_with_receiver_param("Table", "count"));
-    assert!(!table.takes_closure_with_receiver_param("Table", "head"));
-    assert!(!table.takes_closure_with_receiver_param("HashMap", "get"));
-    assert!(!table.takes_closure_with_receiver_param("HashMap", "len"));
-    assert!(!table.takes_closure_with_receiver_param("HashMap", "keys"));
+    assert!(!table.takes_closure_with_receiver_param("Vec", "len"));
 }
 
 // =============================================================================
@@ -140,24 +123,22 @@ fn test_method_table_takes_closure_with_receiver_param() {
 #[test]
 fn test_resolve_result_unwrap() {
     use shape_ast::ast::TypeAnnotation;
-    use shape_runtime::type_system::checking::MethodTable;
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     use shape_runtime::type_system::{BuiltinTypes, Type};
 
-    let table = MethodTable::new();
+    let mut table = MethodTable::new();
+    table.register_user_generic_method(
+        "Result", "unwrap", 0, vec![], TypeParamExpr::ReceiverParam(0), vec![],
+    );
+
     let result_type = Type::Generic {
-        base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-            "Result".into(),
-        ))),
+        base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
         args: vec![BuiltinTypes::string()],
     };
-
     let resolved = table.resolve_method_call(&result_type, "unwrap", &[]);
     assert!(resolved.is_some(), "Result<string>.unwrap() should resolve");
     assert!(
-        matches!(
-            resolved.unwrap(),
-            Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "string"
-        ),
+        matches!(resolved.unwrap(), Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "string"),
         "Result<string>.unwrap() should return string"
     );
 }
@@ -165,54 +146,62 @@ fn test_resolve_result_unwrap() {
 #[test]
 fn test_resolve_option_map() {
     use shape_ast::ast::TypeAnnotation;
-    use shape_runtime::type_system::checking::MethodTable;
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     use shape_runtime::type_system::{BuiltinTypes, Type};
 
-    let table = MethodTable::new();
+    let mut table = MethodTable::new();
+    table.register_user_generic_method(
+        "Option", "map", 1,
+        vec![TypeParamExpr::Function {
+            params: vec![TypeParamExpr::ReceiverParam(0)],
+            returns: Box::new(TypeParamExpr::MethodParam(0)),
+        }],
+        TypeParamExpr::GenericContainer { name: "Option".to_string(), args: vec![TypeParamExpr::MethodParam(0)] },
+        vec![],
+    );
+
     let option_type = Type::Generic {
-        base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-            "Option".into(),
-        ))),
+        base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
         args: vec![BuiltinTypes::number()],
     };
-
     let resolved = table.resolve_method_call(&option_type, "map", &[]);
     assert!(resolved.is_some(), "Option<number>.map() should resolve");
-    // map returns Option<U> where U is a fresh type variable
     let rt = resolved.unwrap();
     assert!(
         matches!(&rt, Type::Generic { base, .. }
-            if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Option")
-        ),
-        "Option.map should return Option<U>, got {:?}",
-        rt
+            if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Option")),
+        "Option.map should return Option<U>, got {:?}", rt
     );
 }
 
 #[test]
 fn test_resolve_table_map_returns_table_u() {
     use shape_ast::ast::TypeAnnotation;
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     use shape_runtime::type_system::Type;
-    use shape_runtime::type_system::checking::MethodTable;
 
-    let table = MethodTable::new();
+    let mut table = MethodTable::new();
+    table.register_user_generic_method(
+        "Table", "map", 1,
+        vec![TypeParamExpr::Function {
+            params: vec![TypeParamExpr::ReceiverParam(0)],
+            returns: Box::new(TypeParamExpr::MethodParam(0)),
+        }],
+        TypeParamExpr::GenericContainer { name: "Table".to_string(), args: vec![TypeParamExpr::MethodParam(0)] },
+        vec![],
+    );
+
     let table_type = Type::Generic {
-        base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-            "Table".into(),
-        ))),
+        base: Box::new(Type::Concrete(TypeAnnotation::Reference("Table".into()))),
         args: vec![Type::Concrete(TypeAnnotation::Reference("Row".into()))],
     };
-
     let resolved = table.resolve_method_call(&table_type, "map", &[]);
     assert!(resolved.is_some(), "Table<Row>.map() should resolve");
     let rt = resolved.unwrap();
-    // map returns Table<U> where U is fresh — should be Table<TypeVar>
     assert!(
         matches!(&rt, Type::Generic { base, .. }
-            if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Table")
-        ),
-        "Table.map should return Table<U>, got {:?}",
-        rt
+            if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Table")),
+        "Table.map should return Table<U>, got {:?}", rt
     );
 }
 

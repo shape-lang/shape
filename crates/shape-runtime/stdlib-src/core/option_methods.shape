@@ -1,0 +1,13 @@
+/// @module std::core::option_methods
+/// Method definitions for Option<T>.
+///
+/// All methods delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+extend Option<T> {
+    method unwrap() -> T { self.unwrap() }
+    method unwrapOr(default: T) -> T { self.unwrapOr(default) }
+    method isSome() -> bool { self.isSome() }
+    method isNone() -> bool { self.isNone() }
+    method map<U>(f: (T) => U) -> Option<U> { self.map(f) }
+}

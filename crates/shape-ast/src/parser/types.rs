@@ -1077,12 +1077,16 @@ pub(crate) fn parse_method_def_shared(pair: Pair<Rule>) -> Result<crate::ast::ty
     let name = name_pair.as_str().to_string();
 
     let mut params = Vec::new();
+    let mut type_params = None;
     let mut when_clause = None;
     let mut return_type = None;
     let mut body = Vec::new();
 
     for part in md_inner {
         match part.as_rule() {
+            Rule::type_params => {
+                type_params = Some(parse_type_params(part)?);
+            }
             Rule::function_params => {
                 for param_pair in part.into_inner() {
                     if param_pair.as_rule() == Rule::function_param {
@@ -1115,6 +1119,7 @@ pub(crate) fn parse_method_def_shared(pair: Pair<Rule>) -> Result<crate::ast::ty
         declaring_module_path: None,
         doc_comment: None,
         annotations: Vec::new(),
+        type_params,
         params,
         when_clause,
         return_type,

@@ -410,6 +410,23 @@ impl TypeInferenceEngine {
         } else {
             inferred_return_type
         };
+
+        // If the function uses `?` but has an explicit return type that is
+        // neither Result nor Option, that is a user error — the `?` operator
+        // needs a propagatable wrapper type.  Reject at compile time instead
+        // of silently wrapping the return type.
+        if is_fallible
+            && func.return_type.is_some()
+            && !self.is_result_type(&return_base)
+            && !self.is_option_type(&return_base)
+        {
+            return Err(TypeError::ConstraintViolation(format!(
+                "operator '?' requires the function to return Result or Option, but '{}' has return type '{}'",
+                func.name,
+                self.render_type_for_diag(&return_base)
+            )));
+        }
+
         let actual_return_type = self.apply_fallibility_to_return_type(return_base, is_fallible);
         let function_type = BuiltinTypes::function(param_types, actual_return_type);
         if let Some(origin) = local_origin {
@@ -572,11 +589,128 @@ impl TypeInferenceEngine {
             return Err(TypeError::TraitImplValidation(msg));
         }
 
+        // Extract receiver type params from the target type for generic method registration
+        let receiver_type_params: Vec<String> = match &impl_block.target_type {
+            TypeName::Generic { type_args, .. } => type_args
+                .iter()
+                .filter_map(|arg| {
+                    let name_str = match arg {
+                        TypeAnnotation::Basic(name) => name.as_str(),
+                        TypeAnnotation::Reference(path) => path.as_str(),
+                        _ => return None,
+                    };
+                    let first = name_str.chars().next().unwrap_or('a');
+                    if first.is_uppercase() && name_str.len() <= 2 {
+                        Some(name_str.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            _ => vec![],
+        };
+
+        // Extract trait-level type param bounds from the trait name for bound checking
+        // e.g., `impl NumericVec for Vec` where NumericVec requires T: Numeric
+        let receiver_param_bounds: Vec<(usize, Vec<String>)> = Self::extract_trait_receiver_bounds(
+            &impl_block.trait_name,
+            &receiver_type_params,
+        );
+
+        let has_receiver_params = !receiver_type_params.is_empty();
+
         // Register each impl method in the method table under the target type
         let impl_method_names: Vec<String> =
             impl_block.methods.iter().map(|m| m.name.clone()).collect();
 
         for method in &impl_block.methods {
+            self.register_impl_method(
+                &type_name,
+                method,
+                &receiver_type_params,
+                &receiver_param_bounds,
+                has_receiver_params,
+            );
+        }
+
+        // Register default methods from the trait that the impl doesn't override
+        if let Some(trait_def) = self.env.lookup_trait(&trait_name) {
+            let trait_def = trait_def.clone();
+            for member in &trait_def.members {
+                if let TraitMember::Default(default_method) = member {
+                    if !impl_method_names.contains(&default_method.name) {
+                        self.register_impl_method(
+                            &type_name,
+                            default_method,
+                            &receiver_type_params,
+                            &receiver_param_bounds,
+                            has_receiver_params,
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Register a single method from an impl block in the method table,
+    /// handling both generic and monomorphic methods.
+    fn register_impl_method(
+        &mut self,
+        type_name: &str,
+        method: &shape_ast::ast::MethodDef,
+        receiver_type_params: &[String],
+        receiver_param_bounds: &[(usize, Vec<String>)],
+        has_receiver_params: bool,
+    ) {
+        use crate::type_system::checking::method_table::TypeParamExpr;
+
+        let method_type_params: Vec<String> = method
+            .type_params
+            .as_ref()
+            .map(|tps| tps.iter().map(|tp| tp.name.clone()).collect())
+            .unwrap_or_default();
+
+        let is_generic = has_receiver_params || !method_type_params.is_empty();
+
+        if is_generic {
+            let param_exprs: Vec<TypeParamExpr> = method
+                .params
+                .iter()
+                .map(|p| {
+                    if let Some(ann) = &p.type_annotation {
+                        Self::annotation_to_type_param_expr(
+                            ann,
+                            receiver_type_params,
+                            &method_type_params,
+                        )
+                    } else {
+                        TypeParamExpr::Concrete(Type::fresh_var())
+                    }
+                })
+                .collect();
+            let return_expr = method
+                .return_type
+                .as_ref()
+                .map(|ann| {
+                    Self::annotation_to_type_param_expr(
+                        ann,
+                        receiver_type_params,
+                        &method_type_params,
+                    )
+                })
+                .unwrap_or_else(|| TypeParamExpr::Concrete(Type::fresh_var()));
+
+            self.method_table.register_user_generic_method(
+                type_name,
+                &method.name,
+                method_type_params.len(),
+                param_exprs,
+                return_expr,
+                receiver_param_bounds.to_vec(),
+            );
+        } else {
             let param_types: Vec<Type> = method
                 .params
                 .iter()
@@ -595,43 +729,144 @@ impl TypeInferenceEngine {
                 .unwrap_or_else(|| Type::fresh_var());
 
             self.method_table.register_user_method(
-                &type_name,
+                type_name,
                 &method.name,
                 param_types,
                 return_type,
             );
         }
+    }
 
-        // Register default methods from the trait that the impl doesn't override
-        if let Some(trait_def) = self.env.lookup_trait(&trait_name) {
-            let trait_def = trait_def.clone();
-            for member in &trait_def.members {
-                if let TraitMember::Default(default_method) = member {
-                    if !impl_method_names.contains(&default_method.name) {
-                        let param_types: Vec<Type> = default_method
-                            .params
-                            .iter()
-                            .map(|p| {
-                                if let Some(ann) = &p.type_annotation {
-                                    self.resolve_type_annotation(ann)
-                                } else {
-                                    Type::fresh_var()
-                                }
-                            })
-                            .collect();
-                        let return_type = default_method
-                            .return_type
-                            .as_ref()
-                            .map(|ann| self.resolve_type_annotation(ann))
-                            .unwrap_or_else(|| Type::fresh_var());
+    /// Extract receiver parameter trait bounds from a trait name.
+    /// For now returns empty — bounds will come from where clauses or
+    /// trait-level type params in future iterations.
+    fn extract_trait_receiver_bounds(
+        _trait_name: &TypeName,
+        _receiver_type_params: &[String],
+    ) -> Vec<(usize, Vec<String>)> {
+        // TODO: Extract bounds from trait definition's type params
+        // e.g., if NumericVec<T: Numeric> then T at receiver index 0 requires Numeric
+        vec![]
+    }
 
-                        self.method_table.register_user_method(
-                            &type_name,
-                            &default_method.name,
-                            param_types,
-                            return_type,
-                        );
+    /// Register extend block methods in the method table.
+    ///
+    /// For generic extend blocks (e.g., `extend Vec<T>`), methods that reference
+    /// type parameters are registered as `GenericMethodSignature` entries with
+    /// `TypeParamExpr` trees, enabling proper generic method resolution.
+    fn register_extend(&mut self, extend: &shape_ast::ast::ExtendStatement) -> TypeResult<()> {
+        use crate::type_system::checking::method_table::TypeParamExpr;
+
+        let type_name = Self::type_name_str(&extend.type_name);
+        let targets = Self::extend_target_names(&type_name);
+
+        // Extract receiver type param names from generic extend blocks.
+        // e.g., `extend Vec<T>` → receiver_type_params = ["T"]
+        // e.g., `extend HashMap<K, V>` → receiver_type_params = ["K", "V"]
+        let receiver_type_params: Vec<String> = match &extend.type_name {
+            TypeName::Generic { type_args, .. } => type_args
+                .iter()
+                .filter_map(|arg| {
+                    let name_str = match arg {
+                        TypeAnnotation::Basic(name) => name.as_str(),
+                        TypeAnnotation::Reference(path) => path.as_str(),
+                        _ => return None,
+                    };
+                    // Single uppercase letter or two-char uppercase = type param
+                    let first = name_str.chars().next().unwrap_or('a');
+                    if first.is_uppercase() && name_str.len() <= 2 {
+                        Some(name_str.to_string())
+                    } else {
+                        None
                     }
+                })
+                .collect(),
+            _ => vec![],
+        };
+
+        let has_receiver_params = !receiver_type_params.is_empty();
+
+        for method in &extend.methods {
+            // Extract method-level type params (e.g., `method map<U>(...)`)
+            let method_type_params: Vec<String> = method
+                .type_params
+                .as_ref()
+                .map(|tps| tps.iter().map(|tp| tp.name.clone()).collect())
+                .unwrap_or_default();
+
+            let is_generic = has_receiver_params || !method_type_params.is_empty();
+
+            if is_generic {
+                // Build TypeParamExpr-based signature for generic method resolution
+                let param_exprs: Vec<TypeParamExpr> = method
+                    .params
+                    .iter()
+                    .map(|p| {
+                        if let Some(ann) = &p.type_annotation {
+                            Self::annotation_to_type_param_expr(
+                                ann,
+                                &receiver_type_params,
+                                &method_type_params,
+                            )
+                        } else {
+                            TypeParamExpr::Concrete(Type::fresh_var())
+                        }
+                    })
+                    .collect();
+                let return_expr = method
+                    .return_type
+                    .as_ref()
+                    .map(|ann| {
+                        Self::annotation_to_type_param_expr(
+                            ann,
+                            &receiver_type_params,
+                            &method_type_params,
+                        )
+                    })
+                    .unwrap_or_else(|| TypeParamExpr::Concrete(Type::fresh_var()));
+
+                // Extract receiver param bounds from method-level type params
+                // that reference receiver type params with trait bounds.
+                // For now, bounds come from the extend block's type args if
+                // they have trait bounds (via where clauses on the extend).
+                let receiver_param_bounds: Vec<(usize, Vec<String>)> = vec![];
+
+                for target in &targets {
+                    self.method_table.register_user_generic_method(
+                        target,
+                        &method.name,
+                        method_type_params.len(),
+                        param_exprs.clone(),
+                        return_expr.clone(),
+                        receiver_param_bounds.clone(),
+                    );
+                }
+            } else {
+                // Non-generic: use the existing monomorphic registration
+                let param_types: Vec<Type> = method
+                    .params
+                    .iter()
+                    .map(|p| {
+                        if let Some(ann) = &p.type_annotation {
+                            self.resolve_type_annotation(ann)
+                        } else {
+                            Type::fresh_var()
+                        }
+                    })
+                    .collect();
+                let return_type = method
+                    .return_type
+                    .as_ref()
+                    .map(|ann| self.resolve_type_annotation(ann))
+                    .unwrap_or_else(|| Type::fresh_var());
+
+                for target in &targets {
+                    self.method_table.register_user_method(
+                        target,
+                        &method.name,
+                        param_types.clone(),
+                        return_type.clone(),
+                    );
                 }
             }
         }
@@ -639,40 +874,102 @@ impl TypeInferenceEngine {
         Ok(())
     }
 
-    /// Register extend block methods in the method table
-    fn register_extend(&mut self, extend: &shape_ast::ast::ExtendStatement) -> TypeResult<()> {
-        let type_name = Self::type_name_str(&extend.type_name);
-        let targets = Self::extend_target_names(&type_name);
+    /// Convert a type annotation to a TypeParamExpr, mapping type parameter names
+    /// to ReceiverParam/MethodParam indices.
+    ///
+    /// For `extend Vec<T> { method map<U>(f: (T) => U): Vec<U> { ... } }`:
+    /// - `T` → `ReceiverParam(0)`
+    /// - `U` → `MethodParam(0)`
+    /// - `(T) => U` → `Function { params: [ReceiverParam(0)], returns: MethodParam(0) }`
+    /// - `Vec<U>` → `GenericContainer { name: "Vec", args: [MethodParam(0)] }`
+    fn annotation_to_type_param_expr(
+        ann: &TypeAnnotation,
+        receiver_params: &[String],
+        method_params: &[String],
+    ) -> crate::type_system::checking::method_table::TypeParamExpr {
+        use crate::type_system::checking::method_table::TypeParamExpr;
 
-        for method in &extend.methods {
-            let param_types: Vec<Type> = method
-                .params
-                .iter()
-                .map(|p| {
-                    if let Some(ann) = &p.type_annotation {
-                        self.resolve_type_annotation(ann)
-                    } else {
-                        Type::fresh_var()
-                    }
-                })
-                .collect();
-            let return_type = method
-                .return_type
-                .as_ref()
-                .map(|ann| self.resolve_type_annotation(ann))
-                .unwrap_or_else(|| Type::fresh_var());
-
-            for target in &targets {
-                self.method_table.register_user_method(
-                    target,
-                    &method.name,
-                    param_types.clone(),
-                    return_type.clone(),
-                );
+        // Helper to check if a name is a type parameter
+        let check_param = |name_str: &str| -> Option<TypeParamExpr> {
+            if let Some(idx) = receiver_params.iter().position(|p| p == name_str) {
+                return Some(TypeParamExpr::ReceiverParam(idx));
             }
-        }
+            if let Some(idx) = method_params.iter().position(|p| p == name_str) {
+                return Some(TypeParamExpr::MethodParam(idx));
+            }
+            None
+        };
 
-        Ok(())
+        match ann {
+            TypeAnnotation::Basic(name) => {
+                if let Some(expr) = check_param(name.as_str()) {
+                    return expr;
+                }
+                TypeParamExpr::Concrete(Type::Concrete(ann.clone()))
+            }
+            TypeAnnotation::Reference(path) => {
+                if let Some(expr) = check_param(path.as_str()) {
+                    return expr;
+                }
+                TypeParamExpr::Concrete(Type::Concrete(ann.clone()))
+            }
+            TypeAnnotation::Function { params, returns } => {
+                let param_exprs: Vec<TypeParamExpr> = params
+                    .iter()
+                    .map(|p| {
+                        Self::annotation_to_type_param_expr(
+                            &p.type_annotation,
+                            receiver_params,
+                            method_params,
+                        )
+                    })
+                    .collect();
+                let return_expr = Box::new(Self::annotation_to_type_param_expr(
+                    returns,
+                    receiver_params,
+                    method_params,
+                ));
+                TypeParamExpr::Function {
+                    params: param_exprs,
+                    returns: return_expr,
+                }
+            }
+            TypeAnnotation::Generic { name, args } => {
+                let name_str = name.as_str();
+                // Check if the whole thing is a type param (unlikely for Generic but possible)
+                if args.is_empty() {
+                    if let Some(expr) = check_param(name_str) {
+                        return expr;
+                    }
+                }
+                let arg_exprs: Vec<TypeParamExpr> = args
+                    .iter()
+                    .map(|a| {
+                        Self::annotation_to_type_param_expr(a, receiver_params, method_params)
+                    })
+                    .collect();
+                TypeParamExpr::GenericContainer {
+                    name: name_str.to_string(),
+                    args: arg_exprs,
+                }
+            }
+            TypeAnnotation::Array(elem) => {
+                let elem_expr = Self::annotation_to_type_param_expr(
+                    elem,
+                    receiver_params,
+                    method_params,
+                );
+                TypeParamExpr::GenericContainer {
+                    name: "Vec".to_string(),
+                    args: vec![elem_expr],
+                }
+            }
+            TypeAnnotation::Void => {
+                TypeParamExpr::Concrete(Type::Concrete(TypeAnnotation::Void))
+            }
+            // For other annotation types, fall back to concrete
+            _ => TypeParamExpr::Concrete(Type::Concrete(ann.clone())),
+        }
     }
 
     /// Extract the simple type name string from a TypeName
@@ -1158,7 +1455,9 @@ mod tests {
     fn test_hasmethod_enforcement_known_method_passes() {
         use shape_ast::parser::parse_program;
 
-        // Call a method that exists on the builtin type "string"
+        // Call a method that exists on the builtin type "string".
+        // Since methods are now registered from Shape stdlib, we register
+        // it manually on the method table for this unit test.
         let code = r#"
             let s: string = "hello"
             let n = s.len()
@@ -1166,6 +1465,12 @@ mod tests {
 
         let program = parse_program(code).expect("Failed to parse");
         let mut engine = TypeInferenceEngine::new();
+        engine.method_table.register_user_method(
+            "string",
+            "len",
+            vec![],
+            BuiltinTypes::number(),
+        );
         let result = engine.infer_program(&program);
         assert!(
             result.is_ok(),

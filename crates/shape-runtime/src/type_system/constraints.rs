@@ -563,18 +563,6 @@ impl ConstraintSolver {
     /// Check if a type satisfies a constraint
     fn check_constraint(&self, ty: &Type, constraint: &TypeConstraint) -> TypeResult<()> {
         match constraint {
-            TypeConstraint::Numeric => match ty {
-                Type::Concrete(TypeAnnotation::Basic(name))
-                    if BuiltinTypes::is_numeric_type_name(name) =>
-                {
-                    Ok(())
-                }
-                _ => Err(TypeError::ConstraintViolation(format!(
-                    "{:?} is not numeric",
-                    ty
-                ))),
-            },
-
             TypeConstraint::Comparable => match ty {
                 Type::Concrete(TypeAnnotation::Basic(name))
                     if BuiltinTypes::is_numeric_type_name(name)
@@ -860,14 +848,31 @@ impl ConstraintSolver {
         }
     }
 
-    /// Check if a type implements a trait, considering numeric widening.
+    /// Check if a type implements a trait, considering aliases and numeric widening.
     ///
-    /// For example, `int` satisfies a trait bound if the trait is implemented for `number`,
-    /// since `int` can widen to `number` in the type system.
+    /// Handles three resolution strategies:
+    /// 1. Direct lookup: `"Numeric::int"` in the trait_impls set
+    /// 2. Canonical alias: `"Float"` → `"f64"`, `"byte"` → `"u8"` via runtime name table
+    /// 3. Script alias: `"i64"` → `"int"`, `"f64"` → `"number"` via script alias table
+    /// 4. Numeric widening: integer-family names can satisfy number/float/f64 impls
     fn has_trait_impl(&self, trait_name: &str, type_name: &str) -> bool {
         let key = format!("{}::{}", trait_name, type_name);
         if self.trait_impls.contains(&key) {
             return true;
+        }
+        // Try canonical runtime alias (e.g. "Float" -> "f64", "byte" -> "u8")
+        if let Some(canonical) = BuiltinTypes::canonical_numeric_runtime_name(type_name) {
+            let canon_key = format!("{}::{}", trait_name, canonical);
+            if self.trait_impls.contains(&canon_key) {
+                return true;
+            }
+        }
+        // Try script-facing alias (e.g. "i64" -> "int", "f64" -> "number")
+        if let Some(script_alias) = BuiltinTypes::canonical_script_alias(type_name) {
+            let alias_key = format!("{}::{}", trait_name, script_alias);
+            if self.trait_impls.contains(&alias_key) {
+                return true;
+            }
         }
         // Numeric widening: integer-family aliases can use number/float/f64 impls.
         if BuiltinTypes::is_integer_type_name(type_name) {
@@ -1134,14 +1139,24 @@ mod tests {
 
     #[test]
     fn test_int_constrained_numeric_succeeds() {
-        // Concrete(int) ~ Constrained(Numeric) should succeed
+        // Concrete(int) ~ Constrained(ImplementsTrait("Numeric")) should succeed
         let mut solver = ConstraintSolver::new();
+        // Inject Numeric trait impls (same as TypeEnvironment registers)
+        let trait_impls: std::collections::HashSet<String> = [
+            "Numeric::int", "Numeric::number", "Numeric::decimal",
+            "Numeric::i8", "Numeric::i16", "Numeric::i32", "Numeric::i64",
+            "Numeric::u8", "Numeric::u16", "Numeric::u32", "Numeric::u64",
+            "Numeric::f32", "Numeric::f64",
+        ].iter().map(|s| s.to_string()).collect();
+        solver.set_trait_impls(trait_impls);
         let bound_var = TypeVar::fresh();
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("int".to_string())),
             Type::Constrained {
                 var: bound_var,
-                constraint: Box::new(TypeConstraint::Numeric),
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
             },
         )];
         assert!(solver.solve(&mut constraints).is_ok());
@@ -1182,12 +1197,21 @@ mod tests {
     #[test]
     fn test_decimal_constrained_numeric_succeeds() {
         let mut solver = ConstraintSolver::new();
+        let trait_impls: std::collections::HashSet<String> = [
+            "Numeric::int", "Numeric::number", "Numeric::decimal",
+            "Numeric::i8", "Numeric::i16", "Numeric::i32", "Numeric::i64",
+            "Numeric::u8", "Numeric::u16", "Numeric::u32", "Numeric::u64",
+            "Numeric::f32", "Numeric::f64",
+        ].iter().map(|s| s.to_string()).collect();
+        solver.set_trait_impls(trait_impls);
         let bound_var = TypeVar::fresh();
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("decimal".to_string())),
             Type::Constrained {
                 var: bound_var,
-                constraint: Box::new(TypeConstraint::Numeric),
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
             },
         )];
         assert!(solver.solve(&mut constraints).is_ok());

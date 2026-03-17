@@ -204,6 +204,9 @@ impl TypeEnvironment {
 
         // Register operator traits — trait-based operator overloading.
         self.register_operator_traits();
+
+        // Register the Numeric marker trait — used for trait-bounded method gating.
+        self.register_numeric_trait();
     }
 
     /// Register the Content trait and built-in implementations for primitive types.
@@ -556,6 +559,34 @@ impl TypeEnvironment {
             annotations: vec![],
         };
         self.define_trait(&ord_trait);
+    }
+
+    /// Register the Numeric marker trait and built-in implementations.
+    ///
+    /// Numeric is a marker trait (no methods) used as a bound to gate
+    /// numeric-only operations like `Vec<T: Numeric>.sum()`.
+    /// All primitive numeric types implement it.
+    fn register_numeric_trait(&mut self) {
+        let numeric_trait = TraitDef {
+            name: "Numeric".to_string(),
+            doc_comment: None,
+            type_params: None,
+            super_traits: vec![],
+            members: vec![],
+            annotations: vec![],
+        };
+        self.define_trait(&numeric_trait);
+
+        // Register Numeric impls for all primitive numeric types.
+        let numeric_types = [
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64",
+            "int",    // alias for i64
+            "number", // alias for f64
+            "decimal",
+        ];
+        for type_name in &numeric_types {
+            let _ = self.register_trait_impl("Numeric", type_name, vec![]);
+        }
     }
 
     /// Define a built-in function with monomorphic type

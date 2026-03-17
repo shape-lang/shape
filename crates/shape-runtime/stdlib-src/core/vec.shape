@@ -1,0 +1,103 @@
+/// @module std::core::vec
+/// Method definitions for Vec<T> (Array).
+///
+/// Type-agnostic methods are defined via `extend Vec<T>`.
+/// Numeric-only methods are defined via `trait NumericVec` + `impl NumericVec for Vec`.
+/// Method bodies delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+// -- Type-agnostic methods --------------------------------------------------
+
+extend Vec<T> {
+    method len() -> int { self.len() }
+
+    method isEmpty() -> bool { self.isEmpty() }
+
+    method first() -> T { self.first() }
+
+    method last() -> T { self.last() }
+
+    method push(item: T) { self.push(item) }
+
+    method pop() -> T { self.pop() }
+
+    method reverse() -> Vec<T> { self.reverse() }
+
+    method clone() -> Vec<T> { self.clone() }
+
+    method filter(predicate: (T) => bool) -> Vec<T> { self.filter(predicate) }
+
+    method map<U>(f: (T) => U) -> Vec<U> { self.map(f) }
+
+    method reduce<U>(f: (U, T) => U, init: U) -> U { self.reduce(f, init) }
+
+    method find(predicate: (T) => bool) -> T { self.find(predicate) }
+
+    method forEach(f: (T) => void) -> void { self.forEach(f) }
+
+    method some(predicate: (T) => bool) -> bool { self.some(predicate) }
+
+    method every(predicate: (T) => bool) -> bool { self.every(predicate) }
+
+    method join(separator: string) -> string { self.join(separator) }
+
+    method slice(start: int, end: int) -> Vec<T> { self.slice(start, end) }
+
+    method take(n: int) -> Vec<T> { self.take(n) }
+
+    method drop(n: int) -> Vec<T> { self.drop(n) }
+
+    method flatten() -> Vec<T> { self.flatten() }
+
+    method unique() -> Vec<T> { self.unique() }
+
+    method concat(other: Vec<T>) -> Vec<T> { self.concat(other) }
+
+    method indexOf(value: T) -> int { self.indexOf(value) }
+
+    method sort(cmp: (T, T) => number) -> Vec<T> { self.sort(cmp) }
+
+    method includes(value: T) -> bool { self.includes(value) }
+
+    method findIndex(predicate: (T) => bool) -> int { self.findIndex(predicate) }
+
+    method flatMap<U>(f: (T) => Vec<U>) -> Vec<U> { self.flatMap(f) }
+
+    method groupBy<K>(key_fn: (T) => K) -> Vec<K> { self.groupBy(key_fn) }
+
+    method sortBy(key_fn: (T) => number) -> Vec<T> { self.sortBy(key_fn) }
+}
+
+// -- Numeric-only methods ---------------------------------------------------
+
+trait NumericVec {
+    sum(): number,
+    avg(): number,
+    mean(): number,
+    min(): number,
+    max(): number,
+    std(): number,
+    variance(): number,
+    dot(other: Vec<number>): number,
+    norm(): number,
+    normalize(): Vec<number>,
+    cumsum(): Vec<number>,
+    diff(): Vec<number>,
+    abs(): Vec<number>,
+}
+
+impl NumericVec for Vec {
+    method sum() -> number { self.sum() }
+    method avg() -> number { self.avg() }
+    method mean() -> number { self.mean() }
+    method min() -> number { self.min() }
+    method max() -> number { self.max() }
+    method std() -> number { self.std() }
+    method variance() -> number { self.variance() }
+    method dot(other: Vec<number>) -> number { self.dot(other) }
+    method norm() -> number { self.norm() }
+    method normalize() -> Vec<number> { self.normalize() }
+    method cumsum() -> Vec<number> { self.cumsum() }
+    method diff() -> Vec<number> { self.diff() }
+    method abs() -> Vec<number> { self.abs() }
+}

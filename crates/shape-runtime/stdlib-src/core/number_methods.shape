@@ -1,0 +1,16 @@
+/// @module std::core::number_methods
+/// Method definitions for the number type.
+///
+/// All methods delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+extend number {
+    method abs() -> number { self.abs() }
+    method floor() -> number { self.floor() }
+    method ceil() -> number { self.ceil() }
+    method round() -> number { self.round() }
+    method toString() -> string { self.toString() }
+    method toFixed(digits: number) -> string { self.toFixed(digits) }
+    method sign() -> number { self.sign() }
+    method clamp(min: number, max: number) -> number { self.clamp(min, max) }
+}

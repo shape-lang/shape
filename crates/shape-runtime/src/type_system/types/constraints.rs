@@ -7,8 +7,6 @@ use super::core::Type;
 /// Type constraints for inference
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeConstraint {
-    /// Type must be numeric
-    Numeric,
     /// Type must be comparable
     Comparable,
     /// Type must be iterable
@@ -33,3 +31,11 @@ pub enum TypeConstraint {
     /// Type must implement a specific trait
     ImplementsTrait { trait_name: String },
 }
+
+// Numeric checking flows through the trait system:
+// 1. The `Numeric` trait is registered in TypeEnvironment (environment/mod.rs)
+// 2. Arithmetic operators emit `ImplementsTrait { trait_name: "Numeric" }`
+// 3. The constraint solver resolves it via `has_trait_impl()` with alias/widening support
+//
+// The previous `TypeConstraint::Numeric` variant, `satisfies_numeric()`, and
+// `NUMERIC_TYPE_NAMES` have been removed in favor of the real trait system.

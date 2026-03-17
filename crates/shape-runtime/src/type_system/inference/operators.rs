@@ -248,7 +248,9 @@ impl TypeInferenceEngine {
             effective_left.clone(),
             Type::Constrained {
                 var: left_bound,
-                constraint: Box::new(TypeConstraint::Numeric),
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
             },
             span,
         );
@@ -257,7 +259,9 @@ impl TypeInferenceEngine {
             effective_right.clone(),
             Type::Constrained {
                 var: right_bound,
-                constraint: Box::new(TypeConstraint::Numeric),
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
             },
             span,
         );

@@ -85,6 +85,11 @@ pub struct GenericMethodSignature {
     /// Return type using TypeParamExpr
     pub return_type: TypeParamExpr,
     pub is_fallible: bool,
+    /// Trait bounds on receiver type parameters.
+    /// Each entry is (receiver_param_index, vec_of_trait_names).
+    /// e.g., `Vec<T: Numeric>.sum()` → `[(0, ["Numeric"])]`
+    #[allow(dead_code)]
+    pub receiver_param_bounds: Vec<(usize, Vec<String>)>,
 }
 
 /// A method signature
@@ -125,11 +130,14 @@ impl MethodTable {
             generic_methods: HashMap::new(),
         };
         table.register_builtin_methods();
-        table.register_generic_builtin_methods();
         table
     }
 
-    /// Register builtin methods for standard types
+    /// Register builtin methods for standard types.
+    ///
+    /// Only universal methods (__Any__) are registered here. All type-specific
+    /// methods are defined in Shape stdlib files (stdlib-src/core/*.shape) and
+    /// registered via extend/impl blocks during compilation.
     fn register_builtin_methods(&mut self) {
         // Universal methods available on every value.
         self.register_method(
@@ -154,1069 +162,20 @@ impl MethodTable {
             BuiltinTypes::string(),
             false,
         );
-
-        // Array methods
-        self.register_method("Vec", "len", vec![], BuiltinTypes::number(), false);
-        self.register_method("Vec", "isEmpty", vec![], BuiltinTypes::boolean(), false);
-        self.register_method(
-            "Vec",
-            "first",
-            vec![],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "last",
-            vec![],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "push",
-            vec![Type::fresh_var()],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "pop",
-            vec![],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "reverse",
-            vec![],
-            Type::fresh_var(),
-            false,
-        );
-
-        // Array higher-order methods (with callback) — kept for fallback; generic_methods takes priority
-        self.register_method(
-            "Vec",
-            "map",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "filter",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "reduce",
-            vec![BuiltinTypes::any(), BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "find",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "forEach",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::void(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "some",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::boolean(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "every",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::boolean(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "join",
-            vec![BuiltinTypes::string()],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "slice",
-            vec![BuiltinTypes::number(), BuiltinTypes::number()],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "take",
-            vec![BuiltinTypes::number()],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "drop",
-            vec![BuiltinTypes::number()],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "flatten",
-            vec![],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "unique",
-            vec![],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "concat",
-            vec![Type::fresh_var()],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "indexOf",
-            vec![Type::fresh_var()],
-            BuiltinTypes::number(),
-            false,
-        );
-        self.register_method(
-            "Vec",
-            "sort",
-            vec![BuiltinTypes::any()],
-            Type::fresh_var(),
-            false,
-        );
-
-        // Table methods used by query/dataflow chains.
-        // These are typed loosely here; execution-level validation remains in VM/runtime.
-        self.register_method(
-            "Table",
-            "filter",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "map",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "reduce",
-            vec![BuiltinTypes::any(), BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "groupBy",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "indexBy",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "select",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "orderBy",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "simulate",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "aggregate",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::any(),
-            false,
-        );
-        self.register_method(
-            "Table",
-            "forEach",
-            vec![BuiltinTypes::any()],
-            BuiltinTypes::void(),
-            false,
-        );
-        self.register_method("Table", "describe", vec![], BuiltinTypes::any(), false);
-        self.register_method("Table", "count", vec![], BuiltinTypes::number(), false);
-
-        // String methods
-        self.register_method("string", "len", vec![], BuiltinTypes::number(), false);
-        self.register_method("string", "isEmpty", vec![], BuiltinTypes::boolean(), false);
-        self.register_method(
-            "string",
-            "toLowerCase",
-            vec![],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "toUpperCase",
-            vec![],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method("string", "trim", vec![], BuiltinTypes::string(), false);
-        self.register_method(
-            "string",
-            "split",
-            vec![BuiltinTypes::string()],
-            BuiltinTypes::array(BuiltinTypes::string()),
-            false,
-        );
-        self.register_method(
-            "string",
-            "contains",
-            vec![BuiltinTypes::string()],
-            BuiltinTypes::boolean(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "startsWith",
-            vec![BuiltinTypes::string()],
-            BuiltinTypes::boolean(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "endsWith",
-            vec![BuiltinTypes::string()],
-            BuiltinTypes::boolean(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "replace",
-            vec![BuiltinTypes::string(), BuiltinTypes::string()],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method("string", "trimStart", vec![], BuiltinTypes::string(), false);
-        self.register_method("string", "trimEnd", vec![], BuiltinTypes::string(), false);
-        self.register_method("string", "toNumber", vec![], BuiltinTypes::number(), true);
-        self.register_method("string", "toBool", vec![], BuiltinTypes::boolean(), true);
-        self.register_method(
-            "string",
-            "chars",
-            vec![],
-            BuiltinTypes::array(BuiltinTypes::string()),
-            false,
-        );
-        self.register_method(
-            "string",
-            "padStart",
-            vec![BuiltinTypes::number()],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "padEnd",
-            vec![BuiltinTypes::number()],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "repeat",
-            vec![BuiltinTypes::number()],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "charAt",
-            vec![BuiltinTypes::number()],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method("string", "reverse", vec![], BuiltinTypes::string(), false);
-        self.register_method(
-            "string",
-            "indexOf",
-            vec![BuiltinTypes::string()],
-            BuiltinTypes::number(),
-            false,
-        );
-        self.register_method("string", "isDigit", vec![], BuiltinTypes::boolean(), false);
-        self.register_method("string", "isAlpha", vec![], BuiltinTypes::boolean(), false);
-        self.register_method(
-            "string",
-            "codePointAt",
-            vec![BuiltinTypes::number()],
-            BuiltinTypes::number(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "substring",
-            vec![BuiltinTypes::number()],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "normalize",
-            vec![BuiltinTypes::string()],
-            BuiltinTypes::string(),
-            false,
-        );
-        self.register_method(
-            "string",
-            "graphemes",
-            vec![],
-            BuiltinTypes::array(BuiltinTypes::string()),
-            false,
-        );
-        self.register_method(
-            "string",
-            "graphemeLen",
-            vec![],
-            BuiltinTypes::integer(),
-            false,
-        );
-        self.register_method("string", "isAscii", vec![], BuiltinTypes::boolean(), false);
-
-        // Number methods
-        self.register_method("number", "abs", vec![], BuiltinTypes::number(), false);
-        self.register_method("number", "floor", vec![], BuiltinTypes::number(), false);
-        self.register_method("number", "ceil", vec![], BuiltinTypes::number(), false);
-        self.register_method("number", "round", vec![], BuiltinTypes::number(), false);
-        self.register_method("number", "toString", vec![], BuiltinTypes::string(), false);
-        self.register_method(
-            "number",
-            "toFixed",
-            vec![BuiltinTypes::number()],
-            BuiltinTypes::string(),
-            false,
-        );
-
-        self.register_method("number", "sign", vec![], BuiltinTypes::number(), false);
-        self.register_method(
-            "number",
-            "clamp",
-            vec![BuiltinTypes::number(), BuiltinTypes::number()],
-            BuiltinTypes::number(),
-            false,
-        );
-
-        // Integer methods
-        self.register_method(
-            "int",
-            "abs",
-            vec![],
-            Type::Concrete(TypeAnnotation::Basic("int".to_string())),
-            false,
-        );
-        self.register_method("int", "toString", vec![], BuiltinTypes::string(), false);
-        self.register_method(
-            "int",
-            "sign",
-            vec![],
-            Type::Concrete(TypeAnnotation::Basic("int".to_string())),
-            false,
-        );
-        self.register_method(
-            "int",
-            "clamp",
-            vec![
-                Type::Concrete(TypeAnnotation::Basic("int".to_string())),
-                Type::Concrete(TypeAnnotation::Basic("int".to_string())),
-            ],
-            Type::Concrete(TypeAnnotation::Basic("int".to_string())),
-            false,
-        );
-
-        // Option methods
-        self.register_method(
-            "Option",
-            "unwrap",
-            vec![],
-            Type::fresh_var(),
-            true,
-        );
-        self.register_method(
-            "Option",
-            "unwrapOr",
-            vec![Type::fresh_var()],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method("Option", "isSome", vec![], BuiltinTypes::boolean(), false);
-        self.register_method("Option", "isNone", vec![], BuiltinTypes::boolean(), false);
-        self.register_method(
-            "Option",
-            "map",
-            vec![BuiltinTypes::any()],
-            Type::fresh_var(),
-            false,
-        );
-
-        // Result methods
-        self.register_method(
-            "Result",
-            "unwrap",
-            vec![],
-            Type::fresh_var(),
-            true,
-        );
-        self.register_method(
-            "Result",
-            "unwrapOr",
-            vec![Type::fresh_var()],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method("Result", "isOk", vec![], BuiltinTypes::boolean(), false);
-        self.register_method("Result", "isErr", vec![], BuiltinTypes::boolean(), false);
-        self.register_method(
-            "Result",
-            "map",
-            vec![BuiltinTypes::any()],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Result",
-            "mapErr",
-            vec![BuiltinTypes::any()],
-            Type::fresh_var(),
-            false,
-        );
-
-        // Column methods (for vectorized column operations)
-        self.register_method("Column", "len", vec![], BuiltinTypes::number(), false);
-        self.register_method(
-            "Column",
-            "first",
-            vec![],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method(
-            "Column",
-            "last",
-            vec![],
-            Type::fresh_var(),
-            false,
-        );
-        self.register_method("Column", "sum", vec![], BuiltinTypes::number(), false);
-        self.register_method("Column", "mean", vec![], BuiltinTypes::number(), false);
-        self.register_method("Column", "min", vec![], BuiltinTypes::number(), false);
-        self.register_method("Column", "max", vec![], BuiltinTypes::number(), false);
-        self.register_method("Column", "std", vec![], BuiltinTypes::number(), false);
-        self.register_method(
-            "Column",
-            "abs",
-            vec![],
-            BuiltinTypes::array(BuiltinTypes::number()),
-            false,
-        );
-        self.register_method(
-            "Column",
-            "toArray",
-            vec![],
-            BuiltinTypes::array(BuiltinTypes::any()),
-            false,
-        );
     }
 
-    /// Register generic builtin methods for types with type parameters
-    fn register_generic_builtin_methods(&mut self) {
-        use TypeParamExpr::*;
-
-        // Vec<T> methods
-        // filter(fn(T) -> bool) -> Vec<T>
-        self.register_generic_method(
-            "Vec",
-            "filter",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::boolean())),
-            }],
-            SelfType,
-            false,
-        );
-        // map<U>(fn(T) -> U) -> Vec<U>
-        self.register_generic_method(
-            "Vec",
-            "map",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(MethodParam(0)),
-            }],
-            GenericContainer {
-                name: "Vec".to_string(),
-                args: vec![MethodParam(0)],
-            },
-            false,
-        );
-        // reduce<U>(fn(U, T) -> U, U) -> U
-        self.register_generic_method(
-            "Vec",
-            "reduce",
-            1,
-            vec![
-                Function {
-                    params: vec![MethodParam(0), ReceiverParam(0)],
-                    returns: Box::new(MethodParam(0)),
-                },
-                MethodParam(0),
-            ],
-            MethodParam(0),
-            false,
-        );
-        // find(fn(T) -> bool) -> T
-        self.register_generic_method(
-            "Vec",
-            "find",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::boolean())),
-            }],
-            ReceiverParam(0),
-            false,
-        );
-        // forEach(fn(T) -> void) -> void
-        self.register_generic_method(
-            "Vec",
-            "forEach",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::void())),
-            }],
-            Concrete(BuiltinTypes::void()),
-            false,
-        );
-        // some(fn(T) -> bool) -> bool
-        self.register_generic_method(
-            "Vec",
-            "some",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::boolean())),
-            }],
-            Concrete(BuiltinTypes::boolean()),
-            false,
-        );
-        // every(fn(T) -> bool) -> bool
-        self.register_generic_method(
-            "Vec",
-            "every",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::boolean())),
-            }],
-            Concrete(BuiltinTypes::boolean()),
-            false,
-        );
-        // sort(fn(T,T) -> number) -> Vec<T>
-        self.register_generic_method(
-            "Vec",
-            "sort",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0), ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::number())),
-            }],
-            SelfType,
-            false,
-        );
-        // flatMap<U>(fn(T) -> Vec<U>) -> Vec<U>
-        self.register_generic_method(
-            "Vec",
-            "flatMap",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(GenericContainer {
-                    name: "Vec".to_string(),
-                    args: vec![MethodParam(0)],
-                }),
-            }],
-            GenericContainer {
-                name: "Vec".to_string(),
-                args: vec![MethodParam(0)],
-            },
-            false,
-        );
-        // groupBy<K>(fn(T) -> K) -> Vec<{key: K, group: Vec<T>}>
-        self.register_generic_method(
-            "Vec",
-            "groupBy",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(MethodParam(0)),
-            }],
-            Concrete(BuiltinTypes::any()),
-            false,
-        ); // groupBy result shape is complex, keep any
-        // findIndex(fn(T) -> bool) -> number
-        self.register_generic_method(
-            "Vec",
-            "findIndex",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::boolean())),
-            }],
-            Concrete(BuiltinTypes::number()),
-            false,
-        );
-        // sortBy(fn(T) -> any) -> Vec<T>
-        self.register_generic_method(
-            "Vec",
-            "sortBy",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::any())),
-            }],
-            SelfType,
-            false,
-        );
-        // includes(T) -> bool
-        self.register_generic_method(
-            "Vec",
-            "includes",
-            0,
-            vec![ReceiverParam(0)],
-            Concrete(BuiltinTypes::boolean()),
-            false,
-        );
-        // first() -> T
-        self.register_generic_method("Vec", "first", 0, vec![], ReceiverParam(0), false);
-        // last() -> T
-        self.register_generic_method("Vec", "last", 0, vec![], ReceiverParam(0), false);
-
-        // Table<T> methods
-        // filter(fn(T) -> bool) -> Table<T>
-        self.register_generic_method(
-            "Table",
-            "filter",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::boolean())),
-            }],
-            SelfType,
-            false,
-        );
-        // map<U>(fn(T) -> U) -> Table<U>
-        self.register_generic_method(
-            "Table",
-            "map",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(MethodParam(0)),
-            }],
-            GenericContainer {
-                name: "Table".to_string(),
-                args: vec![MethodParam(0)],
-            },
-            false,
-        );
-        // reduce<U>(fn(U, T) -> U, U) -> U
-        self.register_generic_method(
-            "Table",
-            "reduce",
-            1,
-            vec![
-                Function {
-                    params: vec![MethodParam(0), ReceiverParam(0)],
-                    returns: Box::new(MethodParam(0)),
-                },
-                MethodParam(0),
-            ],
-            MethodParam(0),
-            false,
-        );
-        // groupBy(fn(T) -> any) -> Vec<{key: any, group: Table<T>}>
-        self.register_generic_method(
-            "Table",
-            "groupBy",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::any())),
-            }],
-            Concrete(BuiltinTypes::any()),
-            false,
-        );
-        // indexBy(fn(T) -> any) -> Table<T> (indexed)
-        self.register_generic_method(
-            "Table",
-            "indexBy",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::any())),
-            }],
-            SelfType,
-            false,
-        );
-        // select<U>(fn(T) -> U) -> Table<U>
-        self.register_generic_method(
-            "Table",
-            "select",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(MethodParam(0)),
-            }],
-            GenericContainer {
-                name: "Table".to_string(),
-                args: vec![MethodParam(0)],
-            },
-            false,
-        );
-        // orderBy(fn(T) -> any, string) -> Table<T>
-        self.register_generic_method(
-            "Table",
-            "orderBy",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::any())),
-            }],
-            SelfType,
-            false,
-        );
-        // simulate(fn(T) -> any) -> any
-        self.register_generic_method(
-            "Table",
-            "simulate",
-            0,
-            vec![Concrete(BuiltinTypes::any())],
-            Concrete(BuiltinTypes::any()),
-            false,
-        );
-        // aggregate(any) -> any (dynamic shape)
-        self.register_generic_method(
-            "Table",
-            "aggregate",
-            0,
-            vec![Concrete(BuiltinTypes::any())],
-            Concrete(BuiltinTypes::any()),
-            false,
-        );
-        // forEach(fn(T) -> void) -> void
-        self.register_generic_method(
-            "Table",
-            "forEach",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(Concrete(BuiltinTypes::void())),
-            }],
-            Concrete(BuiltinTypes::void()),
-            false,
-        );
-        // head(number) -> Table<T>
-        self.register_generic_method(
-            "Table",
-            "head",
-            0,
-            vec![Concrete(BuiltinTypes::number())],
-            SelfType,
-            false,
-        );
-        // tail(number) -> Table<T>
-        self.register_generic_method(
-            "Table",
-            "tail",
-            0,
-            vec![Concrete(BuiltinTypes::number())],
-            SelfType,
-            false,
-        );
-        // limit(number) -> Table<T>
-        self.register_generic_method(
-            "Table",
-            "limit",
-            0,
-            vec![Concrete(BuiltinTypes::number())],
-            SelfType,
-            false,
-        );
-        // toMat() -> Mat<number>
-        self.register_generic_method(
-            "Table",
-            "toMat",
-            0,
-            vec![],
-            GenericContainer {
-                name: "Mat".to_string(),
-                args: vec![Concrete(BuiltinTypes::number())],
-            },
-            false,
-        );
-
-        // Option<T> methods
-        // unwrap() -> T
-        self.register_generic_method("Option", "unwrap", 0, vec![], ReceiverParam(0), true);
-        // unwrapOr(T) -> T
-        self.register_generic_method(
-            "Option",
-            "unwrapOr",
-            0,
-            vec![ReceiverParam(0)],
-            ReceiverParam(0),
-            false,
-        );
-        // map<U>(fn(T) -> U) -> Option<U>
-        self.register_generic_method(
-            "Option",
-            "map",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(MethodParam(0)),
-            }],
-            GenericContainer {
-                name: "Option".to_string(),
-                args: vec![MethodParam(0)],
-            },
-            false,
-        );
-
-        // Result<T, E> methods (Result<T> defaults E to AnyError)
-        // unwrap() -> T
-        self.register_generic_method("Result", "unwrap", 0, vec![], ReceiverParam(0), true);
-        // unwrapOr(T) -> T
-        self.register_generic_method(
-            "Result",
-            "unwrapOr",
-            0,
-            vec![ReceiverParam(0)],
-            ReceiverParam(0),
-            false,
-        );
-        // map<U>(fn(T) -> U) -> Result<U, E>
-        self.register_generic_method(
-            "Result",
-            "map",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(0)],
-                returns: Box::new(MethodParam(0)),
-            }],
-            GenericContainer {
-                name: "Result".to_string(),
-                args: vec![MethodParam(0), ReceiverParam(1)],
-            },
-            false,
-        );
-        // mapErr<U>(fn(E) -> U) -> Result<T, U>
-        self.register_generic_method(
-            "Result",
-            "mapErr",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(1)],
-                returns: Box::new(MethodParam(0)),
-            }],
-            GenericContainer {
-                name: "Result".to_string(),
-                args: vec![ReceiverParam(0), MethodParam(0)],
-            },
-            false,
-        );
-
-        // HashMap<K,V> methods
-        // get(K) -> Option<V>
-        self.register_generic_method(
-            "HashMap",
-            "get",
-            0,
-            vec![ReceiverParam(0)],
-            GenericContainer {
-                name: "Option".to_string(),
-                args: vec![ReceiverParam(1)],
-            },
-            false,
-        );
-        // set(K, V) -> HashMap<K,V>
-        self.register_generic_method(
-            "HashMap",
-            "set",
-            0,
-            vec![ReceiverParam(0), ReceiverParam(1)],
-            SelfType,
-            false,
-        );
-        // has(K) -> bool
-        self.register_generic_method(
-            "HashMap",
-            "has",
-            0,
-            vec![ReceiverParam(0)],
-            Concrete(BuiltinTypes::boolean()),
-            false,
-        );
-        // delete(K) -> HashMap<K,V>
-        self.register_generic_method(
-            "HashMap",
-            "delete",
-            0,
-            vec![ReceiverParam(0)],
-            SelfType,
-            false,
-        );
-        // keys() -> Vec<K>
-        self.register_generic_method(
-            "HashMap",
-            "keys",
-            0,
-            vec![],
-            GenericContainer {
-                name: "Vec".to_string(),
-                args: vec![ReceiverParam(0)],
-            },
-            false,
-        );
-        // values() -> Vec<V>
-        self.register_generic_method(
-            "HashMap",
-            "values",
-            0,
-            vec![],
-            GenericContainer {
-                name: "Vec".to_string(),
-                args: vec![ReceiverParam(1)],
-            },
-            false,
-        );
-        // entries() -> Vec<[K,V]>
-        self.register_generic_method(
-            "HashMap",
-            "entries",
-            0,
-            vec![],
-            Concrete(BuiltinTypes::any()),
-            false,
-        ); // tuple type not expressible
-        // len() -> number
-        self.register_generic_method(
-            "HashMap",
-            "len",
-            0,
-            vec![],
-            Concrete(BuiltinTypes::number()),
-            false,
-        );
-        // isEmpty() -> bool
-        self.register_generic_method(
-            "HashMap",
-            "isEmpty",
-            0,
-            vec![],
-            Concrete(BuiltinTypes::boolean()),
-            false,
-        );
-        // map<U>(fn(K,V) -> U) -> HashMap<K,U>
-        self.register_generic_method(
-            "HashMap",
-            "map",
-            1,
-            vec![Function {
-                params: vec![ReceiverParam(0), ReceiverParam(1)],
-                returns: Box::new(MethodParam(0)),
-            }],
-            GenericContainer {
-                name: "HashMap".to_string(),
-                args: vec![ReceiverParam(0), MethodParam(0)],
-            },
-            false,
-        );
-        // filter(fn(K,V) -> bool) -> HashMap<K,V>
-        self.register_generic_method(
-            "HashMap",
-            "filter",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0), ReceiverParam(1)],
-                returns: Box::new(Concrete(BuiltinTypes::boolean())),
-            }],
-            SelfType,
-            false,
-        );
-        // forEach(fn(K,V) -> void) -> void
-        self.register_generic_method(
-            "HashMap",
-            "forEach",
-            0,
-            vec![Function {
-                params: vec![ReceiverParam(0), ReceiverParam(1)],
-                returns: Box::new(Concrete(BuiltinTypes::void())),
-            }],
-            Concrete(BuiltinTypes::void()),
-            false,
-        );
-    }
-
-    /// Register a generic method for a type
-    fn register_generic_method(
+    /// Register generic builtin methods for types with type parameters.
+    ///
+    /// Register a generic method for a type (from extend/impl blocks in Shape stdlib).
+    /// Supports receiver parameter trait bounds for compile-time checking.
+    pub fn register_user_generic_method(
         &mut self,
         type_name: &str,
         method_name: &str,
         method_type_params: usize,
         param_types: Vec<TypeParamExpr>,
         return_type: TypeParamExpr,
-        is_fallible: bool,
+        receiver_param_bounds: Vec<(usize, Vec<String>)>,
     ) {
         let key = (type_name.to_string(), method_name.to_string());
         self.generic_methods.insert(
@@ -1226,7 +185,8 @@ impl MethodTable {
                 method_type_params,
                 param_types,
                 return_type,
-                is_fallible,
+                is_fallible: false,
+                receiver_param_bounds,
             },
         );
     }
@@ -1462,10 +422,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_lookup_string_method() {
-        let table = MethodTable::new();
-        let string_type = BuiltinTypes::string();
+    fn test_lookup_user_registered_method() {
+        let mut table = MethodTable::new();
+        // Methods are now registered from Shape stdlib, not at MethodTable::new()
+        table.register_user_method("string", "len", vec![], BuiltinTypes::number());
 
+        let string_type = BuiltinTypes::string();
         let sig = table.lookup(&string_type, "len");
         assert!(sig.is_some());
 
@@ -1474,50 +436,13 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_array_method() {
-        let table = MethodTable::new();
-        let array_type = BuiltinTypes::array(BuiltinTypes::number());
+    fn test_lookup_user_registered_array_method() {
+        let mut table = MethodTable::new();
+        table.register_user_method("Vec", "len", vec![], BuiltinTypes::number());
 
+        let array_type = BuiltinTypes::array(BuiltinTypes::number());
         let sig = table.lookup(&array_type, "len");
         assert!(sig.is_some());
-
-        let sig = table.lookup(&array_type, "map");
-        assert!(sig.is_some());
-    }
-
-    #[test]
-    fn test_methods_for_type_array() {
-        let table = MethodTable::new();
-        let methods = table.methods_for_type("Vec");
-        let names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
-        assert!(names.contains(&"len"));
-        assert!(names.contains(&"map"));
-        assert!(names.contains(&"filter"));
-        assert!(names.contains(&"reduce"));
-        assert!(names.contains(&"forEach"));
-        assert!(names.contains(&"some"));
-        assert!(names.contains(&"every"));
-        assert!(
-            methods.len() >= 13,
-            "Array should have at least 13 methods, got {}",
-            methods.len()
-        );
-    }
-
-    #[test]
-    fn test_methods_for_type_string() {
-        let table = MethodTable::new();
-        let methods = table.methods_for_type("string");
-        let names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
-        assert!(names.contains(&"toLowerCase"));
-        assert!(names.contains(&"split"));
-        assert!(names.contains(&"contains"));
-        assert!(names.contains(&"trim"));
-        assert!(
-            methods.len() >= 10,
-            "string should have at least 10 methods, got {}",
-            methods.len()
-        );
     }
 
     #[test]
@@ -1544,8 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_array_first() {
-        let table = MethodTable::new();
+    fn test_resolve_array_first_with_user_generic() {
+        let mut table = MethodTable::new();
+        // Register first() -> T as a generic method (as Shape stdlib would)
+        table.register_user_generic_method(
+            "Vec", "first", 0, vec![], TypeParamExpr::ReceiverParam(0), vec![],
+        );
+
         let array_type = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![BuiltinTypes::number()],
@@ -1614,147 +544,127 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_generic_array_filter() {
-        let table = MethodTable::new();
+    fn test_resolve_generic_filter_with_user_registration() {
+        let mut table = MethodTable::new();
+        table.register_user_generic_method(
+            "Vec", "filter", 0,
+            vec![TypeParamExpr::Function {
+                params: vec![TypeParamExpr::ReceiverParam(0)],
+                returns: Box::new(TypeParamExpr::Concrete(BuiltinTypes::boolean())),
+            }],
+            TypeParamExpr::SelfType, vec![],
+        );
+
         let array_type = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let result = table.resolve_method_call(&array_type, "filter", &[]);
         assert!(result.is_some());
-        // filter returns SelfType, so should be same as receiver
         let rt = result.unwrap();
-        assert!(
-            matches!(rt, Type::Generic { .. }),
-            "filter should return Vec<number>, got {:?}",
-            rt
-        );
+        assert!(matches!(rt, Type::Generic { .. }), "filter should return Vec<number>, got {:?}", rt);
     }
 
     #[test]
-    fn test_resolve_generic_array_map() {
-        let table = MethodTable::new();
+    fn test_resolve_generic_map_with_user_registration() {
+        let mut table = MethodTable::new();
+        table.register_user_generic_method(
+            "Vec", "map", 1,
+            vec![TypeParamExpr::Function {
+                params: vec![TypeParamExpr::ReceiverParam(0)],
+                returns: Box::new(TypeParamExpr::MethodParam(0)),
+            }],
+            TypeParamExpr::GenericContainer {
+                name: "Vec".to_string(),
+                args: vec![TypeParamExpr::MethodParam(0)],
+            },
+            vec![],
+        );
+
         let array_type = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![BuiltinTypes::string()],
         };
         let result = table.resolve_method_call(&array_type, "map", &[]);
         assert!(result.is_some());
-        // map returns Vec<U> where U is a fresh type variable
         let rt = result.unwrap();
-        assert!(
-            matches!(rt, Type::Generic { .. }),
-            "map should return Vec<U>, got {:?}",
-            rt
-        );
+        assert!(matches!(rt, Type::Generic { .. }), "map should return Vec<U>, got {:?}", rt);
     }
 
     #[test]
-    fn test_resolve_generic_option_unwrap() {
-        let table = MethodTable::new();
+    fn test_resolve_generic_option_unwrap_with_user_registration() {
+        let mut table = MethodTable::new();
+        table.register_user_generic_method(
+            "Option", "unwrap", 0, vec![],
+            TypeParamExpr::ReceiverParam(0), vec![],
+        );
+
         let option_type = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let result = table.resolve_method_call(&option_type, "unwrap", &[]);
         assert!(result.is_some());
-        // unwrap returns ReceiverParam(0) = number
-        assert!(
-            matches!(result.unwrap(), Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "number")
-        );
+        assert!(matches!(result.unwrap(), Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "number"));
     }
 
     #[test]
-    fn test_resolve_generic_hashmap_get() {
-        let table = MethodTable::new();
+    fn test_resolve_generic_hashmap_get_with_user_registration() {
+        let mut table = MethodTable::new();
+        table.register_user_generic_method(
+            "HashMap", "get", 0,
+            vec![TypeParamExpr::ReceiverParam(0)],
+            TypeParamExpr::GenericContainer {
+                name: "Option".to_string(),
+                args: vec![TypeParamExpr::ReceiverParam(1)],
+            },
+            vec![],
+        );
+
         let map_type = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "HashMap".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("HashMap".into()))),
             args: vec![BuiltinTypes::string(), BuiltinTypes::number()],
         };
         let result = table.resolve_method_call(&map_type, "get", &[]);
         assert!(result.is_some());
-        // get returns Option<V> = Option<number>
         let rt = result.unwrap();
         assert!(
             matches!(&rt, Type::Generic { base, args }
                 if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Option")
-                && args.len() == 1
-            ),
-            "get should return Option<number>, got {:?}",
-            rt
+                && args.len() == 1),
+            "get should return Option<number>, got {:?}", rt
         );
     }
 
     #[test]
-    fn test_resolve_generic_hashmap_keys() {
-        let table = MethodTable::new();
-        let map_type = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "HashMap".into(),
-            ))),
-            args: vec![BuiltinTypes::string(), BuiltinTypes::number()],
-        };
-        let result = table.resolve_method_call(&map_type, "keys", &[]);
-        assert!(result.is_some());
-        // keys returns Vec<K> = Vec<string>
-        let rt = result.unwrap();
-        assert!(
-            matches!(&rt, Type::Generic { base, args }
-                if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Vec")
-                && args.len() == 1
-            ),
-            "keys should return Vec<string>, got {:?}",
-            rt
+    fn test_is_self_returning_with_user_registration() {
+        let mut table = MethodTable::new();
+        table.register_user_generic_method(
+            "Vec", "filter", 0, vec![], TypeParamExpr::SelfType, vec![],
         );
-    }
-
-    #[test]
-    fn test_resolve_generic_table_filter_selftype() {
-        let table = MethodTable::new();
-        let table_type = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Table".into(),
-            ))),
-            args: vec![Type::Concrete(TypeAnnotation::Reference(
-                "Candle".into(),
-            ))],
-        };
-        let result = table.resolve_method_call(&table_type, "filter", &[]);
-        assert!(result.is_some());
-        // filter returns SelfType = Table<Candle>
-        let rt = result.unwrap();
-        assert!(
-            matches!(rt, Type::Generic { .. }),
-            "filter should return Table<Candle>, got {:?}",
-            rt
+        table.register_user_generic_method(
+            "Vec", "map", 1, vec![],
+            TypeParamExpr::GenericContainer { name: "Vec".to_string(), args: vec![TypeParamExpr::MethodParam(0)] },
+            vec![],
         );
-    }
 
-    #[test]
-    fn test_is_self_returning() {
-        let table = MethodTable::new();
         assert!(table.is_self_returning("Vec", "filter"));
-        assert!(table.is_self_returning("Vec", "sort"));
-        assert!(table.is_self_returning("Table", "filter"));
-        assert!(table.is_self_returning("Table", "orderBy"));
-        assert!(table.is_self_returning("Table", "head"));
         assert!(!table.is_self_returning("Vec", "map"));
-        assert!(!table.is_self_returning("Vec", "find"));
-        assert!(!table.is_self_returning("Table", "count"));
     }
 
     #[test]
-    fn test_takes_closure_with_receiver_param() {
-        let table = MethodTable::new();
+    fn test_takes_closure_with_receiver_param_with_user_registration() {
+        let mut table = MethodTable::new();
+        table.register_user_generic_method(
+            "Vec", "filter", 0,
+            vec![TypeParamExpr::Function {
+                params: vec![TypeParamExpr::ReceiverParam(0)],
+                returns: Box::new(TypeParamExpr::Concrete(BuiltinTypes::boolean())),
+            }],
+            TypeParamExpr::SelfType, vec![],
+        );
+
         assert!(table.takes_closure_with_receiver_param("Vec", "filter"));
-        assert!(table.takes_closure_with_receiver_param("Vec", "map"));
-        assert!(table.takes_closure_with_receiver_param("Table", "filter"));
-        assert!(table.takes_closure_with_receiver_param("Table", "forEach"));
         assert!(!table.takes_closure_with_receiver_param("Vec", "len"));
-        assert!(!table.takes_closure_with_receiver_param("Table", "count"));
     }
 }

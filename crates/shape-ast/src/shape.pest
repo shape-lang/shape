@@ -54,7 +54,7 @@ item_core = {
 
 // ===== Module System =====
 // Module paths use `::` separators: std::core::math, mylib::submodule
-// No relative imports — dependencies are declared in shape.toml/frontmatter
+// Module paths use :: separators. Local dependencies are declared in shape.toml/frontmatter.
 module_path = @{
     path_segment ~ ("::" ~ path_segment)*
 }
@@ -279,7 +279,7 @@ documented_method_def = {
 }
 
 method_def = {
-    "async"? ~ ("method" | "fn") ~ method_name ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type? ~ "{" ~ function_body ~ "}"
+    "async"? ~ ("method" | "fn") ~ method_name ~ type_params? ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type? ~ "{" ~ function_body ~ "}"
 }
 
 // Method names allow `from` (keyword in import context) to be used as a method name
@@ -1019,19 +1019,33 @@ postfix_expr = {
 // Try operator for Result error propagation: expr?
 // Don't match if:
 // 1. Followed by ? (would be null coalesce ??)
-// 2. Followed by expression then : (would be ternary ?:)
-try_operator = { "?" ~ !"?" ~ !ternary_lookahead }
+// 2. Followed by expression then : on the same line (would be ternary ?:)
+//
+// Compound atomic ($) prevents implicit WHITESPACE consumption between "?" and
+// the ternary lookahead, so a newline after "?" stops the lookahead from scanning
+// subsequent lines and matching colons in type annotations or other statements.
+try_operator = ${ "?" ~ !"?" ~ !ternary_lookahead }
 
 // Lookahead to detect ternary pattern: ? <expr> :
-// Match balanced delimiters until : is found
-ternary_lookahead = _{ balanced_ternary ~ ":" }
-balanced_ternary = _{
+// Compound atomic: newlines stop the scan since ternary arms don't span lines
+// at the top level (though parenthesized/bracketed sub-expressions may).
+ternary_lookahead = ${ balanced_ternary ~ ":" }
+balanced_ternary = ${
     (
-        "(" ~ balanced_ternary ~ ")"
-        | "[" ~ balanced_ternary ~ "]"
-        | "{" ~ balanced_ternary ~ "}"
-        // Handle nested ternary: ? expr : expr counts as a balanced unit
-        | "?" ~ balanced_ternary ~ ":" ~ balanced_ternary
+        " " | "\t"
+        | "(" ~ balanced_ternary_inner ~ ")"
+        | "[" ~ balanced_ternary_inner ~ "]"
+        | "?" ~ balanced_ternary_inner ~ ":" ~ balanced_ternary
+        | !(":" | "(" | "[" | ")" | "]" | "?" | ";" | "\n" | "\r" | EOI) ~ ANY
+    )*
+}
+// Inner balanced ternary allows newlines (inside delimiters, newlines are fine)
+balanced_ternary_inner = _{
+    (
+        "(" ~ balanced_ternary_inner ~ ")"
+        | "[" ~ balanced_ternary_inner ~ "]"
+        | "{" ~ balanced_ternary_inner ~ "}"
+        | "?" ~ balanced_ternary_inner ~ ":" ~ balanced_ternary_inner
         | !(":" | "(" | "[" | "{" | ")" | "]" | "}" | "?" | ";" | EOI) ~ ANY
     )*
 }

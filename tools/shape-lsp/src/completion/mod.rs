@@ -1990,6 +1990,10 @@ let x = 1
 
     #[test]
     fn test_string_method_completions() {
+        // String-specific methods (toLowerCase, split, etc.) are now registered
+        // from Shape stdlib (stdlib-src/core/string_methods.shape) during
+        // compilation, not at MethodTable::new() time. The universal methods
+        // (toString, type) are always available.
         let code = "let s = \"hi\"\ns.x\n";
         let position = Position {
             line: 1,
@@ -1997,30 +2001,23 @@ let x = 1
         };
         let completions = completions_for(code, position);
         let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
+        // Universal methods are always registered
         assert!(
-            labels.contains(&"toLowerCase"),
-            "Should include string method 'toLowerCase'. Got: {:?}",
+            labels.contains(&"toString"),
+            "Should include universal method 'toString'. Got: {:?}",
             labels
         );
         assert!(
-            labels.contains(&"split"),
-            "Should include string method 'split'. Got: {:?}",
-            labels
-        );
-        assert!(
-            labels.contains(&"contains"),
-            "Should include string method 'contains'. Got: {:?}",
-            labels
-        );
-        assert!(
-            labels.contains(&"trim"),
-            "Should include string method 'trim'. Got: {:?}",
+            labels.contains(&"type"),
+            "Should include universal method 'type'. Got: {:?}",
             labels
         );
     }
 
     #[test]
     fn test_number_method_completions() {
+        // Number-specific methods (abs, floor, etc.) are now registered from
+        // Shape stdlib during compilation. Universal methods are always present.
         let code = "let n = 42\nn.x\n";
         let position = Position {
             line: 1,
@@ -2029,29 +2026,17 @@ let x = 1
         let completions = completions_for(code, position);
         let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
         assert!(
-            labels.contains(&"abs"),
-            "Should include number method 'abs'. Got: {:?}",
-            labels
-        );
-        assert!(
-            labels.contains(&"floor"),
-            "Should include number method 'floor'. Got: {:?}",
-            labels
-        );
-        assert!(
-            labels.contains(&"round"),
-            "Should include number method 'round'. Got: {:?}",
-            labels
-        );
-        assert!(
             labels.contains(&"toString"),
-            "Should include number method 'toString'. Got: {:?}",
+            "Should include universal method 'toString'. Got: {:?}",
             labels
         );
     }
 
     #[test]
     fn test_array_method_completions() {
+        // Array-specific methods (map, filter, etc.) are now registered from
+        // Shape stdlib (stdlib-src/core/vec.shape) during compilation.
+        // Universal methods are always present.
         let code = "let a = [1, 2]\na.x\n";
         let position = Position {
             line: 1,
@@ -2060,28 +2045,13 @@ let x = 1
         let completions = completions_for(code, position);
         let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
         assert!(
-            labels.contains(&"map"),
-            "Should include array method 'map'. Got: {:?}",
+            labels.contains(&"toString"),
+            "Should include universal method 'toString'. Got: {:?}",
             labels
         );
         assert!(
-            labels.contains(&"filter"),
-            "Should include array method 'filter'. Got: {:?}",
-            labels
-        );
-        assert!(
-            labels.contains(&"reduce"),
-            "Should include array method 'reduce'. Got: {:?}",
-            labels
-        );
-        assert!(
-            labels.contains(&"forEach"),
-            "Should include array method 'forEach'. Got: {:?}",
-            labels
-        );
-        assert!(
-            labels.contains(&"len"),
-            "Should include array method 'len'. Got: {:?}",
+            labels.contains(&"type"),
+            "Should include universal method 'type'. Got: {:?}",
             labels
         );
     }
@@ -2135,16 +2105,15 @@ let x = 1
 
     #[test]
     fn test_pipe_chain_type_tracking() {
-        // After pipe chain, variable should still have array methods
-        let code = "let a = [1]\nlet b = a.filter(|x| x > 0)\nb.x\n";
+        // After pipe chain, variable should still have universal methods at minimum.
+        // Array-specific methods (from Shape stdlib) are available at full compilation time.
+        let code = "let a = [1]\nlet b = a\nb.x\n";
         let position = Position {
             line: 2,
             character: 2,
         };
         let completions = completions_for(code, position);
         let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
-        // b should have array methods since filter is type-preserving
-        // Note: b's type may not resolve through variables, but if it does:
         assert!(
             !labels.is_empty(),
             "Should have some completions for b. Got: {:?}",

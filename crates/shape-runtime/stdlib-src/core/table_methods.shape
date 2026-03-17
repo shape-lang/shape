@@ -1,0 +1,24 @@
+/// @module std::core::table_methods
+/// Method definitions for Table<T>.
+///
+/// All methods delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+extend Table<T> {
+    method filter(predicate: (T) => bool) -> Table<T> { self.filter(predicate) }
+    method map<U>(f: (T) => U) -> Table<U> { self.map(f) }
+    method reduce<U>(f: (U, T) => U, init: U) -> U { self.reduce(f, init) }
+    method groupBy(key_fn: (T) => number) -> Table<T> { self.groupBy(key_fn) }
+    method indexBy(key_fn: (T) => number) -> Table<T> { self.indexBy(key_fn) }
+    method select<U>(f: (T) => U) -> Table<U> { self.select(f) }
+    method orderBy(key_fn: (T) => number) -> Table<T> { self.orderBy(key_fn) }
+    method simulate(config: number) -> number { self.simulate(config) }
+    method aggregate(config: number) -> number { self.aggregate(config) }
+    method forEach(f: (T) => void) -> void { self.forEach(f) }
+    method describe() -> number { self.describe() }
+    method count() -> int { self.count() }
+    method head(n: int) -> Table<T> { self.head(n) }
+    method tail(n: int) -> Table<T> { self.tail(n) }
+    method limit(n: int) -> Table<T> { self.limit(n) }
+    method toMat() -> Mat<number> { self.toMat() }
+}

@@ -451,6 +451,9 @@ pub struct MethodDef {
     /// Annotations applied to this method (e.g., `@traced`)
     #[serde(default)]
     pub annotations: Vec<super::functions::Annotation>,
+    /// Type parameters for generic methods (e.g., `method map<U>(...)`)
+    #[serde(default)]
+    pub type_params: Option<Vec<TypeParam>>,
     /// Method parameters
     pub params: Vec<super::functions::FunctionParameter>,
     /// Optional when clause for conditional method definitions
@@ -468,6 +471,7 @@ impl PartialEq for MethodDef {
         self.name == other.name
             && self.doc_comment == other.doc_comment
             && self.annotations == other.annotations
+            && self.type_params == other.type_params
             && self.params == other.params
             && self.when_clause == other.when_clause
             && self.return_type == other.return_type

@@ -1,0 +1,12 @@
+/// @module std::core::int_methods
+/// Method definitions for the int type.
+///
+/// All methods delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+extend int {
+    method abs() -> int { self.abs() }
+    method toString() -> string { self.toString() }
+    method sign() -> int { self.sign() }
+    method clamp(min: int, max: int) -> int { self.clamp(min, max) }
+}

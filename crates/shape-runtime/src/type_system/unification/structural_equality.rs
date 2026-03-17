@@ -174,8 +174,11 @@ pub fn annotations_equal(a: &TypeAnnotation, b: &TypeAnnotation) -> bool {
 /// Check if two type constraints are equal
 pub fn constraints_equal(a: &TypeConstraint, b: &TypeConstraint) -> bool {
     match (a, b) {
-        (TypeConstraint::Numeric, TypeConstraint::Numeric) => true,
         (TypeConstraint::Comparable, TypeConstraint::Comparable) => true,
+        (
+            TypeConstraint::ImplementsTrait { trait_name: n1 },
+            TypeConstraint::ImplementsTrait { trait_name: n2 },
+        ) => n1 == n2,
         (TypeConstraint::Iterable, TypeConstraint::Iterable) => true,
         (TypeConstraint::HasField(n1, t1), TypeConstraint::HasField(n2, t2)) => {
             n1 == n2 && types_equal(t1, t2)

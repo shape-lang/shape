@@ -14,3 +14,15 @@ from std::core::from use { From }
 from std::core::into use { Into }
 from std::core::try_from use { TryFrom }
 from std::core::try_into use { TryInto }
+
+// Method definition modules — extend blocks register methods on builtin types.
+// Namespace imports ensure extend/impl blocks are processed during compilation.
+use std::core::vec
+use std::core::string_methods
+use std::core::number_methods
+use std::core::int_methods
+use std::core::hashmap_methods
+use std::core::option_methods
+use std::core::result_methods
+use std::core::column_methods
+use std::core::table_methods

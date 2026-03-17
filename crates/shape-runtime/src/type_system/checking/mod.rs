@@ -8,3 +8,4 @@
 pub mod method_table;
 
 pub use method_table::MethodTable;
+pub use method_table::TypeParamExpr;

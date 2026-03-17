@@ -107,6 +107,15 @@ pub struct TypeInferenceEngine {
     pub(crate) implicit_return_scopes: Vec<Vec<Type>>,
     /// Struct type definitions keyed by name for generic struct-literal inference.
     pub(crate) struct_type_defs: HashMap<String, StructTypeDef>,
+    /// Resolved type parameter substitutions at generic call sites.
+    /// Key: (function_name, span_start, span_end)
+    /// Value: [(original_param_name, concrete_TypeAnnotation)]
+    ///
+    /// Populated during `infer_function_call` when all type params of a
+    /// polymorphic callee resolve to concrete types. Consumed by the
+    /// bytecode compiler to drive monomorphization.
+    pub callsite_type_args:
+        HashMap<(String, usize, usize), Vec<(String, TypeAnnotation)>>,
 }
 
 impl Default for TypeInferenceEngine {
@@ -152,6 +161,7 @@ impl TypeInferenceEngine {
             return_scopes: Vec::new(),
             implicit_return_scopes: Vec::new(),
             struct_type_defs: HashMap::new(),
+            callsite_type_args: HashMap::new(),
         }
     }
 
@@ -340,6 +350,17 @@ impl TypeInferenceEngine {
         }
     }
 
+    pub(crate) fn is_option_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Generic { base, .. } => matches!(
+                base.as_ref(),
+                Type::Concrete(ann) if ann.as_type_name_str() == Some("Option")
+            ),
+            Type::Concrete(TypeAnnotation::Generic { name, .. }) => name == "Option",
+            _ => false,
+        }
+    }
+
     pub(crate) fn wrap_result_type(&self, inner: Type) -> Type {
         self.wrap_result_type_with_error(inner, self.any_error_type())
     }
@@ -413,7 +434,7 @@ impl TypeInferenceEngine {
 
             if include_numeric_refinement
                 && self.var_has_constraint(local_constraints, param_var, |constraint| {
-                    matches!(constraint, TypeConstraint::Numeric)
+                    matches!(constraint, TypeConstraint::ImplementsTrait { trait_name } if trait_name == "Numeric")
                 })
             {
                 *param_type = BuiltinTypes::number();
@@ -533,7 +554,7 @@ impl TypeInferenceEngine {
         }
 
         if self.var_has_constraint(local_constraints, var, |constraint| {
-            matches!(constraint, TypeConstraint::Numeric)
+            matches!(constraint, TypeConstraint::ImplementsTrait { trait_name } if trait_name == "Numeric")
         }) {
             return Some(TypeAnnotation::Basic("number".to_string()));
         }

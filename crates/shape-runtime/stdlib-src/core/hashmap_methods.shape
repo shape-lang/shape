@@ -1,0 +1,20 @@
+/// @module std::core::hashmap_methods
+/// Method definitions for HashMap<K, V>.
+///
+/// All methods delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+extend HashMap<K, V> {
+    method get(key: K) -> Option<V> { self.get(key) }
+    method set(key: K, value: V) -> HashMap<K, V> { self.set(key, value) }
+    method has(key: K) -> bool { self.has(key) }
+    method delete(key: K) -> HashMap<K, V> { self.delete(key) }
+    method keys() -> Vec<K> { self.keys() }
+    method values() -> Vec<V> { self.values() }
+    method entries() -> Vec<Vec<K>> { self.entries() }
+    method len() -> int { self.len() }
+    method isEmpty() -> bool { self.isEmpty() }
+    method map<U>(f: (K, V) => U) -> HashMap<K, U> { self.map(f) }
+    method filter(predicate: (K, V) => bool) -> HashMap<K, V> { self.filter(predicate) }
+    method forEach(f: (K, V) => void) -> void { self.forEach(f) }
+}

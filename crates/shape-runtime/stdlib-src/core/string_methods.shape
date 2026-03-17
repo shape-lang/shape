@@ -1,0 +1,37 @@
+/// @module std::core::string_methods
+/// Method definitions for the string type.
+///
+/// All methods delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+extend string {
+    method len() -> int { self.len() }
+    method isEmpty() -> bool { self.isEmpty() }
+    method toLowerCase() -> string { self.toLowerCase() }
+    method toUpperCase() -> string { self.toUpperCase() }
+    method trim() -> string { self.trim() }
+    method split(separator: string) -> Vec<string> { self.split(separator) }
+    method contains(needle: string) -> bool { self.contains(needle) }
+    method startsWith(prefix: string) -> bool { self.startsWith(prefix) }
+    method endsWith(suffix: string) -> bool { self.endsWith(suffix) }
+    method replace(pattern: string, replacement: string) -> string { self.replace(pattern, replacement) }
+    method trimStart() -> string { self.trimStart() }
+    method trimEnd() -> string { self.trimEnd() }
+    method toNumber() -> number { self.toNumber() }
+    method toBool() -> bool { self.toBool() }
+    method chars() -> Vec<string> { self.chars() }
+    method padStart(width: int) -> string { self.padStart(width) }
+    method padEnd(width: int) -> string { self.padEnd(width) }
+    method repeat(count: int) -> string { self.repeat(count) }
+    method charAt(index: int) -> string { self.charAt(index) }
+    method reverse() -> string { self.reverse() }
+    method indexOf(needle: string) -> int { self.indexOf(needle) }
+    method isDigit() -> bool { self.isDigit() }
+    method isAlpha() -> bool { self.isAlpha() }
+    method codePointAt(index: int) -> int { self.codePointAt(index) }
+    method substring(start: int) -> string { self.substring(start) }
+    method normalize(form: string) -> string { self.normalize(form) }
+    method graphemes() -> Vec<string> { self.graphemes() }
+    method graphemeLen() -> int { self.graphemeLen() }
+    method isAscii() -> bool { self.isAscii() }
+}

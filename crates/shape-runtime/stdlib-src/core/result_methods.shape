@@ -1,0 +1,14 @@
+/// @module std::core::result_methods
+/// Method definitions for Result<T, E>.
+///
+/// All methods delegate to VM PHF dispatch at runtime — they exist
+/// only so the compiler can type-check calls.
+
+extend Result<T, E> {
+    method unwrap() -> T { self.unwrap() }
+    method unwrapOr(default: T) -> T { self.unwrapOr(default) }
+    method isOk() -> bool { self.isOk() }
+    method isErr() -> bool { self.isErr() }
+    method map<U>(f: (T) => U) -> Result<U, E> { self.map(f) }
+    method mapErr<U>(f: (E) => U) -> Result<T, U> { self.mapErr(f) }
+}
