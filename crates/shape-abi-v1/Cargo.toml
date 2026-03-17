@@ -1,6 +1,6 @@
 [package]
 name = "shape-abi-v1"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Stable host ABI v1 for Shape capability modules"
 license = "MIT"
