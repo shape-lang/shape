@@ -9,7 +9,9 @@
 //! The fallback is **always** NaN-boxed passthrough (raw u64 bits), never
 //! synthetic None or null.
 
+#[cfg(test)]
 use crate::type_tracking::SlotKind;
+#[cfg(test)]
 use shape_value::{NanTag, ValueWord};
 
 /// Marshal a single VM argument into JIT-compatible u64 bits, guided by the
@@ -25,6 +27,7 @@ use shape_value::{NanTag, ValueWord};
 /// | Unknown / other    | NaN-boxed passthrough (raw `ValueWord` bits)      |
 ///
 /// The fallback is always the raw NaN-boxed bits — never None/null.
+#[cfg(test)]
 #[inline]
 pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
     match kind {
@@ -130,6 +133,7 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
 /// | Unknown / other    | NaN-boxed passthrough (transmute to ValueWord)    |
 ///
 /// The fallback is always NaN-boxed passthrough.
+#[cfg(test)]
 #[inline]
 pub fn unmarshal_jit_result(bits: u64, kind: SlotKind) -> ValueWord {
     match kind {

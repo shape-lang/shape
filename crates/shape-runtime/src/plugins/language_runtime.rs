@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub struct CompiledForeignFunction {
     handle: *mut c_void,
     /// Weak reference to the runtime for invoke/dispose
-    runtime: Arc<LanguageRuntimeState>,
+    _runtime: Arc<LanguageRuntimeState>,
 }
 
 // SAFETY: The handle is opaque and managed by the extension.
@@ -267,7 +267,7 @@ impl PluginLanguageRuntime {
 
         Ok(CompiledForeignFunction {
             handle,
-            runtime: Arc::clone(&self.state),
+            _runtime: Arc::clone(&self.state),
         })
     }
 

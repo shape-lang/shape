@@ -398,31 +398,6 @@ fn detect_bound_comparison(
     (IntCC::SignedLessThan, None) // Default
 }
 
-/// Check if a local is loop-invariant (safe to hoist out of the loop).
-///
-/// A local is invariant if it's read but not written inside the loop body.
-pub fn is_loop_invariant(loop_info: &LoopInfo, local_slot: u16) -> bool {
-    loop_info.invariant_locals.contains(&local_slot)
-}
-
-/// Check if an array bounds check can be hoisted.
-///
-/// If the loop's induction variable is bounded by a comparison against
-/// the array length, and the array is loop-invariant, then all bounds
-/// checks for arr[indvar] can be done once before the loop.
-pub fn can_hoist_bounds_check(loop_info: &LoopInfo, array_local: u16, index_local: u16) -> bool {
-    // Array must be invariant
-    if !loop_info.invariant_locals.contains(&array_local) {
-        return false;
-    }
-
-    // Index must be an induction variable bounded by something
-    loop_info
-        .induction_vars
-        .iter()
-        .any(|iv| iv.local_slot == index_local && iv.bound_slot.is_some())
-}
-
 /// Returns true if the opcode is definitively non-allocating.
 ///
 /// Non-allocating opcodes never trigger heap allocation, so loops containing

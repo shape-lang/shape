@@ -1155,7 +1155,7 @@ impl JITCompiler {
         // Phase 1: Per-function preflight to classify each function.
         let mut jit_compatible: Vec<bool> = Vec::with_capacity(program.functions.len());
 
-        for (idx, func) in program.functions.iter().enumerate() {
+        for (_idx, func) in program.functions.iter().enumerate() {
             if func.body_length == 0 {
                 jit_compatible.push(false);
                 continue;

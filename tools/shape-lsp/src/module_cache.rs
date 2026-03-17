@@ -413,7 +413,12 @@ mod tests {
         assert!(resolved.is_some());
         let path = resolved.unwrap();
         let path_str = path.to_string_lossy();
-        assert!(path_str.contains("stdlib/core/math.shape"));
+        assert!(
+            path_str.contains("stdlib/core/math.shape")
+                || path_str.contains("stdlib-src/core/math.shape"),
+            "Expected stdlib math path, got: {}",
+            path_str
+        );
     }
 
     #[test]

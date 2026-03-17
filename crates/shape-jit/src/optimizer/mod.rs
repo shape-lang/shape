@@ -24,9 +24,7 @@ use crate::translator::loop_analysis::LoopInfo;
 
 pub use bounds::{AffineGuardArraySource, AffineSquareGuard, LinearBoundGuard};
 pub use call_path::CallPathPlan;
-pub use cross_function::{
-    CallGraph, DeoptTracker, DevirtAnalysis, InlinePolicy, OptimizationDependencies, Tier2CacheKey,
-};
+pub use cross_function::Tier2CacheKey;
 pub use escape_analysis::EscapeAnalysisPlan;
 pub use hof_inline::{HofInlinePlan, HofInlineSite};
 pub use licm::LicmPlan;

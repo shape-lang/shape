@@ -318,7 +318,7 @@ pub fn jit_bits_to_typed_scalar(
     bits: u64,
     hint: Option<shape_vm::SlotKind>,
 ) -> shape_value::TypedScalar {
-    use shape_value::{ScalarKind, TypedScalar};
+    use shape_value::TypedScalar;
     use shape_vm::SlotKind;
 
     if is_number(bits) {

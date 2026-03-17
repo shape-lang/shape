@@ -6,7 +6,7 @@
 use crate::configuration::BytecodeExecutor;
 
 use shape_ast::Program;
-use shape_ast::ast::{DestructurePattern, ExportItem, Item};
+use shape_ast::ast::{ExportItem, Item};
 use shape_ast::parser::parse_program;
 use shape_runtime::module_loader::ModuleCode;
 
@@ -22,74 +22,47 @@ pub(crate) fn is_hidden_annotation_import_module_name(name: &str) -> bool {
     name.starts_with("__annimport__")
 }
 
-/// Check whether an AST item's name is in the given set of imported names.
-/// Items without a clear name (Impl, Extend, Import) are always included
-/// because they may be required by the named items.
-pub(crate) fn should_include_item(item: &Item, names: &std::collections::HashSet<&str>) -> bool {
-    match item {
-        Item::Function(func_def, _) => names.contains(func_def.name.as_str()),
-        Item::Export(export, _) => match &export.item {
-            ExportItem::Function(f) => names.contains(f.name.as_str()),
-            ExportItem::BuiltinFunction(f) => names.contains(f.name.as_str()),
-            ExportItem::BuiltinType(t) => names.contains(t.name.as_str()),
-            ExportItem::Enum(e) => names.contains(e.name.as_str()),
-            ExportItem::Struct(s) => names.contains(s.name.as_str()),
-            ExportItem::Trait(t) => names.contains(t.name.as_str()),
-            ExportItem::TypeAlias(a) => names.contains(a.name.as_str()),
-            ExportItem::Interface(i) => names.contains(i.name.as_str()),
-            ExportItem::Annotation(a) => names.contains(a.name.as_str()),
-            ExportItem::ForeignFunction(f) => names.contains(f.name.as_str()),
-            ExportItem::Named(specs) => specs.iter().any(|s| names.contains(s.name.as_str())),
-        },
-        Item::BuiltinFunctionDecl(def, _) => names.contains(def.name.as_str()),
-        Item::BuiltinTypeDecl(def, _) => names.contains(def.name.as_str()),
-        Item::StructType(def, _) => names.contains(def.name.as_str()),
-        Item::Enum(def, _) => names.contains(def.name.as_str()),
-        Item::Trait(def, _) => names.contains(def.name.as_str()),
-        Item::TypeAlias(def, _) => names.contains(def.name.as_str()),
-        Item::Interface(def, _) => names.contains(def.name.as_str()),
-        Item::AnnotationDef(def, _) => names.contains(def.name.as_str()),
-        Item::VariableDecl(decl, _) => {
-            if let DestructurePattern::Identifier(name, _) = &decl.pattern {
-                names.contains(name.as_str())
-            } else {
-                false
-            }
-        }
-        // Always include impl/extend — they implement traits/methods for types
-        Item::Impl(..) | Item::Extend(..) => true,
-        // Always include sub-imports — transitive deps needed by inlined items
-        Item::Import(..) => true,
-        _ => false,
-    }
-}
+/// Build a module graph and compute stdlib names from the prelude modules.
+///
+/// This is the canonical entry point for graph-based compilation. It:
+/// 1. Collects prelude import paths from the module loader
+/// 2. Builds the full module dependency graph
+/// 3. Computes stdlib function names from prelude module interfaces
+///
+/// Returns `(graph, stdlib_names, prelude_imports)`.
+pub fn build_graph_and_stdlib_names(
+    program: &Program,
+    loader: &mut shape_runtime::module_loader::ModuleLoader,
+    extensions: &[shape_runtime::module_exports::ModuleExports],
+) -> std::result::Result<
+    (
+        std::sync::Arc<crate::module_graph::ModuleGraph>,
+        std::collections::HashSet<String>,
+        Vec<String>,
+    ),
+    shape_ast::error::ShapeError,
+> {
+    let prelude_imports = crate::module_graph::collect_prelude_import_paths(loader);
+    let graph =
+        crate::module_graph::build_module_graph(program, loader, extensions, &prelude_imports)
+            .map_err(|e| shape_ast::error::ShapeError::ModuleError {
+                message: e.to_string(),
+                module_path: None,
+            })?;
+    let graph = std::sync::Arc::new(graph);
 
-/// Extract function names from a list of AST items.
-pub(crate) fn collect_function_names_from_items(
-    items: &[Item],
-) -> std::collections::HashSet<String> {
-    let mut names = std::collections::HashSet::new();
-    for item in items {
-        match item {
-            Item::Function(func_def, _) => {
-                names.insert(func_def.name.clone());
+    let mut stdlib_names = std::collections::HashSet::new();
+    for prelude_path in &prelude_imports {
+        if let Some(dep_id) = graph.id_for_path(prelude_path) {
+            let dep_node = graph.node(dep_id);
+            for export_name in dep_node.interface.exports.keys() {
+                stdlib_names.insert(export_name.clone());
+                stdlib_names.insert(format!("{}::{}", prelude_path, export_name));
             }
-            Item::BuiltinFunctionDecl(function, _) => {
-                names.insert(function.name.clone());
-            }
-            Item::Export(export, _) => {
-                if let ExportItem::Function(f) = &export.item {
-                    names.insert(f.name.clone());
-                } else if let ExportItem::BuiltinFunction(f) = &export.item {
-                    names.insert(f.name.clone());
-                } else if let ExportItem::ForeignFunction(f) = &export.item {
-                    names.insert(f.name.clone());
-                }
-            }
-            _ => {}
         }
     }
-    names
+
+    Ok((graph, stdlib_names, prelude_imports))
 }
 
 /// Attach declaring package provenance to `extern C` items in a program.
@@ -258,7 +231,6 @@ impl BytecodeExecutor {
             ),
         }
     }
-
 
 }
 

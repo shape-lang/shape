@@ -301,7 +301,7 @@ impl BytecodeExecutor {
         &self,
         engine: &mut ShapeEngine,
         vm_snapshot: shape_runtime::snapshot::VmSnapshot,
-        mut bytecode: BytecodeProgram,
+        bytecode: BytecodeProgram,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
         let store = engine.snapshot_store().ok_or_else(|| {
             shape_runtime::error::ShapeError::RuntimeError {
@@ -389,18 +389,22 @@ impl BytecodeExecutor {
 
         Self::extract_and_store_format_hints(program, runtime.persistent_context_mut());
 
-        let module_binding_registry = runtime.module_binding_registry();
-        let imported_program = Self::create_program_from_imports(&module_binding_registry)?;
         let mut root_program = program.clone();
         crate::module_resolution::annotate_program_native_abi_package_key(
             &mut root_program,
             self.root_package_key.as_deref(),
         );
 
-        let mut merged_program = imported_program;
-        merged_program.items.extend(root_program.items);
-        let mut stdlib_names = crate::module_resolution::prepend_prelude_items(&mut merged_program);
-        stdlib_names.extend(self.append_imported_module_items(&mut merged_program)?);
+        let mut loader = self.module_loader.take().unwrap_or_else(
+            shape_runtime::module_loader::ModuleLoader::new,
+        );
+        let (graph, stdlib_names, prelude_imports) =
+            crate::module_resolution::build_graph_and_stdlib_names(
+                &root_program,
+                &mut loader,
+                &self.extensions,
+            )?;
+        self.module_loader = Some(loader);
 
         let mut compiler = BytecodeCompiler::new();
         compiler.stdlib_function_names = stdlib_names;
@@ -416,11 +420,12 @@ impl BytecodeExecutor {
 
         compiler.native_resolution_context = self.native_resolution_context.clone();
 
-        let bytecode = if let Some(source) = &source_for_compilation {
-            compiler.compile_with_source(&merged_program, source)?
-        } else {
-            compiler.compile(&merged_program)?
-        };
+        if let Some(source) = &source_for_compilation {
+            compiler.set_source(source);
+        }
+
+        let bytecode =
+            compiler.compile_with_graph_and_prelude(&root_program, graph, &prelude_imports)?;
 
         // Store in bytecode cache (best-effort, ignore errors)
         if let (Some(cache), Some(source)) = (&self.bytecode_cache, &source_for_compilation) {
@@ -561,14 +566,20 @@ impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
             self.root_package_key.as_deref(),
         );
 
-        // Inject prelude and resolve imports
-        let stdlib_names = crate::module_resolution::prepend_prelude_items(&mut program);
+        // Build graph and compile via graph pipeline
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        let (graph, stdlib_names, prelude_imports) =
+            crate::module_resolution::build_graph_and_stdlib_names(
+                &program,
+                &mut loader,
+                &self.extensions,
+            )?;
 
-        // Compile and execute
         let mut compiler = BytecodeCompiler::new();
         compiler.stdlib_function_names = stdlib_names;
         compiler.native_resolution_context = self.native_resolution_context.clone();
-        let bytecode = compiler.compile(&program)?;
+        let bytecode =
+            compiler.compile_with_graph_and_prelude(&program, graph, &prelude_imports)?;
 
         let module_binding_names = bytecode.module_binding_names.clone();
         let mut vm = VirtualMachine::new(VMConfig::default());
@@ -641,23 +652,16 @@ impl ProgramExecutor for BytecodeExecutor {
             // This preserves metadata that bytecode doesn't carry
             Self::extract_and_store_format_hints(program, runtime.persistent_context_mut());
 
-            // Extract imported functions from ModuleBindingRegistry and add them to the program
-            let module_binding_registry = runtime.module_binding_registry();
-            let imported_program = Self::create_program_from_imports(&module_binding_registry)?;
             let mut root_program = program.clone();
             crate::module_resolution::annotate_program_native_abi_package_key(
                 &mut root_program,
                 self.root_package_key.as_deref(),
             );
 
-            // Merge imported functions into the main program
-            let mut merged_program = imported_program;
-            merged_program.items.extend(root_program.items);
-
             // Inject persisted struct type definitions from previous REPL sessions
             // so the compiler can see types defined in earlier commands.
             if let Some(ctx) = runtime.persistent_context() {
-                let current_struct_names: std::collections::HashSet<String> = merged_program
+                let current_struct_names: std::collections::HashSet<String> = root_program
                     .items
                     .iter()
                     .filter_map(|item| {
@@ -670,7 +674,7 @@ impl ProgramExecutor for BytecodeExecutor {
                     .collect();
                 for (name, struct_def) in ctx.struct_type_defs() {
                     if !current_struct_names.contains(name) {
-                        merged_program.items.insert(
+                        root_program.items.insert(
                             0,
                             shape_ast::ast::Item::StructType(
                                 struct_def.clone(),
@@ -681,11 +685,18 @@ impl ProgramExecutor for BytecodeExecutor {
                 }
             }
 
-            let mut stdlib_names =
-                crate::module_resolution::prepend_prelude_items(&mut merged_program);
-            stdlib_names.extend(self.append_imported_module_items(&mut merged_program)?);
+            // Build module graph and compile via graph pipeline
+            let mut loader = self.module_loader.take().unwrap_or_else(
+                shape_runtime::module_loader::ModuleLoader::new,
+            );
+            let (graph, stdlib_names, prelude_imports) =
+                crate::module_resolution::build_graph_and_stdlib_names(
+                    &root_program,
+                    &mut loader,
+                    &self.extensions,
+                )?;
+            self.module_loader = Some(loader);
 
-            // Compile AST to Bytecode with knowledge of existing module_bindings
             let mut compiler = BytecodeCompiler::new();
             compiler.stdlib_function_names = stdlib_names;
             compiler.register_known_bindings(&known_bindings);
@@ -710,12 +721,15 @@ impl ProgramExecutor for BytecodeExecutor {
                 compiler.set_permission_set(Some(pset.clone()));
             }
 
-            // Use compile_with_source if source text is available for better error messages
-            let bytecode = if let Some(source) = &source_for_compilation {
-                compiler.compile_with_source(&merged_program, source)?
-            } else {
-                compiler.compile(&merged_program)?
-            };
+            if let Some(source) = &source_for_compilation {
+                compiler.set_source(source);
+            }
+
+            let bytecode = compiler.compile_with_graph_and_prelude(
+                &root_program,
+                graph,
+                &prelude_imports,
+            )?;
 
             // Save the module_binding names for syncing (includes both new and existing)
             let module_binding_names = bytecode.module_binding_names.clone();

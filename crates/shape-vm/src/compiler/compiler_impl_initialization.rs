@@ -15,41 +15,6 @@ impl BytecodeCompiler {
         bindings
     }
 
-    pub(super) fn collect_import_module_scope_sources(program: &Program) -> HashMap<String, String> {
-        use shape_ast::ast::{ImportItems, Item};
-
-        let mut sources = HashMap::new();
-        for item in &program.items {
-            let Item::Import(import_stmt, _) = item else {
-                continue;
-            };
-            if import_stmt.from.is_empty() {
-                continue;
-            }
-
-            match &import_stmt.items {
-                ImportItems::Namespace { name, alias } => {
-                    let local_name = alias.clone().unwrap_or_else(|| name.clone());
-                    sources
-                        .entry(local_name)
-                        .or_insert_with(|| import_stmt.from.clone());
-                }
-                ImportItems::Named(specs) => {
-                    if specs.iter().any(|spec| spec.is_annotation) {
-                        let hidden_module_name =
-                            crate::module_resolution::hidden_annotation_import_module_name(
-                                &import_stmt.from,
-                            );
-                        sources
-                            .entry(hidden_module_name)
-                            .or_insert_with(|| import_stmt.from.clone());
-                    }
-                }
-            }
-        }
-        sources
-    }
-
     pub fn new() -> Self {
         Self {
             program: BytecodeProgram::new(),
@@ -154,6 +119,8 @@ impl BytecodeCompiler {
             function_borrow_summaries: HashMap::new(),
             mir_span_to_point: HashMap::new(),
             mir_field_analyses: HashMap::new(),
+            graph_namespace_map: HashMap::new(),
+            module_graph: None,
         }
     }
 

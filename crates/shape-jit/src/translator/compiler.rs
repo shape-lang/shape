@@ -905,50 +905,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         candidates
     }
 
-    /// Compile bytecode to kernel IR (simplified linear compilation).
-    ///
-    /// Kernel mode uses a simplified compilation path:
-    /// - Linear instruction stream (no complex control flow for V1)
-    /// - Returns i32 result code (0 = continue, 1 = done, negative = error)
-    /// - All data access goes through kernel_series_ptrs/kernel_state_ptr
-    /// Record a deopt point for a non-speculative guard (shape guards,
-    /// signal propagation, etc.).
-    ///
-    /// For speculative guards (arithmetic, property, call), prefer
-    /// `emit_deopt_point_with_spill()` which creates a per-guard spill
-    /// block that stores live locals and operand stack values to ctx_buf,
-    /// enabling the VM to resume execution at the exact guard failure
-    /// point instead of re-executing from function entry.
-    ///
-    /// `bytecode_ip` is sub-program-local (0-based within the function
-    /// slice); the caller in `compile_optimizing_function` rebases it
-    /// to global program IP after `take_deopt_points()`.
-    ///
-    /// # Returns
-    /// Stable deopt point id (index into `deopt_points`) for this guard site.
-    pub(crate) fn emit_deopt_point(
-        &mut self,
-        bytecode_ip: usize,
-        live_locals: &[u16],
-        local_kinds: &[SlotKind],
-    ) -> usize {
-        let deopt_id = self.deopt_points.len();
-        let deopt_info = DeoptInfo {
-            resume_ip: bytecode_ip,
-            local_mapping: live_locals
-                .iter()
-                .enumerate()
-                .map(|(jit_idx, &bc_idx)| (jit_idx as u16, bc_idx))
-                .collect(),
-            local_kinds: local_kinds.to_vec(),
-            stack_depth: 0, // Filled by caller if needed
-            innermost_function_id: None,
-            inline_frames: Vec::new(),
-        };
-        self.deopt_points.push(deopt_info);
-        deopt_id
-    }
-
     /// Record a deopt point with a per-guard spill block.
     ///
     /// Creates a dedicated Cranelift block that stores all live locals
@@ -1067,9 +1023,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
                 deferred_inline_frames.push(super::types::DeferredInlineFrame {
                     live_locals: ictx.locals_snapshot.clone(),
-                    local_kinds: frame_kinds,
-                    f64_locals: ictx.f64_locals.clone(),
-                    int_locals: ictx.int_locals.clone(),
+                    _local_kinds: frame_kinds,
+                    _f64_locals: ictx.f64_locals.clone(),
+                    _int_locals: ictx.int_locals.clone(),
                 });
 
                 ctx_buf_offset += ictx.locals_snapshot.len() as u16;
@@ -1106,11 +1062,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             block: spill_block,
             deopt_id: deopt_id as u32,
             live_locals: live_locals.clone(),
-            local_kinds,
+            _local_kinds: local_kinds,
             on_stack_count,
             extra_param_count: extra_count,
             f64_locals,
-            int_locals,
+            _int_locals: int_locals,
             inline_frames: deferred_inline_frames,
         });
 

@@ -1,0 +1,46 @@
+/// @module std::core::arrow
+/// Arrow IPC columnar file reading.
+///
+/// Read Arrow IPC (.arrow) files into DataTable values.
+///
+/// # Example
+///
+/// ```shape
+/// use std::core::arrow
+///
+/// let table = arrow::read_table("data.arrow")?
+/// let col = table.column("price").toArray()
+/// ```
+
+/// Read the first record batch from an Arrow IPC file.
+///
+/// # Arguments
+///
+/// * `path` - Path to the Arrow IPC file
+///
+/// # Returns
+///
+/// `Ok(table)` on success, `Err(message)` on failure.
+pub builtin fn read_table(path: string) -> Result<DataTable, string>;
+
+/// Read all record batches from an Arrow IPC file.
+///
+/// # Arguments
+///
+/// * `path` - Path to the Arrow IPC file
+///
+/// # Returns
+///
+/// `Ok(tables)` on success, `Err(message)` on failure.
+pub builtin fn read_tables(path: string) -> Result<Array<DataTable>, string>;
+
+/// Read only the schema metadata (key-value pairs) from an Arrow IPC file header.
+///
+/// # Arguments
+///
+/// * `path` - Path to the Arrow IPC file
+///
+/// # Returns
+///
+/// `Ok(metadata)` on success, `Err(message)` on failure.
+pub builtin fn metadata(path: string) -> Result<HashMap<string, string>, string>;

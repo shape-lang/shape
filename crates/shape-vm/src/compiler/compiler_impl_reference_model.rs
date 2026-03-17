@@ -1309,7 +1309,7 @@ impl BytecodeCompiler {
     /// No AST inlining occurs — each module's imports are resolved from
     /// the graph's `ResolvedImport` entries.
     pub fn compile_with_graph(
-        mut self,
+        self,
         root_program: &Program,
         graph: std::sync::Arc<crate::module_graph::ModuleGraph>,
     ) -> Result<BytecodeProgram> {

@@ -286,8 +286,42 @@ impl std::fmt::Display for GraphBuildError {
 
 impl std::error::Error for GraphBuildError {}
 
-// Re-export the hint type from shape-runtime so graph consumers can use it.
-pub use shape_runtime::module_loader::ModuleSourceKindHint;
+/// Classification hint for how a module path should be resolved.
+///
+/// Used during graph construction to decide how to handle each dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleSourceKindHint {
+    /// Module is backed by a native extension (Rust `ModuleExports`).
+    NativeExtension,
+    /// Module has `.shape` source code available.
+    ShapeSource,
+    /// Module is an embedded stdlib module.
+    EmbeddedStdlib,
+    /// Module is available only as a pre-compiled bundle.
+    CompiledBundle,
+    /// Module could not be found.
+    NotFound,
+}
+
+/// Classify a module path by probing the module loader's resolvers.
+pub fn resolve_module_source_kind(
+    loader: &shape_runtime::module_loader::ModuleLoader,
+    module_path: &str,
+) -> ModuleSourceKindHint {
+    // Check if it's a registered extension module (native)
+    if loader.has_extension_module(module_path) {
+        return ModuleSourceKindHint::NativeExtension;
+    }
+    // Check if it's an embedded stdlib module
+    if loader.embedded_stdlib_module_paths().contains(&module_path.to_string()) {
+        return ModuleSourceKindHint::EmbeddedStdlib;
+    }
+    // Check if we can resolve a file path for it
+    if loader.resolve_module_path(module_path).is_ok() {
+        return ModuleSourceKindHint::ShapeSource;
+    }
+    ModuleSourceKindHint::NotFound
+}
 
 /// Intermediate builder state used during graph construction.
 pub struct GraphBuilder {
@@ -825,7 +859,7 @@ fn visit_module(
         }
 
         // Classify the module
-        let kind_hint = loader.resolve_module_source_kind(dep_path);
+        let kind_hint = resolve_module_source_kind(loader, dep_path);
 
         match kind_hint {
             ModuleSourceKindHint::NativeExtension => {
@@ -914,86 +948,6 @@ fn visit_module(
 
     builder.end_visit(current_path);
     Ok(())
-}
-
-/// Extract structured prelude imports from the prelude module's AST in the graph.
-///
-/// Looks up the `std::core::prelude` node (if present) and parses its import
-/// statements to determine named vs namespace imports. Falls back to namespace
-/// imports for paths where prelude AST is unavailable.
-fn extract_structured_prelude_imports(
-    prelude_paths: &[String],
-    builder: &GraphBuilder,
-) -> Vec<PreludeImport> {
-    // Try to find the prelude module in the graph
-    let prelude_ast = builder
-        .path_to_id
-        .get("std::core::prelude")
-        .and_then(|&id| builder.nodes[id.0 as usize].ast.as_ref());
-
-    // Build a map from module path to its import structure from prelude.shape
-    let mut path_to_import: HashMap<String, PreludeImport> = HashMap::new();
-
-    if let Some(ast) = prelude_ast {
-        for item in &ast.items {
-            if let shape_ast::ast::Item::Import(import_stmt, _) = item {
-                if path_to_import.contains_key(&import_stmt.from) {
-                    continue;
-                }
-                match &import_stmt.items {
-                    shape_ast::ast::ImportItems::Named(specs) => {
-                        let symbols = specs
-                            .iter()
-                            .map(|spec| PreludeNamedSymbol {
-                                name: spec.name.clone(),
-                                is_annotation: spec.is_annotation,
-                            })
-                            .collect();
-                        path_to_import.insert(
-                            import_stmt.from.clone(),
-                            PreludeImport {
-                                canonical_path: import_stmt.from.clone(),
-                                named_symbols: symbols,
-                                is_namespace: false,
-                            },
-                        );
-                    }
-                    shape_ast::ast::ImportItems::Namespace { .. } => {
-                        path_to_import.insert(
-                            import_stmt.from.clone(),
-                            PreludeImport {
-                                canonical_path: import_stmt.from.clone(),
-                                named_symbols: Vec::new(),
-                                is_namespace: true,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Return structured imports for each prelude path, falling back to namespace
-    let result: Vec<_> = prelude_paths
-        .iter()
-        .map(|path| {
-            path_to_import
-                .remove(path)
-                .unwrap_or_else(|| PreludeImport {
-                    canonical_path: path.clone(),
-                    named_symbols: Vec::new(),
-                    is_namespace: true,
-                })
-        })
-        .collect();
-    for pi in &result {
-        if pi.canonical_path.contains("snapshot") {
-            eprintln!("[DEBUG extract] snapshot prelude import: is_namespace={}, named_symbols={:?}",
-                pi.is_namespace,
-                pi.named_symbols.iter().map(|s| &s.name).collect::<Vec<_>>());
-        }
-    }
-    result
 }
 
 /// A single symbol imported by the prelude.

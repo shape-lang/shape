@@ -1319,7 +1319,7 @@ impl TypeInferenceEngine {
         ))
     }
 
-    fn render_type_for_diag(&self, ty: &Type) -> String {
+    pub(crate) fn render_type_for_diag(&self, ty: &Type) -> String {
         if matches!(ty, Type::Variable(_) | Type::Constrained { .. }) {
             return "unknown".to_string();
         }

@@ -8,7 +8,6 @@ use crate::{
 };
 use rust_decimal::prelude::ToPrimitive;
 use shape_runtime::type_schema::FieldType;
-use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueSlot, ValueWord};
 use std::collections::HashMap;
 use std::sync::Arc;

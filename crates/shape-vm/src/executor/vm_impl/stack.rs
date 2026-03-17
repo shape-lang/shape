@@ -154,11 +154,6 @@ impl VirtualMachine {
             .flatten()
     }
 
-    #[inline]
-    pub(crate) fn function_id_for_blob_hash(&self, hash: FunctionHash) -> Option<u16> {
-        self.function_id_by_hash.get(&hash).copied()
-    }
-
     pub(crate) fn current_locals_base(&self) -> usize {
         self.call_stack
             .last()

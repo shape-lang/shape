@@ -24,8 +24,6 @@ pub const MAX_SCALAR_ARRAY_ELEMENTS: usize = 8;
 /// Describes one array eligible for scalar replacement.
 #[derive(Debug, Clone)]
 pub struct ScalarArrayEntry {
-    /// Instruction index of the `NewArray` that created this array.
-    pub new_array_idx: usize,
     /// Local variable slot where the array is stored immediately after creation.
     pub local_slot: u16,
     /// Number of elements in the array (from `Operand::Count`).
@@ -47,6 +45,7 @@ pub struct EscapeAnalysisPlan {
 
 impl EscapeAnalysisPlan {
     /// Returns true if any arrays are eligible for scalar replacement.
+    #[cfg(test)]
     pub fn has_candidates(&self) -> bool {
         !self.scalar_arrays.is_empty()
     }
@@ -440,7 +439,6 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
         plan.scalar_arrays.insert(
             candidate.new_array_idx,
             ScalarArrayEntry {
-                new_array_idx: candidate.new_array_idx,
                 local_slot: candidate.local_slot,
                 element_count: candidate.element_count,
                 get_sites: candidate.get_sites,

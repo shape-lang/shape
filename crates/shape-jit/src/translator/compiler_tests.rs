@@ -391,60 +391,6 @@ fn test_function_osr_entry_points_field() {
 }
 
 // ============================================================================
-// DeoptTracker Integration with New Metadata
-// ============================================================================
-
-#[test]
-fn test_deopt_tracker_with_osr_metadata() {
-    use crate::optimizer::{DeoptTracker, OptimizationDependencies};
-
-    let mut tracker = DeoptTracker::new();
-
-    // Register a function with dependencies
-    let func_hash = [1u8; 32];
-    let inlined_hash = [2u8; 32];
-    let mut deps = OptimizationDependencies::default();
-    deps.inlined_functions.insert(inlined_hash);
-    deps.assumed_constant_bindings.insert(3);
-
-    tracker.register(func_hash, deps);
-    assert_eq!(tracker.tracked_count(), 1);
-
-    // Invalidate via function change -> the function should be invalidated
-    let invalidated = tracker.invalidate_function(&inlined_hash);
-    assert_eq!(invalidated.len(), 1);
-    assert_eq!(invalidated[0], func_hash);
-    assert_eq!(tracker.tracked_count(), 0);
-}
-
-#[test]
-fn test_deopt_tracker_binding_invalidation_with_multiple_functions() {
-    use crate::optimizer::{DeoptTracker, OptimizationDependencies};
-
-    let mut tracker = DeoptTracker::new();
-
-    // Two functions depend on binding 5
-    let func1 = [1u8; 32];
-    let func2 = [2u8; 32];
-
-    let mut deps1 = OptimizationDependencies::default();
-    deps1.assumed_constant_bindings.insert(5);
-    tracker.register(func1, deps1);
-
-    let mut deps2 = OptimizationDependencies::default();
-    deps2.assumed_constant_bindings.insert(5);
-    tracker.register(func2, deps2);
-
-    assert_eq!(tracker.tracked_count(), 2);
-
-    // Invalidate binding 5 -> both functions should be invalidated
-    let mut invalidated = tracker.invalidate_binding(5);
-    invalidated.sort();
-    assert_eq!(invalidated.len(), 2);
-    assert_eq!(tracker.tracked_count(), 0);
-}
-
-// ============================================================================
 // Speculative IR Tests (Feedback-Guided Tier 2)
 // ============================================================================
 

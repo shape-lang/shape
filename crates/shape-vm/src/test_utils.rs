@@ -44,11 +44,16 @@ pub fn compile(source: &str) -> crate::bytecode::BytecodeProgram {
 /// This is needed for tests that use stdlib features like comptime builtins.
 /// Panics on parse or compile failure.
 pub fn eval_with_prelude(source: &str) -> ValueWord {
-    let mut program = shape_ast::parser::parse_program(source).expect("parse failed");
-    let stdlib_names = crate::module_resolution::prepend_prelude_items(&mut program);
+    let program = shape_ast::parser::parse_program(source).expect("parse failed");
+    let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+    let (graph, stdlib_names, prelude_imports) =
+        crate::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
+            .expect("graph build failed");
     let mut compiler = BytecodeCompiler::new();
     compiler.stdlib_function_names = stdlib_names;
-    let bytecode = compiler.compile(&program).expect("compile failed");
+    let bytecode = compiler
+        .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
+        .expect("compile failed");
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
     vm.execute(None).expect("execution failed").clone()
@@ -59,12 +64,15 @@ pub fn eval_with_prelude(source: &str) -> ValueWord {
 pub fn compile_with_prelude(
     source: &str,
 ) -> Result<crate::bytecode::BytecodeProgram, VMError> {
-    let mut program = shape_ast::parser::parse_program(source)
+    let program = shape_ast::parser::parse_program(source)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
-    let stdlib_names = crate::module_resolution::prepend_prelude_items(&mut program);
+    let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+    let (graph, stdlib_names, prelude_imports) =
+        crate::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
+            .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut compiler = BytecodeCompiler::new();
     compiler.stdlib_function_names = stdlib_names;
     compiler
-        .compile(&program)
+        .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))
 }

@@ -29,7 +29,7 @@ pub(crate) struct ExprReferenceResult {
 pub type BorrowPlace = u32;
 use crate::bytecode::{
     BuiltinFunction, BytecodeProgram, Constant, FunctionBlob, FunctionHash, Instruction, OpCode,
-    Program as ContentAddressedProgram,
+    Operand, Program as ContentAddressedProgram,
 };
 use crate::type_tracking::{TypeTracker, VariableTypeInfo};
 use shape_ast::ast::{FunctionDef, Program, TypeAnnotation};
@@ -82,6 +82,9 @@ pub(crate) struct ImportedSymbol {
     pub original_name: String,
     /// Module path the symbol was imported from
     pub module_path: String,
+    /// High-level kind of the imported symbol (function, type, etc.)
+    /// `None` for legacy inlining path where kind is not tracked.
+    pub kind: Option<shape_ast::module_utils::ModuleExportKind>,
 }
 
 /// Imported annotation binding routed through a hidden synthetic module.
@@ -90,7 +93,7 @@ pub(crate) struct ImportedAnnotationSymbol {
     /// Original annotation name in the source module.
     pub original_name: String,
     /// Source module path the annotation was imported from.
-    pub module_path: String,
+    pub _module_path: String,
     /// Hidden synthetic module name that owns the compiled annotation scope.
     pub hidden_module_name: String,
 }
@@ -824,6 +827,13 @@ pub struct BytecodeCompiler {
 
     /// Field-level definite-initialization and liveness analyses for compiled functions.
     pub(crate) mir_field_analyses: HashMap<String, crate::mir::FieldAnalysis>,
+
+    /// Graph-compiled namespace map: local namespace name -> canonical module path.
+    /// Populated during graph-driven compilation to resolve qualified names.
+    pub(crate) graph_namespace_map: HashMap<String, String>,
+
+    /// Module dependency graph (set during graph-driven compilation).
+    pub(crate) module_graph: Option<std::sync::Arc<crate::module_graph::ModuleGraph>>,
 }
 
 impl Default for BytecodeCompiler {

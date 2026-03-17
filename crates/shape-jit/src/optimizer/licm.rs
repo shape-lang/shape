@@ -15,7 +15,7 @@
 //!   `tan`, `asin`, `acos`, `atan`, `exp`, `ln`, `log`, `round`
 //! - Matrix/collection methods: `row`, `col`, `transpose`, `shape`, `len`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use shape_vm::bytecode::{BuiltinFunction, BytecodeProgram, OpCode, Operand};
 

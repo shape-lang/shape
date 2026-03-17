@@ -341,8 +341,9 @@ impl VirtualMachine {
                         self.push_vw(ValueWord::empty_set())?;
                     } else if args.len() == 1 {
                         // Set(array) — initialize from array
-                        if let Some(arr) = args[0].as_array() {
-                            self.push_vw(ValueWord::from_set(arr.to_vec()))?;
+                        if let Some(arr) = args[0].as_any_array() {
+                            let items = std::sync::Arc::try_unwrap(arr.to_generic()).unwrap_or_else(|a| (*a).clone());
+                            self.push_vw(ValueWord::from_set(items))?;
                         } else {
                             // Single non-array item — wrap in set
                             self.push_vw(ValueWord::from_set(vec![args[0].clone()]))?;
@@ -358,8 +359,9 @@ impl VirtualMachine {
                         self.push_vw(ValueWord::empty_deque())?;
                     } else if args.len() == 1 {
                         // Deque(array) — initialize from array
-                        if let Some(arr) = args[0].as_array() {
-                            self.push_vw(ValueWord::from_deque(arr.to_vec()))?;
+                        if let Some(arr) = args[0].as_any_array() {
+                            let items = std::sync::Arc::try_unwrap(arr.to_generic()).unwrap_or_else(|a| (*a).clone());
+                            self.push_vw(ValueWord::from_deque(items))?;
                         } else {
                             // Single non-array item
                             self.push_vw(ValueWord::from_deque(vec![args[0].clone()]))?;
@@ -374,8 +376,9 @@ impl VirtualMachine {
                     if args.is_empty() {
                         self.push_vw(ValueWord::empty_priority_queue())?;
                     } else if args.len() == 1 {
-                        if let Some(arr) = args[0].as_array() {
-                            self.push_vw(ValueWord::from_priority_queue(arr.to_vec()))?;
+                        if let Some(arr) = args[0].as_any_array() {
+                            let items = std::sync::Arc::try_unwrap(arr.to_generic()).unwrap_or_else(|a| (*a).clone());
+                            self.push_vw(ValueWord::from_priority_queue(items))?;
                         } else {
                             self.push_vw(ValueWord::from_priority_queue(vec![args[0].clone()]))?;
                         }
@@ -649,6 +652,26 @@ impl VirtualMachine {
                     let args = self.pop_builtin_args()?;
                     let result = self.builtin_is_finite(args)?;
                     self.push_vw(result)?;
+                }
+
+                // Matrix construction (normally compiled to NewMatrix opcode)
+                BuiltinFunction::MatFromFlat => {
+                    let args = self.pop_builtin_args()?;
+                    if args.len() < 2 {
+                        return Err(VMError::RuntimeError(
+                            "mat() requires at least rows and cols arguments".to_string(),
+                        ));
+                    }
+                    let rows = args[0].as_i64().unwrap_or(0) as u32;
+                    let cols = args[1].as_i64().unwrap_or(0) as u32;
+                    let mut data = shape_value::aligned_vec::AlignedVec::with_capacity(
+                        args.len().saturating_sub(2),
+                    );
+                    for v in &args[2..] {
+                        data.push(v.as_number_coerce().unwrap_or(0.0));
+                    }
+                    let mat = shape_value::heap_value::MatrixData::from_flat(data, rows, cols);
+                    self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(mat)))?;
                 }
 
                 // Table construction

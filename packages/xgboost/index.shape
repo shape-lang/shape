@@ -1,0 +1,98 @@
+/// @module xgboost
+/// XGBoost tree ensemble model loading and inference.
+///
+/// Loads XGBoost models from Arrow IPC files (flattened tree format)
+/// and runs inference by traversing decision trees.
+
+use std::core::arrow
+use std::core::json
+
+/// A single node in a decision tree.
+type TreeNode {
+    split_feature: int,
+    threshold: number,
+    left: int,
+    right: int,
+    leaf_value: number,
+    is_leaf: bool
+}
+
+/// A single decision tree.
+type Tree {
+    nodes: Array<TreeNode>
+}
+
+/// An XGBoost gradient-boosted tree model.
+type XGBModel {
+    trees: Array<Tree>,
+    base_score: number,
+    num_features: int
+}
+
+/// Load an XGBoost model from an Arrow IPC file.
+///
+/// The Arrow file must have columns: tree_id, split_indices, split_conditions,
+/// left_children, right_children, base_weights.
+/// Schema metadata must include: base_score, num_feature, num_trees, nodes_per_tree.
+pub fn load_model_arrow(path: string) -> XGBModel {
+    let meta = arrow::metadata(path)?
+    let base_score = meta.get("base_score") as number
+    let num_features = meta.get("num_feature") as int
+    let num_trees = meta.get("num_trees") as int
+    let nodes_per_tree = meta.get("nodes_per_tree") as int
+
+    let table = arrow::read_table(path)?
+    let split_indices_col = table.column("split_indices").toArray()
+    let split_conditions = table.column("split_conditions").toFloatArray()
+    let left_children_col = table.column("left_children").toArray()
+    let right_children_col = table.column("right_children").toArray()
+    let base_weights = table.column("base_weights").toFloatArray()
+
+    let mut trees: Array<Tree> = []
+    for t in 0..num_trees {
+        let offset = t * nodes_per_tree
+        let mut nodes: Array<TreeNode> = []
+        for i in 0..nodes_per_tree {
+            let idx = offset + i
+            let left_child = left_children_col[idx] as int
+            nodes = nodes.push(TreeNode {
+                split_feature: split_indices_col[idx] as int,
+                threshold: split_conditions[idx],
+                left: left_child,
+                right: right_children_col[idx] as int,
+                leaf_value: base_weights[idx],
+                is_leaf: left_child == -1
+            })
+        }
+        trees = trees.push(Tree { nodes: nodes })
+    }
+
+    XGBModel { trees: trees, base_score: base_score, num_features: num_features }
+}
+
+/// Run inference on a single feature vector using a loaded XGBoost model.
+///
+/// Returns the predicted value (sum of leaf values + base_score).
+pub fn predict(model: XGBModel, features: Array<number>) -> number {
+    let mut sum = model.base_score
+    for tree in model.trees {
+        sum = sum + traverse_tree(tree, features)
+    }
+    sum
+}
+
+/// Traverse a single tree to find the leaf value.
+fn traverse_tree(tree: Tree, features: Array<number>) -> number {
+    let mut node_idx = 0
+    loop {
+        let node = tree.nodes[node_idx]
+        if node.is_leaf {
+            return node.leaf_value
+        }
+        if features[node.split_feature] < node.threshold {
+            node_idx = node.left
+        } else {
+            node_idx = node.right
+        }
+    }
+}

@@ -13,12 +13,8 @@ use shape_vm::bytecode::{BytecodeProgram, OpCode, Operand};
 /// Describes a HOF method call site eligible for inlining.
 #[derive(Debug, Clone)]
 pub struct HofInlineSite {
-    /// Method name (e.g. "map", "filter", "reduce")
-    pub method_name: String,
     /// The callback function_id if statically resolvable from bytecode
     pub callback_fn_id: Option<u16>,
-    /// Number of arguments to the method (1 for most, 2 for reduce)
-    pub arg_count: usize,
 }
 
 /// Plan of HOF inline sites keyed by instruction index.
@@ -58,7 +54,7 @@ pub fn analyze_hof_inline(program: &BytecodeProgram) -> HofInlinePlan {
         };
 
         // Check if this is a HOF method
-        let Some(&(_, name, expected_args)) =
+        let Some(&(_, _name, _expected_args)) =
             HOF_METHODS.iter().find(|(id, _, _)| *id == *method_id)
         else {
             continue;
@@ -79,9 +75,7 @@ pub fn analyze_hof_inline(program: &BytecodeProgram) -> HofInlinePlan {
         plan.sites.insert(
             idx,
             HofInlineSite {
-                method_name: name.to_string(),
                 callback_fn_id,
-                arg_count: expected_args,
             },
         );
     }

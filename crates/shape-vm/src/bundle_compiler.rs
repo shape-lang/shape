@@ -4,7 +4,7 @@
 
 use crate::bytecode;
 use crate::compiler::BytecodeCompiler;
-use crate::module_resolution::{annotate_program_native_abi_package_key, should_include_item};
+use crate::module_resolution::annotate_program_native_abi_package_key;
 use sha2::{Digest, Sha256};
 use shape_ast::parser::parse_program;
 use shape_runtime::module_manifest::ModuleManifest;
@@ -96,20 +96,24 @@ impl BundleCompiler {
             // Collect export names from AST (must use original AST)
             let export_names = collect_export_names(&ast);
 
-            // Inject stdlib prelude items
-            let mut stdlib_names = crate::module_resolution::prepend_prelude_items(&mut ast);
+            // Build module graph and compile via graph pipeline
+            let (graph, stdlib_names, prelude_imports) =
+                crate::module_resolution::build_graph_and_stdlib_names(&ast, &mut loader, &[])
+                    .map_err(|e| {
+                        format!(
+                            "Failed to build module graph for '{}': {}",
+                            file_path.display(),
+                            e
+                        )
+                    })?;
 
-            // Resolve explicit imports via ModuleLoader
-            stdlib_names.extend(resolve_and_inline_imports(&mut ast, &mut loader));
-
-            // Compile to bytecode with known bindings
             let mut compiler = BytecodeCompiler::new();
             compiler.stdlib_function_names = stdlib_names;
             compiler.register_known_bindings(&known_bindings);
             compiler.native_resolution_context = Some(native_resolution_context.clone());
             compiler.set_source_dir(root.clone());
             let bytecode = compiler
-                .compile(&ast)
+                .compile_with_graph_and_prelude(&ast, graph, &prelude_imports)
                 .map_err(|e| format!("Failed to compile '{}': {}", file_path.display(), e))?;
 
             // Extract content-addressed program BEFORE serializing (avoid roundtrip)
@@ -270,151 +274,6 @@ impl BundleCompiler {
             docs,
         })
     }
-}
-
-/// Resolve import statements in a program by loading modules and inlining their AST items.
-/// This replicates the logic from `BytecodeExecutor::append_imported_module_items` but
-/// takes a `ModuleLoader` directly, suitable for use outside the executor context.
-fn resolve_and_inline_imports(
-    ast: &mut shape_ast::Program,
-    loader: &mut shape_runtime::module_loader::ModuleLoader,
-) -> std::collections::HashSet<String> {
-    use shape_ast::ast::{ImportItems, Item, ModuleDecl, Span};
-
-    fn namespace_binding_name(import_stmt: &shape_ast::ast::ImportStmt) -> String {
-        match &import_stmt.items {
-            ImportItems::Namespace { name, alias } => {
-                alias.clone().unwrap_or_else(|| name.clone())
-            }
-            ImportItems::Named(_) => unreachable!("expected namespace import"),
-        }
-    }
-
-    fn strip_import_items(items: Vec<Item>) -> Vec<Item> {
-        items.into_iter()
-            .filter(|item| !matches!(item, Item::Import(..)))
-            .collect()
-    }
-
-    fn build_namespace_module_item(local_name: String, items: Vec<Item>) -> Item {
-        Item::Module(
-            ModuleDecl {
-                name: local_name,
-                name_span: Span::DUMMY,
-                doc_comment: None,
-                annotations: Vec::new(),
-                items,
-            },
-            Span::DUMMY,
-        )
-    }
-
-    let mut inlined_names: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut wrapped_namespace_modules: HashSet<(String, String)> = HashSet::new();
-    let mut stdlib_names = std::collections::HashSet::new();
-
-    loop {
-        let mut module_items = Vec::new();
-        let mut found_new = false;
-
-        let mut merged_named: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut namespace_requests = Vec::new();
-
-        for item in ast.items.iter() {
-            let Item::Import(import_stmt, _) = item else {
-                continue;
-            };
-            let module_path = import_stmt.from.as_str();
-            if module_path.is_empty() {
-                continue;
-            }
-
-            match &import_stmt.items {
-                ImportItems::Namespace { .. } => {
-                    let local_name = namespace_binding_name(import_stmt);
-                    if wrapped_namespace_modules
-                        .insert((module_path.to_string(), local_name.clone()))
-                    {
-                        namespace_requests.push((module_path.to_string(), local_name));
-                    }
-                }
-                ImportItems::Named(specs) => {
-                    let entry = merged_named
-                        .entry(module_path.to_string())
-                        .or_default();
-                    let already = inlined_names.get(module_path);
-                    for spec in specs {
-                        if already.is_some_and(|names| names.contains(&spec.name)) {
-                            continue;
-                        }
-                        entry.insert(spec.name.clone());
-                    }
-                }
-            }
-        }
-
-        for (module_path, local_name) in namespace_requests {
-            let is_std = module_path.starts_with("std::");
-            let _ = loader.load_module(&module_path);
-
-            if let Some(module) = loader.get_module(&module_path) {
-                let mut nested_program = module.ast.clone();
-                stdlib_names.extend(resolve_and_inline_imports(&mut nested_program, loader));
-                let nested_items = strip_import_items(nested_program.items);
-                if !nested_items.is_empty() {
-                    if is_std {
-                        stdlib_names.extend(
-                            crate::module_resolution::collect_function_names_from_items(
-                                &nested_items,
-                            ),
-                        );
-                    }
-                    module_items.push(build_namespace_module_item(local_name, nested_items));
-                    found_new = true;
-                }
-            }
-        }
-
-        for (module_path, names) in &merged_named {
-            if names.is_empty() {
-                continue;
-            }
-            found_new = true;
-            let is_std = module_path.starts_with("std::");
-
-            let _ = loader.load_module(module_path);
-
-            if let Some(module) = loader.get_module(module_path) {
-                let items = module.ast.items.clone();
-                if is_std {
-                    stdlib_names.extend(
-                        crate::module_resolution::collect_function_names_from_items(&items),
-                    );
-                }
-                let names_ref: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
-                for ast_item in items {
-                    if should_include_item(&ast_item, &names_ref) {
-                        module_items.push(ast_item);
-                    }
-                }
-                inlined_names
-                    .entry(module_path.clone())
-                    .or_default()
-                    .extend(names.iter().cloned());
-            }
-        }
-
-        if !module_items.is_empty() {
-            module_items.extend(std::mem::take(&mut ast.items));
-            ast.items = module_items;
-        }
-
-        if !found_new {
-            break;
-        }
-    }
-
-    stdlib_names
 }
 
 fn merge_native_scope(

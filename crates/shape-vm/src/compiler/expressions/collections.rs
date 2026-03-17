@@ -111,19 +111,6 @@ fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
-    fn expr_is_local_mir_place(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Identifier(name, _) | Expr::PatternRef(name, _) => {
-                self.resolve_local(name).is_some()
-            }
-            Expr::PropertyAccess { object, .. } => self.expr_is_local_mir_place(object),
-            Expr::IndexAccess {
-                object, end_index, ..
-            } => end_index.is_none() && self.expr_is_local_mir_place(object),
-            _ => false,
-        }
-    }
-
     /// Reject reference storage in collections/aggregates for **top-level code only**.
     /// Inside function bodies the MIR solver detects these via `array_store_loans`,
     /// `object_store_loans`, and `enum_store_loans` facts, so we defer to it.

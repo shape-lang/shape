@@ -303,7 +303,7 @@ impl PriorityQueueData {
         PriorityQueueData { items: Vec::new() }
     }
 
-    pub fn from_items(mut items: Vec<ValueWord>) -> Self {
+    pub fn from_items(items: Vec<ValueWord>) -> Self {
         let mut pq = PriorityQueueData { items };
         pq.heapify();
         pq

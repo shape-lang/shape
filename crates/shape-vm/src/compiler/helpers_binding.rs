@@ -120,40 +120,6 @@ impl BytecodeCompiler {
     // consult `OwnershipDecision` to decide Move vs Clone vs Copy for
     // non-Copy type assignments.
 
-    /// Query the MIR ownership decision for a given MIR program point.
-    /// Returns `None` if no MIR analysis is available for the current function.
-    ///
-    /// Connected to assignment/variable-init codegen via the enriched storage
-    /// plan and span→point mapping. The actual emission of distinct
-    /// move/clone/copy opcodes is a follow-up refinement.
-    pub(super) fn query_mir_ownership_decision(
-        &self,
-        point: crate::mir::types::Point,
-    ) -> Option<crate::mir::analysis::OwnershipDecision> {
-        let func_name = self
-            .current_function
-            .map(|idx| &self.program.functions[idx].name)?;
-        let analysis = self.mir_borrow_analyses.get(func_name)?;
-        Some(analysis.ownership_at(point))
-    }
-
-    /// Query the MIR ownership decision for a given AST span.
-    /// Looks up the span→point mapping for the current function, then
-    /// delegates to `query_mir_ownership_decision`.
-    /// Returns `None` if no mapping or analysis is available.
-    pub(super) fn query_mir_ownership_decision_at_span(
-        &self,
-        span: shape_ast::ast::Span,
-    ) -> Option<crate::mir::analysis::OwnershipDecision> {
-        let func_name = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .map(|f| f.name.as_str())?;
-        let span_map = self.mir_span_to_point.get(func_name)?;
-        let point = span_map.get(&span)?;
-        self.query_mir_ownership_decision(*point)
-    }
-
     /// Access the storage plan for the function currently being compiled.
     /// Returns `None` if no MIR storage plan exists for the current function.
     pub(super) fn current_storage_plan(&self) -> Option<&crate::mir::StoragePlan> {
@@ -169,11 +135,6 @@ impl BytecodeCompiler {
     pub(super) fn mir_storage_class_for_slot(&self, slot: u16) -> Option<BindingStorageClass> {
         self.current_storage_plan()
             .and_then(|plan| plan.slot_classes.get(&crate::mir::SlotId(slot)).copied())
-    }
-
-    /// MIR analysis is always authoritative now (lexical borrow checker removed).
-    pub(super) fn current_function_has_mir_authority(&self) -> bool {
-        true
     }
 
     /// MIR analysis is authoritative for both function bodies and top-level code.

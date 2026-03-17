@@ -1585,7 +1585,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         &mut self,
         info: &crate::translator::loop_analysis::LoopInfo,
     ) {
-        use shape_vm::bytecode::{BuiltinFunction, Constant, Operand};
+        use shape_vm::bytecode::{Constant, Operand};
 
         let hoistable_calls = self
             .optimization_plan

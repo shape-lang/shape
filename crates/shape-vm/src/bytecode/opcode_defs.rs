@@ -1046,6 +1046,9 @@ pub enum BuiltinFunction {
     /// isFinite(x) — check if value is finite
     IsFinite,
 
+    /// mat(rows, cols, ...values) — create a Matrix from flat f64 values
+    MatFromFlat,
+
     // Table construction (1)
     /// Build a TypedTable from inline row values: args = [schema_id, row_count, field_count, val1, val2, ...]
     MakeTableFromRows,
@@ -1272,6 +1275,8 @@ impl BuiltinFunction {
             BuiltinFunction::Clamp,
             BuiltinFunction::IsNaN,
             BuiltinFunction::IsFinite,
+            // Matrix (1)
+            BuiltinFunction::MatFromFlat,
             // Table construction (1)
             BuiltinFunction::MakeTableFromRows,
         ];

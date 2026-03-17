@@ -247,7 +247,6 @@ fn render_braille_chart(spec: &ChartSpec, width: usize, height: usize) -> String
     }
 
     // Render with y-axis labels
-    let braille_lines: Vec<&str> = canvas.render().lines().map(|l| l).collect();
     // We need to own the rendered string first
     let rendered = canvas.render();
     let braille_lines: Vec<&str> = rendered.lines().collect();

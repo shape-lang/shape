@@ -1605,17 +1605,6 @@ fn try_extract_blob(
     Some(BlobSidecar { sidecar_id, data })
 }
 
-/// Return the byte size of a single element for a typed array element kind.
-fn typed_array_element_size(kind: shape_runtime::snapshot::TypedArrayElementKind) -> usize {
-    use shape_runtime::snapshot::TypedArrayElementKind as EK;
-    match kind {
-        EK::I8 | EK::U8 | EK::Bool => 1,
-        EK::I16 | EK::U16 => 2,
-        EK::I32 | EK::U32 | EK::F32 => 4,
-        EK::I64 | EK::U64 | EK::F64 => 8,
-    }
-}
-
 /// Reassemble sidecars back into the serialized payload.
 ///
 /// Walks the `SerializableVMValue` tree and replaces `SidecarRef` variants

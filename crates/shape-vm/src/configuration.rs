@@ -65,7 +65,7 @@ impl BytecodeExecutor {
         };
         executor.register_stdlib_modules();
 
-        // Always initialize a module loader so that append_imported_module_items()
+        // Always initialize a module loader so that graph-based compilation
         // can resolve imports via the embedded stdlib modules.
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
         executor.register_extension_artifacts_in_loader(&mut loader);

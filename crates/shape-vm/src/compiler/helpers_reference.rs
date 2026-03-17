@@ -32,10 +32,6 @@ impl BytecodeCompiler {
         Self::MODULE_BINDING_BORROW_FLAG | binding_idx as BorrowPlace
     }
 
-    fn borrow_key_is_module_binding(place: BorrowPlace) -> bool {
-        (place & Self::MODULE_BINDING_BORROW_FLAG) != 0
-    }
-
     pub(super) fn check_read_allowed_in_current_context(
         &self,
         _place: BorrowPlace,
@@ -1109,16 +1105,6 @@ impl BytecodeCompiler {
 
     pub(super) fn pop_repeating_reference_release_barrier(&mut self) {
         // Lexical reference tracking removed — MIR borrow checker is sole authority.
-    }
-
-    fn local_reference_release_is_barrier_protected(&self, _slot: u16) -> bool {
-        // Lexical reference tracking removed — MIR borrow checker is sole authority.
-        false
-    }
-
-    fn module_reference_release_is_barrier_protected(&self, _slot: u16) -> bool {
-        // Lexical reference tracking removed — MIR borrow checker is sole authority.
-        false
     }
 
     pub(super) fn check_write_allowed_in_current_context(

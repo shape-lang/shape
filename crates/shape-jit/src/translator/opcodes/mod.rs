@@ -27,10 +27,6 @@ mod variables;
 
 use shape_vm::bytecode::{Instruction, OpCode};
 
-use cranelift::prelude::{InstBuilder, types};
-
-use crate::nan_boxing::*;
-
 use super::types::BytecodeToIR;
 
 impl<'a, 'b> BytecodeToIR<'a, 'b> {

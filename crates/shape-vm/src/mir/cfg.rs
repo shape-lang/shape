@@ -11,8 +11,6 @@ pub struct ControlFlowGraph {
     successors: HashMap<BasicBlockId, Vec<BasicBlockId>>,
     /// Predecessors of each block.
     predecessors: HashMap<BasicBlockId, Vec<BasicBlockId>>,
-    /// Number of blocks.
-    num_blocks: u32,
 }
 
 impl ControlFlowGraph {
@@ -32,7 +30,6 @@ impl ControlFlowGraph {
         ControlFlowGraph {
             successors,
             predecessors,
-            num_blocks: mir.blocks.len() as u32,
         }
     }
 

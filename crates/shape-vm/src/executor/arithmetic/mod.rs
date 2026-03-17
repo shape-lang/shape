@@ -6,7 +6,6 @@ use crate::{
     bytecode::{Instruction, NumericWidth, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_ast::IntWidth;
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
 use std::sync::Arc;

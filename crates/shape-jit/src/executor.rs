@@ -40,30 +40,32 @@ impl ProgramExecutor for JITExecutor {
             shape_vm::stdlib::core_binding_names()
         };
 
-        // Extract imported functions from ModuleBindingRegistry
-        let module_binding_registry = runtime.module_binding_registry();
-        let imported_program =
-            shape_vm::BytecodeExecutor::create_program_from_imports(&module_binding_registry)?;
+        // Build module graph and compile via graph pipeline
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        let (graph, stdlib_names, prelude_imports) =
+            shape_vm::module_resolution::build_graph_and_stdlib_names(
+                program,
+                &mut loader,
+                &[],
+            )
+            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
+                message: format!("Module graph construction failed: {}", e),
+                location: None,
+            })?;
 
-        // Merge with main program
-        let mut merged_program = imported_program;
-        merged_program.items.extend(program.items.clone());
-        let stdlib_names = shape_vm::module_resolution::prepend_prelude_items(&mut merged_program);
-
-        // Compile to bytecode (with source text if available for better error messages)
         let bytecode_compile_start = Instant::now();
         let mut compiler = BytecodeCompiler::new();
         compiler.stdlib_function_names = stdlib_names;
         compiler.register_known_bindings(&known_bindings);
-        let mut bytecode = if let Some(source) = &source_for_compilation {
-            compiler.compile_with_source(&merged_program, source)
-        } else {
-            compiler.compile(&merged_program)
+        if let Some(source) = &source_for_compilation {
+            compiler.set_source(source);
         }
-        .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
-            message: format!("Bytecode compilation failed: {}", e),
-            location: None,
-        })?;
+        let bytecode = compiler
+            .compile_with_graph_and_prelude(program, graph, &prelude_imports)
+            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
+                message: format!("Bytecode compilation failed: {}", e),
+                location: None,
+            })?;
         let bytecode_compile_ms = bytecode_compile_start.elapsed().as_millis();
 
         self.execute_with_jit(engine, &bytecode, bytecode_compile_ms, emit_phase_metrics)

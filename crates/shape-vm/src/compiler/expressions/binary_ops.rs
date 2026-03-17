@@ -216,8 +216,8 @@ impl BytecodeCompiler {
         left_numeric: Option<NumericType>,
         right_numeric: Option<NumericType>,
         is_comparison: bool,
-        lhs_hint: Option<crate::type_tracking::StorageHint>,
-        rhs_hint: Option<crate::type_tracking::StorageHint>,
+        _lhs_hint: Option<crate::type_tracking::StorageHint>,
+        _rhs_hint: Option<crate::type_tracking::StorageHint>,
     ) -> NumericEmitResult {
         let Some(plan) = plan_coercion(left_numeric, right_numeric) else {
             return NumericEmitResult::NoPlan;

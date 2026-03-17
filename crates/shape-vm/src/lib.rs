@@ -38,6 +38,7 @@ compile_error!(
 );
 pub mod memory;
 pub mod metrics;
+pub mod module_graph;
 pub mod module_resolution;
 pub mod remote;
 pub mod resource_limits;

@@ -34,14 +34,17 @@ fn execute_bytecode_with_vm(
 }
 
 fn compile_source(source: &str) -> Result<BytecodeProgram, VMError> {
-    let mut program =
+    let program =
         parse_program(source).map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
-    let stdlib_names = crate::module_resolution::prepend_prelude_items(&mut program);
+    let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+    let (graph, stdlib_names, prelude_imports) =
+        crate::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
+            .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut compiler = BytecodeCompiler::new();
     compiler.stdlib_function_names = stdlib_names;
     compiler.set_source(source);
     let bytecode = compiler
-        .compile(&program)
+        .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     Ok(bytecode)
 }

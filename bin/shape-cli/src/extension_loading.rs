@@ -182,14 +182,27 @@ pub fn load_specs(
 ) -> usize {
     let mut loaded = 0usize;
     for spec in specs {
-        match engine.load_extension(&spec.path, &spec.config) {
-            Ok(info) => {
+        // Wrap each extension load in catch_unwind so that a stale .so compiled
+        // against an older ABI cannot take down the whole process with a segfault
+        // or panic inside foreign code.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.load_extension(&spec.path, &spec.config)
+        }));
+        match result {
+            Ok(Ok(info)) => {
                 loaded += 1;
                 on_loaded(spec, &info);
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 let msg = err.to_string();
                 on_failed(spec, &msg);
+            }
+            Err(_panic) => {
+                on_failed(
+                    spec,
+                    "extension panicked during loading (likely ABI mismatch). \
+                     Rebuild with `just build-extensions`.",
+                );
             }
         }
     }

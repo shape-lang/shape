@@ -1,0 +1,59 @@
+/// @module std::core::numeric
+/// Numeric trait — marker trait for types that support arithmetic operations.
+/// Built-in impls for all 10 numeric width types.
+/// `int` is an alias for i64, `number` is an alias for f64.
+
+trait Numeric {
+    zero(): Self
+    one(): Self
+}
+
+impl Numeric for i8 {
+    method zero() { 0 }
+    method one() { 1 }
+}
+
+impl Numeric for i16 {
+    method zero() { 0 }
+    method one() { 1 }
+}
+
+impl Numeric for i32 {
+    method zero() { 0 }
+    method one() { 1 }
+}
+
+impl Numeric for i64 {
+    method zero() { 0 }
+    method one() { 1 }
+}
+
+impl Numeric for u8 {
+    method zero() { 0 }
+    method one() { 1 }
+}
+
+impl Numeric for u16 {
+    method zero() { 0 }
+    method one() { 1 }
+}
+
+impl Numeric for u32 {
+    method zero() { 0 }
+    method one() { 1 }
+}
+
+impl Numeric for u64 {
+    method zero() { 0 }
+    method one() { 1 }
+}
+
+impl Numeric for f32 {
+    method zero() { 0.0 }
+    method one() { 1.0 }
+}
+
+impl Numeric for f64 {
+    method zero() { 0.0 }
+    method one() { 1.0 }
+}

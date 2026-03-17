@@ -909,7 +909,6 @@ impl VirtualMachine {
     ) -> Result<ValueWord, VMError> {
         use arrow_array::RecordBatch;
         use arrow_schema::{Field, Schema};
-        use shape_value::datatable::DataTableBuilder;
         use std::sync::Arc;
 
         if args.len() < 3 {

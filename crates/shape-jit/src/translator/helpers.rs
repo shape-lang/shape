@@ -116,58 +116,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         }
     }
 
-    /// Binary operation with type guards for NaN-boxed numeric values
-    pub(in crate::translator) fn numeric_binary_op<F>(&mut self, op: F)
-    where
-        F: FnOnce(&mut FunctionBuilder, Value, Value) -> Value,
-    {
-        if self.stack_len() >= 2 {
-            let b_boxed = self.stack_pop().unwrap();
-            let a_boxed = self.stack_pop().unwrap();
-
-            // Type check: both must be numbers
-            // Correct check: (bits & NAN_BASE) != NAN_BASE
-            // This handles negative f64 values correctly (they have sign bit set)
-            let nan_base = self.builder.ins().iconst(types::I64, NAN_BASE as i64);
-            let a_masked = self.builder.ins().band(a_boxed, nan_base);
-            let b_masked = self.builder.ins().band(b_boxed, nan_base);
-            let a_is_num = self.builder.ins().icmp(IntCC::NotEqual, a_masked, nan_base);
-            let b_is_num = self.builder.ins().icmp(IntCC::NotEqual, b_masked, nan_base);
-            let both_num = self.builder.ins().band(a_is_num, b_is_num);
-
-            // Fast path: both are numbers
-            let then_block = self.builder.create_block();
-            let else_block = self.builder.create_block();
-            let merge_block = self.builder.create_block();
-
-            self.builder.append_block_param(merge_block, types::I64);
-            self.builder
-                .ins()
-                .brif(both_num, then_block, &[], else_block, &[]);
-
-            // Then: numeric operation
-            self.builder.switch_to_block(then_block);
-            self.builder.seal_block(then_block);
-            let a_f64 = self.i64_to_f64(a_boxed);
-            let b_f64 = self.i64_to_f64(b_boxed);
-            let result_f64 = op(self.builder, a_f64, b_f64);
-            let result_boxed = self.f64_to_i64(result_f64);
-            self.builder.ins().jump(merge_block, &[result_boxed]);
-
-            // Else: return NaN for non-numeric operations
-            self.builder.switch_to_block(else_block);
-            self.builder.seal_block(else_block);
-            let nan_result = self.builder.ins().iconst(types::I64, TAG_NULL as i64);
-            self.builder.ins().jump(merge_block, &[nan_result]);
-
-            // Merge
-            self.builder.switch_to_block(merge_block);
-            self.builder.seal_block(merge_block);
-            let result = self.builder.block_params(merge_block)[0];
-            self.stack_push(result);
-        }
-    }
-
     /// Optimized binary operation for NaN-nullable floats (Option<f64>)
     ///
     /// When both operands are known to be Option<f64> at compile time,
@@ -240,70 +188,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     pub(in crate::translator) fn create_nan_sentinel(&mut self) -> Value {
         let nan_f64 = self.builder.ins().f64const(f64::NAN);
         self.f64_to_i64(nan_f64)
-    }
-
-    pub(in crate::translator) fn comparison_op(&mut self, cc: FloatCC) {
-        if self.stack_len() >= 2 {
-            let b_boxed = self.stack_pop().unwrap();
-            let a_boxed = self.stack_pop().unwrap();
-
-            // Type check: both must be numbers
-            // Correct check: (bits & NAN_BASE) != NAN_BASE
-            // This handles negative f64 values correctly (they have sign bit set)
-            let nan_base = self.builder.ins().iconst(types::I64, NAN_BASE as i64);
-            let a_masked = self.builder.ins().band(a_boxed, nan_base);
-            let b_masked = self.builder.ins().band(b_boxed, nan_base);
-            let a_is_num = self.builder.ins().icmp(IntCC::NotEqual, a_masked, nan_base);
-            let b_is_num = self.builder.ins().icmp(IntCC::NotEqual, b_masked, nan_base);
-            let both_num = self.builder.ins().band(a_is_num, b_is_num);
-
-            let then_block = self.builder.create_block();
-            let else_block = self.builder.create_block();
-            let merge_block = self.builder.create_block();
-
-            self.builder.append_block_param(merge_block, types::I64);
-            self.builder
-                .ins()
-                .brif(both_num, then_block, &[], else_block, &[]);
-
-            // Then: numeric comparison
-            self.builder.switch_to_block(then_block);
-            self.builder.seal_block(then_block);
-            let a_f64 = self.i64_to_f64(a_boxed);
-            let b_f64 = self.i64_to_f64(b_boxed);
-            let cmp = self.builder.ins().fcmp(cc, a_f64, b_f64);
-            let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-            let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
-            let result_bool = self.builder.ins().select(cmp, true_val, false_val);
-            self.builder.ins().jump(merge_block, &[result_bool]);
-
-            // Else: non-numeric comparison
-            // For Eq: return true if values are identical (handles null==null, true==true, etc.)
-            // For other comparisons: return false
-            self.builder.switch_to_block(else_block);
-            self.builder.seal_block(else_block);
-            let true_val = self.builder.ins().iconst(types::I64, TAG_BOOL_TRUE as i64);
-            let false_val = self.builder.ins().iconst(types::I64, TAG_BOOL_FALSE as i64);
-            let non_num_result = if cc == FloatCC::Equal {
-                // For equality, compare the raw bits
-                let is_equal = self.builder.ins().icmp(IntCC::Equal, a_boxed, b_boxed);
-                self.builder.ins().select(is_equal, true_val, false_val)
-            } else if cc == FloatCC::NotEqual {
-                // For inequality, compare the raw bits
-                let is_not_equal = self.builder.ins().icmp(IntCC::NotEqual, a_boxed, b_boxed);
-                self.builder.ins().select(is_not_equal, true_val, false_val)
-            } else {
-                // Other comparisons on non-numerics return false
-                false_val
-            };
-            self.builder.ins().jump(merge_block, &[non_num_result]);
-
-            // Merge
-            self.builder.switch_to_block(merge_block);
-            self.builder.seal_block(merge_block);
-            let result = self.builder.block_params(merge_block)[0];
-            self.stack_push(result);
-        }
     }
 
     /// Binary operation with runtime type check: numeric fast path, generic FFI fallback.
@@ -606,32 +490,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             .unwrap_or(StorageHint::Unknown)
     }
 
-    /// Check if both top two stack slots are known numeric types.
-    /// This enables the NaN-sentinel optimization for binary operations.
-    /// Accepts Float64, NullableFloat64, Int64, and NullableInt64 since
-    /// all are stored as f64 in NaN-boxing (ints fit exactly in f64).
-    pub(in crate::translator) fn can_use_nan_sentinel_binary_op(&self) -> bool {
-        if self.stack_depth < 2 {
-            return false;
-        }
-        let a_hint = self
-            .stack_types
-            .get(&(self.stack_depth - 1))
-            .copied()
-            .unwrap_or(StorageHint::Unknown);
-        let b_hint = self
-            .stack_types
-            .get(&(self.stack_depth - 2))
-            .copied()
-            .unwrap_or(StorageHint::Unknown);
-
-        // Use NaN-sentinel op if both are known numeric types
-        fn is_numeric(h: StorageHint) -> bool {
-            h.is_numeric_family()
-        }
-        is_numeric(a_hint) && is_numeric(b_hint)
-    }
-
     /// Check if either of the top two operands is known to be a non-numeric type
     /// (String, Bool). When true, polymorphic operations like add/sub MUST use
     /// FFI dispatch because the inline numeric path would give wrong results
@@ -657,19 +515,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             matches!(h, StorageHint::String | StorageHint::Bool)
         }
         is_known_non_numeric(a_hint) || is_known_non_numeric(b_hint)
-    }
-
-    /// Check if top of stack is a known numeric type (for unary ops)
-    pub(in crate::translator) fn can_use_nan_sentinel_unary_op(&self) -> bool {
-        if self.stack_depth < 1 {
-            return false;
-        }
-        let hint = self
-            .stack_types
-            .get(&(self.stack_depth - 1))
-            .copied()
-            .unwrap_or(StorageHint::Unknown);
-        hint.is_numeric_family()
     }
 
     pub(in crate::translator) fn integer_clif_type_and_signed(

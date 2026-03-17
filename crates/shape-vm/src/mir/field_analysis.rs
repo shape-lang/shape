@@ -332,8 +332,8 @@ fn compute_definite_initialization(
 fn compute_field_liveness(
     mir: &MirFunction,
     cfg: &ControlFlowGraph,
-    block_writes: &HashMap<BasicBlockId, HashSet<FieldKey>>,
-    block_reads: &HashMap<BasicBlockId, HashSet<FieldKey>>,
+    _block_writes: &HashMap<BasicBlockId, HashSet<FieldKey>>,
+    _block_reads: &HashMap<BasicBlockId, HashSet<FieldKey>>,
 ) -> HashMap<BasicBlockId, HashSet<FieldKey>> {
     let rpo = cfg.reverse_postorder();
 

@@ -1,7 +1,0 @@
-// Test variables with expressions
-let x = 10
-let y = 20
-let z = 30
-let sum = x + y + z
-
-find hammer last(5 candles)

@@ -1038,7 +1038,7 @@ impl BytecodeCompiler {
                             spec.name.clone(),
                             ImportedAnnotationSymbol {
                                 original_name: spec.name.clone(),
-                                module_path: import_stmt.from.clone(),
+                                _module_path: import_stmt.from.clone(),
                                 hidden_module_name,
                             },
                         );
@@ -1252,7 +1252,7 @@ impl BytecodeCompiler {
                                 .entry(sym.local_name.clone())
                                 .or_insert_with(|| ImportedAnnotationSymbol {
                                     original_name: sym.original_name.clone(),
-                                    module_path: canonical_path.clone(),
+                                    _module_path: canonical_path.clone(),
                                     hidden_module_name,
                                 });
                             continue;

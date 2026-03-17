@@ -10,6 +10,7 @@
 use crate::executor::VirtualMachine;
 use crate::executor::objects::method_registry::MethodFn;
 use crate::feedback::{FeedbackSlot, ICState};
+#[cfg(test)]
 use shape_value::ValueWord;
 use shape_value::heap_value::HeapKind;
 

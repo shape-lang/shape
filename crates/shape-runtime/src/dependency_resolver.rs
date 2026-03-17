@@ -79,11 +79,14 @@ struct RegistryVersionRecord {
     #[serde(default)]
     source: Option<RegistrySourceSpec>,
     #[serde(default)]
-    pub checksum: Option<String>,
+    #[serde(rename = "checksum")]
+    pub _checksum: Option<String>,
     #[serde(default)]
-    pub author_key: Option<String>,
+    #[serde(rename = "author_key")]
+    pub _author_key: Option<String>,
     #[serde(default)]
-    pub required_permissions: Vec<String>,
+    #[serde(rename = "required_permissions")]
+    pub _required_permissions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

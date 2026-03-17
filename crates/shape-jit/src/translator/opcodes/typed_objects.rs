@@ -18,7 +18,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     ///
     /// In kernel mode, state is always accessed via kernel_state_ptr (no stack pop needed).
     pub(crate) fn compile_get_field_typed(&mut self, instr: &Instruction) -> Result<(), String> {
-        let (type_id, field_idx, field_type_tag) = match &instr.operand {
+        let (type_id, field_idx, _field_type_tag) = match &instr.operand {
             Some(Operand::TypedField {
                 type_id,
                 field_idx,
@@ -104,7 +104,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     ///
     /// In kernel mode, state is always accessed via kernel_state_ptr.
     pub(crate) fn compile_set_field_typed(&mut self, instr: &Instruction) -> Result<(), String> {
-        let (type_id, field_idx, field_type_tag) = match &instr.operand {
+        let (type_id, field_idx, _field_type_tag) = match &instr.operand {
             Some(Operand::TypedField {
                 type_id,
                 field_idx,

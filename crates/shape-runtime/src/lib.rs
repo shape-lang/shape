@@ -376,7 +376,7 @@ impl Runtime {
         for module_path in module_paths {
             // Skip the prelude module — it contains re-export imports that reference
             // non-exported symbols (traits, constants). Prelude injection is handled
-            // separately by prepend_prelude_items() in the bytecode executor.
+            // separately by the graph-based compilation pipeline in the bytecode executor.
             if module_path == "std::core::prelude" {
                 continue;
             }

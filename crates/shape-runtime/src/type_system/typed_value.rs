@@ -383,7 +383,6 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
         HeapValue::Lazy(_) => SemanticType::Named("Lazy".to_string()),
         HeapValue::Channel(_) => SemanticType::Named("Channel".to_string()),
         HeapValue::Char(_) => SemanticType::Named("char".to_string()),
-        HeapValue::FloatArraySlice { .. } => SemanticType::Array(Box::new(SemanticType::Number)),
     }
 }
 

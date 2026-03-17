@@ -2866,7 +2866,7 @@ impl std::fmt::Display for ValueWord {
                         }
                         crate::enums::EnumPayload::Struct(fields) => {
                             let mut pairs: Vec<_> = fields.iter().collect();
-                            pairs.sort_by_key(|(k, _)| k.clone());
+                            pairs.sort_by_key(|(k, _)| (*k).clone());
                             write!(f, " {{ ")?;
                             for (i, (k, v)) in pairs.iter().enumerate() {
                                 if i > 0 {

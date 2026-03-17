@@ -267,7 +267,7 @@ pub(crate) struct DeferredSpill {
     /// Live locals at the guard point: (bytecode_idx, Cranelift Variable).
     pub live_locals: Vec<(u16, Variable)>,
     /// SlotKind for each live local (parallel to live_locals).
-    pub local_kinds: Vec<SlotKind>,
+    pub _local_kinds: Vec<SlotKind>,
     /// Number of operand stack entries already on the JIT stack (via stack_vars).
     pub on_stack_count: usize,
     /// Number of extra values passed as block params (pre-popped operands).
@@ -277,7 +277,7 @@ pub(crate) struct DeferredSpill {
     pub f64_locals: std::collections::HashSet<u16>,
     /// Locals that hold raw i64 values (from integer-unboxed loops).
     /// These are stored directly to ctx_buf (raw i64 fits in u64).
-    pub int_locals: std::collections::HashSet<u16>,
+    pub _int_locals: std::collections::HashSet<u16>,
     /// Inline frames for multi-frame deopt (innermost-first).
     /// Each entry contains the caller frame's live locals to spill.
     pub inline_frames: Vec<DeferredInlineFrame>,
@@ -289,11 +289,11 @@ pub(crate) struct DeferredInlineFrame {
     /// Live locals for this caller frame: (ctx_buf_position, Cranelift Variable).
     pub live_locals: Vec<(u16, Variable)>,
     /// SlotKind for each live local (parallel to live_locals).
-    pub local_kinds: Vec<SlotKind>,
+    pub _local_kinds: Vec<SlotKind>,
     /// Locals that hold raw f64 values.
-    pub f64_locals: std::collections::HashSet<u16>,
+    pub _f64_locals: std::collections::HashSet<u16>,
     /// Locals that hold raw i64 values.
-    pub int_locals: std::collections::HashSet<u16>,
+    pub _int_locals: std::collections::HashSet<u16>,
 }
 
 /// Context for an inline frame, pushed onto a stack during inlining.
