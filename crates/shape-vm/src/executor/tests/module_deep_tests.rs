@@ -61,7 +61,7 @@ fn test_module_exec_nested_module_access() {
                 fn value() { 42; }
             }
         }
-        outer.inner.value();
+        outer::inner::value();
     "#;
     assert_result_number(code, 42.0);
 }
@@ -75,7 +75,7 @@ fn test_module_exec_nested_module_function_resolution() {
                 fn inner_fn() { 2; }
             }
         }
-        outer.outer_fn() + outer.inner.inner_fn();
+        outer::outer_fn() + outer::inner::inner_fn();
     "#;
     assert_result_number(code, 3.0);
 }
@@ -90,7 +90,7 @@ fn test_module_exec_module_deeply_nested_access() {
                 }
             }
         }
-        a.b.c.deep();
+        a::b::c::deep();
     "#;
     assert_result_number(code, 99.0);
 }
@@ -124,7 +124,7 @@ fn test_module_exec_module_function_cannot_access_outer_locals() {
         mod m {
             fn get_outer() { outer_val; }
         }
-        m.get_outer();
+        m::get_outer();
     "#;
     // This may or may not work depending on scope rules
     let _result = compile_and_execute(code);
@@ -135,7 +135,7 @@ fn test_module_exec_module_function_cannot_access_outer_locals() {
 fn test_module_exec_empty_module_access_fails() {
     let code = r#"
         mod empty { }
-        empty.nonexistent();
+        empty::nonexistent();
     "#;
     let result = compile_and_execute(code);
     assert!(
@@ -154,7 +154,7 @@ fn test_module_exec_module_function_with_closure() {
         mod util {
             fn apply(f, x) { f(x); }
         }
-        util.apply(|x| x * 2, 21);
+        util::apply(|x| x * 2, 21);
     "#;
     assert_result_number(code, 42.0);
 }
@@ -164,11 +164,11 @@ fn test_module_exec_module_function_recursion() {
     let code = r#"
         mod fib {
             fn compute(n) {
-                if n <= 1 { n; }
-                else { compute(n - 1) + compute(n - 2); }
+                if n <= 1 { return n }
+                return compute(n - 1) + compute(n - 2)
             }
         }
-        fib.compute(10);
+        fib::compute(10);
     "#;
     assert_result_number(code, 55.0);
 }
@@ -178,11 +178,11 @@ fn test_module_exec_module_function_with_default_like_pattern() {
     let code = r#"
         mod config {
             fn get_value(key) {
-                if key == "port" { 8080; }
-                else { 0; }
+                if key == "port" { return 8080 }
+                return 0
             }
         }
-        config.get_value("port");
+        config::get_value("port");
     "#;
     assert_result_number(code, 8080.0);
 }
@@ -195,7 +195,7 @@ fn test_module_exec_module_function_chaining() {
             fn step2(x) { x * 2; }
             fn step3(x) { x - 3; }
         }
-        pipeline.step3(pipeline.step2(pipeline.step1(5)));
+        pipeline::step3(pipeline::step2(pipeline::step1(5)));
     "#;
     // step1(5) = 6, step2(6) = 12, step3(12) = 9
     assert_result_number(code, 9.0);
@@ -210,7 +210,7 @@ fn test_module_exec_two_modules_calling_each_other_functions() {
         mod formatter {
             fn format_temp(c) { c; }
         }
-        formatter.format_temp(converter.to_celsius(212));
+        formatter::format_temp(converter::to_celsius(212));
     "#;
     assert_result_number(code, 100.0);
 }
@@ -228,7 +228,7 @@ fn test_module_exec_module_with_match_expression() {
                 };
             }
         }
-        evaluator.eval("mul", 6, 7);
+        evaluator::eval("mul", 6, 7);
     "#;
     assert_result_number(code, 42.0);
 }

@@ -273,6 +273,28 @@ impl ModuleLoader {
         current_source: Option<&str>,
     ) {
         self.configure_for_context(current_file, workspace_root);
+
+        // Fallback: if no shape.toml was found, try frontmatter [dependencies]
+        if self.dependency_paths.is_empty() {
+            if let Some(source) = current_source {
+                let (project, _rest) = crate::frontmatter::parse_frontmatter(source);
+                if let Some(config) = project {
+                    if !config.dependencies.is_empty() {
+                        let root = ProjectRoot {
+                            root_path: current_file
+                                .parent()
+                                .unwrap_or(Path::new("."))
+                                .to_path_buf(),
+                            config,
+                        };
+                        let module_paths = root.resolved_module_paths();
+                        self.set_project_root(&root.root_path, &module_paths);
+                        self.set_dependency_paths(resolve_path_dependencies(&root));
+                    }
+                }
+            }
+        }
+
         crate::extension_context::register_declared_extensions_in_loader(
             self,
             Some(current_file),
@@ -583,12 +605,13 @@ impl ModuleLoader {
         self.cache
             .store_dependencies(cache_key.clone(), dependencies.clone());
 
-        // Compile the module (collect AST exports) and cache it BEFORE loading
-        // dependencies. This allows self-imports (a module importing itself) to
-        // find the partially-compiled module in cache instead of recursing.
+        // Compile the module (collect AST exports) and cache it before loading
+        // dependencies so that cross-module references can find it. Circular
+        // dependency detection is handled in load_module_with_context which
+        // checks the loading_stack before consulting the cache.
         let module = loading::compile_module(compile_module_path, ast)?;
         let module = Arc::new(module);
-        self.cache.insert(cache_key.clone(), module.clone());
+        self.cache.insert(cache_key, module.clone());
 
         // Load all dependencies (with best available context directory).
         let module_dir = origin_path
@@ -653,13 +676,16 @@ impl ModuleLoader {
         module_path: &str,
         context_path: Option<&PathBuf>,
     ) -> Result<Arc<Module>> {
-        // Check cache first
+        // Check for circular dependencies BEFORE the cache check.
+        // Modules are cached early (before their dependencies load) so that
+        // cross-module references work. Without this order, a cached-but-
+        // still-loading module would bypass cycle detection.
+        self.cache.check_circular_dependency(module_path)?;
+
+        // Check cache
         if let Some(module) = self.cache.get(module_path) {
             return Ok(module);
         }
-
-        // Check for circular dependencies
-        self.cache.check_circular_dependency(module_path)?;
 
         // Resolve module artifact from chained resolvers.
         let artifact = self.resolve_module_artifact_with_context(module_path, context_path)?;
@@ -1625,5 +1651,35 @@ pub fn use_answer() { answer() }
         // The bundle module should be resolvable
         let artifact = loader.resolve_module_artifact_with_context("mylib::helpers", None);
         assert!(artifact.is_ok(), "bundle module should be resolvable");
+    }
+
+    #[test]
+    fn test_frontmatter_dependencies_resolve_without_shape_toml() {
+        use std::io::Write;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let dep_dir = temp_dir.path().join("my_dep");
+        std::fs::create_dir_all(&dep_dir).expect("create dep dir");
+
+        // Write a dependency module
+        let mut dep_file = std::fs::File::create(dep_dir.join("index.shape")).expect("create dep");
+        writeln!(dep_file, "pub fn helper(x) {{ x + 1 }}").expect("write dep");
+
+        // Write a main file with frontmatter dependencies (no shape.toml)
+        let main_path = temp_dir.path().join("main.shape");
+        let source = format!(
+            "---\n[dependencies]\nmy_dep = {{ path = \"{}\" }}\n---\nimport my_dep\nmy_dep::helper(1)\n",
+            dep_dir.display()
+        );
+
+        let mut loader = ModuleLoader::new();
+        loader.configure_for_context_with_source(&main_path, None, Some(&source));
+
+        // Verify that dependency paths were set
+        assert!(
+            loader.dependency_paths.contains_key("my_dep"),
+            "frontmatter dependency should be registered, got: {:?}",
+            loader.dependency_paths.keys().collect::<Vec<_>>()
+        );
     }
 }

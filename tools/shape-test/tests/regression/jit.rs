@@ -15,7 +15,8 @@ fn jit_eval(source: &str) -> WireValue {
     let _ = initialize_shared_runtime();
     let mut engine = ShapeEngine::new().expect("engine creation failed");
     let program = shape_ast::parse_program(source).expect("parse failed");
-    let result = JITExecutor
+    let mut jit = JITExecutor { bytecode_executor: shape_vm::BytecodeExecutor::new() };
+    let result = jit
         .execute_program(&mut engine, &program)
         .expect("JIT execution failed");
     result.wire_value
@@ -43,7 +44,8 @@ fn jit_preflight_accepts_all_builtins() {
     let _ = initialize_shared_runtime();
     let mut engine = ShapeEngine::new().expect("engine creation failed");
     let program = shape_ast::parse_program("toBool(1)").expect("parse failed");
-    let result = JITExecutor.execute_program(&mut engine, &program);
+    let mut jit = JITExecutor { bytecode_executor: shape_vm::BytecodeExecutor::new() };
+    let result = jit.execute_program(&mut engine, &program);
     assert!(
         result.is_ok(),
         "All builtins should be accepted by JIT preflight (generic FFI trampoline)"
@@ -652,4 +654,48 @@ large_sum()
 "#,
         4999950000.0,
     );
+}
+
+// -- Regression: trampoline VM→JIT format conversion (CallValue path) ---------
+
+#[test]
+fn jit_trampoline_result_callvalue() {
+    // When a JIT-compiled function calls a non-JIT function via CallValue
+    // (dynamic dispatch) that returns Ok(42), the trampoline must convert
+    // VM-format Result bits to JIT format so jit_is_ok() works correctly.
+    jit_expect_number(
+        r#"
+fn make_ok() -> Result<int, string> {
+    return Ok(42)
+}
+fn call_it(f) -> int {
+    let val = f()?
+    return val
+}
+call_it(make_ok)
+"#,
+        42.0,
+    );
+}
+
+#[test]
+fn jit_trampoline_string_callvalue() {
+    // When a JIT-compiled function calls a non-JIT function via CallValue
+    // that returns a string (heap value), the trampoline must convert
+    // VM Arc<HeapValue> pointer to JIT JitAlloc<T> pointer format.
+    let result = jit_eval(
+        r#"
+fn get_greeting() -> string {
+    return "hello"
+}
+fn call_it(f) -> string {
+    return f()
+}
+call_it(get_greeting)
+"#,
+    );
+    match result {
+        WireValue::String(s) => assert_eq!(s, "hello"),
+        other => panic!("Expected String(\"hello\"), got {:?}", other),
+    }
 }

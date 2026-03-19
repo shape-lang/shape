@@ -21,6 +21,93 @@ use shape_value::ValueWord;
 use std::ffi::c_void;
 use std::sync::Arc;
 
+/// Dispatch a function call through the trampoline VM for functions that
+/// aren't JIT-compiled (null entries in the function table).
+///
+/// Converts JIT-format args to ValueWord, pushes them onto the trampoline VM's
+/// stack, executes the function via the VM interpreter, and returns the result
+/// converted to JIT-format bits via `vm_result_to_jit`.
+fn dispatch_call_via_trampoline_vm(
+    function_id: u32,
+    jit_args: &[u64],
+    jit_ctx: *const JITContext,
+) -> u64 {
+    // Access the thread-local trampoline VM
+    let vm_ptr = crate::executor::TRAMPOLINE_VM.with(|c| c.get());
+    if vm_ptr.is_null() {
+        return TAG_NULL;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+
+    // Convert args from JIT format to ValueWord
+    let arg_vws: Vec<ValueWord> = jit_args
+        .iter()
+        .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, jit_ctx))
+        .collect();
+
+    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+        for (i, vw) in arg_vws.iter().enumerate() {
+            let s = vw.as_str().map(|s| &s[..s.len().min(50)]);
+            eprintln!("[module_fn] arg[{}] tag={:?} str={:?}", i, vw.tag(), s);
+        }
+    }
+
+    // Get execution context for functions that need it
+    let exec_ctx_ptr = crate::executor::TRAMPOLINE_EXEC_CTX.with(|c| c.get());
+    let exec_ctx = if exec_ctx_ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &mut *exec_ctx_ptr })
+    };
+
+    // Execute the function through the VM interpreter (preserving state)
+    match vm.execute_function_in_place(function_id as u16, arg_vws, exec_ctx) {
+        Ok(result) => crate::ffi::object::conversion::vm_result_to_jit(result.raw_bits()),
+        Err(_) => TAG_NULL,
+    }
+}
+
+/// Dispatch a native module function call through the trampoline VM.
+///
+/// Module functions (TAG_MODULE_FN) are Rust closures registered via ModuleExports.
+/// They are called through the VM's invoke_module_fn mechanism.
+fn dispatch_module_fn_call(
+    module_fn_id: u32,
+    jit_args: &[u64],
+    ctx: *mut JITContext,
+) -> u64 {
+    let vm_ptr = crate::executor::TRAMPOLINE_VM.with(|c| c.get());
+    if vm_ptr.is_null() {
+        return TAG_NULL;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let exec_ctx_ptr = crate::executor::TRAMPOLINE_EXEC_CTX.with(|c| c.get());
+    let exec_ctx = if exec_ctx_ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &mut *exec_ctx_ptr })
+    };
+
+    // Convert args from JIT format to ValueWord
+    let arg_vws: Vec<ValueWord> = jit_args
+        .iter()
+        .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, ctx as *const JITContext))
+        .collect();
+
+    // Call through the VM's module function dispatch
+    match vm.invoke_module_fn_by_id(module_fn_id as usize, &arg_vws, exec_ctx) {
+        Ok(result) => {
+            crate::ffi::object::conversion::vm_result_to_jit(result.raw_bits())
+        }
+        Err(e) => {
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                eprintln!("[module_fn] id={} error: {}", module_fn_id, e);
+            }
+            TAG_NULL
+        }
+    }
+}
+
 /// Call a function by function_id
 /// Stack reads args from ctx.stack before the call
 pub extern "C" fn jit_call_function(
@@ -98,67 +185,99 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         ctx_ref.stack_ptr -= 1;
         let callee_bits = ctx_ref.stack[ctx_ref.stack_ptr];
 
-        if is_inline_function(callee_bits) {
-            // Direct function reference (function_id encoded in payload)
-            let function_id = unbox_function_id(callee_bits);
+        // Check for TAG_MODULE_FN (native module functions like read_text).
+        // These are dispatched through the trampoline VM's invoke_module_fn.
+        if shape_value::tags::is_tagged(callee_bits)
+            && shape_value::tags::get_tag(callee_bits) == shape_value::tags::TAG_MODULE_FN
+        {
+            let module_fn_id = shape_value::tags::get_payload(callee_bits) as u32;
+            return dispatch_module_fn_call(module_fn_id, &args, ctx);
+        }
 
-            if ctx_ref.function_table.is_null()
-                || (function_id as usize) >= ctx_ref.function_table_len
-            {
-                return TAG_NULL;
-            }
-
-            // Push args back onto stack for the function
-            for &arg in &args {
-                ctx_ref.stack[ctx_ref.stack_ptr] = arg;
-                ctx_ref.stack_ptr += 1;
-            }
-
-            let fn_ptr = *ctx_ref.function_table.add(function_id as usize);
-            let _result_code = fn_ptr(ctx);
-
-            // Pop result
-            if ctx_ref.stack_ptr > 0 {
-                ctx_ref.stack_ptr -= 1;
-                ctx_ref.stack[ctx_ref.stack_ptr]
-            } else {
-                TAG_NULL
-            }
+        let function_id = if is_inline_function(callee_bits) {
+            unbox_function_id(callee_bits)
         } else if is_heap_kind(callee_bits, HK_CLOSURE) {
-            // Closure with captured values
             let closure = jit_unbox::<JITClosure>(callee_bits);
-            let function_id = closure.function_id;
-
-            if ctx_ref.function_table.is_null()
-                || (function_id as usize) >= ctx_ref.function_table_len
-            {
-                return TAG_NULL;
-            }
-
-            // Push captured values first, then args
-            for i in 0..closure.captures_count as usize {
-                ctx_ref.stack[ctx_ref.stack_ptr] = *closure.captures_ptr.add(i);
-                ctx_ref.stack_ptr += 1;
-            }
-            for &arg in &args {
-                ctx_ref.stack[ctx_ref.stack_ptr] = arg;
-                ctx_ref.stack_ptr += 1;
-            }
-
-            let fn_ptr = *ctx_ref.function_table.add(function_id as usize);
-            let _result_code = fn_ptr(ctx);
-
-            // Pop result
-            if ctx_ref.stack_ptr > 0 {
-                ctx_ref.stack_ptr -= 1;
-                ctx_ref.stack[ctx_ref.stack_ptr]
-            } else {
-                TAG_NULL
-            }
+            closure.function_id
         } else {
-            TAG_NULL
+            return TAG_NULL;
+        };
+
+        // Look up the function pointer in the function table
+        if ctx_ref.function_table.is_null()
+            || (function_id as usize) >= ctx_ref.function_table_len
+        {
+            return TAG_NULL;
+        }
+        let raw_fn_ptr =
+            *(ctx_ref.function_table as *const *const u8).add(function_id as usize);
+        if raw_fn_ptr.is_null() {
+            // Not JIT-compiled — dispatch through trampoline VM
+            return dispatch_call_via_trampoline_vm(
+                function_id as u32,
+                &args,
+                ctx as *const JITContext,
+            );
+        }
+
+        // Reset ctx.stack_ptr before calling — the callee's internal operations
+        // (BuiltinCall, CallForeign, etc.) use ctx.stack and assume it starts
+        // at a consistent state. Without this reset, stale stack_ptr from
+        // previous operations causes writes to wrong positions.
+        ctx_ref.stack_ptr = 0;
+
+        // Call the JIT-compiled function with the correct number of native args.
+        let signal = call_jit_fn_with_args(raw_fn_ptr, ctx, &args);
+
+        // Check for deopt signal
+        if signal < 0 {
+            return TAG_NULL;
+        }
+
+        // Read result from ctx.stack[0] (callee stores it there)
+        if ctx_ref.stack_ptr > 0 {
+            ctx_ref.stack_ptr -= 1;
+            ctx_ref.stack[ctx_ref.stack_ptr]
+        } else {
+            // Callee always sets stack_ptr=1, read stack[0]
+            ctx_ref.stack[0]
         }
     }
+}
+
+/// Call a JIT-compiled function pointer with the right number of native arguments.
+/// The function has Cranelift signature: fn(ctx_ptr: i64, arg0: i64, ...) -> i32
+unsafe fn call_jit_fn_with_args(
+    fn_ptr: *const u8,
+    ctx: *mut JITContext,
+    args: &[u64],
+) -> i32 {
+    type F0 = unsafe extern "C" fn(*mut JITContext) -> i32;
+    type F1 = unsafe extern "C" fn(*mut JITContext, u64) -> i32;
+    type F2 = unsafe extern "C" fn(*mut JITContext, u64, u64) -> i32;
+    type F3 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64) -> i32;
+    type F4 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64) -> i32;
+    type F5 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64, u64) -> i32;
+    type F6 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64, u64, u64) -> i32;
+    type F7 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64, u64, u64, u64) -> i32;
+    type F8 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64, u64, u64, u64, u64) -> i32;
+
+    let result = match args.len() {
+        0 => std::mem::transmute::<_, F0>(fn_ptr)(ctx),
+        1 => std::mem::transmute::<_, F1>(fn_ptr)(ctx, args[0]),
+        2 => std::mem::transmute::<_, F2>(fn_ptr)(ctx, args[0], args[1]),
+        3 => std::mem::transmute::<_, F3>(fn_ptr)(ctx, args[0], args[1], args[2]),
+        4 => std::mem::transmute::<_, F4>(fn_ptr)(ctx, args[0], args[1], args[2], args[3]),
+        5 => std::mem::transmute::<_, F5>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4]),
+        6 => std::mem::transmute::<_, F6>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5]),
+        7 => std::mem::transmute::<_, F7>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6]),
+        8 => std::mem::transmute::<_, F8>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]),
+        _ => {
+            // Too many args for direct dispatch — fall back to trampoline
+            -1
+        }
+    };
+    result
 }
 
 /// fold(array, initial, fn) - left fold over array
@@ -634,12 +753,19 @@ define_jit_call_foreign_native_fixed!(
 );
 
 /// Trampoline placeholder for mixed-table VM fallback paths.
+///
+/// When implemented, this will dispatch to the VM interpreter for functions
+/// that weren't JIT-compiled. The return value from the VM is in ValueWord
+/// format, so it must be converted to JIT format via `vm_result_to_jit`.
 pub unsafe extern "C" fn jit_vm_fallback_trampoline(
     _ctx: *mut std::ffi::c_void,
     _function_id: u32,
     _args_ptr: *const u64,
     _args_len: u32,
 ) -> u64 {
+    // TODO: when implemented, convert result via vm_result_to_jit():
+    //   let vm_result = /* dispatch to VM interpreter */;
+    //   crate::ffi::object::conversion::vm_result_to_jit(vm_result)
     TAG_NULL
 }
 

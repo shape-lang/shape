@@ -551,6 +551,10 @@ pub fn gamma() { 3 }
 
     #[test]
     fn test_modres_circular_direct_a_imports_a() {
+        // Self-imports (A imports A) are allowed: the module is compiled and
+        // cached before its dependencies are loaded, so the self-reference
+        // resolves to the already-cached module. check_circular_dependency()
+        // has an explicit carve-out for this case.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("self_ref.shape"),
@@ -561,12 +565,11 @@ pub fn gamma() { 3 }
         let mut loader = ModuleLoader::new();
         loader.add_module_path(tmp.path().to_path_buf());
 
-        let err = loader.load_module("self_ref").unwrap_err();
-        let msg = format!("{}", err);
+        let result = loader.load_module("self_ref");
         assert!(
-            msg.contains("ircular") || msg.contains("circular"),
-            "should detect self-referential circular dependency, got: {}",
-            msg
+            result.is_ok(),
+            "self-import should succeed (module cached before dep loading), got: {:?}",
+            result.err()
         );
     }
 
