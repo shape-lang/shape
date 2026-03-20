@@ -11,7 +11,21 @@ use std::time::Instant;
 /// JIT-compatible functions are compiled to native code; incompatible functions
 /// (e.g. those using async, pattern matching, or unsupported builtins) are left
 /// as `Interpreted` entries in the mixed function table for VM fallback.
-pub struct JITExecutor;
+///
+/// Wraps a `BytecodeExecutor` so that compilation (including module resolution,
+/// extension capability modules, and module loading) is delegated to the same
+/// pipeline used by the VM path.
+pub struct JITExecutor {
+    pub bytecode_executor: shape_vm::BytecodeExecutor,
+}
+
+impl JITExecutor {
+    pub fn new() -> Self {
+        Self {
+            bytecode_executor: shape_vm::BytecodeExecutor::new(),
+        }
+    }
+}
 
 impl ProgramExecutor for JITExecutor {
     fn execute_program(
@@ -19,53 +33,12 @@ impl ProgramExecutor for JITExecutor {
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
-        use shape_vm::BytecodeCompiler;
         let emit_phase_metrics = std::env::var_os("SHAPE_JIT_PHASE_METRICS").is_some();
 
-        // Capture source text before getting runtime reference (for error messages)
-        let source_for_compilation = engine.current_source().map(|s| s.to_string());
-
-        // Compile to bytecode first to check JIT compatibility
-        let runtime = engine.get_runtime_mut();
-
-        // Get known module bindings — prefer persistent context, fallback to precompiled names
-        let known_bindings: Vec<String> = if let Some(ctx) = runtime.persistent_context() {
-            let names = ctx.root_scope_binding_names();
-            if names.is_empty() {
-                shape_vm::stdlib::core_binding_names()
-            } else {
-                names
-            }
-        } else {
-            shape_vm::stdlib::core_binding_names()
-        };
-
-        // Build module graph and compile via graph pipeline
-        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
-        let (graph, stdlib_names, prelude_imports) =
-            shape_vm::module_resolution::build_graph_and_stdlib_names(
-                program,
-                &mut loader,
-                &[],
-            )
-            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
-                message: format!("Module graph construction failed: {}", e),
-                location: None,
-            })?;
-
         let bytecode_compile_start = Instant::now();
-        let mut compiler = BytecodeCompiler::new();
-        compiler.stdlib_function_names = stdlib_names;
-        compiler.register_known_bindings(&known_bindings);
-        if let Some(source) = &source_for_compilation {
-            compiler.set_source(source);
-        }
-        let bytecode = compiler
-            .compile_with_graph_and_prelude(program, graph, &prelude_imports)
-            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
-                message: format!("Bytecode compilation failed: {}", e),
-                location: None,
-            })?;
+        let bytecode = self
+            .bytecode_executor
+            .compile_program_for_inspection(engine, program)?;
         let bytecode_compile_ms = bytecode_compile_start.elapsed().as_millis();
 
         self.execute_with_jit(engine, &bytecode, bytecode_compile_ms, emit_phase_metrics)

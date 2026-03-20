@@ -1389,7 +1389,22 @@ async fn run_engine(
         }
         #[cfg(feature = "jit")]
         ExecutionMode::JIT => {
-            let mut executor = shape_jit::JITExecutor;
+            let mut executor = shape_jit::JITExecutor::new();
+            extension_loading::register_extension_capability_modules(
+                engine,
+                &mut executor.bytecode_executor,
+            );
+            let module_info = executor.bytecode_executor.module_schemas();
+            engine.register_extension_modules(&module_info);
+            engine.register_language_runtime_artifacts();
+            executor.bytecode_executor.set_interrupt(interrupt_flag);
+            let context_file = engine.script_path().map(PathBuf::from);
+            crate::module_loading::wire_vm_executor_module_loading(
+                engine,
+                &mut executor.bytecode_executor,
+                context_file.as_deref(),
+                Some(source),
+            )?;
             engine.execute(&mut executor, source)?
         }
     };

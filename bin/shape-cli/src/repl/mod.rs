@@ -484,7 +484,23 @@ impl<'a> ReplApp<'a> {
             }
             #[cfg(feature = "jit")]
             ExecutionMode::JIT => {
-                let mut executor = shape_jit::JITExecutor;
+                let mut executor = shape_jit::JITExecutor::new();
+                extension_loading::register_extension_capability_modules(
+                    &self.engine,
+                    &mut executor.bytecode_executor,
+                );
+                let module_info = executor.bytecode_executor.module_schemas();
+                self.engine.register_extension_modules(&module_info);
+                self.engine.register_language_runtime_artifacts();
+                let current_file = std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("__shape_repl__.shape");
+                crate::module_loading::wire_vm_executor_module_loading(
+                    &mut self.engine,
+                    &mut executor.bytecode_executor,
+                    Some(&current_file),
+                    Some(source),
+                )?;
                 self.engine
                     .execute_repl(&mut executor, source)
                     .await
