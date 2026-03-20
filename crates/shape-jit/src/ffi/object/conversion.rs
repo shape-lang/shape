@@ -106,6 +106,12 @@ impl IntoTyped<f64> for f64 { fn into_typed(self) -> f64 { self } }
 pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
     use shape_value::ValueWord;
 
+    // Unified heap values (bit-47 set) are already in VM format.
+    // Clone via refcount bump and pass through.
+    if shape_value::tags::is_unified_heap(bits) {
+        return unsafe { ValueWord::clone_from_bits(bits) };
+    }
+
     if is_number(bits) {
         return ValueWord::from_f64(unbox_number(bits));
     }
@@ -257,6 +263,11 @@ pub fn jit_bits_to_nanboxed_with_ctx(
     ctx: *const super::super::super::context::JITContext,
 ) -> shape_value::ValueWord {
     use shape_value::ValueWord;
+
+    // Unified heap values (bit-47 set) are already in VM format.
+    if shape_value::tags::is_unified_heap(bits) {
+        return unsafe { ValueWord::clone_from_bits(bits) };
+    }
 
     if is_number(bits) {
         return ValueWord::from_f64(unbox_number(bits));
@@ -412,6 +423,12 @@ pub fn typed_scalar_to_jit_bits(ts: &shape_value::TypedScalar) -> u64 {
 pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
     use shape_value::NanTag;
     use shape_value::heap_value::HeapValue;
+
+    // Unified arrays (bit-47 set) are already in JIT-compatible format.
+    // Pass through the raw bits — the UnifiedArray layout is shared.
+    if shape_value::tags::is_unified_heap(nb.raw_bits()) {
+        return nb.raw_bits();
+    }
 
     match nb.tag() {
         NanTag::F64 => box_number(unsafe { nb.as_f64_unchecked() }),
