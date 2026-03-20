@@ -38,6 +38,7 @@ pub mod slot;
 pub mod tags;
 pub mod typed_buffer;
 pub mod unified_array;
+pub mod unified_matrix;
 pub mod unified_string;
 pub mod unified_wrapper;
 pub mod value;
