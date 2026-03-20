@@ -19,6 +19,7 @@ use std::collections::HashMap;
 // Module declarations
 pub mod array;
 pub mod duration;
+pub mod matrix;
 pub mod number;
 pub mod object;
 pub mod result;
@@ -29,6 +30,7 @@ pub mod time;
 // Re-export the individual method handlers
 pub use array::call_array_method;
 pub use duration::call_duration_method;
+pub use matrix::call_matrix_method;
 pub use number::call_number_method;
 pub use object::call_object_method;
 pub use result::call_result_method;
@@ -349,6 +351,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                 Some(HK_JIT_OBJECT) => call_object_method(receiver_bits, &method_name, &args),
                 Some(HK_DURATION) => call_duration_method(receiver_bits, &method_name, &args),
                 Some(HK_COLUMN_REF) => TAG_NULL, // Series type removed
+                Some(HK_MATRIX) => call_matrix_method(receiver_bits, &method_name, &args),
                 Some(HK_TIME) => call_time_method(receiver_bits, &method_name, &args),
                 Some(HK_JIT_SIGNAL_BUILDER) => {
                     call_signalbuilder_method(receiver_bits, &method_name, &args)

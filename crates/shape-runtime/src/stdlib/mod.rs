@@ -8,6 +8,7 @@
 //! [`capability_tags`] and enforced at compile time via the permission system.
 
 pub mod archive;
+pub mod arrow_module;
 pub mod byte_utils;
 pub mod capability_tags;
 pub mod compress;
@@ -54,6 +55,7 @@ pub fn all_stdlib_modules() -> Vec<crate::module_exports::ModuleExports> {
         msgpack_module::create_msgpack_module(),
         set_module::create_set_module(),
         file::create_file_module(),
+        arrow_module::create_arrow_module(),
         crate::stdlib_time::create_time_module(),
         crate::stdlib_io::create_io_module(),
     ]
