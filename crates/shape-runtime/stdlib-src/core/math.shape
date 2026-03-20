@@ -104,3 +104,206 @@ pub fn parallel_map(array, fn) {
 pub fn parallel_filter(array, predicate) {
     array.filter(predicate)
 }
+
+// ===== Constants =====
+
+/// The mathematical constant pi (3.14159...).
+pub fn PI() {
+    3.141592653589793
+}
+
+/// Euler's number e (2.71828...).
+pub fn E() {
+    2.718281828459045
+}
+
+/// Tau = 2 * pi (6.28318...).
+pub fn TAU() {
+    6.283185307179586
+}
+
+// ===== Trigonometry =====
+
+/// Return the sine of `x` in radians.
+pub fn sin(x) {
+    __intrinsic_sin(x)
+}
+
+/// Return the cosine of `x` in radians.
+pub fn cos(x) {
+    __intrinsic_cos(x)
+}
+
+/// Return the tangent of `x` in radians.
+pub fn tan(x) {
+    __intrinsic_tan(x)
+}
+
+/// Return the inverse sine of `x` in radians.
+pub fn asin(x) {
+    __intrinsic_asin(x)
+}
+
+/// Return the inverse cosine of `x` in radians.
+pub fn acos(x) {
+    __intrinsic_acos(x)
+}
+
+/// Return the inverse tangent of `x` in radians.
+pub fn atan(x) {
+    __intrinsic_atan(x)
+}
+
+/// Return the quadrant-aware inverse tangent of `y / x` in radians.
+pub fn atan2(y, x) {
+    __intrinsic_atan2(y, x)
+}
+
+/// Return the hyperbolic sine of `x`.
+pub fn sinh(x) {
+    __intrinsic_sinh(x)
+}
+
+/// Return the hyperbolic cosine of `x`.
+pub fn cosh(x) {
+    __intrinsic_cosh(x)
+}
+
+/// Return the hyperbolic tangent of `x`.
+pub fn tanh(x) {
+    __intrinsic_tanh(x)
+}
+
+// ===== Helpers =====
+
+/// Clamp a value to [min, max].
+pub fn clamp(x, lo, hi) {
+    if x < lo { lo }
+    else if x > hi { hi }
+    else { x }
+}
+
+/// Linear interpolation between two values.
+pub fn lerp(a, b, t) {
+    a + (b - a) * t
+}
+
+/// Return the sign of a number: -1, 0, or 1.
+pub fn sign(x) {
+    if x > 0 { 1 }
+    else if x < 0 { -1 }
+    else { 0 }
+}
+
+/// Convert radians to degrees.
+pub fn degrees(rad) {
+    rad * 180.0 / 3.141592653589793
+}
+
+/// Convert degrees to radians.
+pub fn radians(deg) {
+    deg * 3.141592653589793 / 180.0
+}
+
+// ===== Interpolation =====
+
+/// Batched quadratic B-spline interpolation on a 3D grid.
+///
+/// Evaluates the B-spline at multiple points given as a flat array of
+/// [x0,y0,z0, x1,y1,z1, ...] coordinates. Returns an array of interpolated
+/// values, one per point.
+///
+/// @param grid_data - Flat 3D grid values (nx * ny * nz)
+/// @param nx - Grid size along x
+/// @param ny - Grid size along y
+/// @param nz - Grid size along z
+/// @param x_lo - Grid lower bound x
+/// @param x_hi - Grid upper bound x
+/// @param y_lo - Grid lower bound y
+/// @param y_hi - Grid upper bound y
+/// @param z_lo - Grid lower bound z
+/// @param z_hi - Grid upper bound z
+/// @param pos_flat - Flat array of query positions [x0,y0,z0, x1,y1,z1, ...]
+/// @returns Array of interpolated values
+pub fn bspline2_3d_batch(grid_data, nx, ny, nz, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, pos_flat) {
+    let n = pos_flat.length / 3
+    let nxm = (nx - 1) as number
+    let nym = (ny - 1) as number
+    let nzm = (nz - 1) as number
+    let mut result: Array<number> = []
+    for s in 0..n {
+        let i3 = s * 3
+        let px = pos_flat[i3]
+        let py = pos_flat[i3 + 1]
+        let pz = pos_flat[i3 + 2]
+
+        // Map to fractional grid coords and clamp
+        let mut gx = (px - x_lo) / (x_hi - x_lo) * nxm
+        let mut gy = (py - y_lo) / (y_hi - y_lo) * nym
+        let mut gz = (pz - z_lo) / (z_hi - z_lo) * nzm
+        if gx < 0.0 { gx = 0.0 } else if gx > nxm { gx = nxm }
+        if gy < 0.0 { gy = 0.0 } else if gy > nym { gy = nym }
+        if gz < 0.0 { gz = 0.0 } else if gz > nzm { gz = nzm }
+
+        let cx = floor(gx + 0.5) as int
+        let cy = floor(gy + 0.5) as int
+        let cz = floor(gz + 0.5) as int
+        let tx = gx - cx as number
+        let ty = gy - cy as number
+        let tz = gz - cz as number
+
+        let wx0 = 0.5 * (0.5 - tx) * (0.5 - tx)
+        let wx1 = 0.75 - tx * tx
+        let wx2 = 0.5 * (0.5 + tx) * (0.5 + tx)
+        let wy0 = 0.5 * (0.5 - ty) * (0.5 - ty)
+        let wy1 = 0.75 - ty * ty
+        let wy2 = 0.5 * (0.5 + ty) * (0.5 + ty)
+        let wz0 = 0.5 * (0.5 - tz) * (0.5 - tz)
+        let wz1 = 0.75 - tz * tz
+        let wz2 = 0.5 * (0.5 + tz) * (0.5 + tz)
+
+        let mut ix0 = cx - 1
+        let ix1 = cx
+        let mut ix2 = cx + 1
+        if ix0 < 0 { ix0 = 0 }
+        if ix2 > nx - 1 { ix2 = nx - 1 }
+
+        let mut iy0 = cy - 1
+        let iy1 = cy
+        let mut iy2 = cy + 1
+        if iy0 < 0 { iy0 = 0 }
+        if iy2 > ny - 1 { iy2 = ny - 1 }
+
+        let mut iz0 = cz - 1
+        let iz1 = cz
+        let mut iz2 = cz + 1
+        if iz0 < 0 { iz0 = 0 }
+        if iz2 > nz - 1 { iz2 = nz - 1 }
+
+        let nyz = ny * nz
+        let rx0 = ix0 * nyz
+        let rx1 = ix1 * nyz
+        let rx2 = ix2 * nyz
+        let ry0 = iy0 * nz
+        let ry1 = iy1 * nz
+        let ry2 = iy2 * nz
+
+        let val = wx0 * (
+            wy0 * (wz0 * grid_data[rx0+ry0+iz0] + wz1 * grid_data[rx0+ry0+iz1] + wz2 * grid_data[rx0+ry0+iz2]) +
+            wy1 * (wz0 * grid_data[rx0+ry1+iz0] + wz1 * grid_data[rx0+ry1+iz1] + wz2 * grid_data[rx0+ry1+iz2]) +
+            wy2 * (wz0 * grid_data[rx0+ry2+iz0] + wz1 * grid_data[rx0+ry2+iz1] + wz2 * grid_data[rx0+ry2+iz2])
+        ) +
+        wx1 * (
+            wy0 * (wz0 * grid_data[rx1+ry0+iz0] + wz1 * grid_data[rx1+ry0+iz1] + wz2 * grid_data[rx1+ry0+iz2]) +
+            wy1 * (wz0 * grid_data[rx1+ry1+iz0] + wz1 * grid_data[rx1+ry1+iz1] + wz2 * grid_data[rx1+ry1+iz2]) +
+            wy2 * (wz0 * grid_data[rx1+ry2+iz0] + wz1 * grid_data[rx1+ry2+iz1] + wz2 * grid_data[rx1+ry2+iz2])
+        ) +
+        wx2 * (
+            wy0 * (wz0 * grid_data[rx2+ry0+iz0] + wz1 * grid_data[rx2+ry0+iz1] + wz2 * grid_data[rx2+ry0+iz2]) +
+            wy1 * (wz0 * grid_data[rx2+ry1+iz0] + wz1 * grid_data[rx2+ry1+iz1] + wz2 * grid_data[rx2+ry1+iz2]) +
+            wy2 * (wz0 * grid_data[rx2+ry2+iz0] + wz1 * grid_data[rx2+ry2+iz1] + wz2 * grid_data[rx2+ry2+iz2])
+        )
+        result = result.push(val)
+    }
+    result
+}
