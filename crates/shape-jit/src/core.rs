@@ -681,13 +681,13 @@ mod tests {
     fn test_jit_array_info_ffi() {
         use crate::ffi::array::jit_array_info;
         use crate::jit_array::JitArray;
-        use crate::nan_boxing::{HK_ARRAY, TAG_NULL, box_number, jit_box, jit_drop};
+        use crate::nan_boxing::{TAG_NULL, box_number};
 
-        // Create a JitArray via jit_box (same as jit_new_array)
+        // Create a JitArray via heap_box (UnifiedArray self-boxing)
         let elements = vec![box_number(10.0), box_number(20.0), box_number(30.0)];
         let jit_arr = JitArray::from_vec(elements);
         let expected_len = jit_arr.len() as u64;
-        let array_bits = jit_box(HK_ARRAY, jit_arr);
+        let array_bits = jit_arr.heap_box();
 
         let info = jit_array_info(array_bits);
         assert_ne!(info.data_ptr, 0, "data_ptr should be non-null");
@@ -711,7 +711,7 @@ mod tests {
 
         // Clean up
         unsafe {
-            jit_drop::<JitArray>(array_bits);
+            JitArray::heap_drop(array_bits);
         }
     }
 

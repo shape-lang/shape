@@ -37,7 +37,7 @@ pub extern "C" fn jit_get_all_rows(ctx: *mut JITContext) -> u64 {
             Ok(rows) => {
                 // Convert to array of data row indices
                 let data_rows: Vec<u64> = (0..rows.len()).map(box_data_row).collect();
-                jit_box(HK_ARRAY, JitArray::from_vec(data_rows))
+                JitArray::from_vec(data_rows).heap_box()
             }
             Err(_) => TAG_NULL,
         }
@@ -62,7 +62,7 @@ pub extern "C" fn jit_align_series(ctx: *mut JITContext, symbols_bits: u64, mode
 
         // Convert symbols array from bits
         let symbols_val = if is_heap_kind(symbols_bits, HK_ARRAY) {
-            let arr = jit_unbox::<JitArray>(symbols_bits);
+            let arr = JitArray::from_heap_bits(symbols_bits);
             let values: Vec<shape_value::ValueWord> = arr
                 .iter()
                 .map(|&bits| {

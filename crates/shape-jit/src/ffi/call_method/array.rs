@@ -16,7 +16,7 @@ use crate::nan_boxing::*;
 #[inline(always)]
 pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) -> u64 {
     unsafe {
-        let arr = jit_unbox::<JitArray>(receiver_bits);
+        let arr = JitArray::from_heap_bits(receiver_bits);
         let slice = arr.as_slice();
 
         match method_name {
@@ -62,7 +62,7 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
             "reverse" => {
                 let mut reversed = slice.to_vec();
                 reversed.reverse();
-                jit_box(HK_ARRAY, JitArray::from_vec(reversed))
+                JitArray::from_vec(reversed).heap_box()
             }
             "slice" => {
                 let len = arr.len() as i64;
@@ -91,7 +91,7 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
                 } else {
                     JitArray::new()
                 };
-                jit_box(HK_ARRAY, sliced)
+                sliced.heap_box()
             }
             "join" => {
                 let separator = if !args.is_empty() {
@@ -194,7 +194,7 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
                 } else {
                     return receiver_bits;
                 };
-                jit_box(HK_ARRAY, JitArray::from_slice(&slice[..count]))
+                JitArray::from_slice(&slice[..count]).heap_box()
             }
             "drop" => {
                 if args.is_empty() {
@@ -205,31 +205,31 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
                 } else {
                     return receiver_bits;
                 };
-                jit_box(HK_ARRAY, JitArray::from_slice(&slice[count..]))
+                JitArray::from_slice(&slice[count..]).heap_box()
             }
             "concat" => {
                 let mut result: Vec<u64> = slice.to_vec();
                 for arg in args.iter() {
                     if is_heap_kind(*arg, HK_ARRAY) {
-                        let other = jit_unbox::<JitArray>(*arg);
+                        let other = JitArray::from_heap_bits(*arg);
                         result.extend_from_slice(other.as_slice());
                     } else {
                         result.push(*arg);
                     }
                 }
-                jit_box(HK_ARRAY, JitArray::from_vec(result))
+                JitArray::from_vec(result).heap_box()
             }
             "flatten" | "flat" => {
                 let mut result = Vec::new();
                 for &elem in slice.iter() {
                     if is_heap_kind(elem, HK_ARRAY) {
-                        let inner = jit_unbox::<JitArray>(elem);
+                        let inner = JitArray::from_heap_bits(elem);
                         result.extend_from_slice(inner.as_slice());
                     } else {
                         result.push(elem);
                     }
                 }
-                jit_box(HK_ARRAY, JitArray::from_vec(result))
+                JitArray::from_vec(result).heap_box()
             }
             "unique" => {
                 let mut seen = Vec::new();
@@ -247,7 +247,7 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
                         result.push(elem);
                     }
                 }
-                jit_box(HK_ARRAY, JitArray::from_vec(result))
+                JitArray::from_vec(result).heap_box()
             }
             "sort" | "sorted" => {
                 let mut sorted = slice.to_vec();
@@ -260,7 +260,7 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
                         std::cmp::Ordering::Equal
                     }
                 });
-                jit_box(HK_ARRAY, JitArray::from_vec(sorted))
+                JitArray::from_vec(sorted).heap_box()
             }
             _ => TAG_NULL,
         }

@@ -320,7 +320,7 @@ pub extern "C" fn jit_control_fold(ctx: *mut JITContext) -> u64 {
             return TAG_NULL;
         }
 
-        let elements = jit_unbox::<JitArray>(array_bits);
+        let elements = JitArray::from_heap_bits(array_bits);
 
         let mut accumulator = initial;
         for (index, &value) in elements.iter().enumerate() {
@@ -383,7 +383,7 @@ pub extern "C" fn jit_control_map(ctx: *mut JITContext) -> u64 {
             return TAG_NULL;
         }
 
-        let elements = jit_unbox::<JitArray>(array_bits);
+        let elements = JitArray::from_heap_bits(array_bits);
 
         let mut results = Vec::with_capacity(elements.len());
         for (index, &value) in elements.iter().enumerate() {
@@ -405,7 +405,7 @@ pub extern "C" fn jit_control_map(ctx: *mut JITContext) -> u64 {
         for &r in &results {
             crate::ffi::gc::jit_write_barrier(0, r);
         }
-        jit_box(HK_ARRAY, JitArray::from_vec(results))
+        JitArray::from_vec(results).heap_box()
     }
 }
 
@@ -442,7 +442,7 @@ pub extern "C" fn jit_control_filter(ctx: *mut JITContext) -> u64 {
             return TAG_NULL;
         }
 
-        let elements = jit_unbox::<JitArray>(array_bits);
+        let elements = JitArray::from_heap_bits(array_bits);
 
         let mut results = Vec::new();
         for (index, &value) in elements.iter().enumerate() {
@@ -462,7 +462,7 @@ pub extern "C" fn jit_control_filter(ctx: *mut JITContext) -> u64 {
             }
         }
 
-        jit_box(HK_ARRAY, JitArray::from_vec(results))
+        JitArray::from_vec(results).heap_box()
     }
 }
 
@@ -493,7 +493,7 @@ pub extern "C" fn jit_control_foreach(ctx: *mut JITContext, _count: usize) -> u6
             return TAG_NULL;
         }
 
-        let elements = jit_unbox::<JitArray>(array_bits);
+        let elements = JitArray::from_heap_bits(array_bits);
 
         for (index, &value) in elements.iter().enumerate() {
             // Call: callback(value, index)
@@ -546,7 +546,7 @@ pub extern "C" fn jit_control_find(ctx: *mut JITContext) -> u64 {
             return TAG_NULL;
         }
 
-        let elements = jit_unbox::<JitArray>(array_bits);
+        let elements = JitArray::from_heap_bits(array_bits);
 
         for (index, &value) in elements.iter().enumerate() {
             // Call: predicate(value, index)
@@ -802,7 +802,7 @@ pub extern "C" fn jit_control_find_index(ctx: *mut JITContext) -> u64 {
             return box_number(-1.0);
         }
 
-        let elements = jit_unbox::<JitArray>(array_bits);
+        let elements = JitArray::from_heap_bits(array_bits);
 
         for (index, &value) in elements.iter().enumerate() {
             // Call: predicate(value, index)
@@ -858,7 +858,7 @@ pub extern "C" fn jit_control_some(ctx: *mut JITContext) -> u64 {
             return TAG_BOOL_FALSE;
         }
 
-        let elements = jit_unbox::<JitArray>(array_bits);
+        let elements = JitArray::from_heap_bits(array_bits);
 
         for (index, &value) in elements.iter().enumerate() {
             // Call: predicate(value, index)
@@ -914,7 +914,7 @@ pub extern "C" fn jit_control_every(ctx: *mut JITContext) -> u64 {
             return TAG_BOOL_FALSE;
         }
 
-        let elements = jit_unbox::<JitArray>(array_bits);
+        let elements = JitArray::from_heap_bits(array_bits);
 
         if elements.is_empty() {
             return TAG_BOOL_TRUE; // Empty array - vacuous truth

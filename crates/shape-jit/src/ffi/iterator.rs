@@ -34,7 +34,7 @@ pub extern "C" fn jit_iter_done(iter_bits: u64, idx_bits: u64) -> u64 {
 
         let done = match heap_kind(iter_bits) {
             Some(HK_ARRAY) => {
-                let arr = jit_unbox::<JitArray>(iter_bits);
+                let arr = JitArray::from_heap_bits(iter_bits);
                 idx as usize >= arr.len()
             }
             Some(HK_STRING) => {
@@ -92,7 +92,7 @@ pub extern "C" fn jit_iter_next(iter_bits: u64, idx_bits: u64) -> u64 {
 
         match heap_kind(iter_bits) {
             Some(HK_ARRAY) => {
-                let arr = jit_unbox::<JitArray>(iter_bits);
+                let arr = JitArray::from_heap_bits(iter_bits);
                 arr.get(idx as usize).copied().unwrap_or(TAG_NULL)
             }
             Some(HK_STRING) => {

@@ -159,7 +159,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     let result = self.builder.inst_results(inst)[0];
                     self.stack_push(result);
                 } else {
-                    let empty_arr = jit_box(HK_ARRAY, crate::jit_array::JitArray::new());
+                    let empty_arr = crate::jit_array::JitArray::new().heap_box();
                     let val = self.builder.ins().iconst(types::I64, empty_arr as i64);
                     self.stack_push(val);
                 }

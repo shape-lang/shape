@@ -75,7 +75,7 @@ pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) ->
                 obj_bits
             }
             Some(HK_ARRAY) => {
-                let arr = jit_unbox_mut::<JitArray>(obj_bits);
+                let arr = JitArray::from_heap_bits_mut(obj_bits);
 
                 if is_number(key_bits) {
                     // Numeric index assignment
@@ -148,12 +148,12 @@ pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) ->
 
                     // Get values to insert
                     if is_heap_kind(value_bits, HK_ARRAY) {
-                        let values = jit_unbox::<JitArray>(value_bits);
+                        let values = JitArray::from_heap_bits(value_bits);
                         // Splice via Vec since JitArray doesn't support splice
                         let mut vec = arr.as_slice().to_vec();
                         vec.splice(start_idx..end_idx, values.iter().copied());
                         // Rebuild the JitArray in-place
-                        let arr_mut = jit_unbox_mut::<JitArray>(obj_bits);
+                        let arr_mut = JitArray::from_heap_bits_mut(obj_bits);
                         let new_arr = JitArray::from_vec(vec);
                         // Splice replaces the entire array contents; barrier on the container write.
                         super::super::gc::jit_write_barrier(obj_bits, obj_bits);
@@ -192,7 +192,7 @@ pub extern "C" fn jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64 {
         if !is_heap_kind(keys_bits, HK_ARRAY) {
             return TAG_NULL;
         }
-        let keys = jit_unbox::<JitArray>(keys_bits);
+        let keys = JitArray::from_heap_bits(keys_bits);
 
         // Build exclude set
         let mut exclude = std::collections::HashSet::new();

@@ -476,5 +476,5 @@ pub extern "C" fn jit_time_range(start_bits: u64, end_bits: u64, step_bits: u64)
     }
 
     // Return as boxed array
-    jit_box(HK_ARRAY, JitArray::from_vec(times))
+    JitArray::from_vec(times).heap_box()
 }

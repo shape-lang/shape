@@ -881,14 +881,14 @@ impl VirtualMachine {
     #[inline(always)]
     pub(in crate::executor) fn op_is_ok(&mut self) -> Result<(), VMError> {
         let nb = self.pop_vw()?;
-        let is_ok = matches!(nb.as_heap_ref(), Some(HeapValue::Ok(_)));
+        let is_ok = nb.as_ok_inner().is_some();
         self.push_vw(ValueWord::from_bool(is_ok))
     }
 
     #[inline(always)]
     pub(in crate::executor) fn op_is_err(&mut self) -> Result<(), VMError> {
         let nb = self.pop_vw()?;
-        let is_err = matches!(nb.as_heap_ref(), Some(HeapValue::Err(_)));
+        let is_err = nb.as_err_inner().is_some();
         self.push_vw(ValueWord::from_bool(is_err))
     }
 

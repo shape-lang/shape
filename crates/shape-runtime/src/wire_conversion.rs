@@ -233,6 +233,30 @@ pub fn nb_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
 
 /// Convert a heap-tagged ValueWord to WireValue by dispatching on HeapValue.
 fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
+    // Handle unified-format Ok/Err/Some (bit 47 set)
+    if shape_value::tags::is_unified_heap(nb.raw_bits()) {
+        let kind = unsafe { shape_value::tags::unified_heap_kind(nb.raw_bits()) };
+        if kind == shape_value::tags::HEAP_KIND_OK as u16 {
+            let w = unsafe { shape_value::unified_wrapper::UnifiedWrapper::from_heap_bits(nb.raw_bits()) };
+            let iv = unsafe { &*(&w.inner as *const u64 as *const ValueWord) };
+            return WireValue::Result { ok: true, value: Box::new(nb_to_wire(iv, ctx)) };
+        }
+        if kind == shape_value::tags::HEAP_KIND_ERR as u16 {
+            let w = unsafe { shape_value::unified_wrapper::UnifiedWrapper::from_heap_bits(nb.raw_bits()) };
+            let iv = unsafe { &*(&w.inner as *const u64 as *const ValueWord) };
+            return WireValue::Result { ok: false, value: Box::new(nb_to_wire(iv, ctx)) };
+        }
+        if kind == shape_value::tags::HEAP_KIND_SOME as u16 {
+            let w = unsafe { shape_value::unified_wrapper::UnifiedWrapper::from_heap_bits(nb.raw_bits()) };
+            let iv = unsafe { &*(&w.inner as *const u64 as *const ValueWord) };
+            return nb_to_wire(iv, ctx);
+        }
+        if kind == shape_value::tags::HEAP_KIND_STRING as u16 {
+            let us = unsafe { shape_value::unified_string::UnifiedString::from_heap_bits(nb.raw_bits()) };
+            return WireValue::String(us.as_str().to_string());
+        }
+        return WireValue::Null;
+    }
     let hv = match nb.as_heap_ref() {
         Some(hv) => hv,
         None => return WireValue::Null,

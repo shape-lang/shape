@@ -42,7 +42,7 @@ pub fn call_string_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
                     .map(|part| jit_box(HK_STRING, part.to_string()))
                     .collect();
 
-                jit_box(HK_ARRAY, JitArray::from_vec(parts))
+                JitArray::from_vec(parts).heap_box()
             }
             "includes" | "contains" => {
                 if args.is_empty() {
@@ -178,7 +178,7 @@ pub fn call_string_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
                     .chars()
                     .map(|ch| jit_box(HK_STRING, ch.to_string()))
                     .collect();
-                jit_box(HK_ARRAY, JitArray::from_vec(chars))
+                JitArray::from_vec(chars).heap_box()
             }
             "isEmpty" | "is_empty" => {
                 if s.is_empty() {

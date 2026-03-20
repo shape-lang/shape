@@ -108,7 +108,7 @@ fn check_type_recursive(value_bits: u64, type_spec: &str) -> bool {
                 if !is_heap_kind(value_bits, HK_ARRAY) {
                     return false;
                 }
-                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
+                let arr = unsafe { JitArray::from_heap_bits(value_bits) };
                 arr.iter().all(|elem| check_type_recursive(*elem, rest))
             }
             "tuple" => {
@@ -117,7 +117,7 @@ fn check_type_recursive(value_bits: u64, type_spec: &str) -> bool {
                     return false;
                 }
                 let types: Vec<&str> = rest.split(',').collect();
-                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
+                let arr = unsafe { JitArray::from_heap_bits(value_bits) };
                 if arr.len() != types.len() {
                     return false;
                 }
@@ -224,7 +224,7 @@ fn format_nan_boxed(value_bits: u64) -> String {
                 s.clone()
             }
             Some(HK_ARRAY) => {
-                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
+                let arr = unsafe { JitArray::from_heap_bits(value_bits) };
                 let elems: Vec<String> = arr.iter().map(|&bits| format_nan_boxed(bits)).collect();
                 format!("[{}]", elems.join(", "))
             }

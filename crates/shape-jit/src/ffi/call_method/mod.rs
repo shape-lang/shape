@@ -273,14 +273,14 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                             // count(pred) = filter(pred).length
                             let filtered = super::control::jit_control_filter(ctx);
                             if is_heap_kind(filtered, HK_ARRAY) {
-                                let arr = jit_unbox::<JitArray>(filtered);
+                                let arr = JitArray::from_heap_bits(filtered);
                                 return box_number(arr.len() as f64);
                             }
                             box_number(0.0)
                         }
                         "group" | "groupBy" => {
                             // group(keyFn) - groups elements by the result of keyFn
-                            let elements = jit_unbox::<JitArray>(working_array_bits);
+                            let elements = JitArray::from_heap_bits(working_array_bits);
 
                             let mut groups: HashMap<String, Vec<u64>> = HashMap::new();
 
@@ -321,7 +321,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                             // When GC feature enabled, route through gc_allocator.
                             let mut obj: HashMap<String, u64> = HashMap::new();
                             for (key, values) in groups {
-                                obj.insert(key, jit_box(HK_ARRAY, JitArray::from_vec(values)));
+                                obj.insert(key, JitArray::from_vec(values).heap_box());
                             }
                             jit_box(HK_JIT_OBJECT, obj)
                         }

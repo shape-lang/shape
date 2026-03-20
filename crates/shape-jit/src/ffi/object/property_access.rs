@@ -36,7 +36,7 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
         if let Some(kind) = heap_kind(obj_bits) {
             match kind {
                 HK_ARRAY => {
-                    let arr = jit_unbox::<JitArray>(obj_bits);
+                    let arr = JitArray::from_heap_bits(obj_bits);
 
                     // Handle array properties
                     match key_str {
@@ -250,7 +250,7 @@ pub extern "C" fn jit_hashmap_value_at(obj_bits: u64, slot_index: u64) -> u64 {
 pub extern "C" fn jit_length(value_bits: u64) -> u64 {
     let len = match heap_kind(value_bits) {
         Some(HK_ARRAY) => {
-            let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
+            let arr = unsafe { JitArray::from_heap_bits(value_bits) };
             arr.len()
         }
         Some(HK_STRING) => {

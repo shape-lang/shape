@@ -39,7 +39,8 @@ fn typed_array_to_jit<T: Copy + CastToF64>(
     jit_arr.typed_data = data.as_ptr() as *mut u64;
     jit_arr.element_kind = kind.as_byte();
     jit_arr.typed_storage_kind = kind.as_byte();
-    jit_box(hk, jit_arr)
+    jit_arr.kind = hk;
+    jit_arr.heap_box()
 }
 
 /// Reconstruct a width-specific typed array from a JitArray's NaN-boxed elements.
@@ -49,7 +50,7 @@ where
     f64: IntoTyped<T>,
     F: FnOnce(Arc<shape_value::typed_buffer::TypedBuffer<T>>) -> shape_value::ValueWord,
 {
-    let arr = unsafe { jit_unbox::<JitArray>(bits) };
+    let arr = unsafe { JitArray::from_heap_bits(bits) };
     let data: Vec<T> = arr
         .iter()
         .map(|&b| {
@@ -146,7 +147,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
             ValueWord::from_string(Arc::new(s.clone()))
         }
         Some(HK_ARRAY) => {
-            let arr = unsafe { jit_unbox::<JitArray>(bits) };
+            let arr = unsafe { JitArray::from_heap_bits(bits) };
             let values: Vec<ValueWord> = arr.iter().map(|&b| jit_bits_to_nanboxed(b)).collect();
             ValueWord::from_array(Arc::new(values))
         }
@@ -164,7 +165,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         }
         Some(HK_FLOAT_ARRAY) => {
             // Reconstruct FloatArray from JitArray's NaN-boxed element buffer.
-            let arr = unsafe { jit_unbox::<JitArray>(bits) };
+            let arr = unsafe { JitArray::from_heap_bits(bits) };
             let floats: Vec<f64> = arr
                 .iter()
                 .map(|&b| {
@@ -181,7 +182,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         }
         Some(HK_INT_ARRAY) => {
             // Reconstruct IntArray from JitArray's NaN-boxed element buffer.
-            let arr = unsafe { jit_unbox::<JitArray>(bits) };
+            let arr = unsafe { JitArray::from_heap_bits(bits) };
             let ints: Vec<i64> = arr
                 .iter()
                 .map(|&b| {
@@ -197,7 +198,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         }
         Some(HK_FLOAT_ARRAY_SLICE) => {
             // Reconstruct FloatArraySlice with original parent Arc linkage.
-            let arr = unsafe { jit_unbox::<JitArray>(bits) };
+            let arr = unsafe { JitArray::from_heap_bits(bits) };
             if arr.slice_parent_arc.is_null() {
                 // Fallback: parent was lost, materialize as owned FloatArray.
                 let floats: Vec<f64> = arr
@@ -275,7 +276,7 @@ pub fn jit_bits_to_nanboxed_with_ctx(
     }
 
     if is_heap_kind(bits, HK_ARRAY) {
-        let arr = unsafe { jit_unbox::<JitArray>(bits) };
+        let arr = unsafe { JitArray::from_heap_bits(bits) };
         let values: Vec<ValueWord> = arr
             .iter()
             .map(|&b| jit_bits_to_nanboxed_with_ctx(b, ctx))
@@ -439,7 +440,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                 // escape into the outer JitArray element buffer without GC tracking.
                 // When GC feature enabled, route through gc_allocator.
                 let boxed_arr: Vec<u64> = arr.iter().map(|v| nanboxed_to_jit_bits(v)).collect();
-                jit_box(HK_ARRAY, JitArray::from_vec(boxed_arr))
+                JitArray::from_vec(boxed_arr).heap_box()
             }
             Some(HeapValue::Time(dt)) => jit_box(HK_TIME, dt.timestamp()),
             Some(HeapValue::Duration(dur)) => {
@@ -523,7 +524,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                 jit_arr.typed_storage_kind =
                     crate::jit_array::ArrayElementKind::Float64.as_byte();
                 let _ = len; // suppress unused warning
-                jit_box(HK_FLOAT_ARRAY, jit_arr)
+                { jit_arr.kind = HK_FLOAT_ARRAY; jit_arr.heap_box() }
             }
             Some(HeapValue::IntArray(buf)) => {
                 // Bridge IntArray → JitArray with typed_data pointing to
@@ -539,7 +540,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                     crate::jit_array::ArrayElementKind::Int64.as_byte();
                 jit_arr.typed_storage_kind =
                     crate::jit_array::ArrayElementKind::Int64.as_byte();
-                jit_box(HK_INT_ARRAY, jit_arr)
+                { jit_arr.kind = HK_INT_ARRAY; jit_arr.heap_box() }
             }
             Some(HeapValue::FloatArraySlice {
                 parent,
@@ -575,7 +576,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                     Arc::into_raw(Arc::clone(parent)) as *const ();
                 jit_arr.slice_offset = *offset;
                 jit_arr.slice_len = *len;
-                jit_box(HK_FLOAT_ARRAY_SLICE, jit_arr)
+                { jit_arr.kind = HK_FLOAT_ARRAY_SLICE; jit_arr.heap_box() }
             }
             Some(HeapValue::Matrix(mat_arc)) => {
                 // Bridge Matrix → JitMatrix with direct f64 data pointer.

@@ -35,7 +35,7 @@ pub extern "C" fn jit_set_index_ref(ref_ptr: *mut u64, index: u64, value: u64) {
         return;
     }
 
-    let arr = unsafe { jit_unbox_mut::<JitArray>(array_bits) };
+    let arr = unsafe { JitArray::from_heap_bits_mut(array_bits) };
 
     // Convert index from NaN-boxed f64 to integer
     let idx = if is_number(index) {

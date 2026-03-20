@@ -21,14 +21,14 @@ pub fn get_array_elements(array_bits: u64) -> Vec<u64> {
     if !is_heap_kind(array_bits, HK_ARRAY) {
         return Vec::new();
     }
-    let arr = unsafe { jit_unbox::<JitArray>(array_bits) };
+    let arr = unsafe { JitArray::from_heap_bits(array_bits) };
     arr.as_slice().to_vec()
 }
 
 /// Helper: Create a new array from elements
 pub fn create_array_from_elements(_ctx: *mut JITContext, elements: &[u64]) -> u64 {
     let arr = JitArray::from_slice(elements);
-    jit_box(HK_ARRAY, arr)
+    arr.heap_box()
 }
 
 // ============================================================================
@@ -57,7 +57,7 @@ pub extern "C" fn jit_array_info(array_bits: u64) -> ArrayInfo {
         };
     }
 
-    let arr = unsafe { jit_unbox::<JitArray>(array_bits) };
+    let arr = unsafe { JitArray::from_heap_bits(array_bits) };
     ArrayInfo {
         data_ptr: arr.data as u64,
         length: arr.len as u64,
@@ -83,7 +83,7 @@ pub extern "C" fn jit_new_array(ctx: *mut JITContext, count: usize) -> u64 {
         }
         elements.reverse();
 
-        jit_box(HK_ARRAY, JitArray::from_vec(elements))
+        JitArray::from_vec(elements).heap_box()
     }
 }
 
@@ -94,7 +94,7 @@ pub extern "C" fn jit_array_get(array_bits: u64, index_bits: u64) -> u64 {
             return TAG_NULL;
         }
 
-        let arr = jit_unbox::<JitArray>(array_bits);
+        let arr = JitArray::from_heap_bits(array_bits);
         let index = unbox_number(index_bits) as i64;
 
         let actual_index = if index < 0 {
@@ -180,7 +180,7 @@ pub extern "C" fn jit_array_push_local(array_bits: u64, value_bits: u64) -> u64 
     if !is_heap_kind(array_bits, HK_ARRAY) {
         return array_bits;
     }
-    let arr = unsafe { jit_unbox_mut::<JitArray>(array_bits) };
+    let arr = unsafe { JitArray::from_heap_bits_mut(array_bits) };
     arr.push(value_bits);
     array_bits
 }
@@ -195,7 +195,7 @@ pub extern "C" fn jit_array_reserve_local(array_bits: u64, min_capacity: i64) ->
     if min_capacity <= 0 {
         return array_bits;
     }
-    let arr = unsafe { jit_unbox_mut::<JitArray>(array_bits) };
+    let arr = unsafe { JitArray::from_heap_bits_mut(array_bits) };
     arr.reserve(min_capacity as usize);
     array_bits
 }
@@ -210,7 +210,7 @@ pub extern "C" fn jit_array_zip(arr1: u64, arr2: u64) -> u64 {
 
     for i in 0..min_len {
         let pair = JitArray::from_slice(&[elements1[i], elements2[i]]);
-        let pair_bits = jit_box(HK_ARRAY, pair);
+        let pair_bits = pair.heap_box();
         pairs.push(pair_bits);
     }
 
@@ -227,7 +227,7 @@ pub extern "C" fn jit_array_first(arr_bits: u64) -> u64 {
     if !is_heap_kind(arr_bits, HK_ARRAY) {
         return TAG_NULL;
     }
-    let arr = unsafe { jit_unbox::<JitArray>(arr_bits) };
+    let arr = unsafe { JitArray::from_heap_bits(arr_bits) };
     arr.first().copied().unwrap_or(TAG_NULL)
 }
 
@@ -236,7 +236,7 @@ pub extern "C" fn jit_array_last(arr_bits: u64) -> u64 {
     if !is_heap_kind(arr_bits, HK_ARRAY) {
         return TAG_NULL;
     }
-    let arr = unsafe { jit_unbox::<JitArray>(arr_bits) };
+    let arr = unsafe { JitArray::from_heap_bits(arr_bits) };
     arr.last().copied().unwrap_or(TAG_NULL)
 }
 
@@ -245,7 +245,7 @@ pub extern "C" fn jit_array_min(arr_bits: u64) -> u64 {
     if !is_heap_kind(arr_bits, HK_ARRAY) {
         return TAG_NULL;
     }
-    let arr = unsafe { jit_unbox::<JitArray>(arr_bits) };
+    let arr = unsafe { JitArray::from_heap_bits(arr_bits) };
     if arr.is_empty() {
         return TAG_NULL;
     }
@@ -270,7 +270,7 @@ pub extern "C" fn jit_array_max(arr_bits: u64) -> u64 {
     if !is_heap_kind(arr_bits, HK_ARRAY) {
         return TAG_NULL;
     }
-    let arr = unsafe { jit_unbox::<JitArray>(arr_bits) };
+    let arr = unsafe { JitArray::from_heap_bits(arr_bits) };
     if arr.is_empty() {
         return TAG_NULL;
     }
@@ -323,7 +323,7 @@ pub extern "C" fn jit_slice(arr_bits: u64, start_bits: u64, end_bits: u64) -> u6
         if !is_heap_kind(arr_bits, HK_ARRAY) {
             return TAG_NULL;
         }
-        let arr = jit_unbox::<JitArray>(arr_bits);
+        let arr = JitArray::from_heap_bits(arr_bits);
 
         let start = if is_number(start_bits) {
             unbox_number(start_bits) as usize
@@ -340,11 +340,11 @@ pub extern "C" fn jit_slice(arr_bits: u64, start_bits: u64, end_bits: u64) -> u6
         let end = end.min(arr.len());
 
         if start > end {
-            return jit_box(HK_ARRAY, JitArray::new());
+            return JitArray::new().heap_box();
         }
 
         let sliced = JitArray::from_slice(&arr.as_slice()[start..end]);
-        jit_box(HK_ARRAY, sliced)
+        sliced.heap_box()
     }
 }
 
@@ -363,9 +363,9 @@ pub extern "C" fn jit_range(start_bits: u64, end_bits: u64) -> u64 {
 
     if end > start && (end - start) <= 10000 {
         let range: Vec<u64> = (start..end).map(|i| box_number(i as f64)).collect();
-        jit_box(HK_ARRAY, JitArray::from_vec(range))
+        JitArray::from_vec(range).heap_box()
     } else {
-        jit_box(HK_ARRAY, JitArray::new())
+        JitArray::new().heap_box()
     }
 }
 
@@ -417,6 +417,10 @@ pub extern "C" fn jit_array_filled(size_bits: u64, value_bits: u64) -> u64 {
 
     // Build directly to avoid O(n) kind inference + typed-mirror initialization.
     let arr = JitArray {
+        kind: shape_value::tags::HEAP_KIND_ARRAY as u16,
+        flags: 0,
+        _reserved: 0,
+        refcount: std::sync::atomic::AtomicU32::new(1),
         data,
         len: len as u64,
         cap: cap as u64,
@@ -428,7 +432,7 @@ pub extern "C" fn jit_array_filled(size_bits: u64, value_bits: u64) -> u64 {
         slice_offset: 0,
         slice_len: 0,
     };
-    jit_box(HK_ARRAY, arr)
+    arr.heap_box()
 }
 
 /// Reverse an array, returning a new reversed array.
@@ -438,10 +442,10 @@ pub extern "C" fn jit_array_reverse(arr_bits: u64) -> u64 {
     if !is_heap_kind(arr_bits, HK_ARRAY) {
         return TAG_NULL;
     }
-    let arr = unsafe { jit_unbox::<JitArray>(arr_bits) };
+    let arr = unsafe { JitArray::from_heap_bits(arr_bits) };
     let mut reversed = arr.as_slice().to_vec();
     reversed.reverse();
-    jit_box(HK_ARRAY, JitArray::from_vec(reversed))
+    JitArray::from_vec(reversed).heap_box()
 }
 
 /// Push a single element onto an array (method call style).
@@ -452,10 +456,10 @@ pub extern "C" fn jit_array_push_element(arr_bits: u64, element_bits: u64) -> u6
     if !is_heap_kind(arr_bits, HK_ARRAY) {
         return TAG_NULL;
     }
-    let arr = unsafe { jit_unbox::<JitArray>(arr_bits) };
+    let arr = unsafe { JitArray::from_heap_bits(arr_bits) };
     let mut elements = arr.as_slice().to_vec();
     elements.push(element_bits);
-    jit_box(HK_ARRAY, JitArray::from_vec(elements))
+    JitArray::from_vec(elements).heap_box()
 }
 
 /// Allocate a new empty array with pre-allocated capacity.
@@ -464,9 +468,9 @@ pub extern "C" fn jit_array_push_element(arr_bits: u64, element_bits: u64) -> u6
 pub extern "C" fn jit_hof_array_alloc(capacity: u64) -> u64 {
     let cap = capacity as usize;
     if cap > 100_000_000 {
-        return jit_box(HK_ARRAY, JitArray::new());
+        return JitArray::new().heap_box();
     }
-    jit_box(HK_ARRAY, JitArray::with_capacity(cap))
+    JitArray::with_capacity(cap).heap_box()
 }
 
 /// Push a single element into an in-place array (used by HOF inlining loops).
@@ -477,7 +481,7 @@ pub extern "C" fn jit_hof_array_push(array_bits: u64, value_bits: u64) -> u64 {
     if !is_heap_kind(array_bits, HK_ARRAY) {
         return array_bits;
     }
-    let arr = unsafe { jit_unbox_mut::<JitArray>(array_bits) };
+    let arr = unsafe { JitArray::from_heap_bits_mut(array_bits) };
     arr.push(value_bits);
     array_bits
 }

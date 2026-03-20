@@ -113,6 +113,34 @@ pub fn sign_extend_i48(bits: u64) -> i64 {
     shifted >> 16
 }
 
+// ===== Unified heap object discrimination =====
+
+pub const UNIFIED_HEAP_FLAG: u64 = 1 << 47;
+pub const UNIFIED_PTR_MASK: u64 = PAYLOAD_MASK & !UNIFIED_HEAP_FLAG;
+
+#[inline(always)]
+pub fn is_unified_heap(bits: u64) -> bool {
+    is_tagged(bits) && get_tag(bits) == TAG_HEAP && (get_payload(bits) & UNIFIED_HEAP_FLAG) != 0
+}
+
+#[inline(always)]
+pub fn unified_heap_ptr(bits: u64) -> *const u8 {
+    (get_payload(bits) & UNIFIED_PTR_MASK) as *const u8
+}
+
+#[inline(always)]
+pub unsafe fn unified_heap_kind(bits: u64) -> u16 {
+    let ptr = unified_heap_ptr(bits) as *const u16;
+    unsafe { *ptr }
+}
+
+#[inline(always)]
+pub fn make_unified_heap(ptr: *const u8) -> u64 {
+    let addr = ptr as u64;
+    debug_assert!(addr & UNIFIED_HEAP_FLAG == 0, "pointer already has bit 47 set");
+    make_tagged(TAG_HEAP, addr | UNIFIED_HEAP_FLAG)
+}
+
 // ===== HeapKind discriminator constants (for JIT dispatch) =====
 //
 // These mirror the `HeapKind` enum in heap_value.rs as integer constants,
