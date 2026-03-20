@@ -128,7 +128,7 @@ fn test_extend_number_multiple_methods() {
     );
 
     let binding = result.unwrap();
-    let arr = binding.as_array().expect("Expected Vec");
+    let arr = binding.to_array_arc().expect("Expected Vec");
     assert_eq!(arr.len(), 3, "Should have 3 results");
 
     assert_eq!(
@@ -260,7 +260,7 @@ fn test_extend_array_generic() {
     );
 
     let binding = result.unwrap();
-    let arr = binding.as_array().expect("Expected Vec");
+    let arr = binding.to_array_arc().expect("Expected Vec");
     assert_eq!(arr.len(), 4, "Should have 4 results");
 
     assert_eq!(
@@ -343,7 +343,7 @@ fn test_extend_this_in_closure() {
     );
 
     let binding = result.unwrap();
-    let arr = binding.as_array().expect("Expected Vec");
+    let arr = binding.to_array_arc().expect("Expected Vec");
     assert_eq!(arr.len(), 3, "Should have 3 elements");
 
     assert_eq!(as_f64(&arr[0]), Some(2.0), "Expected 2, got {:?}", arr[0]);
@@ -417,7 +417,7 @@ fn test_extend_method_with_default_param() {
     );
 
     let binding = result.unwrap();
-    let arr = binding.as_array().expect("Expected Vec");
+    let arr = binding.to_array_arc().expect("Expected Vec");
     assert_eq!(arr.len(), 2, "Should have 2 results");
 
     assert_eq!(
@@ -473,7 +473,7 @@ fn test_extend_multiple_types() {
     );
 
     let binding = result.unwrap();
-    let arr = binding.as_array().expect("Expected Vec");
+    let arr = binding.to_array_arc().expect("Expected Vec");
     assert_eq!(arr.len(), 3, "Should have 3 results");
 
     assert_eq!(

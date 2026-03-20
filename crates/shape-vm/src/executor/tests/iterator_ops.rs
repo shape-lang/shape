@@ -150,7 +150,7 @@ fn test_iterator_collect() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 5);
     assert_eq!(arr[0].as_i64(), Some(1));
     assert_eq!(arr[4].as_i64(), Some(5));
@@ -171,7 +171,7 @@ fn test_iterator_to_array() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 5);
 }
 
@@ -221,7 +221,7 @@ fn test_iterator_take_collect() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].as_i64(), Some(1));
     assert_eq!(arr[2].as_i64(), Some(3));
@@ -251,7 +251,7 @@ fn test_iterator_skip_collect() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].as_i64(), Some(3));
     assert_eq!(arr[2].as_i64(), Some(5));
@@ -290,7 +290,7 @@ fn test_iterator_skip_take_collect() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].as_i64(), Some(2));
     assert_eq!(arr[1].as_i64(), Some(3));
@@ -327,7 +327,7 @@ fn test_array_iter_collect() {
         Constant::String("collect".to_string()),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let out = result.as_array().expect("should be array");
+    let out = result.to_array_arc().expect("should be array");
     assert_eq!(out.len(), 3);
     assert_eq!(out[0].as_i64(), Some(1));
 }
@@ -353,7 +353,7 @@ fn test_string_iter_collect() {
         Constant::String("collect".to_string()),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].as_str().unwrap(), "a");
     assert_eq!(arr[1].as_str().unwrap(), "b");
@@ -386,7 +386,7 @@ fn test_range_iter_collect() {
         Constant::String("collect".to_string()),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].as_i64(), Some(0));
     assert_eq!(arr[1].as_i64(), Some(1));
@@ -417,7 +417,7 @@ fn test_range_iter_inclusive_collect() {
         Constant::String("collect".to_string()),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].as_i64(), Some(1));
     assert_eq!(arr[2].as_i64(), Some(3));
@@ -466,10 +466,10 @@ fn test_hashmap_iter_collect_pairs() {
         Constant::String("collect".to_string()),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 2);
     // Each element is a [key, value] pair
-    let pair0 = arr[0].as_array().expect("pair should be array");
+    let pair0 = arr[0].to_array_arc().expect("pair should be array");
     assert_eq!(pair0.len(), 2);
 }
 
@@ -542,7 +542,7 @@ fn test_empty_iterator_collect() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().expect("should be array");
+    let arr = result.to_array_arc().expect("should be array");
     assert_eq!(arr.len(), 0);
 }
 
@@ -649,7 +649,7 @@ fn test_hashmap_iter_next_yields_pair() {
     ];
     let constants = vec![Constant::Value(test_hashmap()), Constant::Number(0.0)];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let pair = result.as_array().expect("should be [key, value] pair");
+    let pair = result.to_array_arc().expect("should be [key, value] pair");
     assert_eq!(pair.len(), 2);
 }
 

@@ -255,6 +255,19 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
             let us = unsafe { shape_value::unified_string::UnifiedString::from_heap_bits(nb.raw_bits()) };
             return WireValue::String(us.as_str().to_string());
         }
+        if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            let arr = unsafe {
+                shape_value::unified_array::UnifiedArray::from_heap_bits(nb.raw_bits())
+            };
+            return WireValue::Array(
+                (0..arr.len())
+                    .map(|i| {
+                        let elem = unsafe { ValueWord::clone_from_bits(*arr.get(i).unwrap()) };
+                        nb_to_wire(&elem, ctx)
+                    })
+                    .collect(),
+            );
+        }
         return WireValue::Null;
     }
     let hv = match nb.as_heap_ref() {

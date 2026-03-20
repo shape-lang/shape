@@ -100,6 +100,14 @@ impl ValueSlot {
     pub fn from_value_word(nb: &ValueWord) -> (Self, bool) {
         use crate::value_word::NanTag;
         if nb.tag() == NanTag::Heap {
+            // Handle unified heap values (bit-47): materialize to HeapValue.
+            if crate::tags::is_unified_heap(nb.raw_bits()) {
+                if let Some(view) = nb.as_any_array() {
+                    let hv = crate::heap_value::HeapValue::Array(view.to_generic());
+                    return (Self::from_heap(hv), true);
+                }
+                return (Self(0), false);
+            }
             if let Some(hv) = nb.as_heap_ref() {
                 return (Self::from_heap(hv.clone()), true);
             }

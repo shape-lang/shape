@@ -97,7 +97,7 @@ fn test_new_typed_array_mixed_falls_back() {
     // Should be a generic array, not a typed array
     assert!(result.as_int_array().is_none());
     assert!(result.as_float_array().is_none());
-    assert!(result.as_array().is_some());
+    assert!(result.to_array_arc().is_some());
 }
 
 // ===== SIMD Arithmetic: Vec + Vec =====
@@ -472,7 +472,7 @@ fn test_float_array_to_array() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().unwrap();
+    let arr = result.to_array_arc().unwrap();
     assert_eq!(arr.len(), 3);
 }
 
@@ -598,7 +598,7 @@ fn test_int_array_to_array() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().unwrap();
+    let arr = result.to_array_arc().unwrap();
     assert_eq!(arr.len(), 3);
 }
 
@@ -725,7 +725,7 @@ fn test_bool_array_to_array() {
         Constant::Number(0.0),
     ];
     let result = execute_bytecode(instructions, constants).unwrap();
-    let arr = result.as_array().unwrap();
+    let arr = result.to_array_arc().unwrap();
     assert_eq!(arr.len(), 3);
 }
 

@@ -1136,7 +1136,32 @@ impl VirtualMachine {
                     }
                     // Both heap: string concat, decimal, bigint, array concat, typed object merge
                     (NanTag::Heap, NanTag::Heap) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        let a_unified = shape_value::tags::is_unified_heap(a_nb.raw_bits());
+                        let b_unified = shape_value::tags::is_unified_heap(b_nb.raw_bits());
+                        // Handle cases where at least one side is unified.
+                        if a_unified || b_unified {
+                            // Both arrays → concat
+                            if let (Some(a_view), Some(b_view)) = (a_nb.as_any_array(), b_nb.as_any_array()) {
+                                let a_generic = a_view.to_generic();
+                                let b_generic = b_view.to_generic();
+                                let mut result_arr = Vec::with_capacity(a_generic.len() + b_generic.len());
+                                result_arr.extend_from_slice(&a_generic);
+                                result_arr.extend_from_slice(&b_generic);
+                                return self.push_vw(ValueWord::from_array(Arc::new(result_arr)));
+                            }
+                            return Err(VMError::RuntimeError(format!(
+                                "Cannot apply '+' to {} and {}",
+                                a_nb.type_name(),
+                                b_nb.type_name()
+                            )));
+                        }
+                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
+                            return Err(VMError::RuntimeError(format!(
+                                "Cannot apply operator to {} and {}",
+                                a_nb.type_name(), b_nb.type_name()
+                            )));
+                        };
+                        match (a_hv, b_hv) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_vw(ValueWord::from_i64(
                                     a_big.checked_add(*b_big).ok_or_else(|| {
@@ -1624,7 +1649,13 @@ impl VirtualMachine {
                         }
                     }
                     (NanTag::Heap, NanTag::Heap) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
+                            return Err(VMError::RuntimeError(format!(
+                                "Cannot apply operator to {} and {}",
+                                a_nb.type_name(), b_nb.type_name()
+                            )));
+                        };
+                        match (a_hv, b_hv) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_vw(ValueWord::from_i64(
                                     a_big.checked_sub(*b_big).ok_or_else(|| {
@@ -1864,7 +1895,13 @@ impl VirtualMachine {
                         }
                     }
                     (NanTag::Heap, NanTag::Heap) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
+                            return Err(VMError::RuntimeError(format!(
+                                "Cannot apply operator to {} and {}",
+                                a_nb.type_name(), b_nb.type_name()
+                            )));
+                        };
+                        match (a_hv, b_hv) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_vw(ValueWord::from_i64(
                                     a_big.checked_mul(*b_big).ok_or_else(|| {
@@ -2157,7 +2194,13 @@ impl VirtualMachine {
                         }
                     }
                     (NanTag::Heap, NanTag::Heap) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
+                            return Err(VMError::RuntimeError(format!(
+                                "Cannot apply operator to {} and {}",
+                                a_nb.type_name(), b_nb.type_name()
+                            )));
+                        };
+                        match (a_hv, b_hv) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 if *b_big == 0 {
                                     return Err(VMError::DivisionByZero);
@@ -2372,7 +2415,13 @@ impl VirtualMachine {
                         }
                     }
                     (NanTag::Heap, NanTag::Heap) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
+                            return Err(VMError::RuntimeError(format!(
+                                "Cannot apply operator to {} and {}",
+                                a_nb.type_name(), b_nb.type_name()
+                            )));
+                        };
+                        match (a_hv, b_hv) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 if *b_big == 0 {
                                     return Err(VMError::DivisionByZero);

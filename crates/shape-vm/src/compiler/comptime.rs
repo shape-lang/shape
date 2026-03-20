@@ -752,6 +752,17 @@ fn normalize_comptime_value(nb: &ValueWord, vm: &VirtualMachine) -> ValueWord {
     use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_nb_pairs};
     use shape_value::heap_value::HeapValue;
 
+    // Handle unified arrays.
+    if let Some(view) = nb.as_any_array() {
+        let normalized: Vec<ValueWord> = (0..view.len())
+            .map(|i| {
+                let elem = view.get_nb(i).unwrap_or_else(ValueWord::none);
+                normalize_comptime_value(&elem, vm)
+            })
+            .collect();
+        return ValueWord::from_array(Arc::new(normalized));
+    }
+
     match nb.as_heap_ref() {
         Some(HeapValue::TypedObject {
             schema_id,

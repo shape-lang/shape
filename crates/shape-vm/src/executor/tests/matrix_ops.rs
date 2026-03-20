@@ -218,7 +218,7 @@ fn test_matrix_transpose() {
 #[test]
 fn test_matrix_shape() {
     let result = method_call(test_matrix_2x3(), "shape", vec![]);
-    let arr = result.as_array().unwrap();
+    let arr = result.to_array_arc().unwrap();
     assert_eq!(arr[0].as_i64(), Some(2));
     assert_eq!(arr[1].as_i64(), Some(3));
 }

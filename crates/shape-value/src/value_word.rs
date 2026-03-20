@@ -1645,7 +1645,7 @@ impl ValueWord {
     }
 
     /// Get a reference to a heap Array without cloning.
-    /// Returns None if this is not a heap-boxed Array.
+    /// Returns None if this is not a heap-boxed Array (or unified array).
     #[inline]
     #[deprecated(note = "Use as_any_array() instead for unified typed array dispatch")]
     pub fn as_array(&self) -> Option<&VMArray> {
@@ -1656,6 +1656,20 @@ impl ValueWord {
             }
         } else {
             std::option::Option::None
+        }
+    }
+
+    /// Materialize an `Arc<Vec<ValueWord>>` from any array format.
+    ///
+    /// Handles both legacy `HeapValue::Array` and unified `UnifiedArray`.
+    /// For legacy arrays, this is a cheap Arc clone. For unified arrays,
+    /// elements are cloned into a new Vec.
+    #[inline]
+    pub fn to_array_arc(&self) -> Option<Arc<Vec<ValueWord>>> {
+        if let Some(view) = self.as_any_array() {
+            Some(view.to_generic())
+        } else {
+            None
         }
     }
 

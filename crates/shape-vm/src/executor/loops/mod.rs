@@ -102,6 +102,18 @@ impl VirtualMachine {
             expected: "number",
             got: "unknown",
         })? as i64;
+        // Handle unified arrays (bit-47 tagged) for iteration.
+        if shape_value::tags::is_unified_heap(iter.raw_bits()) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(iter.raw_bits()) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits(iter.raw_bits())
+                };
+                let done = idx < 0 || idx as usize >= arr.len();
+                self.push_vw(ValueWord::from_bool(done))?;
+                return Ok(());
+            }
+        }
         let done = match iter.as_heap_ref() {
             Some(HeapValue::Array(arr)) => idx < 0 || idx as usize >= arr.len(),
             Some(HeapValue::IntArray(arr)) => idx < 0 || idx as usize >= arr.len(),
@@ -159,6 +171,23 @@ impl VirtualMachine {
         let idx = idx_nb.as_number_coerce().ok_or_else(|| {
             VMError::RuntimeError("Expected number for iterator index".to_string())
         })? as i64;
+        // Handle unified arrays (bit-47 tagged) for iteration.
+        if shape_value::tags::is_unified_heap(iter.raw_bits()) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(iter.raw_bits()) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits(iter.raw_bits())
+                };
+                let result = if idx < 0 || idx as usize >= arr.len() {
+                    ValueWord::none()
+                } else {
+                    let elem_bits = *arr.get(idx as usize).unwrap();
+                    unsafe { ValueWord::clone_from_bits(elem_bits) }
+                };
+                self.push_vw(result)?;
+                return Ok(());
+            }
+        }
         let result = match iter.as_heap_ref() {
             Some(HeapValue::Array(arr)) => {
                 if idx < 0 {

@@ -259,7 +259,7 @@ fn test_memo_stats_initial() {
     let ctx = test_ctx();
     let handle_nb = transport_memoized(&[], &ctx).unwrap();
     let stats = transport_memo_stats(&[handle_nb], &ctx).unwrap();
-    let arr = stats.as_array().unwrap();
+    let arr = stats.to_array_arc().unwrap();
     assert_eq!(arr.len(), 4);
     // All stats should be 0 initially
     for i in 0..4 {
@@ -337,7 +337,7 @@ fn test_memoized_send_caches_results() {
 
     // Check stats: 1 hit, 1 miss, 2 total
     let stats = transport_memo_stats(&[handle_nb], &ctx).unwrap();
-    let arr = stats.as_array().unwrap();
+    let arr = stats.to_array_arc().unwrap();
     assert_eq!(arr[0].as_i64().unwrap(), 1); // cache_hits
     assert_eq!(arr[1].as_i64().unwrap(), 1); // cache_misses
     assert_eq!(arr[3].as_i64().unwrap(), 2); // total_requests

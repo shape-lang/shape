@@ -82,7 +82,7 @@ fn test_state_serialize_deserialize_roundtrip_number() {
     let serialized = state_serialize(&[original.clone()], &ctx).unwrap();
 
     // Should be an array of ints
-    let arr = serialized.as_array().unwrap();
+    let arr = serialized.to_array_arc().unwrap();
     assert!(!arr.is_empty());
 
     let deserialized = state_deserialize(&[serialized], &ctx).unwrap();
@@ -117,7 +117,7 @@ fn test_state_serialize_deserialize_roundtrip_array() {
     ]));
     let serialized = state_serialize(&[original], &ctx).unwrap();
     let deserialized = state_deserialize(&[serialized], &ctx).unwrap();
-    let arr = deserialized.as_array().unwrap();
+    let arr = deserialized.to_array_arc().unwrap();
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].as_f64(), Some(1.0));
     assert_eq!(arr[1].as_f64(), Some(2.0));
@@ -154,7 +154,7 @@ fn extract_delta_fields(delta_nb: &ValueWord) -> (Vec<(String, ValueWord)>, Vec<
     // slot 1 = removed (Array)
     assert!(heap_mask & 2 != 0, "removed slot should be a heap value");
     let removed_nb = slots[1].as_heap_nb();
-    let removed_arr = removed_nb.as_array().expect("removed should be an Array");
+    let removed_arr = removed_nb.to_array_arc().expect("removed should be an Array");
     let removed: Vec<String> = removed_arr
         .iter()
         .map(|nb| nb.as_str().unwrap().to_string())
@@ -321,7 +321,7 @@ fn test_state_args_returns_captured_args() {
     };
     let ctx = test_ctx_with_vm_state(&mock);
     let result = state_args_stub(&[], &ctx).unwrap();
-    let arr = result.as_array().unwrap();
+    let arr = result.to_array_arc().unwrap();
     assert_eq!(arr.len(), 2);
     assert_eq!(arr[0].as_f64(), Some(1.0));
     assert_eq!(arr[1].as_f64(), Some(2.0));
@@ -348,10 +348,10 @@ fn test_state_locals_returns_name_value_pairs() {
     };
     let ctx = test_ctx_with_vm_state(&mock);
     let result = state_locals_stub(&[], &ctx).unwrap();
-    let arr = result.as_array().unwrap();
+    let arr = result.to_array_arc().unwrap();
     assert_eq!(arr.len(), 2);
     // Each element is [name, value]
-    let pair0 = arr[0].as_array().unwrap();
+    let pair0 = arr[0].to_array_arc().unwrap();
     assert_eq!(pair0[0].as_str().unwrap().to_string(), "x");
     assert_eq!(pair0[1].as_f64(), Some(10.0));
 }

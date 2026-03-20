@@ -337,6 +337,36 @@ impl VirtualMachine {
         // Extract key string once (used by most paths).
         let key_str = key_nb.as_str();
 
+        // Handle unified arrays (bit-47 tagged) before HeapValue dispatch.
+        if shape_value::tags::is_unified_heap(obj_ref.raw_bits()) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(obj_ref.raw_bits()) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits(obj_ref.raw_bits())
+                };
+                if let Some(ks) = key_str {
+                    if ks == "length" {
+                        return self.push_vw(ValueWord::from_i64(arr.len() as i64));
+                    }
+                    return Err(VMError::UndefinedProperty(ks.to_string()));
+                }
+                let idx_opt = key_nb
+                    .as_i64()
+                    .or_else(|| key_nb.as_f64().map(|f| f as i64));
+                if let Some(idx) = idx_opt {
+                    let len = arr.len() as i64;
+                    let actual = if idx < 0 { len + idx } else { idx };
+                    if actual >= 0 && (actual as usize) < arr.len() {
+                        let elem_bits = *arr.get(actual as usize).unwrap();
+                        let elem = unsafe { ValueWord::clone_from_bits(elem_bits) };
+                        return self.push_vw(elem);
+                    } else {
+                        return self.push_vw(ValueWord::none());
+                    }
+                }
+            }
+        }
+
         // Primary dispatch: check if obj is a heap value.
         if let Some(hv) = obj_ref.as_heap_ref() {
             match hv {
@@ -802,6 +832,53 @@ impl VirtualMachine {
             }
         }
 
+        // Handle unified arrays (bit-47 tagged) for index assignment.
+        if shape_value::tags::is_unified_heap(object_nb.raw_bits()) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(object_nb.raw_bits()) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let idx = Self::parse_array_index(key_nb)?;
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits_mut(object_nb.raw_bits())
+                };
+                let len = arr.len() as i64;
+                let actual = if idx < 0 { len + idx } else { idx };
+                if actual < 0 {
+                    return Err(VMError::RuntimeError(format!(
+                        "Array index {} is out of bounds",
+                        idx
+                    )));
+                }
+                let index = actual as usize;
+                if index < arr.len() {
+                    record_heap_write();
+                    let old_bits = *arr.get(index).unwrap();
+                    let old = unsafe { ValueWord::clone_from_bits(old_bits) };
+                    write_barrier_vw(&old, &value_nb);
+                    drop(old);
+                    // Decrement old element refcount
+                    if shape_value::tags::is_tagged(old_bits)
+                        && shape_value::tags::get_tag(old_bits) == shape_value::tags::TAG_HEAP
+                    {
+                        let old_vw = unsafe { ValueWord::clone_from_bits(old_bits) };
+                        drop(old_vw); // extra decrement
+                    }
+                    let new_bits = value_nb.raw_bits();
+                    std::mem::forget(value_nb);
+                    arr.set_boxed(index, new_bits);
+                } else {
+                    // Extend with none values
+                    while arr.len() < index {
+                        arr.push(ValueWord::none().raw_bits());
+                    }
+                    record_heap_write();
+                    let new_bits = value_nb.raw_bits();
+                    std::mem::forget(value_nb);
+                    arr.push(new_bits);
+                }
+                return Ok(());
+            }
+        }
+
         if let Some(HeapValue::Array(arr)) = object_nb.as_heap_mut() {
             let idx = Self::parse_array_index(key_nb)?;
             let len = arr.len() as i64;
@@ -978,6 +1055,16 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn op_length(&mut self) -> Result<(), VMError> {
         let nb = self.pop_vw()?;
+        // Handle unified arrays (bit-47 tagged).
+        if shape_value::tags::is_unified_heap(nb.raw_bits()) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(nb.raw_bits()) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits(nb.raw_bits())
+                };
+                return self.push_vw(ValueWord::from_i64(arr.len() as i64));
+            }
+        }
         // Fast path: inspect HeapValue directly without materializing ValueWord
         if let Some(hv) = nb.as_heap_ref() {
             let length = match hv {

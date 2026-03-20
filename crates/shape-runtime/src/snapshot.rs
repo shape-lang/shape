@@ -648,6 +648,23 @@ pub fn nanboxed_to_serializable(
             nb.as_module_function().unwrap()
         ))),
         NanTag::Heap => {
+            // Handle unified arrays (bit-47 tagged) only.
+            if shape_value::tags::is_unified_heap(nb.raw_bits()) {
+                let kind = unsafe { shape_value::tags::unified_heap_kind(nb.raw_bits()) };
+                if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                    let arr = unsafe {
+                        shape_value::unified_array::UnifiedArray::from_heap_bits(nb.raw_bits())
+                    };
+                    let items: Vec<SerializableVMValue> = (0..arr.len())
+                        .map(|i| {
+                            let elem = unsafe { shape_value::ValueWord::clone_from_bits(*arr.get(i).unwrap()) };
+                            nanboxed_to_serializable(&elem, store).unwrap_or(SerializableVMValue::None)
+                        })
+                        .collect();
+                    return Ok(SerializableVMValue::Array(items));
+                }
+                return Ok(SerializableVMValue::None);
+            }
             let hv = nb.as_heap_ref().unwrap();
             heap_value_to_serializable(hv, store)
         }

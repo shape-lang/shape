@@ -268,7 +268,7 @@ fn test_group_by_string() {
     ];
     handle_group_by(&mut vm, to_nb_args(args), None).unwrap();
     let result = vm.pop().unwrap();
-    let groups = result.as_array().expect("Expected Array");
+    let groups = result.to_array_arc().expect("Expected Array");
     assert_eq!(groups.len(), 2);
     // Groups sorted by key: AAPL, GOOG
     let g0 = to_obj_map(&groups[0].clone(), &vm);
@@ -310,7 +310,7 @@ fn test_group_by_empty() {
     ];
     handle_group_by(&mut vm, to_nb_args(args), None).unwrap();
     let result = vm.pop().unwrap();
-    let groups = result.as_array().expect("Expected Array");
+    let groups = result.to_array_arc().expect("Expected Array");
     assert_eq!(groups.len(), 0);
 }
 
@@ -672,7 +672,7 @@ fn test_simulate_event_log_and_seed() {
 
     // Verify event_log exists and has 4 entries (one per row)
     let events = obj["event_log"]
-        .as_array()
+        .to_array_arc()
         .expect("Expected Array for event_log");
     assert_eq!(events.len(), 4);
     // Check first event
@@ -692,7 +692,7 @@ fn test_simulate_event_log_and_seed() {
 
     // Verify results also collected
     let results = obj["results"]
-        .as_array()
+        .to_array_arc()
         .expect("Expected Array for results");
     assert_eq!(results.len(), 4);
     assert_eq!(
@@ -735,7 +735,7 @@ fn test_rows_returns_array_of_row_views() {
     let args = vec![ValueWord::from_datatable(dt.clone())];
     handle_rows(&mut vm, to_nb_args(args), None).unwrap();
     let result = vm.pop().unwrap();
-    let arr = result.as_array().expect("Expected array");
+    let arr = result.to_array_arc().expect("Expected array");
     assert_eq!(arr.len(), 4);
     // Each element should be a RowView
     for (i, row) in arr.iter().enumerate() {
@@ -756,7 +756,7 @@ fn test_rows_empty_table() {
     let args = vec![ValueWord::from_datatable(dt)];
     handle_rows(&mut vm, to_nb_args(args), None).unwrap();
     let result = vm.pop().unwrap();
-    let arr = result.as_array().expect("Expected array");
+    let arr = result.to_array_arc().expect("Expected array");
     assert_eq!(arr.len(), 0);
 }
 
@@ -768,7 +768,7 @@ fn test_rows_typed_table_preserves_schema_id() {
     let args = vec![ValueWord::from_typed_table(schema_id, dt.clone())];
     handle_rows(&mut vm, to_nb_args(args), None).unwrap();
     let result = vm.pop().unwrap();
-    let arr = result.as_array().expect("Expected array");
+    let arr = result.to_array_arc().expect("Expected array");
     assert_eq!(arr.len(), 4);
     for row in arr.iter() {
         let (sid, _, _) = row.as_row_view().expect("Expected RowView");
@@ -787,7 +787,7 @@ fn test_columns_ref_returns_array_of_column_refs() {
     let args = vec![ValueWord::from_datatable(dt.clone())];
     handle_columns_ref(&mut vm, to_nb_args(args), None).unwrap();
     let result = vm.pop().unwrap();
-    let arr = result.as_array().expect("Expected array");
+    let arr = result.to_array_arc().expect("Expected array");
     assert_eq!(arr.len(), 3); // price, volume, symbol
     for (i, col) in arr.iter().enumerate() {
         let (schema_id, table, col_id) = col.as_column_ref().expect("Expected ColumnRef");
@@ -807,7 +807,7 @@ fn test_columns_ref_empty_table() {
     let args = vec![ValueWord::from_datatable(dt)];
     handle_columns_ref(&mut vm, to_nb_args(args), None).unwrap();
     let result = vm.pop().unwrap();
-    let arr = result.as_array().expect("Expected array");
+    let arr = result.to_array_arc().expect("Expected array");
     assert_eq!(arr.len(), 1); // "x" column still exists even with 0 rows
 }
 
@@ -819,7 +819,7 @@ fn test_columns_ref_typed_table_preserves_schema_id() {
     let args = vec![ValueWord::from_typed_table(schema_id, dt.clone())];
     handle_columns_ref(&mut vm, to_nb_args(args), None).unwrap();
     let result = vm.pop().unwrap();
-    let arr = result.as_array().expect("Expected array");
+    let arr = result.to_array_arc().expect("Expected array");
     assert_eq!(arr.len(), 3);
     for col in arr.iter() {
         let (sid, _, _) = col.as_column_ref().expect("Expected ColumnRef");

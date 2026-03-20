@@ -261,7 +261,7 @@ fn test_arrays() {
 
     let result = execute_bytecode(instructions, constants).unwrap();
 
-    let arr = result.as_array().expect("Expected array");
+    let arr = result.to_array_arc().expect("Expected array");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].clone().to_number().unwrap(), 1.0);
     assert_eq!(arr[1].clone().to_number().unwrap(), 2.0);

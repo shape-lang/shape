@@ -425,6 +425,15 @@ pub(crate) fn nb_to_slot(nb: &shape_value::ValueWord) -> (shape_value::slot::Val
 
     match nb.tag() {
         NanTag::Heap => {
+            // Handle unified heap values (bit-47): materialize to HeapValue.
+            if shape_value::tags::is_unified_heap(nb.raw_bits()) {
+                if let Some(view) = nb.as_any_array() {
+                    let hv = shape_value::heap_value::HeapValue::Array(view.to_generic());
+                    return (ValueSlot::from_heap(hv), true);
+                }
+                // For other unified types, store raw bits.
+                return (ValueSlot::from_raw(nb.raw_bits()), false);
+            }
             let hv = nb.as_heap_ref().unwrap().clone();
             (ValueSlot::from_heap(hv), true)
         }

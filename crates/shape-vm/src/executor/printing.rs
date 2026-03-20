@@ -116,6 +116,21 @@ impl<'a> ValueFormatter<'a> {
             NanTag::Heap => {}
         }
 
+        // Handle unified arrays (bit-47 tagged) before HeapValue dispatch.
+        if shape_value::tags::is_unified_heap(value.raw_bits()) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(value.raw_bits()) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits(value.raw_bits())
+                };
+                let elems: Vec<ValueWord> = (0..arr.len())
+                    .map(|i| unsafe { ValueWord::clone_from_bits(*arr.get(i).unwrap()) })
+                    .collect();
+                return self.format_nanboxed_array(&elems, depth);
+            }
+            return format!("<unified:{}>", kind);
+        }
+
         // Heap path: dispatch on HeapValue variant
         match value.as_heap_ref() {
             Some(HeapValue::String(s)) => s.as_ref().clone(),

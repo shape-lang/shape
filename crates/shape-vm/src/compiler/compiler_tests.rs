@@ -2637,7 +2637,7 @@ fn test_push_inplace_in_function() {
         "#,
         "build",
     );
-    let arr = result.as_array().unwrap();
+    let arr = result.to_array_arc().unwrap();
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].to_number().unwrap(), 10.0);
 }

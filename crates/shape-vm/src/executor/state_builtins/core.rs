@@ -567,9 +567,20 @@ pub(crate) fn state_diff(args: &[ValueWord], ctx: &ModuleContext) -> Result<Valu
         let schema_id = schema.id as u64;
         // Delta has two fields: changed (slot 0) and removed (slot 1)
         // Both are complex heap types (HashMap and Array)
+        // Convert unified arrays to HeapValue for slot storage.
+        let changed_hv = if let Some(view) = changed_map.as_any_array() {
+            HeapValue::Array(view.to_generic())
+        } else {
+            changed_map.as_heap_ref().unwrap().clone()
+        };
+        let removed_hv = if let Some(view) = removed.as_any_array() {
+            HeapValue::Array(view.to_generic())
+        } else {
+            removed.as_heap_ref().unwrap().clone()
+        };
         let slots = vec![
-            ValueSlot::from_heap(changed_map.as_heap_ref().unwrap().clone()),
-            ValueSlot::from_heap(removed.as_heap_ref().unwrap().clone()),
+            ValueSlot::from_heap(changed_hv),
+            ValueSlot::from_heap(removed_hv),
         ];
         let heap_mask: u64 = 0b11; // both slots are heap pointers
 

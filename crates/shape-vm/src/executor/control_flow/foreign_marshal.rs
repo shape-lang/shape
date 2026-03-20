@@ -262,9 +262,12 @@ fn marshal_typed_object(
                     .map(|v| untyped_msgpack_to_nanboxed(v))
                     .unwrap_or_else(|| ValueWord::from_array(Arc::new(Vec::new())));
                 // Extract the inner array or wrap
-                let heap_val = match arr_nb.as_heap_ref() {
-                    Some(hv) => hv.clone(),
-                    None => HeapValue::Array(Arc::new(Vec::new())),
+                let heap_val = if let Some(view) = arr_nb.as_any_array() {
+                    HeapValue::Array(view.to_generic())
+                } else if let Some(hv) = arr_nb.as_heap_ref() {
+                    hv.clone()
+                } else {
+                    HeapValue::Array(Arc::new(Vec::new()))
                 };
                 slots.push(ValueSlot::from_heap(heap_val));
                 heap_mask |= 1u64 << (slots.len() - 1);
@@ -332,10 +335,22 @@ fn nanboxed_to_msgpack_value(nb: &ValueWord, schemas: &TypeSchemaRegistry) -> rm
         }
         NanTag::Bool => rmpv::Value::Boolean(nb.as_bool().unwrap_or(false)),
         NanTag::None => rmpv::Value::Nil,
-        NanTag::Heap => nb
-            .as_heap_ref()
-            .map(|hv| heap_to_msgpack_value(hv, schemas))
-            .unwrap_or(rmpv::Value::Nil),
+        NanTag::Heap => {
+            // Handle unified arrays.
+            if let Some(view) = nb.as_any_array() {
+                return rmpv::Value::Array(
+                    (0..view.len())
+                        .map(|i| {
+                            let elem = view.get_nb(i).unwrap_or_else(ValueWord::none);
+                            nanboxed_to_msgpack_value(&elem, schemas)
+                        })
+                        .collect(),
+                );
+            }
+            nb.as_heap_ref()
+                .map(|hv| heap_to_msgpack_value(hv, schemas))
+                .unwrap_or(rmpv::Value::Nil)
+        }
         _ => rmpv::Value::Nil,
     }
 }
@@ -589,14 +604,10 @@ mod tests {
         ]);
         let bytes = rmp_serde::to_vec(&val).unwrap();
         let result = unmarshal_result(&bytes, "Result<Vec<int>>", None, &schemas).unwrap();
-        let arr = result.as_heap_ref().unwrap();
-        match arr {
-            HeapValue::Array(items) => {
-                assert_eq!(items.len(), 3);
-                assert_eq!(items[0].as_i64(), Some(1));
-            }
-            _ => panic!("expected array"),
-        }
+        let view = result.as_any_array().expect("Expected array view");
+        let items = view.to_generic();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].as_i64(), Some(1));
     }
 
     #[test]

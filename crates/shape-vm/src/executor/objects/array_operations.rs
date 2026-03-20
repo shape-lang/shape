@@ -12,6 +12,21 @@ impl VirtualMachine {
         let value_nb = self.pop_vw()?;
         let mut array_nb = self.pop_vw()?;
 
+        // Handle unified arrays (bit-47 tagged) for push.
+        if shape_value::tags::is_unified_heap(array_nb.raw_bits()) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(array_nb.raw_bits()) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits_mut(array_nb.raw_bits())
+                };
+                let new_bits = value_nb.raw_bits();
+                std::mem::forget(value_nb);
+                arr.push(new_bits);
+                self.push_vw(array_nb)?;
+                return Ok(());
+            }
+        }
+
         // Try mutable access for any array variant
         if let Some(mut view) = array_nb.as_any_array_mut() {
             match &mut view {
@@ -148,6 +163,20 @@ impl VirtualMachine {
         let is_tagged = (bits & TAG_BASE) == TAG_BASE;
         let tag = (bits >> 48) & 0x7;
 
+        // Handle unified arrays (bit-47 tagged).
+        if is_tagged && tag == 0 && shape_value::tags::is_unified_heap(bits) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(bits) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits_mut(bits)
+                };
+                let new_bits = value.raw_bits();
+                std::mem::forget(value);
+                arr.push(new_bits);
+                return Ok(());
+            }
+        }
+
         if is_tagged && tag == 0 {
             let ptr = (bits & PAYLOAD_MASK) as *mut HeapValue;
             if !ptr.is_null() {
@@ -241,6 +270,37 @@ impl VirtualMachine {
             expected: "number",
             got: "unknown",
         })? as i32;
+
+        // Handle unified arrays (bit-47 tagged) for slice access.
+        if shape_value::tags::is_unified_heap(array_nb.raw_bits()) {
+            let kind = unsafe { shape_value::tags::unified_heap_kind(array_nb.raw_bits()) };
+            if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe {
+                    shape_value::unified_array::UnifiedArray::from_heap_bits(array_nb.raw_bits())
+                };
+                let len = arr.len() as i32;
+                let actual_start = if start < 0 {
+                    (len + start).max(0) as usize
+                } else {
+                    start as usize
+                };
+                let actual_end = if end < 0 {
+                    (len + end).max(0) as usize
+                } else {
+                    (end as usize).min(arr.len())
+                };
+                let slice: Vec<ValueWord> = if actual_start < actual_end && actual_start < arr.len()
+                {
+                    (actual_start..actual_end)
+                        .map(|i| unsafe { ValueWord::clone_from_bits(*arr.get(i).unwrap()) })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
+                return Ok(());
+            }
+        }
 
         use shape_value::heap_value::HeapValue;
         match array_nb.as_heap_ref() {

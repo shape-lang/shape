@@ -63,6 +63,17 @@ pub fn iter_source_element_at(source: &ValueWord, position: usize) -> Option<Val
 }
 
 fn source_len(source: &ValueWord) -> Option<usize> {
+    // Handle unified arrays.
+    if shape_value::tags::is_unified_heap(source.raw_bits()) {
+        let kind = unsafe { shape_value::tags::unified_heap_kind(source.raw_bits()) };
+        if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            let arr = unsafe {
+                shape_value::unified_array::UnifiedArray::from_heap_bits(source.raw_bits())
+            };
+            return Some(arr.len());
+        }
+        return std::option::Option::None;
+    }
     match source.as_heap_ref()? {
         HeapValue::Array(arr) => Some(arr.len()),
         HeapValue::String(s) => Some(s.chars().count()),
@@ -89,6 +100,21 @@ fn source_len(source: &ValueWord) -> Option<usize> {
 
 /// Fetch element at `position` from the source collection.
 fn source_element_at(source: &ValueWord, position: usize) -> Option<ValueWord> {
+    // Handle unified arrays.
+    if shape_value::tags::is_unified_heap(source.raw_bits()) {
+        let kind = unsafe { shape_value::tags::unified_heap_kind(source.raw_bits()) };
+        if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+            let arr = unsafe {
+                shape_value::unified_array::UnifiedArray::from_heap_bits(source.raw_bits())
+            };
+            if position < arr.len() {
+                let elem_bits = *arr.get(position).unwrap();
+                return Some(unsafe { ValueWord::clone_from_bits(elem_bits) });
+            }
+            return std::option::Option::None;
+        }
+        return std::option::Option::None;
+    }
     match source.as_heap_ref()? {
         HeapValue::Array(arr) => arr.get(position).cloned(),
         HeapValue::String(s) => s
@@ -511,8 +537,9 @@ pub fn handle_chain(
     let elems2 = if let Some(it2) = args[1].as_iterator() {
         let mut state2 = it2.clone();
         collect_all(vm, &mut state2, &mut ctx)?
-    } else if let Some(HeapValue::Array(arr)) = args[1].as_heap_ref() {
-        arr.to_vec()
+    } else if let Some(view) = args[1].as_any_array() {
+        let generic = view.to_generic();
+        (*generic).clone()
     } else {
         return Err(VMError::RuntimeError(
             "Iterator.chain() argument must be an iterator or array".to_string(),
