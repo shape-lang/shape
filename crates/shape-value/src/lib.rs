@@ -37,6 +37,9 @@ pub mod shape_graph;
 pub mod slot;
 pub mod tags;
 pub mod typed_buffer;
+pub mod unified_array;
+pub mod unified_string;
+pub mod unified_wrapper;
 pub mod value;
 
 pub use aligned_vec::AlignedVec;
