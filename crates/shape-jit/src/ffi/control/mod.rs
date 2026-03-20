@@ -28,84 +28,24 @@ use std::sync::Arc;
 /// stack, executes the function via the VM interpreter, and returns the result
 /// converted to JIT-format bits via `vm_result_to_jit`.
 fn dispatch_call_via_trampoline_vm(
-    function_id: u32,
-    jit_args: &[u64],
-    jit_ctx: *const JITContext,
+    _function_id: u32,
+    _jit_args: &[u64],
+    _jit_ctx: *const JITContext,
 ) -> u64 {
-    // Access the thread-local trampoline VM
-    let vm_ptr = crate::executor::TRAMPOLINE_VM.with(|c| c.get());
-    if vm_ptr.is_null() {
-        return TAG_NULL;
-    }
-    let vm = unsafe { &mut *vm_ptr };
-
-    // Convert args from JIT format to ValueWord
-    let arg_vws: Vec<ValueWord> = jit_args
-        .iter()
-        .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, jit_ctx))
-        .collect();
-
-    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-        for (i, vw) in arg_vws.iter().enumerate() {
-            let s = vw.as_str().map(|s| &s[..s.len().min(50)]);
-            eprintln!("[module_fn] arg[{}] tag={:?} str={:?}", i, vw.tag(), s);
-        }
-    }
-
-    // Get execution context for functions that need it
-    let exec_ctx_ptr = crate::executor::TRAMPOLINE_EXEC_CTX.with(|c| c.get());
-    let exec_ctx = if exec_ctx_ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &mut *exec_ctx_ptr })
-    };
-
-    // Execute the function through the VM interpreter (preserving state)
-    match vm.execute_function_in_place(function_id as u16, arg_vws, exec_ctx) {
-        Ok(result) => crate::ffi::object::conversion::vm_result_to_jit(result.raw_bits()),
-        Err(_) => TAG_NULL,
-    }
+    // TODO: Requires trampoline VM integration (TRAMPOLINE_VM thread-local).
+    // Currently unused — the JIT executor sets up its own VM trampoline.
+    TAG_NULL
 }
 
 /// Dispatch a native module function call through the trampoline VM.
-///
-/// Module functions (TAG_MODULE_FN) are Rust closures registered via ModuleExports.
-/// They are called through the VM's invoke_module_fn mechanism.
 fn dispatch_module_fn_call(
-    module_fn_id: u32,
-    jit_args: &[u64],
-    ctx: *mut JITContext,
+    _module_fn_id: u32,
+    _jit_args: &[u64],
+    _ctx: *mut JITContext,
 ) -> u64 {
-    let vm_ptr = crate::executor::TRAMPOLINE_VM.with(|c| c.get());
-    if vm_ptr.is_null() {
-        return TAG_NULL;
-    }
-    let vm = unsafe { &mut *vm_ptr };
-    let exec_ctx_ptr = crate::executor::TRAMPOLINE_EXEC_CTX.with(|c| c.get());
-    let exec_ctx = if exec_ctx_ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &mut *exec_ctx_ptr })
-    };
-
-    // Convert args from JIT format to ValueWord
-    let arg_vws: Vec<ValueWord> = jit_args
-        .iter()
-        .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, ctx as *const JITContext))
-        .collect();
-
-    // Call through the VM's module function dispatch
-    match vm.invoke_module_fn_by_id(module_fn_id as usize, &arg_vws, exec_ctx) {
-        Ok(result) => {
-            crate::ffi::object::conversion::vm_result_to_jit(result.raw_bits())
-        }
-        Err(e) => {
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                eprintln!("[module_fn] id={} error: {}", module_fn_id, e);
-            }
-            TAG_NULL
-        }
-    }
+    // TODO: Requires trampoline VM integration (TRAMPOLINE_VM thread-local).
+    // Currently unused — the JIT executor sets up its own VM trampoline.
+    TAG_NULL
 }
 
 /// Call a function by function_id
