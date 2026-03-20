@@ -232,7 +232,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         Some(HK_MATRIX) => {
             // Reconstruct Matrix with original Arc<MatrixData>.
             let jm = unsafe {
-                jit_unbox::<crate::jit_matrix::JitMatrix>(bits)
+                crate::jit_matrix::JitMatrix::from_heap_bits(bits)
             };
             let mat_arc = jm.to_arc();
             ValueWord::from_matrix(mat_arc)
@@ -580,8 +580,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
             }
             Some(HeapValue::Matrix(mat_arc)) => {
                 // Bridge Matrix → JitMatrix with direct f64 data pointer.
-                let jm = crate::jit_matrix::JitMatrix::from_arc(mat_arc);
-                jit_box(HK_MATRIX, jm)
+                crate::jit_matrix::JitMatrix::from_arc(mat_arc).heap_box()
             }
             // Width-specific typed arrays
             Some(HeapValue::BoolArray(buf)) => typed_array_to_jit(&buf.data, HK_BOOL_ARRAY, ArrayElementKind::Bool),
