@@ -127,6 +127,21 @@ pub fn nb_to_external(nb: &ValueWord, schemas: &dyn SchemaLookup) -> ExternalVal
         }
         tags::TAG_REF => ExternalValue::Opaque("<ref>".to_string()),
         tags::TAG_HEAP => {
+            // Handle unified arrays (bit-47 set)
+            if tags::is_unified_heap(bits) {
+                let kind = unsafe { tags::unified_heap_kind(bits) };
+                if kind == tags::HEAP_KIND_ARRAY as u16 {
+                    let arr = unsafe { crate::unified_array::UnifiedArray::from_heap_bits(bits) };
+                    let items: Vec<ExternalValue> = (0..arr.len())
+                        .map(|i| {
+                            let elem = unsafe { ValueWord::clone_from_bits(*arr.get(i).unwrap()) };
+                            nb_to_external(&elem, schemas)
+                        })
+                        .collect();
+                    return ExternalValue::Array(items);
+                }
+                return ExternalValue::Opaque(format!("<unified:{}>", kind));
+            }
             if let Some(hv) = nb.as_heap_ref() {
                 heap_to_external(hv, schemas)
             } else {

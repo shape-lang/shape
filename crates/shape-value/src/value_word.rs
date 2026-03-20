@@ -645,10 +645,21 @@ impl ValueWord {
         }
     }
 
-    /// Create a ValueWord from a VMArray directly (no intermediate conversion).
+    /// Create a ValueWord from a VMArray using UnifiedArray with bit-47 tagging.
+    ///
+    /// This bypasses HeapValue::Array entirely, creating a UnifiedArray
+    /// that can be passed to the JIT without conversion.
     #[inline]
     pub fn from_array(a: crate::value::VMArray) -> Self {
-        Self::heap_box(HeapValue::Array(a))
+        use crate::unified_array::{UnifiedArray, UAF_OWNS_ELEMENTS};
+        let mut arr = UnifiedArray::with_capacity(a.len());
+        arr.flags = UAF_OWNS_ELEMENTS;
+        for elem in a.iter() {
+            let cloned = elem.clone();
+            arr.push(cloned.raw_bits());
+            std::mem::forget(cloned);
+        }
+        Self(arr.heap_box_unified())
     }
 
     /// Create a ValueWord from Decimal directly (no intermediate conversion).
@@ -3507,8 +3518,11 @@ mod tests {
         ]);
         let v = ValueWord::from_array(arr.clone());
         assert!(v.is_heap());
-        let extracted = v.as_array().expect("should be array");
-        assert_eq!(extracted.len(), 3);
+        let view = v.as_any_array().expect("should be array");
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.get_nb(0), Some(ValueWord::from_i64(1)));
+        assert_eq!(view.get_nb(1), Some(ValueWord::from_i64(2)));
+        assert_eq!(view.get_nb(2), Some(ValueWord::from_i64(3)));
     }
 
     #[test]
