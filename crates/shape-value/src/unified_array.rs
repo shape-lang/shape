@@ -299,44 +299,66 @@ impl UnifiedArray {
         self
     }
 
-    // ── NaN-boxing (JIT format, NO bit 47) ──────────────────────────────
+    // ── NaN-boxing ────────────────────────────────────────────────────────
 
-    /// Box this array into a NaN-boxed TAG_HEAP u64 (JIT format).
+    /// Extract the raw pointer from NaN-boxed TAG_HEAP bits.
     ///
-    /// Uses standard `TAG_BASE | ptr` encoding without bit 47.
+    /// Handles both VM format (bit-47 set, uses `unified_heap_ptr`) and
+    /// JIT format (no bit-47, uses `PAYLOAD_MASK`).
+    #[inline]
+    fn extract_ptr(bits: u64) -> *const Self {
+        if tags::is_unified_heap(bits) {
+            tags::unified_heap_ptr(bits) as *const Self
+        } else {
+            (bits & tags::PAYLOAD_MASK) as *const Self
+        }
+    }
+
+    /// Box this array into a NaN-boxed TAG_HEAP u64 (JIT format, NO bit 47).
+    ///
+    /// Used by JIT-created arrays. The JIT manages these independently.
     #[inline]
     pub fn heap_box(self) -> u64 {
         let ptr = Box::into_raw(Box::new(self));
         tags::TAG_BASE | ((ptr as u64) & tags::PAYLOAD_MASK)
     }
 
-    /// Get a reference from NaN-boxed TAG_HEAP bits (JIT format).
+    /// Box this array into a NaN-boxed TAG_HEAP u64 (VM format, bit 47 set).
+    ///
+    /// Used by `ValueWord::from_array()`. ValueWord Clone/Drop manage the refcount.
+    #[inline]
+    pub fn heap_box_unified(self) -> u64 {
+        let ptr = Box::into_raw(Box::new(self));
+        tags::make_unified_heap(ptr as *const u8)
+    }
+
+    /// Get a reference from NaN-boxed TAG_HEAP bits (any format).
     ///
     /// # Safety
     /// `bits` must be a valid TAG_HEAP value pointing to a live UnifiedArray.
     #[inline]
     pub unsafe fn from_heap_bits(bits: u64) -> &'static Self {
-        let ptr = (bits & tags::PAYLOAD_MASK) as *const Self;
+        let ptr = Self::extract_ptr(bits);
         unsafe { &*ptr }
     }
 
-    /// Get a mutable reference from NaN-boxed TAG_HEAP bits (JIT format).
+    /// Get a mutable reference from NaN-boxed TAG_HEAP bits (any format).
     ///
     /// # Safety
     /// `bits` must be a valid TAG_HEAP value pointing to a live UnifiedArray.
     /// Caller must ensure exclusive access.
     #[inline]
     pub unsafe fn from_heap_bits_mut(bits: u64) -> &'static mut Self {
-        let ptr = (bits & tags::PAYLOAD_MASK) as *mut Self;
+        let ptr = Self::extract_ptr(bits) as *mut Self;
         unsafe { &mut *ptr }
     }
 
-    /// Drop a heap-boxed UnifiedArray from its NaN-boxed bits (JIT format).
+    /// Drop a heap-boxed UnifiedArray from its NaN-boxed bits (any format).
     ///
     /// # Safety
     /// Must only be called once per allocation.
     pub unsafe fn heap_drop(bits: u64) {
-        let ptr = (bits & tags::PAYLOAD_MASK) as *mut Self;
+        let ptr = Self::extract_ptr(bits) as *mut Self;
         unsafe { drop(Box::from_raw(ptr)) };
     }
 
@@ -830,6 +852,46 @@ impl std::ops::IndexMut<usize> for UnifiedArray {
 
 impl Drop for UnifiedArray {
     fn drop(&mut self) {
+        // Drop owned elements' refcounts before freeing the buffer.
+        if self.flags & UAF_OWNS_ELEMENTS != 0 && !self.data.is_null() {
+            for i in 0..self.len as usize {
+                let elem_bits = unsafe { *self.data.add(i) };
+                if tags::is_tagged(elem_bits) && tags::get_tag(elem_bits) == tags::TAG_HEAP {
+                    if tags::is_unified_heap(elem_bits) {
+                        let ptr = tags::unified_heap_ptr(elem_bits);
+                        if !ptr.is_null() {
+                            let rc = unsafe {
+                                (ptr.add(4)) as *const std::sync::atomic::AtomicU32
+                            };
+                            let prev = unsafe {
+                                (*rc).fetch_sub(1, std::sync::atomic::Ordering::Release)
+                            };
+                            if prev == 1 {
+                                std::sync::atomic::fence(
+                                    std::sync::atomic::Ordering::Acquire,
+                                );
+                                let kind = unsafe { *(ptr as *const u16) };
+                                if kind == tags::HEAP_KIND_ARRAY as u16 {
+                                    unsafe { UnifiedArray::heap_drop(elem_bits) };
+                                } else if kind == tags::HEAP_KIND_MATRIX as u16 {
+                                    unsafe {
+                                        crate::unified_matrix::UnifiedMatrix::heap_drop(
+                                            elem_bits,
+                                        )
+                                    };
+                                }
+                            }
+                        }
+                    } else {
+                        let ptr =
+                            tags::get_payload(elem_bits) as *const crate::heap_value::HeapValue;
+                        if !ptr.is_null() {
+                            unsafe { std::sync::Arc::decrement_strong_count(ptr) };
+                        }
+                    }
+                }
+            }
+        }
         // Free the element data buffer.
         if !self.data.is_null() && self.cap > 0 {
             Self::dealloc_u64_buffer(self.data, self.cap as usize);
