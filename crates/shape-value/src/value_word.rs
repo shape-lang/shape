@@ -729,25 +729,19 @@ impl ValueWord {
     /// Create a ValueWord Some directly.
     #[inline]
     pub fn from_some(inner: ValueWord) -> Self {
-        let ib = inner.raw_bits();
-        std::mem::forget(inner);
-        Self(crate::unified_wrapper::UnifiedWrapper::new_some(ib).heap_box())
+        Self::heap_box(HeapValue::Some(Box::new(inner)))
     }
 
     /// Create a ValueWord Ok directly.
     #[inline]
     pub fn from_ok(inner: ValueWord) -> Self {
-        let ib = inner.raw_bits();
-        std::mem::forget(inner);
-        Self(crate::unified_wrapper::UnifiedWrapper::new_ok(ib).heap_box())
+        Self::heap_box(HeapValue::Ok(Box::new(inner)))
     }
 
     /// Create a ValueWord Err directly.
     #[inline]
     pub fn from_err(inner: ValueWord) -> Self {
-        let ib = inner.raw_bits();
-        std::mem::forget(inner);
-        Self(crate::unified_wrapper::UnifiedWrapper::new_err(ib).heap_box())
+        Self::heap_box(HeapValue::Err(Box::new(inner)))
     }
 
     // ===== HashMap constructors =====
@@ -1731,14 +1725,6 @@ impl ValueWord {
     /// Extract the inner value from a Some variant.
     #[inline]
     pub fn as_some_inner(&self) -> Option<&ValueWord> {
-        if crate::tags::is_unified_heap(self.0) {
-            let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
-            if kind == crate::tags::HEAP_KIND_SOME as u16 {
-                let w = unsafe { crate::unified_wrapper::UnifiedWrapper::from_heap_bits(self.0) };
-                return Some(unsafe { &*(&w.inner as *const u64 as *const ValueWord) });
-            }
-            return std::option::Option::None;
-        }
         match self.as_heap_ref()? {
             HeapValue::Some(inner) => Some(inner),
             _ => std::option::Option::None,
@@ -1748,14 +1734,6 @@ impl ValueWord {
     /// Extract the inner value from an Ok variant.
     #[inline]
     pub fn as_ok_inner(&self) -> Option<&ValueWord> {
-        if crate::tags::is_unified_heap(self.0) {
-            let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
-            if kind == crate::tags::HEAP_KIND_OK as u16 {
-                let w = unsafe { crate::unified_wrapper::UnifiedWrapper::from_heap_bits(self.0) };
-                return Some(unsafe { &*(&w.inner as *const u64 as *const ValueWord) });
-            }
-            return std::option::Option::None;
-        }
         match self.as_heap_ref()? {
             HeapValue::Ok(inner) => Some(inner),
             _ => std::option::Option::None,
@@ -1765,14 +1743,6 @@ impl ValueWord {
     /// Extract the inner value from an Err variant.
     #[inline]
     pub fn as_err_inner(&self) -> Option<&ValueWord> {
-        if crate::tags::is_unified_heap(self.0) {
-            let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
-            if kind == crate::tags::HEAP_KIND_ERR as u16 {
-                let w = unsafe { crate::unified_wrapper::UnifiedWrapper::from_heap_bits(self.0) };
-                return Some(unsafe { &*(&w.inner as *const u64 as *const ValueWord) });
-            }
-            return std::option::Option::None;
-        }
         match self.as_heap_ref()? {
             HeapValue::Err(inner) => Some(inner),
             _ => std::option::Option::None,
