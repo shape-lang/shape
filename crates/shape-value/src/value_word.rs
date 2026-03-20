@@ -2710,12 +2710,18 @@ impl Clone for ValueWord {
     #[inline]
     fn clone(&self) -> Self {
         if is_tagged(self.0) && get_tag(self.0) == TAG_HEAP {
-            // Bump the Arc refcount — no allocation, no deep clone.
-            let ptr = get_payload(self.0) as *const HeapValue;
-            unsafe { Arc::increment_strong_count(ptr) };
+            if crate::tags::is_unified_heap(self.0) {
+                let ptr = crate::tags::unified_heap_ptr(self.0);
+                unsafe {
+                    let rc = (ptr.add(4)) as *const std::sync::atomic::AtomicU32;
+                    (*rc).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                let ptr = get_payload(self.0) as *const HeapValue;
+                unsafe { Arc::increment_strong_count(ptr) };
+            }
             Self(self.0)
         } else {
-            // Non-heap values: just copy the bits.
             Self(self.0)
         }
     }
@@ -2737,11 +2743,33 @@ impl Clone for ValueWord {
 impl Drop for ValueWord {
     fn drop(&mut self) {
         if is_tagged(self.0) && get_tag(self.0) == TAG_HEAP {
-            let ptr = get_payload(self.0) as *const HeapValue;
-            if !ptr.is_null() {
-                unsafe {
-                    // Decrement the Arc refcount; drops HeapValue when it reaches zero.
-                    Arc::decrement_strong_count(ptr);
+            if crate::tags::is_unified_heap(self.0) {
+                let ptr = crate::tags::unified_heap_ptr(self.0);
+                if !ptr.is_null() {
+                    unsafe {
+                        let rc = (ptr.add(4)) as *const std::sync::atomic::AtomicU32;
+                        let prev = (*rc).fetch_sub(1, std::sync::atomic::Ordering::Release);
+                        if prev == 1 {
+                            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                            let kind = *(ptr as *const u16);
+                            if kind == crate::tags::HEAP_KIND_ARRAY as u16 {
+                                crate::unified_array::UnifiedArray::heap_drop(self.0);
+                            } else if kind == crate::tags::HEAP_KIND_MATRIX as u16 {
+                                crate::unified_matrix::UnifiedMatrix::heap_drop(self.0);
+                            } else if kind == crate::tags::HEAP_KIND_OK as u16 || kind == crate::tags::HEAP_KIND_ERR as u16 || kind == crate::tags::HEAP_KIND_SOME as u16 {
+                                crate::unified_wrapper::UnifiedWrapper::heap_drop(self.0);
+                            } else if kind == crate::tags::HEAP_KIND_STRING as u16 {
+                                crate::unified_string::UnifiedString::heap_drop(self.0);
+                            }
+                        }
+                    }
+                }
+            } else {
+                let ptr = get_payload(self.0) as *const HeapValue;
+                if !ptr.is_null() {
+                    unsafe {
+                        Arc::decrement_strong_count(ptr);
+                    }
                 }
             }
         }
