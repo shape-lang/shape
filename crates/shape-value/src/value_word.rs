@@ -155,6 +155,8 @@ pub enum ArrayView<'a> {
     U32(&'a Arc<crate::typed_buffer::TypedBuffer<u32>>),
     U64(&'a Arc<crate::typed_buffer::TypedBuffer<u64>>),
     F32(&'a Arc<crate::typed_buffer::TypedBuffer<f32>>),
+    /// Slice view over a UnifiedArray's NaN-boxed element buffer.
+    GenericSlice(&'a [ValueWord]),
 }
 
 impl<'a> ArrayView<'a> {
@@ -173,6 +175,7 @@ impl<'a> ArrayView<'a> {
             ArrayView::U32(a) => a.len(),
             ArrayView::U64(a) => a.len(),
             ArrayView::F32(a) => a.len(),
+            ArrayView::GenericSlice(s) => s.len(),
         }
     }
 
@@ -203,6 +206,7 @@ impl<'a> ArrayView<'a> {
                 }
             }),
             ArrayView::F32(a) => a.get(idx).map(|&v| ValueWord::from_f64(v as f64)),
+            ArrayView::GenericSlice(s) => s.get(idx).cloned(),
         }
     }
 
@@ -266,6 +270,7 @@ impl<'a> ArrayView<'a> {
             ArrayView::F32(a) => {
                 Arc::new(a.iter().map(|&v| ValueWord::from_f64(v as f64)).collect())
             }
+            ArrayView::GenericSlice(s) => Arc::new(s.to_vec()),
         }
     }
 
@@ -1151,8 +1156,16 @@ impl ValueWord {
     #[cfg(not(feature = "gc"))]
     pub unsafe fn clone_from_bits(bits: u64) -> Self {
         if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
-            let ptr = get_payload(bits) as *const HeapValue;
-            unsafe { Arc::increment_strong_count(ptr) };
+            if crate::tags::is_unified_heap(bits) {
+                let ptr = crate::tags::unified_heap_ptr(bits);
+                unsafe {
+                    let rc = (ptr.add(4)) as *const std::sync::atomic::AtomicU32;
+                    (*rc).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                let ptr = get_payload(bits) as *const HeapValue;
+                unsafe { Arc::increment_strong_count(ptr) };
+            }
         }
         Self(bits)
     }
@@ -1417,6 +1430,9 @@ impl ValueWord {
     #[inline]
     pub fn as_heap_ref(&self) -> Option<&HeapValue> {
         if is_tagged(self.0) && get_tag(self.0) == TAG_HEAP {
+            if crate::tags::is_unified_heap(self.0) {
+                return None;
+            }
             let ptr = get_payload(self.0) as *const HeapValue;
             Some(unsafe { &*ptr })
         } else {
@@ -1433,6 +1449,9 @@ impl ValueWord {
     #[cfg(not(feature = "gc"))]
     pub fn as_heap_mut(&mut self) -> Option<&mut HeapValue> {
         if is_tagged(self.0) && get_tag(self.0) == TAG_HEAP {
+            if crate::tags::is_unified_heap(self.0) {
+                return None;
+            }
             let ptr = get_payload(self.0) as *const HeapValue;
             // Reconstruct the Arc without dropping it (we'll consume it via make_mut).
             let mut arc = unsafe { Arc::from_raw(ptr) };
@@ -1457,6 +1476,9 @@ impl ValueWord {
     #[cfg(feature = "gc")]
     pub fn as_heap_mut(&mut self) -> Option<&mut HeapValue> {
         if is_tagged(self.0) && get_tag(self.0) == TAG_HEAP {
+            if crate::tags::is_unified_heap(self.0) {
+                return None;
+            }
             let ptr = get_payload(self.0) as *mut HeapValue;
             Some(unsafe { &mut *ptr })
         } else {
@@ -1474,6 +1496,14 @@ impl ValueWord {
         }
         let tag = get_tag(self.0);
         if tag == TAG_HEAP {
+            if crate::tags::is_unified_heap(self.0) {
+                let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
+                if kind == crate::tags::HEAP_KIND_ARRAY as u16 {
+                    let arr = unsafe { crate::unified_array::UnifiedArray::from_heap_bits(self.0) };
+                    return arr.len() > 0;
+                }
+                return true;
+            }
             let ptr = get_payload(self.0) as *const HeapValue;
             return unsafe { (*ptr).is_truthy() };
         }
@@ -1521,6 +1551,18 @@ impl ValueWord {
     /// Returns None if this is not a heap value.
     #[inline]
     pub fn heap_kind(&self) -> Option<crate::heap_value::HeapKind> {
+        if crate::tags::is_unified_heap(self.0) {
+            let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
+            return match kind {
+                k if k == crate::tags::HEAP_KIND_ARRAY as u16 => Some(crate::heap_value::HeapKind::Array),
+                k if k == crate::tags::HEAP_KIND_MATRIX as u16 => Some(crate::heap_value::HeapKind::Matrix),
+                k if k == crate::tags::HEAP_KIND_STRING as u16 => Some(crate::heap_value::HeapKind::String),
+                k if k == crate::tags::HEAP_KIND_OK as u16 => Some(crate::heap_value::HeapKind::Ok),
+                k if k == crate::tags::HEAP_KIND_ERR as u16 => Some(crate::heap_value::HeapKind::Err),
+                k if k == crate::tags::HEAP_KIND_SOME as u16 => Some(crate::heap_value::HeapKind::Some),
+                _ => None,
+            };
+        }
         if let Some(hv) = self.as_heap_ref() {
             Some(hv.kind())
         } else {
@@ -1606,9 +1648,21 @@ impl ValueWord {
         }
     }
 
-    /// Get a unified read-only view over any array variant (Generic, Int, Float, Bool, width-specific).
+    /// Get a unified read-only view over any array variant (Generic, Int, Float, Bool, width-specific, UnifiedArray).
     #[inline]
     pub fn as_any_array(&self) -> Option<ArrayView<'_>> {
+        if crate::tags::is_unified_heap(self.0) {
+            let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
+            if kind == crate::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe { crate::unified_array::UnifiedArray::from_heap_bits(self.0) };
+                let slice = arr.as_slice();
+                let vw_slice = unsafe {
+                    std::slice::from_raw_parts(slice.as_ptr() as *const ValueWord, slice.len())
+                };
+                return Some(ArrayView::GenericSlice(vw_slice));
+            }
+            return None;
+        }
         match self.as_heap_ref()? {
             HeapValue::Array(a) => Some(ArrayView::Generic(a)),
             HeapValue::IntArray(a) => Some(ArrayView::Int(a)),
@@ -2433,6 +2487,18 @@ impl ValueWord {
         }
         let tag = get_tag(self.0);
         if tag == TAG_HEAP {
+            if crate::tags::is_unified_heap(self.0) {
+                let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
+                return match kind {
+                    k if k == crate::tags::HEAP_KIND_ARRAY as u16 => "array",
+                    k if k == crate::tags::HEAP_KIND_MATRIX as u16 => "matrix",
+                    k if k == crate::tags::HEAP_KIND_STRING as u16 => "string",
+                    k if k == crate::tags::HEAP_KIND_OK as u16 => "result",
+                    k if k == crate::tags::HEAP_KIND_ERR as u16 => "result",
+                    k if k == crate::tags::HEAP_KIND_SOME as u16 => "option",
+                    _ => "unknown",
+                };
+            }
             let ptr = get_payload(self.0) as *const HeapValue;
             return unsafe { (*ptr).type_name() };
         }
@@ -2495,6 +2561,21 @@ impl ValueWord {
         }
         if self.is_function() || self.is_module_function() {
             return serde_json::json!(format!("<{}>", self.type_name()));
+        }
+        // Handle unified arrays
+        if crate::tags::is_unified_heap(self.0) {
+            let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
+            if kind == crate::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe { crate::unified_array::UnifiedArray::from_heap_bits(self.0) };
+                let values: Vec<serde_json::Value> = (0..arr.len())
+                    .map(|i| {
+                        let elem = unsafe { ValueWord::clone_from_bits(*arr.get(i).unwrap()) };
+                        elem.to_json_value()
+                    })
+                    .collect();
+                return serde_json::json!(values);
+            }
+            return serde_json::json!(format!("<unified:{}>", kind));
         }
         match self.as_heap_ref() {
             Some(HeapValue::String(s)) => serde_json::json!(s.as_str()),
@@ -2661,6 +2742,29 @@ impl PartialEq for ValueWord {
             && is_tagged(other.0)
             && get_tag(other.0) == TAG_HEAP
         {
+            // Handle unified arrays
+            let self_unified = crate::tags::is_unified_heap(self.0);
+            let other_unified = crate::tags::is_unified_heap(other.0);
+            if self_unified || other_unified {
+                // Both need to be arrays to compare
+                if let (Some(a), Some(b)) = (self.as_any_array(), other.as_any_array()) {
+                    if a.len() != b.len() {
+                        return false;
+                    }
+                    for i in 0..a.len() {
+                        match (a.get_nb(i), b.get_nb(i)) {
+                            (Some(va), Some(vb)) => {
+                                if va != vb {
+                                    return false;
+                                }
+                            }
+                            _ => return false,
+                        }
+                    }
+                    return true;
+                }
+                return false;
+            }
             match (self.as_heap_ref(), other.as_heap_ref()) {
                 (Some(a), Some(b)) => a.structural_eq(b),
                 _ => false,
@@ -2781,6 +2885,22 @@ impl std::fmt::Display for ValueWord {
                 RefTarget::Stack(slot) => write!(f, "&slot_{}", slot),
                 RefTarget::ModuleBinding(slot) => write!(f, "&module_{}", slot),
                 RefTarget::Projected(_) => write!(f, "&ref"),
+            }
+        } else if crate::tags::is_unified_heap(self.0) {
+            let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
+            if kind == crate::tags::HEAP_KIND_ARRAY as u16 {
+                let arr = unsafe { crate::unified_array::UnifiedArray::from_heap_bits(self.0) };
+                write!(f, "[")?;
+                for i in 0..arr.len() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    let elem = unsafe { ValueWord::clone_from_bits(*arr.get(i).unwrap()) };
+                    write!(f, "{}", elem)?;
+                }
+                write!(f, "]")
+            } else {
+                write!(f, "<unified:{}>", kind)
             }
         } else if let Some(hv) = self.as_heap_ref() {
             match hv {
@@ -3140,6 +3260,14 @@ impl std::fmt::Debug for ValueWord {
         } else if let Some(target) = self.as_ref_target() {
             write!(f, "ValueWord(Ref({:?}))", target)
         } else if self.is_heap() {
+            if crate::tags::is_unified_heap(self.0) {
+                let kind = unsafe { crate::tags::unified_heap_kind(self.0) };
+                if kind == crate::tags::HEAP_KIND_ARRAY as u16 {
+                    let arr = unsafe { crate::unified_array::UnifiedArray::from_heap_bits(self.0) };
+                    return write!(f, "ValueWord(unified_array: len={})", arr.len());
+                }
+                return write!(f, "ValueWord(unified: kind={})", kind);
+            }
             let ptr = get_payload(self.0) as *const HeapValue;
             let hv = unsafe { &*ptr };
             write!(f, "ValueWord(heap: {:?})", hv)
