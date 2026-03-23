@@ -148,18 +148,6 @@ fn analyze_loop_calls(
         // Check for CallMethod with a pure method name.
         if instr.opcode == OpCode::CallMethod {
             match &instr.operand {
-                Some(Operand::MethodCall { name, arg_count: _ }) => {
-                    let str_idx = name.0 as usize;
-                    if let Some(method_name) = program.strings.get(str_idx) {
-                        if is_pure_method_name(method_name) {
-                            if let Some(call) =
-                                try_hoist_method_call(program, info, i)
-                            {
-                                hoistable.push(call);
-                            }
-                        }
-                    }
-                }
                 Some(Operand::TypedMethodCall {
                     string_id,
                     arg_count: _,
@@ -244,9 +232,8 @@ fn try_hoist_method_call(
     info: &LoopInfo,
     call_idx: usize,
 ) -> Option<HoistableCall> {
-    // Get arg_count from the operand directly.
+    // Get arg_count from the TypedMethodCall operand.
     let operand_arg_count = match &program.instructions[call_idx].operand {
-        Some(Operand::MethodCall { arg_count, .. }) => *arg_count as usize,
         Some(Operand::TypedMethodCall { arg_count, .. }) => *arg_count as usize,
         _ => return None,
     };
@@ -255,24 +242,16 @@ fn try_hoist_method_call(
         return None; // Sanity limit
     }
 
-    // The instruction before CallMethod should be PushConst(arg_count).
-    if call_idx == 0 {
-        return None;
-    }
-    let argc_instr = &program.instructions[call_idx - 1];
-    if argc_instr.opcode != OpCode::PushConst {
-        return None;
-    }
-
-    // Total values pushed before the PushConst: receiver + args.
+    // TypedMethodCall: stack has [receiver, arg0, ..., argN] — no overhead values.
+    // Total values pushed before CallMethod: receiver + args.
     let total_pushes = 1 + operand_arg_count;
-    let first_arg_idx = (call_idx - 1).checked_sub(total_pushes)?;
+    let first_arg_idx = call_idx.checked_sub(total_pushes)?;
     if first_arg_idx <= info.header_idx {
         return None;
     }
 
     // Check receiver + all args are invariant value producers.
-    for j in first_arg_idx..(call_idx - 1) {
+    for j in first_arg_idx..call_idx {
         if !is_invariant_value_producer(j, program, info) {
             return None;
         }
@@ -482,12 +461,10 @@ mod tests {
         //   LoopStart
         //   ...loop condition...
         //   LoadLocal(2)  // matrix (receiver, invariant)
-        //   PushConst(0)  // arg_count = 0
-        //   CallMethod(MethodCall { name: "shape", arg_count: 0 })
+        //   CallMethod(TypedMethodCall { method_id: 0, arg_count: 0, string_id: 0 })
         //   StoreLocal(3)
         //   ...increment...
         //   LoopEnd
-        use shape_value::StringId;
         let instrs = vec![
             make_instr(OpCode::LoopStart, None),                                    // 0
             make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 1
@@ -495,20 +472,20 @@ mod tests {
             make_instr(OpCode::LtInt, None),                                         // 3
             make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))),               // 4
             make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),                  // 5: matrix (invariant)
-            make_instr(OpCode::PushConst, Some(Operand::Const(1))),                  // 6: argc=0
             make_instr(
                 OpCode::CallMethod,
-                Some(Operand::MethodCall {
-                    name: StringId(0),
+                Some(Operand::TypedMethodCall {
+                    method_id: 0, // MethodId::DYNAMIC — uses string fallback
                     arg_count: 0,
+                    string_id: 0, // "shape" at string pool index 0
                 }),
-            ),                                                                        // 7
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),                 // 8
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 9
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 10
-            make_instr(OpCode::AddInt, None),                                        // 11
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),                 // 12
-            make_instr(OpCode::LoopEnd, None),                                       // 13
+            ),                                                                        // 6
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),                 // 7
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 8
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 9
+            make_instr(OpCode::AddInt, None),                                        // 10
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),                 // 11
+            make_instr(OpCode::LoopEnd, None),                                       // 12
         ];
 
         let program = make_program_with_strings(
@@ -522,7 +499,7 @@ mod tests {
         assert!(plan.hoistable_calls_by_loop.contains_key(&0));
         let calls = &plan.hoistable_calls_by_loop[&0];
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].call_idx, 7);
+        assert_eq!(calls[0].call_idx, 6);
     }
 
     #[test]

@@ -331,14 +331,6 @@ impl FunctionBlobBuilder {
                             local_strings.push(program.strings[gidx as usize].clone());
                         }
                     }
-                    Operand::MethodCall { name, .. } => {
-                        let gidx = name.0 as u16;
-                        if !string_remap.contains_key(&gidx) {
-                            let local_idx = local_strings.len() as u16;
-                            string_remap.insert(gidx, local_idx);
-                            local_strings.push(program.strings[gidx as usize].clone());
-                        }
-                    }
                     Operand::TypedMethodCall { string_id, .. } => {
                         let gidx = *string_id;
                         if !string_remap.contains_key(&gidx) {
@@ -385,11 +377,6 @@ impl FunctionBlobBuilder {
                         Operand::Name(sid) => {
                             if let Some(&local) = string_remap.get(&(sid.0 as u16)) {
                                 sid.0 = local as u32;
-                            }
-                        }
-                        Operand::MethodCall { name, arg_count: _ } => {
-                            if let Some(&local) = string_remap.get(&(name.0 as u16)) {
-                                name.0 = local as u32;
                             }
                         }
                         Operand::TypedMethodCall { string_id, .. } => {

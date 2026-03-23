@@ -277,10 +277,10 @@ define_opcodes! {
     Break = 0x72, Loop, pops: 0, pushes: 0;
     /// Continue to next iteration
     Continue = 0x73, Loop, pops: 0, pushes: 0;
-    /// Iterator next
-    IterNext = 0x74, Loop, pops: 1, pushes: 1;
-    /// Check if iterator done
-    IterDone = 0x75, Loop, pops: 1, pushes: 1;
+    /// Iterator next: pops iterator + index, pushes next value
+    IterNext = 0x74, Loop, pops: 2, pushes: 1;
+    /// Check if iterator done: pops iterator + index, pushes bool
+    IterDone = 0x75, Loop, pops: 2, pushes: 1;
 
     // ===== Typed Conversion Operations (direct, zero-dispatch) =====
     /// Convert value to int (infallible, panics on failure)
@@ -362,7 +362,7 @@ define_opcodes! {
     /// Unwrap Option: extract inner value from Some, panic on None
     UnwrapOption = 0xA4, Exception, pops: 1, pushes: 1;
     /// Add context to Result/Option failures and lift success into Result
-    ErrorContext = 0xA5, Exception, pops: 1, pushes: 1;
+    ErrorContext = 0xA5, Exception, pops: 2, pushes: 1;
     /// Check whether Result is Ok(value)
     IsOk = 0xA6, Exception, pops: 1, pushes: 1;
     /// Check whether Result is Err(error)
@@ -405,7 +405,7 @@ define_opcodes! {
     /// Get field from typed object using precomputed offset
     GetFieldTyped = 0xD0, Object, pops: 1, pushes: 1;
     /// Set field on typed object using precomputed offset
-    SetFieldTyped = 0xD1, Object, pops: 2, pushes: 0;
+    SetFieldTyped = 0xD1, Object, pops: 2, pushes: 1;
     /// Create a new typed object with fields from stack
     NewTypedObject = 0xD2, Object, pops: 0, pushes: 1;
     /// Merge two typed objects into a new typed object
@@ -736,10 +736,7 @@ pub enum Operand {
     },
     /// A named reference (e.g., trait name for BoxTraitObject)
     Name(StringId),
-    /// A method call descriptor (name + arg count) for dynamic dispatch
-    MethodCall { name: StringId, arg_count: u16 },
     /// Typed method call using compile-time resolved MethodId.
-    /// Replaces stack-based string dispatch for known methods.
     /// For `MethodId::DYNAMIC`, the VM falls back to string lookup
     /// using `string_id` from the string pool.
     TypedMethodCall {

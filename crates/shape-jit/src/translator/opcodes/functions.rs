@@ -500,34 +500,35 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             }
         }
 
-        // Fallback: full FFI dispatch through jit_call_method
+        // Fallback: full FFI dispatch through emit_method_ffi_fallback
+        // TypedMethodCall: stack has [receiver, arg0, arg1, ...] — no overhead values
         let arg_count = operand_arg_count;
-        let needed_values = arg_count + 3; // receiver + args + method_name + arg_count
+        let needed_values = arg_count + 1; // receiver + args
 
         if self.stack_len() >= needed_values {
-            self.materialize_to_stack(needed_values);
+            // Pop args and receiver from SSA stack
+            let mut args = Vec::with_capacity(arg_count);
+            for _ in 0..arg_count {
+                if let Some(arg) = self.stack_pop() {
+                    args.push(arg);
+                }
+            }
+            args.reverse();
+            let receiver = match self.stack_pop() {
+                Some(v) => v,
+                None => {
+                    let null_val = self.builder.ins().iconst(types::I64, TAG_NULL as i64);
+                    self.stack_push(null_val);
+                    self.reload_referenced_locals();
+                    return Ok(());
+                }
+            };
 
-            let count_val = self.builder.ins().iconst(types::I64, needed_values as i64);
-            let inst = self
-                .builder
-                .ins()
-                .call(self.ffi.call_method, &[self.ctx_ptr, count_val]);
-            let result = self.builder.inst_results(inst)[0];
-
-            self.update_sp_after_ffi(needed_values, 0);
-            self.stack_push(result);
-        } else if self.stack_len() >= 3 {
-            let count = self.stack_len();
-            self.materialize_to_stack(count);
-
-            let count_val = self.builder.ins().iconst(types::I64, count as i64);
-            let inst = self
-                .builder
-                .ins()
-                .call(self.ffi.call_method, &[self.ctx_ptr, count_val]);
-            let result = self.builder.inst_results(inst)[0];
-
-            self.update_sp_after_ffi(count, 0);
+            let result = self.emit_method_ffi_fallback(
+                receiver,
+                method_id.unwrap_or(0),
+                &args,
+            );
             self.stack_push(result);
         } else {
             let null_val = self.builder.ins().iconst(types::I64, TAG_NULL as i64);
@@ -540,29 +541,24 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// Try to inline a zero-argument method call.
     ///
     /// For known method IDs with zero arguments, we can emit inline IR that:
-    /// 1. Pops the arg_count and method_name from the SSA stack (they were pushed
-    ///    by the compiler but aren't needed for the inline path)
-    /// 2. Pops the receiver
-    /// 3. Emits a runtime type check on the receiver tag
-    /// 4. Emits the inlined operation (e.g., array length read, f64 abs/floor/ceil)
-    /// 5. Falls back to FFI if the receiver type doesn't match
+    /// 1. Pops the receiver from the SSA stack
+    /// 2. Emits a runtime type check on the receiver tag
+    /// 3. Emits the inlined operation (e.g., array length read, f64 abs/floor/ceil)
+    /// 4. Falls back to FFI if the receiver type doesn't match
     ///
     /// Returns `Some(())` if the method was inlined, `None` if it should use FFI.
     fn try_inline_method(&mut self, method_id: u16) -> Result<Option<()>, String> {
         use shape_value::MethodId;
 
-        // Stack layout: [..., receiver, method_name_str, arg_count_num]
-        // For zero-arg methods: arg_count=0, so stack has receiver + 2 overhead values
-        if self.stack_len() < 3 {
+        // Stack layout (TypedMethodCall): [..., receiver]
+        // method_id and arg_count are in the operand, not on the stack
+        if self.stack_len() < 1 {
             return Ok(None);
         }
 
         match method_id {
             // arr.length / arr.len -> inline array length read
             id if id == MethodId::LENGTH.0 || id == MethodId::LEN.0 => {
-                // Pop overhead: arg_count_num and method_name_str
-                let _arg_count_val = self.stack_pop(); // arg_count (0)
-                let _method_name = self.stack_pop(); // method name string
                 let receiver = self.stack_pop().unwrap();
 
                 // Runtime heap kind check: is receiver an array?
@@ -598,8 +594,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // num.abs() -> inline fabs
             id if id == MethodId::ABS.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let receiver = self.stack_pop().unwrap();
 
                 // Runtime check: is receiver a number?
@@ -652,8 +646,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // arr.isEmpty -> inline: length == 0 ? true : false
             id if id == MethodId::IS_EMPTY.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let receiver = self.stack_pop().unwrap();
 
                 let is_array = self.emit_is_heap_kind(receiver, HK_ARRAY);
@@ -691,8 +683,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // arr.first -> inline: len > 0 ? data[0] : null
             id if id == MethodId::FIRST.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let receiver = self.stack_pop().unwrap();
 
                 let is_array = self.emit_is_heap_kind(receiver, HK_ARRAY);
@@ -752,8 +742,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // arr.last -> inline: len > 0 ? data[len-1] : null
             id if id == MethodId::LAST.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let receiver = self.stack_pop().unwrap();
 
                 let is_array = self.emit_is_heap_kind(receiver, HK_ARRAY);
@@ -818,8 +806,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // arr.pop() -> FFI to jit_array_pop
             id if id == MethodId::POP.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let receiver = self.stack_pop().unwrap();
 
                 let inst = self.builder.ins().call(self.ffi.array_pop, &[receiver]);
@@ -830,8 +816,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // arr.reverse() -> FFI to jit_array_reverse
             id if id == MethodId::REVERSE.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let receiver = self.stack_pop().unwrap();
 
                 let inst = self.builder.ins().call(self.ffi.array_reverse, &[receiver]);
@@ -847,28 +831,25 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// Try to inline a one-argument method call.
     ///
     /// For known method IDs with one argument, we can emit inline IR that:
-    /// 1. Pops the arg_count and method_name from the SSA stack
-    /// 2. Pops the single argument
-    /// 3. Pops the receiver
-    /// 4. Emits a runtime type check on the receiver tag
-    /// 5. Emits the inlined operation or an FFI helper call
-    /// 6. Falls back to FFI if the receiver type doesn't match
+    /// 1. Pops the single argument
+    /// 2. Pops the receiver
+    /// 3. Emits a runtime type check on the receiver tag
+    /// 4. Emits the inlined operation or an FFI helper call
+    /// 5. Falls back to FFI if the receiver type doesn't match
     ///
     /// Returns `Some(())` if the method was inlined, `None` if it should use FFI.
     fn try_inline_method_1arg(&mut self, method_id: u16) -> Result<Option<()>, String> {
         use shape_value::MethodId;
 
-        // Stack layout: [..., receiver, arg0, method_name_str, arg_count_num]
-        // For one-arg methods: arg_count=1, so stack has receiver + arg + 2 overhead values
-        if self.stack_len() < 4 {
+        // Stack layout (TypedMethodCall): [..., receiver, arg0]
+        // method_id and arg_count are in the operand, not on the stack
+        if self.stack_len() < 2 {
             return Ok(None);
         }
 
         match method_id {
             // arr.includes(value) -> inline linear scan with bitwise equality
             id if id == MethodId::INCLUDES.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let arg0 = self.stack_pop().unwrap();
                 let receiver = self.stack_pop().unwrap();
 
@@ -952,8 +933,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // arr.indexOf(needle) -> inline linear scan, return index or -1
             id if id == MethodId::INDEX_OF.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let arg0 = self.stack_pop().unwrap();
                 let receiver = self.stack_pop().unwrap();
 
@@ -1040,8 +1019,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             // arr.push(element) -> FFI to jit_array_push_element
             id if id == MethodId::PUSH.0 => {
-                let _arg_count_val = self.stack_pop();
-                let _method_name = self.stack_pop();
                 let arg0 = self.stack_pop().unwrap();
                 let receiver = self.stack_pop().unwrap();
 
@@ -1079,13 +1056,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         method_id: u16,
         arg_count: usize,
     ) -> Result<Option<()>, String> {
-        let needed = arg_count + 3; // receiver + method name + arg_count + args
+        let needed = arg_count + 1; // receiver + args
         if self.stack_len() < needed {
             return Ok(None);
         }
 
-        let _arg_count = self.stack_pop();
-        let _method_name = self.stack_pop();
         let mut args = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {
             if let Some(arg) = self.stack_pop() {
@@ -1107,13 +1082,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     }
 
     /// Helper: inline a unary f64 method on a number receiver (floor, ceil, round).
-    /// Pops overhead + receiver from SSA stack, emits type check + inline IR.
+    /// Pops receiver from SSA stack, emits type check + inline IR.
     fn inline_number_unary_method<F>(&mut self, op: F) -> Result<Option<()>, String>
     where
         F: FnOnce(&mut FunctionBuilder, Value) -> Value,
     {
-        let _arg_count_val = self.stack_pop();
-        let _method_name = self.stack_pop();
         let receiver = self.stack_pop().unwrap();
 
         // Runtime check: is receiver a number?

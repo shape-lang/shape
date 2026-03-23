@@ -62,15 +62,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             None => return Ok(None),
         };
 
-        // Need at least: receiver + callback + method_name + arg_count on stack
-        let needed = arg_count + 3;
+        // Need at least: receiver + args on stack (TypedMethodCall: no overhead values)
+        let needed = arg_count + 1;
         if self.stack_len() < needed {
             return Ok(None);
         }
-
-        // Pop overhead: arg_count_num and method_name
-        let _arg_count_val = self.stack_pop();
-        let _method_name = self.stack_pop();
 
         // Pop args (callback is first, initial value for reduce is second)
         let mut args = Vec::with_capacity(arg_count);
@@ -430,6 +426,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         );
         let fn_ref_val = self.builder.ins().bor(tag_fn_base, preloaded.function_id);
 
+        // Compute stack_base before the loop so it dominates all blocks
+        let stack_base = self
+            .builder
+            .ins()
+            .iadd_imm(self.ctx_ptr, STACK_OFFSET as i64);
+
         // Store callee at base_sp
         self.builder.ins().store(
             MemFlags::trusted(),
@@ -475,10 +477,6 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         let dest_idx = self.builder.ins().iadd(dest_idx_base, one);
         let dest_idx = self.builder.ins().iadd(dest_idx, ci);
         let dest_off = self.builder.ins().imul(dest_idx, eight);
-        let stack_base = self
-            .builder
-            .ins()
-            .iadd_imm(self.ctx_ptr, STACK_OFFSET as i64);
         let dest_addr = self.builder.ins().iadd(stack_base, dest_off);
         self.builder
             .ins()

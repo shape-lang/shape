@@ -200,9 +200,15 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         // Pop field values from virtual stack and store their indices
         let mut field_indices: Vec<Value> = Vec::with_capacity(field_count as usize);
         for _ in 0..field_count {
-            let val = self
-                .stack_pop()
-                .ok_or("NewTypedObject: missing field value on stack")?;
+            let val = self.stack_pop().ok_or_else(|| {
+                format!(
+                    "NewTypedObject(schema={}, fields={}): stack has {} values, need {}",
+                    schema_id,
+                    field_count,
+                    field_indices.len(),
+                    field_count
+                )
+            })?;
             field_indices.push(val);
         }
         // Reverse since we popped in reverse order (LIFO)

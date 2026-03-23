@@ -30,9 +30,15 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     pub(crate) fn compile_jump(&mut self, instr: &Instruction, idx: usize) -> Result<(), String> {
         if let Some(Operand::Offset(offset)) = &instr.operand {
             let target_idx = ((idx as i32) + 1 + *offset) as usize;
-            self.block_stack_depth
+            let prev = self
+                .block_stack_depth
                 .entry(target_idx)
                 .or_insert(self.stack_depth);
+            debug_assert_eq!(
+                *prev, self.stack_depth,
+                "Block {} depth mismatch: first predecessor={}, this predecessor={}",
+                target_idx, *prev, self.stack_depth
+            );
 
             // Check for unrollable back-edge: backward jump with pending unroll info
             if target_idx < idx {
@@ -95,12 +101,24 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 let target_idx = ((idx as i32) + 1 + *offset) as usize;
                 let next_idx = idx + 1;
 
-                self.block_stack_depth
+                let prev = self
+                    .block_stack_depth
                     .entry(target_idx)
                     .or_insert(self.stack_depth);
-                self.block_stack_depth
+                debug_assert_eq!(
+                    *prev, self.stack_depth,
+                    "Block {} depth mismatch: first predecessor={}, this predecessor={}",
+                    target_idx, *prev, self.stack_depth
+                );
+                let prev = self
+                    .block_stack_depth
                     .entry(next_idx)
                     .or_insert(self.stack_depth);
+                debug_assert_eq!(
+                    *prev, self.stack_depth,
+                    "Block {} depth mismatch: first predecessor={}, this predecessor={}",
+                    next_idx, *prev, self.stack_depth
+                );
 
                 if let (Some(&target_block), Some(&next_block)) =
                     (self.blocks.get(&target_idx), self.blocks.get(&next_idx))
@@ -199,12 +217,24 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 let target_idx = ((idx as i32) + 1 + *offset) as usize;
                 let next_idx = idx + 1;
 
-                self.block_stack_depth
+                let prev = self
+                    .block_stack_depth
                     .entry(target_idx)
                     .or_insert(self.stack_depth);
-                self.block_stack_depth
+                debug_assert_eq!(
+                    *prev, self.stack_depth,
+                    "Block {} depth mismatch: first predecessor={}, this predecessor={}",
+                    target_idx, *prev, self.stack_depth
+                );
+                let prev = self
+                    .block_stack_depth
                     .entry(next_idx)
                     .or_insert(self.stack_depth);
+                debug_assert_eq!(
+                    *prev, self.stack_depth,
+                    "Block {} depth mismatch: first predecessor={}, this predecessor={}",
+                    next_idx, *prev, self.stack_depth
+                );
 
                 if let (Some(&target_block), Some(&next_block)) =
                     (self.blocks.get(&target_idx), self.blocks.get(&next_idx))

@@ -33,12 +33,14 @@ use shape_value::VMError;
 /// JIT context buffer size in u64 words.
 ///
 /// Must match the `JITContext` layout from `shape-jit/src/context.rs`:
-///   - locals:    byte 64  (u64 index 8)
-///   - stack:     byte 576 (u64 index 72)
-///   - stack_ptr: byte 1600 (u64 index 200)
-///   - total:     ~1728 bytes = 216 u64s
+///   - locals:    byte 64   (u64 index 8),  256 slots
+///   - stack:     byte 2112  (u64 index 264), 512 slots
+///   - stack_ptr: byte 6208  (u64 index 776)
+///   - gc_safepoint_flag_ptr: byte 6328
+///   - foreign_bridge_ptr:    byte 6344
+///   - total: ~6352 bytes = 794 u64s, rounded to 800
 #[cfg(feature = "jit")]
-const CTX_U64_SIZE: usize = 216;
+const CTX_U64_SIZE: usize = 800;
 
 /// Offset (in u64 words) where locals begin in the JIT context buffer.
 #[cfg(feature = "jit")]
@@ -98,7 +100,7 @@ impl VirtualMachine {
         // The JIT compiler rejects these loops at compile time, but this
         // guard catches any stale OSR entry metadata that slips through.
         for &local_idx in &osr_entry.live_locals {
-            if local_idx as usize >= 64 {
+            if local_idx as usize >= 256 {
                 return Ok(false);
             }
         }
@@ -138,7 +140,7 @@ impl VirtualMachine {
         // All locals should be < 64 (validated at entry above).
         for (i, &local_idx) in osr_entry.live_locals.iter().enumerate() {
             debug_assert!(
-                (local_idx as usize) < 64,
+                (local_idx as usize) < 256,
                 "OSR local {} exceeds capacity after successful JIT execution",
                 local_idx
             );
@@ -175,11 +177,11 @@ impl VirtualMachine {
     ) {
         for (i, &local_idx) in osr_entry.live_locals.iter().enumerate() {
             debug_assert!(
-                (local_idx as usize) < 64,
+                (local_idx as usize) < 256,
                 "OSR deopt: local {} exceeds JIT locals capacity",
                 local_idx
             );
-            if local_idx as usize >= 64 {
+            if local_idx as usize >= 256 {
                 continue; // Defensive: should never happen (JIT rejects at compile time)
             }
             let kind = osr_entry

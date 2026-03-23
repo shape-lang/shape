@@ -25,17 +25,180 @@ mod stack;
 mod typed_objects;
 mod variables;
 
-use shape_vm::bytecode::{Instruction, OpCode};
+use shape_vm::bytecode::{Instruction, OpCode, Operand};
 
 use super::types::BytecodeToIR;
 
+/// Compile-time guard that enforces correct stack effects for JIT opcode handlers.
+///
+/// Created before each opcode dispatch with the expected (pops, pushes) from
+/// `instruction_stack_effect()`. Verified after the handler returns. The
+/// `#[must_use]` attribute causes a Rust compiler warning if the guard is
+/// created but `verify()` is never called.
+#[must_use = "StackEffectGuard must be verified after opcode compilation"]
+pub(crate) struct StackEffectGuard {
+    opcode: OpCode,
+    pre_depth: usize,
+    expected_pops: usize,
+    expected_pushes: usize,
+}
+
+impl StackEffectGuard {
+    pub fn verify(self, post_depth: usize) -> Result<(), String> {
+        let expected_delta = self.expected_pushes as i64 - self.expected_pops as i64;
+        let actual_delta = post_depth as i64 - self.pre_depth as i64;
+        if actual_delta != expected_delta {
+            return Err(format!(
+                "Stack effect mismatch for {:?}: expected delta {} (pops={}, pushes={}), \
+                 got delta {} (pre={}, post={})",
+                self.opcode,
+                expected_delta,
+                self.expected_pops,
+                self.expected_pushes,
+                actual_delta,
+                self.pre_depth,
+                post_depth
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl<'a, 'b> BytecodeToIR<'a, 'b> {
+    /// Returns (pops, pushes) for this instruction, or None for control-flow
+    /// opcodes that manage their own depth (Jump, JumpIf*, Return, Break, etc.)
+    /// and variable-arity opcodes whose operand we can't decode.
+    fn instruction_stack_effect(instr: &Instruction) -> Option<(usize, usize)> {
+        match instr.opcode {
+            // Control flow — manages own depth via block_stack_depth
+            OpCode::Jump
+            | OpCode::JumpIfFalse
+            | OpCode::JumpIfFalseTrusted
+            | OpCode::JumpIfTrue
+            | OpCode::Return
+            | OpCode::ReturnValue
+            | OpCode::Break
+            | OpCode::Continue
+            | OpCode::Throw
+            | OpCode::LoopStart
+            | OpCode::LoopEnd
+            | OpCode::SetupTry
+            | OpCode::PopHandler => None,
+
+            // Variable-arity: compute from operand
+            OpCode::NewTypedObject => {
+                let field_count = match &instr.operand {
+                    Some(Operand::TypedObjectAlloc { field_count, .. }) => *field_count as usize,
+                    _ => return None,
+                };
+                Some((field_count, 1))
+            }
+            OpCode::NewArray | OpCode::NewTypedArray => {
+                let count = match &instr.operand {
+                    Some(Operand::Count(n)) => *n as usize,
+                    _ => return None,
+                };
+                Some((count, 1))
+            }
+            OpCode::NewObject => {
+                let count = match &instr.operand {
+                    Some(Operand::Count(n)) => *n as usize * 2, // key-value pairs
+                    _ => return None,
+                };
+                Some((count, 1))
+            }
+            OpCode::Call => {
+                // pops: arity + 1 (args + function), pushes: 1
+                let arity = match &instr.operand {
+                    Some(Operand::Count(n)) => *n as usize,
+                    _ => return None,
+                };
+                Some((arity + 1, 1))
+            }
+            OpCode::CallValue => {
+                // CallValue: pops arity + 1 (args + callable), pushes 1
+                // But CallValue uses Count operand in some paths
+                // Variable arity — skip guard
+                None
+            }
+            OpCode::CallMethod => {
+                // TypedMethodCall: method_id + arg_count in operand, no stack overhead
+                // pops: arity + 1 (receiver + args), pushes: 1
+                let arity = match &instr.operand {
+                    Some(Operand::TypedMethodCall { arg_count, .. }) => *arg_count as usize,
+                    // Legacy MethodCall is no longer emitted by the bytecode compiler.
+                    // Skip guard for any unexpected operand variants.
+                    _ => return None,
+                };
+                Some((arity + 1, 1))
+            }
+            OpCode::BuiltinCall => {
+                // Variable arity — skip guard
+                None
+            }
+            OpCode::CallForeign => {
+                // Variable arity — skip guard
+                None
+            }
+            OpCode::DynMethodCall => {
+                // pops: arity + 1 (receiver + args), pushes: 1
+                let arity = match &instr.operand {
+                    Some(Operand::TypedMethodCall { arg_count, .. }) => *arg_count as usize,
+                    _ => return None,
+                };
+                Some((arity + 1, 1))
+            }
+            OpCode::NewMatrix => {
+                let (rows, cols) = match &instr.operand {
+                    Some(Operand::MatrixDims { rows, cols }) => (*rows as usize, *cols as usize),
+                    _ => return None,
+                };
+                Some((rows * cols, 1))
+            }
+            OpCode::JoinInit => {
+                // Variable arity (pops N tasks), pushes 1
+                let count = match &instr.operand {
+                    Some(Operand::Count(n)) => *n as usize,
+                    _ => return None,
+                };
+                Some((count, 1))
+            }
+
+            // ErrorContext: VM pops 2 (context + value), pushes 1
+            OpCode::ErrorContext => Some((2, 1)),
+
+            // BindSchema: VM pops 1, pushes 1 (net 0) — no-op is correct for depth
+            OpCode::BindSchema => Some((1, 1)),
+
+            // Fixed-arity: use the OpCode const fn methods
+            other => {
+                let pops = other.stack_pops();
+                let pushes = other.stack_pushes();
+                if pops == 0 && pushes == 0 {
+                    // Declared as variable-arity (0/0) but not handled above — skip guard
+                    None
+                } else {
+                    Some((pops as usize, pushes as usize))
+                }
+            }
+        }
+    }
+
     /// Main dispatch for opcode translation
     pub(crate) fn compile_instruction(
         &mut self,
         instr: &Instruction,
         idx: usize,
     ) -> Result<(), String> {
+        // Create guard if we know the expected effect
+        let guard = Self::instruction_stack_effect(instr).map(|(pops, pushes)| StackEffectGuard {
+            opcode: instr.opcode,
+            pre_depth: self.stack_depth,
+            expected_pops: pops,
+            expected_pushes: pushes,
+        });
+
+        // Dispatch to handler
         match instr.opcode {
             // Stack operations
             OpCode::PushConst => self.compile_push_const(instr),
@@ -228,9 +391,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             OpCode::UnwrapOk => self.compile_unwrap_ok(),
             OpCode::UnwrapErr => self.compile_unwrap_err(),
 
-            // Schema binding and error context — semantic no-ops in JIT
-            // (type info is tracked statically, error context is metadata-only)
-            OpCode::BindSchema | OpCode::ErrorContext => Ok(()),
+            // Schema binding — semantic no-op in JIT (type info tracked statically)
+            OpCode::BindSchema => Ok(()),
+
+            // ErrorContext — pops 2 (context + value), pushes 1 (Result) via FFI
+            OpCode::ErrorContext => self.compile_opcode_via_generic_ffi(instr.opcode, 2, true),
 
             // MergeObject — pop 2 objects, push merged via FFI
             OpCode::MergeObject => self.compile_merge_object(),
@@ -250,8 +415,13 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // BoxTraitObject: pops 1 (value), pushes 1 (trait object)
             OpCode::BoxTraitObject => self.compile_opcode_via_generic_ffi(instr.opcode, 1, true),
             // DynMethodCall: pops N+1 (receiver + args), pushes 1 (result)
-            // Stack effect depends on operand — use generic FFI trampoline
-            OpCode::DynMethodCall => self.compile_opcode_via_generic_ffi(instr.opcode, 1, true),
+            OpCode::DynMethodCall => {
+                let pop_count = match &instr.operand {
+                    Some(Operand::TypedMethodCall { arg_count, .. }) => *arg_count as usize + 1,
+                    _ => 1, // fallback: stack-based dispatch, count unknown
+                };
+                self.compile_opcode_via_generic_ffi(instr.opcode, pop_count, true)
+            }
 
             // Type coercion opcodes
             OpCode::IntToNumber => self.compile_int_to_number(),
@@ -282,7 +452,13 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             OpCode::NewTypedArray => self.compile_new_array(instr),
 
             // NewMatrix — create matrix via FFI (pops rows*cols elements, pushes 1)
-            OpCode::NewMatrix => self.compile_opcode_via_generic_ffi(instr.opcode, 0, true),
+            OpCode::NewMatrix => {
+                let pop_count = match &instr.operand {
+                    Some(Operand::MatrixDims { rows, cols }) => (*rows as usize) * (*cols as usize),
+                    _ => 0,
+                };
+                self.compile_opcode_via_generic_ffi(instr.opcode, pop_count, true)
+            }
 
             // Compact typed opcodes — decode NumericWidth and dispatch to int/float paths
             OpCode::AddTyped
@@ -317,6 +493,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::TryConvertToChar => {
                 self.compile_opcode_via_generic_ffi(instr.opcode, 1, true)
             }
+        }?;
+
+        // Verify stack effect
+        if let Some(guard) = guard {
+            guard.verify(self.stack_depth)?;
         }
+        Ok(())
     }
 }

@@ -162,7 +162,7 @@ impl VirtualMachine {
                     // Snapshot per-parameter SlotKinds and the return kind from
                     // the callee's FrameDescriptor. These small copies release
                     // the borrow on `self.program` before we touch the stack.
-                    let mut param_kinds = [crate::type_tracking::SlotKind::Unknown; 64];
+                    let mut param_kinds = [crate::type_tracking::SlotKind::Unknown; 256];
                     let return_kind;
                     if let Some(fd) = &func.frame_descriptor {
                         for i in 0..copy_count {
@@ -182,21 +182,28 @@ impl VirtualMachine {
                     // This gives the JIT side accurate type information.
                     //
                     // Fallback is ALWAYS NaN-boxed passthrough (never None/null).
-                    let mut jit_locals = [0u64; 64];
+                    let mut jit_locals = [0u64; 256];
                     let args_base = self.sp.saturating_sub(arg_count);
                     for i in 0..copy_count {
                         jit_locals[i] =
                             jit_abi::marshal_arg_to_jit(&self.stack[args_base + i], param_kinds[i]);
                     }
 
-                    // Build a minimal JIT context on the stack matching the
-                    // JITContext layout (from shape-jit/src/context.rs):
-                    //   locals:    byte 64  (u64 index 8)
-                    //   stack:     byte 576 (u64 index 72)
-                    //   stack_ptr: byte 1600 (u64 index 200)
-                    //   total: ~1728 bytes = 216 u64s
-                    const CTX_U64_SIZE: usize = 216;
+                    // Build a JIT context on the stack matching the JITContext
+                    // layout (from shape-jit/src/context.rs):
+                    //   locals:    byte 64   (u64 index 8),  256 slots
+                    //   stack:     byte 2112  (u64 index 264), 512 slots
+                    //   stack_ptr: byte 6208  (u64 index 776)
+                    //   gc_safepoint_flag_ptr: byte 6328
+                    //   foreign_bridge_ptr:    byte 6344
+                    //   total: ~6352 bytes = 794 u64s, rounded to 800
+                    const CTX_U64_SIZE: usize = 800;
                     const LOCALS_U64_OFFSET: usize = 8; // byte 64 / 8
+
+                    // Compile-time assertion: CTX_U64_SIZE covers through stack_ptr + remaining fields.
+                    const _: () = {
+                        assert!(CTX_U64_SIZE * 8 >= 6216 + 136, "CTX_U64_SIZE too small for JITContext layout");
+                    };
                     let mut ctx_buf = [0u64; CTX_U64_SIZE];
                     for i in 0..copy_count {
                         ctx_buf[LOCALS_U64_OFFSET + i] = jit_locals[i];

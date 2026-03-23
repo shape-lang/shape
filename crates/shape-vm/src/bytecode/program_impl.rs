@@ -47,7 +47,7 @@ impl BytecodeProgram {
     }
 
     /// Intern a string and return a `StringId` for use in `Operand::Name` /
-    /// `Operand::MethodCall`. Uses the HashMap index for O(1) dedup.
+    /// `Operand::TypedMethodCall`. Uses the HashMap index for O(1) dedup.
     pub fn intern_string(&mut self, s: &str) -> StringId {
         self.ensure_string_index();
         if let Some(&idx) = self.string_index.get(s) {
@@ -215,7 +215,6 @@ impl BytecodeProgram {
                     Operand::Property(idx) => *idx += string_offset,
                     Operand::Function(idx) => idx.0 += func_offset,
                     Operand::Name(id) => id.0 += string_offset as u32,
-                    Operand::MethodCall { name, .. } => name.0 += string_offset as u32,
                     Operand::TypedMethodCall { string_id, .. } => {
                         *string_id += string_offset;
                     }

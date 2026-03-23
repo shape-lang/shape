@@ -145,10 +145,6 @@ fn remap_operand(
                 Operand::Function(FunctionId(dep_idx))
             }
         }
-        Operand::MethodCall { name, arg_count } => Operand::MethodCall {
-            name: StringId((string_base + name.0 as usize) as u32),
-            arg_count,
-        },
         Operand::TypedMethodCall {
             method_id,
             arg_count,

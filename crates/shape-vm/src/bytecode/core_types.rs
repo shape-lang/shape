@@ -613,8 +613,6 @@ impl Instruction {
                 Operand::ColumnAccess { .. } => 4,
                 // Name: StringId (4 bytes)
                 Operand::Name(_) => 4,
-                // MethodCall: StringId (4) + arg_count (2) = 6 bytes
-                Operand::MethodCall { .. } => 6,
                 // TypedMethodCall: method_id (2) + arg_count (2) + string_id (2) = 6 bytes
                 Operand::TypedMethodCall { .. } => 6,
                 // ForeignFunction: u16 index = 2 bytes

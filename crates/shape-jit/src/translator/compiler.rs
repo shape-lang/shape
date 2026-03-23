@@ -363,7 +363,12 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
             if let Some(&block) = self.blocks.get(&i) {
                 if need_fallthrough && !block_terminated {
-                    self.block_stack_depth.entry(i).or_insert(self.stack_depth);
+                    let prev = self.block_stack_depth.entry(i).or_insert(self.stack_depth);
+                    debug_assert_eq!(
+                        *prev, self.stack_depth,
+                        "Block {} depth mismatch: first predecessor={}, this predecessor={}",
+                        i, *prev, self.stack_depth
+                    );
                     if self.merge_blocks.contains(&i) {
                         let val = self.stack_pop().unwrap_or_else(|| {
                             self.builder.ins().iconst(types::I64, TAG_NULL as i64)
@@ -450,6 +455,10 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
                 if let Some(&expected_depth) = self.block_stack_depth.get(&i) {
                     self.stack_depth = expected_depth;
+                    // Reset physical stack tracking at block boundary: predecessors
+                    // may have materialized values at different offsets, so the
+                    // compile-time stack pointer must restart from 0.
+                    self.compile_time_sp = 0;
                     // Clear typed_stack at block boundaries: f64 SSA Values from
                     // predecessor blocks may not dominate this block, so cached
                     // shadows are invalid. The optimization still applies within

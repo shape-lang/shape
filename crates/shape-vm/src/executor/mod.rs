@@ -484,9 +484,6 @@ fn remap_operand(operand: &mut Option<Operand>, const_offset: usize, string_offs
         Operand::Name(sid) => {
             sid.0 = (sid.0 as usize + string_offset) as u32;
         }
-        Operand::MethodCall { name, .. } => {
-            name.0 = (name.0 as usize + string_offset) as u32;
-        }
         Operand::TypedMethodCall { string_id, .. } => {
             *string_id = (*string_id as usize + string_offset) as u16;
         }
