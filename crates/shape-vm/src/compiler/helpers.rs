@@ -95,6 +95,13 @@ impl BytecodeCompiler {
             TypeAnnotation::Generic { name, args } if name == "Mat" && args.len() == 1 => {
                 Some(format!("Mat<{}>", args[0].to_type_string()))
             }
+            // Track Option/Result wrapper types so conversion lifting can
+            // detect them (even though generic args are lost in the tracker).
+            TypeAnnotation::Generic { name, .. }
+                if name == "Option" || name == "Result" =>
+            {
+                Some(name.to_lowercase())
+            }
             _ => None,
         }
     }
@@ -1334,6 +1341,8 @@ impl BytecodeCompiler {
             "fold" => BuiltinFunction::ControlFold,
 
             // Math intrinsics
+            "__intrinsic_minimize" => BuiltinFunction::IntrinsicMinimize,
+            "__intrinsic_bspline2_3d_batch" => BuiltinFunction::IntrinsicBspline2_3dBatch,
             "__intrinsic_sum" => BuiltinFunction::IntrinsicSum,
             "__intrinsic_mean" => BuiltinFunction::IntrinsicMean,
             "__intrinsic_min" => BuiltinFunction::IntrinsicMin,
@@ -1548,6 +1557,8 @@ impl BytecodeCompiler {
                 | BuiltinFunction::NativeTableFromArrowCTyped
                 | BuiltinFunction::NativeTableBindType
                 | BuiltinFunction::ControlFold
+                | BuiltinFunction::IntrinsicMinimize
+                | BuiltinFunction::IntrinsicBspline2_3dBatch
                 | BuiltinFunction::IntrinsicSum
                 | BuiltinFunction::IntrinsicMean
                 | BuiltinFunction::IntrinsicMin

@@ -205,6 +205,8 @@ pub struct FFIFuncRefs {
     pub(crate) set_field_typed: FuncRef,
     // TypedObject allocation
     pub(crate) typed_object_alloc: FuncRef,
+    // TypedObject field set via FFI
+    pub(crate) typed_object_set_field: FuncRef,
     // TypedObject merge (O(1) memcpy-based)
     pub(crate) typed_merge_object: FuncRef,
     // Typed column access (Arrow-backed LoadCol* opcodes)

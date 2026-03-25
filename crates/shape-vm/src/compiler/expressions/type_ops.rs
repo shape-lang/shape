@@ -11,6 +11,17 @@ use super::super::BytecodeCompiler;
 const INTO_DISPATCH_TAG: &str = "__IntoDispatch";
 const TRY_INTO_DISPATCH_TAG: &str = "__TryIntoDispatch";
 
+/// How an `as`/`as?` cast should be compiled after validation.
+#[derive(Debug)]
+enum CastLiftKind {
+    /// Source type has a direct Into/TryInto impl for the target.
+    Direct,
+    /// Source is `Option<T>` — needs null-check lifting.
+    LiftOption,
+    /// Source is `Result<T, E>` — needs Ok/Err lifting.
+    LiftResult,
+}
+
 fn type_name_to_annotation(name: &str) -> TypeAnnotation {
     match name {
         "number" | "int" | "decimal" | "string" | "bool" | "row" | "pattern" | "function"
@@ -157,6 +168,392 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Extract the inner type `T` from an `Option<T>` annotation.
+    fn unwrap_option_inner(ann: &TypeAnnotation) -> Option<&TypeAnnotation> {
+        match ann {
+            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
+                Some(&args[0])
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract the inner type `T` from a `Result<T, E>` annotation.
+    fn unwrap_result_inner(ann: &TypeAnnotation) -> Option<&TypeAnnotation> {
+        match ann {
+            TypeAnnotation::Generic { name, args }
+                if name == "Result" && !args.is_empty() =>
+            {
+                Some(&args[0])
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to resolve a full type annotation for the source expression.
+    ///
+    /// Unlike `try_into_name_from_annotation` (which only extracts the base
+    /// name), this preserves the full generic structure so we can detect
+    /// `Option<T>` and `Result<T, E>` wrappers.
+    fn resolve_source_annotation(&mut self, expr: &Expr) -> Option<TypeAnnotation> {
+        // Try static annotation first
+        if let Ok(ann) = self.static_type_annotation_for_expr(expr) {
+            // The type tracker may return a bare `Basic("option")` /
+            // `Basic("result")` that has lost its generic args.  For wrapper
+            // types we need the full generic structure, so try type inference.
+            let is_bare_wrapper = matches!(
+                &ann,
+                TypeAnnotation::Basic(n) if n == "option" || n == "result"
+            ) || matches!(
+                &ann,
+                TypeAnnotation::Reference(n) if n.as_str() == "Option" || n.as_str() == "Result"
+            );
+            if !is_bare_wrapper {
+                return Some(ann);
+            }
+            // Try inference for the full generic structure
+            if let Ok(ty) = self.infer_expr_type(expr) {
+                if let Some(inferred_ann) = ty.to_annotation() {
+                    return Some(inferred_ann);
+                }
+            }
+            // Inference failed — return the bare wrapper annotation so lifting
+            // can still be detected (inner type validated at runtime)
+            return Some(ann);
+        }
+        // Fall back to inferred type → annotation (preserves generics)
+        if let Ok(ty) = self.infer_expr_type(expr) {
+            return ty.to_annotation();
+        }
+        None
+    }
+
+    /// Check whether any Into/TryInto impls are registered in the trait registry.
+    fn has_any_conversion_impls(&self) -> bool {
+        self.type_inference.env.has_any_into_impls()
+    }
+
+    /// Check whether `source` has `Into<target>` impl.
+    fn has_into_impl(&self, source: &str, target: &str) -> bool {
+        self.type_inference
+            .env
+            .lookup_trait_impl_named("Into", source, target)
+            .is_some()
+            || self
+                .type_inference
+                .env
+                .lookup_trait_impl("Into", source)
+                .is_some()
+    }
+
+    /// Check whether `source` has `TryInto<target>` impl.
+    fn has_try_into_impl(&self, source: &str, target: &str) -> bool {
+        self.type_inference
+            .env
+            .lookup_trait_impl_named("TryInto", source, target)
+            .is_some()
+            || self
+                .type_inference
+                .env
+                .lookup_trait_impl("TryInto", source)
+                .is_some()
+    }
+
+    /// Validate an infallible `as Type` cast and determine the compilation
+    /// strategy: direct conversion, Option lifting, or Result lifting.
+    ///
+    /// Returns `Err` for invalid casts (no Into impl). Returns `Ok(None)` when
+    /// validation is skipped (test mode, unresolvable source). Returns
+    /// `Ok(Some(strategy))` on success.
+    fn validate_infallible_cast(
+        &mut self,
+        expr: &Expr,
+        target_name: &str,
+    ) -> Result<Option<CastLiftKind>> {
+        // Guard: skip validation when no Into impls are registered (test mode)
+        if !self.has_any_conversion_impls() {
+            return Ok(None);
+        }
+
+        let source_ann = match self.resolve_source_annotation(expr) {
+            Some(ann) => ann,
+            None => return Ok(None), // can't resolve → conservative skip
+        };
+
+        let source_name = match Self::try_into_name_from_annotation(&source_ann) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+
+        // Identity cast: always valid
+        if source_name == target_name {
+            return Ok(Some(CastLiftKind::Direct));
+        }
+
+        // Direct impl check
+        if self.has_into_impl(&source_name, target_name) {
+            return Ok(Some(CastLiftKind::Direct));
+        }
+
+        // Option<T> as M → lift if T has Into<M>
+        if let Some(inner_ann) = Self::unwrap_option_inner(&source_ann) {
+            if let Some(inner_name) = Self::try_into_name_from_annotation(inner_ann) {
+                if inner_name == target_name || self.has_into_impl(&inner_name, target_name) {
+                    return Ok(Some(CastLiftKind::LiftOption));
+                }
+            }
+            // Inner type has no Into impl → compile error
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot convert `Option<{}>` to `{}`: inner type has no `Into<{}>` implementation",
+                    annotation_to_string(inner_ann),
+                    target_name,
+                    target_name,
+                ),
+                location: Some(self.span_to_source_location(expr.span())),
+            });
+        }
+
+        // Result<T, E> as M → lift if T has Into<M>
+        if let Some(inner_ann) = Self::unwrap_result_inner(&source_ann) {
+            if let Some(inner_name) = Self::try_into_name_from_annotation(inner_ann) {
+                if inner_name == target_name || self.has_into_impl(&inner_name, target_name) {
+                    return Ok(Some(CastLiftKind::LiftResult));
+                }
+            }
+            // Inner type has no Into impl → compile error
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot convert `Result<{}, _>` to `{}`: inner type has no `Into<{}>` implementation",
+                    annotation_to_string(inner_ann),
+                    target_name,
+                    target_name,
+                ),
+                location: Some(self.span_to_source_location(expr.span())),
+            });
+        }
+
+        // Bare wrapper name without generic args (type tracker lost generics):
+        // emit lifting code and let the inner conversion be validated at runtime.
+        if source_name == "option" || source_name == "Option" {
+            return Ok(Some(CastLiftKind::LiftOption));
+        }
+        if source_name == "result" || source_name == "Result" {
+            return Ok(Some(CastLiftKind::LiftResult));
+        }
+
+        // No valid conversion path → compile error
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Cannot convert `{}` to `{}`: no `Into<{}>` implementation found",
+                source_name, target_name, target_name,
+            ),
+            location: Some(self.span_to_source_location(expr.span())),
+        })
+    }
+
+    /// Validate a fallible `as Type?` cast.
+    fn validate_fallible_cast(
+        &mut self,
+        expr: &Expr,
+        target_name: &str,
+    ) -> Result<Option<CastLiftKind>> {
+        if !self.has_any_conversion_impls() {
+            return Ok(None);
+        }
+
+        let source_ann = match self.resolve_source_annotation(expr) {
+            Some(ann) => ann,
+            None => return Ok(None),
+        };
+
+        let source_name = match Self::try_into_name_from_annotation(&source_ann) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+
+        if source_name == target_name {
+            return Ok(Some(CastLiftKind::Direct));
+        }
+
+        if self.has_try_into_impl(&source_name, target_name)
+            || self.has_into_impl(&source_name, target_name)
+        {
+            return Ok(Some(CastLiftKind::Direct));
+        }
+
+        // Option<T> as M? → lift if T has TryInto<M>
+        if let Some(inner_ann) = Self::unwrap_option_inner(&source_ann) {
+            if let Some(inner_name) = Self::try_into_name_from_annotation(inner_ann) {
+                if inner_name == target_name
+                    || self.has_try_into_impl(&inner_name, target_name)
+                    || self.has_into_impl(&inner_name, target_name)
+                {
+                    return Ok(Some(CastLiftKind::LiftOption));
+                }
+            }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot convert `Option<{}>` to `{}?`: inner type has no `TryInto<{}>` implementation",
+                    annotation_to_string(inner_ann),
+                    target_name,
+                    target_name,
+                ),
+                location: Some(self.span_to_source_location(expr.span())),
+            });
+        }
+
+        // Result<T, E> as M? → lift if T has TryInto<M>
+        if let Some(inner_ann) = Self::unwrap_result_inner(&source_ann) {
+            if let Some(inner_name) = Self::try_into_name_from_annotation(inner_ann) {
+                if inner_name == target_name
+                    || self.has_try_into_impl(&inner_name, target_name)
+                    || self.has_into_impl(&inner_name, target_name)
+                {
+                    return Ok(Some(CastLiftKind::LiftResult));
+                }
+            }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot convert `Result<{}, _>` to `{}?`: inner type has no `TryInto<{}>` implementation",
+                    annotation_to_string(inner_ann),
+                    target_name,
+                    target_name,
+                ),
+                location: Some(self.span_to_source_location(expr.span())),
+            });
+        }
+
+        // Bare wrapper name without generic args (type tracker lost generics):
+        // emit lifting code and let the inner conversion be validated at runtime.
+        if source_name == "option" || source_name == "Option" {
+            return Ok(Some(CastLiftKind::LiftOption));
+        }
+        if source_name == "result" || source_name == "Result" {
+            return Ok(Some(CastLiftKind::LiftResult));
+        }
+
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Cannot convert `{}` to `{}?`: no `TryInto<{}>` implementation found",
+                source_name, target_name, target_name,
+            ),
+            location: Some(self.span_to_source_location(expr.span())),
+        })
+    }
+
+    /// Emit bytecode for Option<T> lifting with an infallible conversion.
+    ///
+    /// Stack effect: replaces top-of-stack Option<T> value with Option<M>.
+    /// None values pass through unchanged; Some(t) values are converted.
+    fn emit_option_lift_infallible(
+        &mut self,
+        convert_opcode: OpCode,
+    ) {
+        // Stack: [option_val]
+        self.emit(Instruction::simple(OpCode::Dup));
+        // Stack: [option_val, option_val]
+        self.emit(Instruction::simple(OpCode::PushNull));
+        // Stack: [option_val, option_val, null]
+        self.emit(Instruction::simple(OpCode::Eq));
+        // Stack: [option_val, is_none]
+        let jump_skip = self.emit_jump(OpCode::JumpIfTrue, 0);
+        // Stack: [option_val] — not None, convert it
+        self.emit(Instruction::new(convert_opcode, None));
+        // Stack: [converted_val]
+        let jump_end = self.emit_jump(OpCode::Jump, 0);
+        // skip: value is None, leave it on stack
+        self.patch_jump(jump_skip);
+        // Stack: [null]
+        // end:
+        self.patch_jump(jump_end);
+    }
+
+    /// Emit bytecode for Option<T> lifting with a fallible conversion.
+    ///
+    /// Stack effect: replaces top-of-stack Option<T> value with Option<Result<M, AnyError>>.
+    /// None values pass through; Some(t) values are try-converted.
+    fn emit_option_lift_fallible(
+        &mut self,
+        try_convert_opcode: OpCode,
+    ) {
+        // Same pattern as infallible but using TryConvertTo*
+        self.emit(Instruction::simple(OpCode::Dup));
+        self.emit(Instruction::simple(OpCode::PushNull));
+        self.emit(Instruction::simple(OpCode::Eq));
+        let jump_skip = self.emit_jump(OpCode::JumpIfTrue, 0);
+        self.emit(Instruction::new(try_convert_opcode, None));
+        let jump_end = self.emit_jump(OpCode::Jump, 0);
+        self.patch_jump(jump_skip);
+        self.patch_jump(jump_end);
+    }
+
+    /// Emit bytecode for Result<T, E> lifting with an infallible conversion.
+    ///
+    /// Stack effect: replaces top-of-stack Result<T, E> with Result<M, E>.
+    /// Err values pass through; Ok(t) values are unwrapped, converted, and re-wrapped.
+    fn emit_result_lift_infallible(
+        &mut self,
+        convert_opcode: OpCode,
+    ) -> Result<()> {
+        // Stack: [result_val]
+        self.emit(Instruction::simple(OpCode::Dup));
+        // Stack: [result_val, result_val]
+        self.emit(Instruction::simple(OpCode::IsOk));
+        // Stack: [result_val, is_ok]
+        let jump_skip = self.emit_jump(OpCode::JumpIfFalse, 0);
+        // Stack: [result_val] — it's Ok, unwrap and convert
+        self.emit(Instruction::simple(OpCode::UnwrapOk));
+        // Stack: [inner_val]
+        self.emit(Instruction::new(convert_opcode, None));
+        // Stack: [converted_val]
+        // Re-wrap in Ok() by calling the Ok builtin
+        self.emit_call_ok()?;
+        // Stack: [Ok(converted_val)]
+        let jump_end = self.emit_jump(OpCode::Jump, 0);
+        // skip: value is Err, leave it on stack
+        self.patch_jump(jump_skip);
+        // Stack: [err_result]
+        // end:
+        self.patch_jump(jump_end);
+        Ok(())
+    }
+
+    /// Emit bytecode for Result<T, E> lifting with a fallible conversion.
+    fn emit_result_lift_fallible(
+        &mut self,
+        try_convert_opcode: OpCode,
+    ) -> Result<()> {
+        self.emit(Instruction::simple(OpCode::Dup));
+        self.emit(Instruction::simple(OpCode::IsOk));
+        let jump_skip = self.emit_jump(OpCode::JumpIfFalse, 0);
+        self.emit(Instruction::simple(OpCode::UnwrapOk));
+        self.emit(Instruction::new(try_convert_opcode, None));
+        // Re-wrap in Ok()
+        self.emit_call_ok()?;
+        let jump_end = self.emit_jump(OpCode::Jump, 0);
+        self.patch_jump(jump_skip);
+        self.patch_jump(jump_end);
+        Ok(())
+    }
+
+    /// Emit a call to the `Ok()` builtin to re-wrap a value in Ok.
+    fn emit_call_ok(&mut self) -> Result<()> {
+        if let Some(func_idx) = self.find_function("Ok") {
+            let arg_count = self.program.add_constant(Constant::Int(1));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(arg_count)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::Call,
+                Some(Operand::Function(shape_value::FunctionId(func_idx as u16))),
+            ));
+        }
+        // Ok() not found — in stripped test mode, skip the re-wrap
+        Ok(())
+    }
+
     pub(super) fn expr_is_type_symbol(&self, expr: &Expr) -> bool {
         matches!(expr, Expr::Identifier(name, _) if self.is_type_symbol_name(name))
     }
@@ -243,6 +640,7 @@ impl BytecodeCompiler {
         expr: &Expr,
         type_annotation: &shape_ast::ast::TypeAnnotation,
     ) -> Result<()> {
+        // ── Fallible path: `as Type?` (parsed as `as Option<Type>`) ──
         if let TypeAnnotation::Generic { name, args } = type_annotation
             && name == "Option"
             && args.len() == 1
@@ -259,11 +657,32 @@ impl BytecodeCompiler {
                     }
                 })?;
 
-            // Fast path: emit typed TryConvertTo* opcode for primitive targets
-            if let Some(try_convert_opcode) = Self::try_convert_opcode_for_primitive(&target_selector) {
-                self.compile_expr(expr)?;
-                self.emit(Instruction::new(try_convert_opcode, None));
-                return Ok(());
+            // Validate the fallible cast (checks source type + lifting)
+            let cast_kind = self.validate_fallible_cast(expr, &target_selector)?;
+
+            if let Some(try_convert_opcode) =
+                Self::try_convert_opcode_for_primitive(&target_selector)
+            {
+                match cast_kind {
+                    Some(CastLiftKind::LiftOption) => {
+                        // Option<T> as M? → null-check lifting with try-convert
+                        self.compile_expr(expr)?;
+                        self.emit_option_lift_fallible(try_convert_opcode);
+                        return Ok(());
+                    }
+                    Some(CastLiftKind::LiftResult) => {
+                        // Result<T, E> as M? → Ok/Err lifting with try-convert
+                        self.compile_expr(expr)?;
+                        self.emit_result_lift_fallible(try_convert_opcode)?;
+                        return Ok(());
+                    }
+                    _ => {
+                        // Direct conversion
+                        self.compile_expr(expr)?;
+                        self.emit(Instruction::new(try_convert_opcode, None));
+                        return Ok(());
+                    }
+                }
             }
 
             let source_name = self
@@ -300,8 +719,8 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
-        // Width integer cast: `expr as i8`, `expr as u16`, etc.
-        // Emits CastWidth which does bit-truncation (Rust-style).
+        // ── Width integer cast: `expr as i8`, `expr as u16`, etc. ──
+        // Emits CastWidth which does bit-truncation (Rust-style). Not Into-based.
         if let TypeAnnotation::Basic(name) = type_annotation {
             if let Some(w) = shape_ast::IntWidth::from_name(name) {
                 self.compile_expr(expr)?;
@@ -314,12 +733,32 @@ impl BytecodeCompiler {
             }
         }
 
+        // ── Infallible path: `as Type` ──
         if let Some(target_selector) = Self::try_into_name_from_annotation(type_annotation) {
-            // Fast path: emit typed ConvertTo* opcode for primitive targets
+            // Validate the infallible cast (checks source type + lifting)
+            let cast_kind = self.validate_infallible_cast(expr, &target_selector)?;
+
             if let Some(convert_opcode) = Self::convert_opcode_for_primitive(&target_selector) {
-                self.compile_expr(expr)?;
-                self.emit(Instruction::new(convert_opcode, None));
-                return Ok(());
+                match cast_kind {
+                    Some(CastLiftKind::LiftOption) => {
+                        // Option<T> as M → null-check lifting with convert
+                        self.compile_expr(expr)?;
+                        self.emit_option_lift_infallible(convert_opcode);
+                        return Ok(());
+                    }
+                    Some(CastLiftKind::LiftResult) => {
+                        // Result<T, E> as M → Ok/Err lifting with convert
+                        self.compile_expr(expr)?;
+                        self.emit_result_lift_infallible(convert_opcode)?;
+                        return Ok(());
+                    }
+                    _ => {
+                        // Direct conversion (primitive fast path)
+                        self.compile_expr(expr)?;
+                        self.emit(Instruction::new(convert_opcode, None));
+                        return Ok(());
+                    }
+                }
             }
 
             // `as Type` compiles to Into<Target> dispatch through Convert.

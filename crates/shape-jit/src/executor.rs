@@ -121,8 +121,14 @@ impl JITExecutor {
             })?
         };
 
-        // Create JIT context and execute
+        // Create JIT context and set function table for CallValue dispatch
         let mut jit_ctx = JITContext::default();
+        let func_table = jit.get_function_table();
+        if !func_table.is_empty() {
+            jit_ctx.function_table =
+                func_table.as_ptr() as *const crate::context::JittedStrategyFn;
+            jit_ctx.function_table_len = func_table.len();
+        }
         if let Some(state) = foreign_bridge.as_ref() {
             jit_ctx.foreign_bridge_ptr = state.as_ref() as *const _ as *const std::ffi::c_void;
         }
@@ -135,6 +141,63 @@ impl JITExecutor {
             }
         }
 
+        // Register the generic builtin dispatch trampoline so builtins
+        // without dedicated JIT lowering can fall back to the VM interpreter.
+        unsafe {
+            crate::ffi::generic_builtin::register_generic_builtin_fn(
+                crate::ffi::generic_builtin::builtin_dispatch_trampoline,
+            );
+        }
+
+        // Create a trampoline VM for executing functions that weren't
+        // JIT-compiled (demoted due to block depth errors, unsupported opcodes,
+        // etc.). The VM is loaded with the full bytecode program and extensions
+        // so it can execute any function by ID.
+        let mut trampoline_vm = shape_vm::VirtualMachine::new(shape_vm::VMConfig::default());
+        trampoline_vm.load_program(bytecode.clone());
+        for ext in self.bytecode_executor.extensions() {
+            trampoline_vm.register_extension(ext.clone());
+        }
+        trampoline_vm.populate_module_objects();
+
+        // Pre-run the program on the VM to populate module bindings (stdlib
+        // prelude creates module namespace objects, registers extension functions,
+        // etc.). The JIT can't reliably do this because many stdlib functions
+        // are demoted. After VM execution, copy the populated module bindings
+        // to the JIT context so the JIT-compiled user code sees them.
+        // Output is captured (not printed) to avoid double output.
+        trampoline_vm.enable_output_capture();
+        let vm_exec_ok = trampoline_vm.execute(None).is_ok();
+        // Copy VM module bindings to JIT context locals regardless of
+        // execution success — partial initialization is better than none.
+        let vm_bindings = trampoline_vm.module_bindings_snapshot();
+        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
+        if debug {
+            let non_null = vm_bindings.iter().filter(|vw| !vw.is_none()).count();
+            eprintln!(
+                "[jit-init] VM pre-run {}: {} module bindings ({} non-null)",
+                if vm_exec_ok { "OK" } else { "FAILED" },
+                vm_bindings.len(),
+                non_null
+            );
+        }
+        for (idx, vw) in vm_bindings.iter().enumerate() {
+            if idx < jit_ctx.locals.len() {
+                jit_ctx.locals[idx] = vw.raw_bits();
+            }
+        }
+
+        // Reset VM state for trampoline use (clear stack/IP but keep program + bindings).
+        // Disable output capture so print() works normally during JIT execution.
+        trampoline_vm.reset_for_trampoline();
+        trampoline_vm.disable_output_capture();
+
+        unsafe {
+            crate::ffi::control::set_trampoline_vm(
+                &mut trampoline_vm as *mut shape_vm::VirtualMachine,
+            );
+        }
+
         // Execute the JIT-compiled function
         if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
             eprintln!("[jit-debug] compilation OK, about to execute...");
@@ -142,6 +205,9 @@ impl JITExecutor {
         let jit_exec_start = Instant::now();
         let signal = unsafe { jit_fn(&mut jit_ctx) };
         let jit_exec_ms = jit_exec_start.elapsed().as_millis();
+
+        // Clear the trampoline VM pointer (VM is about to be dropped)
+        crate::ffi::control::unset_trampoline_vm();
 
         // Get result from JIT context stack via TypedScalar boundary
         let raw_result = if jit_ctx.stack_ptr > 0 {

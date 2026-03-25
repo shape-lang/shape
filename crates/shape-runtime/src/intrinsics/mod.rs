@@ -139,6 +139,11 @@ impl IntrinsicsRegistry {
         functions.insert("__intrinsic_sinh".to_string(), math::intrinsic_sinh);
         functions.insert("__intrinsic_cosh".to_string(), math::intrinsic_cosh);
         functions.insert("__intrinsic_tanh".to_string(), math::intrinsic_tanh);
+        // Interpolation intrinsics
+        functions.insert(
+            "__intrinsic_bspline2_3d_batch".to_string(),
+            math::intrinsic_bspline2_3d_batch,
+        );
         // Character code intrinsics
         functions.insert(
             "__intrinsic_char_code".to_string(),

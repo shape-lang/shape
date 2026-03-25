@@ -397,7 +397,9 @@ impl JITCompiler {
 
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
-        for _ in 0..func.arity {
+        // Closures receive captures as leading native args, followed by user params.
+        let effective_arity = func.captures_count + func.arity;
+        for _ in 0..effective_arity {
             sig.params.push(AbiParam::new(types::I64));
         }
         sig.returns.push(AbiParam::new(types::I32));
@@ -468,9 +470,14 @@ impl JITCompiler {
                 collect_numeric_param_hints(&sub_program, func.arity, &func.ref_params);
 
             let entry_params = compiler.builder.block_params(entry_block).to_vec();
-            for arg_idx in 0..func.arity {
-                let arg_val = entry_params[(arg_idx as usize) + 1];
-                let var = compiler.get_or_create_local(arg_idx);
+            // Set up all native params: captures first (indices 0..captures_count),
+            // then user params (indices captures_count..captures_count+arity).
+            // This matches the VM calling convention where the bytecode body
+            // does LoadLocal/StoreLocal for each slot in order.
+            let total_native_params = (func.captures_count + func.arity) as usize;
+            for arg_idx in 0..total_native_params {
+                let arg_val = entry_params[arg_idx + 1]; // +1 for ctx_ptr
+                let var = compiler.get_or_create_local(arg_idx as u16);
                 compiler.builder.def_var(var, arg_val);
             }
 
@@ -1204,7 +1211,9 @@ impl JITCompiler {
             let func_name = format!("{}_f{}_{}", name, idx, func.name);
             let mut user_sig = self.module.make_signature();
             user_sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
-            for _ in 0..func.arity {
+            // Closures receive captures as leading native args, followed by user params.
+            let effective_arity = func.captures_count + func.arity;
+            for _ in 0..effective_arity {
                 user_sig.params.push(AbiParam::new(types::I64));
             }
             user_sig.returns.push(AbiParam::new(types::I32));
@@ -1213,6 +1222,7 @@ impl JITCompiler {
                 .declare_function(&func_name, Linkage::Local, &user_sig)
                 .map_err(|e| format!("Failed to pre-declare function {}: {}", func.name, e))?;
             user_func_ids.insert(idx as u16, func_id);
+            // Store user-visible arity (without captures) for CallValue arg count checks
             user_func_arities.insert(idx as u16, func.arity);
         }
 
@@ -1225,18 +1235,23 @@ impl JITCompiler {
         )?;
 
         // Phase 4: Compile only JIT-compatible function bodies.
+        // Functions that fail to compile are demoted to interpreted fallback.
         for (idx, func) in program.functions.iter().enumerate() {
             if !jit_compatible[idx] {
                 continue;
             }
             let func_name = format!("{}_f{}_{}", name, idx, func.name);
-            self.compile_function_with_user_funcs(
+            if let Err(_e) = self.compile_function_with_user_funcs(
                 &func_name,
                 program,
                 idx,
                 &user_func_ids,
                 &user_func_arities,
-            )?;
+            ) {
+                // Demote to interpreted — the function table slot stays null
+                // so CallValue will fall back through the trampoline VM.
+                jit_compatible[idx] = false;
+            }
         }
 
         self.module

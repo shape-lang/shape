@@ -888,6 +888,11 @@ impl TypeEnvironment {
             .lookup_trait_impl_named(trait_name, type_name, impl_name)
     }
 
+    /// Check whether any Into/TryInto trait impls have been registered.
+    pub fn has_any_into_impls(&self) -> bool {
+        self.type_registry.has_any_into_impls()
+    }
+
     /// Resolve an associated type from a trait implementation
     pub fn resolve_associated_type(
         &self,

@@ -508,6 +508,9 @@ impl JITCompiler {
             typed_object_alloc: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_typed_object_alloc"], builder.func),
+            typed_object_set_field: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_typed_object_set_field"], builder.func),
             typed_merge_object: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_typed_merge_object"], builder.func),

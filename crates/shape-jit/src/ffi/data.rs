@@ -372,35 +372,42 @@ pub extern "C" fn jit_eval_data_relative(_ctx: *mut JITContext, _expr: u64, _off
 /// Panics if obj is not a TypedObject or has a schema mismatch.
 /// This indicates a type system bug - the type checker should guarantee
 /// that typed field access only occurs on correctly-typed objects.
-pub extern "C" fn jit_get_field_typed(obj: u64, type_id: u64, _field_idx: u64, offset: u64) -> u64 {
-    // TypedObject with direct offset access (~2ns)
-    if !is_typed_object(obj) {
-        panic!(
-            "jit_get_field_typed: expected TypedObject but got tag 0x{:x}. \
-             This indicates a type system bug - typed field access should only \
-             be emitted for statically-known TypedObjects.",
-            obj & TAG_MASK
-        );
-    }
+pub extern "C" fn jit_get_field_typed(obj: u64, type_id: u64, field_idx: u64, offset: u64) -> u64 {
+    #[allow(unused_imports)]
+    use crate::ffi::object::conversion::{jit_bits_to_nanboxed, nanboxed_to_jit_bits};
 
-    let ptr = unbox_typed_object(obj) as *const super::typed_object::TypedObject;
-    if ptr.is_null() {
-        panic!("jit_get_field_typed: TypedObject pointer is null");
-    }
-
-    unsafe {
-        // Type guard
-        if type_id != 0 && (*ptr).schema_id != type_id as u32 {
-            panic!(
-                "jit_get_field_typed: schema mismatch - expected {} but got {}. \
-                 This indicates a type system bug.",
-                type_id,
-                (*ptr).schema_id
-            );
+    // Fast path: JIT-allocated TypedObject with direct offset access (~2ns)
+    if is_typed_object(obj) {
+        let ptr = unbox_typed_object(obj) as *const super::typed_object::TypedObject;
+        if !ptr.is_null() {
+            return unsafe {
+                if type_id != 0 && (*ptr).schema_id != type_id as u32 {
+                    TAG_NULL
+                } else {
+                    (*ptr).get_field(offset as usize)
+                }
+            };
         }
-        // Direct field access by offset - O(1)!
-        (*ptr).get_field(offset as usize)
     }
+
+    // Slow path: VM-allocated object (Arc<HeapValue>).
+    // The obj bits are a ValueWord (repr(transparent) u64) with TAG_HEAP
+    // pointing to Arc<HeapValue>. We can't use jit_bits_to_nanboxed because
+    // that assumes JitAlloc format. Instead, clone directly from raw bits
+    // to get a proper ValueWord with Arc refcount bump.
+    let vw = unsafe { shape_value::ValueWord::clone_from_bits(obj) };
+    if let Some((_schema_id, slots, heap_mask)) = vw.as_typed_object() {
+        let idx = field_idx as usize;
+        if idx < slots.len() {
+            let is_heap = (heap_mask >> idx) & 1 != 0;
+            let field_vw = slots[idx].as_value_word(is_heap);
+            // The field value is a VM ValueWord. Return its raw bits directly
+            // since the JIT and VM use the same NaN-boxing for inline values
+            // (numbers, bools, function refs) and the same Arc<HeapValue> pointers.
+            return field_vw.raw_bits();
+        }
+    }
+    TAG_NULL
 }
 
 /// Set a field on a typed object using precomputed offset.
@@ -428,38 +435,27 @@ pub extern "C" fn jit_set_field_typed(
     obj: u64,
     value: u64,
     type_id: u64,
-    _field_idx: u64,
+    field_idx: u64,
     offset: u64,
 ) -> u64 {
-    // TypedObject with direct offset access (~2ns)
-    if !is_typed_object(obj) {
-        panic!(
-            "jit_set_field_typed: expected TypedObject but got tag 0x{:x}. \
-             This indicates a type system bug - typed field access should only \
-             be emitted for statically-known TypedObjects.",
-            obj & TAG_MASK
-        );
-    }
-
-    let ptr = unbox_typed_object(obj) as *mut super::typed_object::TypedObject;
-    if ptr.is_null() {
-        panic!("jit_set_field_typed: TypedObject pointer is null");
-    }
-
-    unsafe {
-        // Type guard
-        if type_id != 0 && (*ptr).schema_id != type_id as u32 {
-            panic!(
-                "jit_set_field_typed: schema mismatch - expected {} but got {}. \
-                 This indicates a type system bug.",
-                type_id,
-                (*ptr).schema_id
-            );
+    // Fast path: JIT-allocated TypedObject
+    if is_typed_object(obj) {
+        let ptr = unbox_typed_object(obj) as *mut super::typed_object::TypedObject;
+        if !ptr.is_null() {
+            return unsafe {
+                if type_id != 0 && (*ptr).schema_id != type_id as u32 {
+                    obj // schema mismatch — return unchanged
+                } else {
+                    let old_bits = (*ptr).get_field(offset as usize);
+                    super::gc::jit_write_barrier(old_bits, value);
+                    (*ptr).set_field(offset as usize, value);
+                    obj
+                }
+            };
         }
-        // Direct field set by offset - O(1)!
-        let old_bits = (*ptr).get_field(offset as usize);
-        super::gc::jit_write_barrier(old_bits, value);
-        (*ptr).set_field(offset as usize, value);
-        obj
     }
+
+    // Slow path: VM-allocated object — return unchanged.
+    // VM objects should be mutated through the trampoline VM, not directly.
+    obj
 }

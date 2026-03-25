@@ -26,9 +26,11 @@ use crate::bytecode::{DeoptInfo, OsrEntryPoint};
 #[cfg(feature = "jit")]
 use crate::executor::control_flow::jit_abi;
 #[cfg(feature = "jit")]
+use crate::executor::VirtualMachine;
+#[cfg(feature = "jit")]
 use crate::type_tracking::SlotKind;
 #[cfg(feature = "jit")]
-use shape_value::VMError;
+use shape_value::{VMError, ValueWord};
 
 /// JIT context buffer size in u64 words.
 ///

@@ -132,6 +132,24 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 };
                 Some((arity + 1, 1))
             }
+            OpCode::MakeClosure => {
+                // Variable arity: pops N captures (pushed by BoxLocal), pushes 1 closure
+                None
+            }
+            OpCode::MakeRef => {
+                // Conditional push: only pushes when operand matches Operand::Local.
+                // Skip guard to avoid false mismatch when the conditional branch
+                // doesn't execute.
+                None
+            }
+            // Reference/box opcodes compiled via generic FFI — the FFI handler
+            // manages its own JIT stack pops/pushes and may differ from the
+            // declared opcode effects (e.g. BoxLocal declares pushes:1 but the
+            // JIT handler pushes:0 since it operates on locals, not stack).
+            OpCode::MakeFieldRef
+            | OpCode::MakeIndexRef
+            | OpCode::BoxLocal
+            | OpCode::BoxModuleBinding => None,
             OpCode::BuiltinCall => {
                 // Variable arity — skip guard
                 None
@@ -472,13 +490,14 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             OpCode::CastWidth => self.compile_cast_width(instr),
 
             // Field reference — pops 1 (object), pushes 1 (field ref) via FFI
-            OpCode::MakeFieldRef => self.compile_opcode_via_generic_ffi(instr.opcode, 1, true),
+            OpCode::MakeFieldRef => self.compile_make_field_ref(instr),
 
             // Index reference — pops 2 (base ref, index), pushes 1 (indexed ref) via FFI
             OpCode::MakeIndexRef => self.compile_opcode_via_generic_ffi(instr.opcode, 2, true),
 
-            // Typed conversion opcodes — pops 1, pushes 1 via FFI trampoline.
-            // TODO: add real JIT lowering (inline tag checks, fcvt, etc.)
+            // Typed conversion opcodes — dispatched via generic FFI trampoline.
+            // The trampoline handles opcode IDs (0x8000+) and performs proper
+            // value conversion at runtime (e.g., NaN-boxed int → NaN-boxed f64).
             OpCode::ConvertToInt
             | OpCode::ConvertToNumber
             | OpCode::ConvertToString

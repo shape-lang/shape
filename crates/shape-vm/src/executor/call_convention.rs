@@ -399,7 +399,7 @@ impl VirtualMachine {
     /// ValueWord-native call_value_immediate: dispatches on NanTag/HeapKind.
     ///
     /// Returns ValueWord directly.
-    pub(in crate::executor) fn call_value_immediate_nb(
+    pub fn call_value_immediate_nb(
         &mut self,
         callee: &ValueWord,
         args: &[ValueWord],

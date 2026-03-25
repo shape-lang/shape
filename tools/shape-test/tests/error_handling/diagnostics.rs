@@ -203,6 +203,89 @@ fn run() -> Result<int> {
 }
 
 // =========================================================================
+// Compile-time `as` cast validation and Option/Result lifting
+// =========================================================================
+
+// -- Compile errors for invalid infallible casts --
+
+#[test]
+fn infallible_cast_string_to_int_is_rejected() {
+    // string has TryInto<int> but NOT Into<int>, so `as int` must fail
+    let code = r#"
+let bad = "42" as int
+"#;
+    ShapeTest::new(code).expect_semantic_diagnostic_contains("Cannot assert type");
+}
+
+// -- Valid direct conversions (no semantic diagnostics) --
+
+#[test]
+fn infallible_cast_int_to_number_no_semantic_diagnostics() {
+    let code = r#"
+impl Into<number> for int as number {
+  method into() { 0.0 }
+}
+let n = 42 as number
+"#;
+    ShapeTest::new(code).expect_no_semantic_diagnostics();
+}
+
+#[test]
+fn infallible_cast_bool_to_int_no_semantic_diagnostics() {
+    let code = r#"
+impl Into<int> for bool as int {
+  method into() { 0 }
+}
+let n = true as int
+"#;
+    ShapeTest::new(code).expect_no_semantic_diagnostics();
+}
+
+#[test]
+fn fallible_cast_string_to_int_no_semantic_diagnostics() {
+    let code = r#"
+impl TryInto<int> for string as int {
+  method tryInto() { Ok(0) }
+}
+let r = "42" as int?
+"#;
+    ShapeTest::new(code).expect_no_semantic_diagnostics();
+}
+
+// -- Width casts are unaffected by Into validation --
+
+#[test]
+fn width_cast_i8_always_valid() {
+    ShapeTest::new("let x = 256 as i8\nx").expect_run_ok();
+}
+
+// -- Option/Result lifting: type inference accepts these casts --
+
+#[test]
+fn option_int_as_number_no_semantic_diagnostics() {
+    let code = r#"
+impl Into<number> for int as number {
+  method into() { 0.0 }
+}
+let opt: Option<int> = Some(42)
+let val = opt as number
+"#;
+    ShapeTest::new(code).expect_no_semantic_diagnostics();
+}
+
+#[test]
+fn result_int_as_number_no_semantic_diagnostics() {
+    let code = r#"
+impl Into<number> for int as number {
+  method into() { 0.0 }
+}
+let res: Result<int> = Ok(42)
+let val = res as number
+"#;
+    ShapeTest::new(code).expect_no_semantic_diagnostics();
+}
+
+// =========================================================================
 // Parse error quality (from programs_error_handling.rs)
 // =========================================================================
 

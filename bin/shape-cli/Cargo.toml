@@ -11,7 +11,7 @@ description = "CLI and REPL for the Shape programming language"
 
 [features]
 default = ["jit"]
-jit = ["shape-jit"]  # JIT requires VM for bytecode compilation (shape-vm is already a dependency)
+jit = ["shape-jit", "shape-vm/jit"]  # Enable JIT in both the JIT crate and VM tiered compilation
 
 [dependencies]
 anyhow.workspace = true

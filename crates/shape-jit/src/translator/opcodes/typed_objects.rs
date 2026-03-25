@@ -36,46 +36,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         }
 
         // Standard mode continues below (type_id used in slow path)
-        let _ = type_id; // Used below in slow path
+        // Pop object from JIT typed stack.
         let obj = self
             .stack_pop()
             .ok_or("GetFieldTyped: missing object on stack")?;
 
-        // Type check: TAG_HEAP + HeapKind == HK_TYPED_OBJECT
-        let is_typed = self.emit_is_heap_kind(obj, HK_TYPED_OBJECT);
-
-        // Extract alloc_ptr for use in the fast path below
-        let alloc_ptr = self.emit_payload_ptr(obj);
-
-        // Control flow blocks
-        let fast_block = self.builder.create_block();
-        let slow_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-        self.builder.append_block_param(merge_block, types::I64);
-        self.builder
-            .ins()
-            .brif(is_typed, fast_block, &[], slow_block, &[]);
-
-        // Fast path: load TypedObject pointer from JitAlloc.data, then access field
-        self.builder.switch_to_block(fast_block);
-        self.builder.seal_block(fast_block);
-        // alloc_ptr + 8 = JitAlloc.data (which is *const u8 to TypedObject)
-        let obj_ptr = self.emit_trusted_load(
-            types::I64,
-            alloc_ptr,
-            JIT_ALLOC_DATA_OFFSET as i32,
-        );
-        // Field address: obj_ptr + 8 (TypedObject header) + field offset
-        let field_addr = self.builder.ins().iadd_imm(obj_ptr, 8 + offset as i64);
-        let value = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), field_addr, 0);
-        self.builder.ins().jump(merge_block, &[value]);
-
-        // Slow path: FFI fallback
-        self.builder.switch_to_block(slow_block);
-        self.builder.seal_block(slow_block);
         let field_idx_val = self.builder.ins().iconst(types::I64, field_idx as i64);
         let type_id_val = self.builder.ins().iconst(types::I64, type_id as i64);
         let offset_val = self.builder.ins().iconst(types::I64, offset as i64);
@@ -83,13 +48,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             self.ffi.get_field_typed,
             &[obj, type_id_val, field_idx_val, offset_val],
         );
-        let slow_result = self.builder.inst_results(inst)[0];
-        self.builder.ins().jump(merge_block, &[slow_result]);
-
-        // Merge block
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        let result = self.builder.block_params(merge_block)[0];
+        let result = self.builder.inst_results(inst)[0];
         self.stack_push(result);
         Ok(())
     }
@@ -131,37 +90,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             .ok_or("SetFieldTyped: missing object on stack")?;
 
         // Type check: TAG_HEAP + HeapKind == HK_TYPED_OBJECT
-        let is_typed = self.emit_is_heap_kind(obj, HK_TYPED_OBJECT);
-
-        // Extract alloc_ptr for use in the fast path below
-        let alloc_ptr = self.emit_payload_ptr(obj);
-
-        // Control flow blocks
-        let fast_block = self.builder.create_block();
-        let slow_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-        self.builder.append_block_param(merge_block, types::I64);
-        self.builder
-            .ins()
-            .brif(is_typed, fast_block, &[], slow_block, &[]);
-
-        // Fast path: load TypedObject pointer from JitAlloc.data, then store field
-        self.builder.switch_to_block(fast_block);
-        self.builder.seal_block(fast_block);
-        let obj_ptr = self.emit_trusted_load(
-            types::I64,
-            alloc_ptr,
-            JIT_ALLOC_DATA_OFFSET as i32,
-        );
-        let field_addr = self.builder.ins().iadd_imm(obj_ptr, 8 + offset as i64);
-        self.builder
-            .ins()
-            .store(MemFlags::trusted(), value, field_addr, 0);
-        self.builder.ins().jump(merge_block, &[obj]);
-
-        // Slow path: FFI fallback
-        self.builder.switch_to_block(slow_block);
-        self.builder.seal_block(slow_block);
+        // Route all SetFieldTyped through FFI for safety (same reason as GetFieldTyped).
         let field_idx_val = self.builder.ins().iconst(types::I64, field_idx as i64);
         let type_id_val = self.builder.ins().iconst(types::I64, type_id as i64);
         let offset_val = self.builder.ins().iconst(types::I64, offset as i64);
@@ -169,13 +98,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             self.ffi.set_field_typed,
             &[obj, value, type_id_val, field_idx_val, offset_val],
         );
-        let slow_result = self.builder.inst_results(inst)[0];
-        self.builder.ins().jump(merge_block, &[slow_result]);
-
-        // Merge block
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        let result = self.builder.block_params(merge_block)[0];
+        let result = self.builder.inst_results(inst)[0];
         self.stack_push(result);
         Ok(())
     }
@@ -197,27 +120,22 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             _ => return Err("NewTypedObject requires TypedObjectAlloc operand".to_string()),
         };
 
-        // Pop field values from virtual stack and store their indices
-        let mut field_indices: Vec<Value> = Vec::with_capacity(field_count as usize);
-        for _ in 0..field_count {
-            let val = self.stack_pop().ok_or_else(|| {
+        // Pop field values, ensuring NaN-boxing.
+        let count = field_count as usize;
+        let mut field_vals: Vec<Value> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let val = self.stack_pop_boxed().ok_or_else(|| {
                 format!(
-                    "NewTypedObject(schema={}, fields={}): stack has {} values, need {}",
-                    schema_id,
-                    field_count,
-                    field_indices.len(),
-                    field_count
+                    "NewTypedObject(schema={}, fields={}): stack underflow",
+                    schema_id, field_count,
                 )
             })?;
-            field_indices.push(val);
+            field_vals.push(val);
         }
-        // Reverse since we popped in reverse order (LIFO)
-        field_indices.reverse();
+        field_vals.reverse();
 
-        // Calculate data size for allocation
-        let data_size = (field_count as i64) * 8;
-
-        // Call jit_typed_object_alloc to get a fresh TypedObject
+        // Allocate the TypedObject via FFI
+        let data_size = (count as i64) * 8;
         let schema_id_val = self.builder.ins().iconst(types::I32, schema_id as i64);
         let data_size_val = self.builder.ins().iconst(types::I64, data_size);
         let alloc_inst = self
@@ -226,22 +144,17 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             .call(self.ffi.typed_object_alloc, &[schema_id_val, data_size_val]);
         let obj = self.builder.inst_results(alloc_inst)[0];
 
-        // Store each field value at the appropriate offset
-        // TypedObject layout: 8-byte header + fields at offsets 0, 8, 16, etc.
-        let alloc_ptr = self.emit_payload_ptr(obj);
-        // Load TypedObject raw pointer from JitAlloc.data
-        let typed_ptr = self.emit_trusted_load(
-            types::I64,
-            alloc_ptr,
-            JIT_ALLOC_DATA_OFFSET as i32,
-        );
-
-        for (i, field_val) in field_indices.into_iter().enumerate() {
-            let field_offset = 8 + (i as i64 * 8); // TypedObject header is 8 bytes
-            let field_addr = self.builder.ins().iadd_imm(typed_ptr, field_offset);
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), field_val, field_addr, 0);
+        // Store field values via FFI to avoid inline JitAlloc pointer chain.
+        // Cranelift's code generation can miscompile the inline pointer chain,
+        // causing the JitAlloc kind header to be corrupted at runtime.
+        let mut current_obj = obj;
+        for (i, field_val) in field_vals.into_iter().enumerate() {
+            let offset_val = self.builder.ins().iconst(types::I64, (i as i64) * 8);
+            let call = self.builder.ins().call(
+                self.ffi.typed_object_set_field,
+                &[current_obj, offset_val, field_val],
+            );
+            current_obj = self.builder.inst_results(call)[0];
         }
 
         self.stack_push(obj);

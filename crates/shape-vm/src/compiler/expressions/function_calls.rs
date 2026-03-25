@@ -1541,7 +1541,10 @@ impl BytecodeCompiler {
                 })
             })
         });
-        if let Some(func_idx) = extend_func_idx.or_else(|| self.find_function(method)) {
+        if let Some(func_idx) = extend_func_idx
+            .or_else(|| self.find_function(method))
+            .filter(|&idx| self.current_function != Some(idx))
+        {
             // UFCS rewrite: receiver already compiled (on stack), args already compiled.
             // Stack is: [receiver, arg1, arg2, ...] — receiver is first, which is what we want.
             // Pad missing default args with Unit sentinels (same as regular call path).
@@ -1627,7 +1630,10 @@ impl BytecodeCompiler {
                 })
                 .flatten();
 
-            if let Some(func_idx) = scoped_func_idx.or(trait_func_idx) {
+            if let Some(func_idx) = scoped_func_idx
+                .or(trait_func_idx)
+                .filter(|&idx| self.current_function != Some(idx))
+            {
                 let func_name = self.program.functions[func_idx].name.clone();
                 let total_arity = self.program.functions[func_idx].arity as usize;
                 let effective_total_arity = self

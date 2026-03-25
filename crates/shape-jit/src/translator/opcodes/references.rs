@@ -29,27 +29,88 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// slot lives in the native stack frame and is NOT affected by ctx.locals
     /// save/restore during function calls.
     pub(crate) fn compile_make_ref(&mut self, instr: &Instruction) -> Result<(), String> {
-        if let Some(Operand::Local(idx)) = &instr.operand {
-            // Get current SSA value of the local
-            let var = self.get_or_create_local(*idx);
-            let current_val = self.builder.use_var(var);
+        // Get the current value for the referenced variable
+        let (current_val, slot_key) = match &instr.operand {
+            Some(Operand::Local(idx)) => {
+                let var = self.get_or_create_local(*idx);
+                (self.builder.use_var(var), *idx)
+            }
+            Some(Operand::ModuleBinding(idx)) => {
+                // Load module binding from ctx.locals memory
+                let locals_offset = crate::context::LOCALS_OFFSET;
+                let byte_offset = locals_offset + (*idx as i32 * 8);
+                let val = self.builder.ins().load(
+                    types::I64,
+                    MemFlags::new(),
+                    self.ctx_ptr,
+                    byte_offset,
+                );
+                // Use a synthetic slot key that won't collide with local indices
+                // (module binding indices are in a separate namespace)
+                (val, 0x8000 | *idx)
+            }
+            _ => return Ok(()),
+        };
 
-            // Allocate a Cranelift stack slot (8 bytes, aligned to 8)
-            // This lives in the native function's stack frame, NOT in ctx.locals
+        // Allocate a Cranelift stack slot (8 bytes, aligned to 8)
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            8,
+            3,
+        ));
+
+        // Store the value to the stack slot
+        self.builder.ins().stack_store(current_val, slot, 0);
+        self.ref_stack_slots.insert(slot_key, slot);
+
+        // Push the address of the stack slot
+        let addr = self.builder.ins().stack_addr(types::I64, slot, 0);
+        self.stack_push(addr);
+        Ok(())
+    }
+
+    /// MakeFieldRef: Project a reference through a typed field.
+    ///
+    /// VM semantics: pops a reference, pushes a projected reference to a field.
+    /// JIT implementation: dereferences the pointer to get the object, calls
+    /// jit_get_field_typed FFI to extract the field value, stores the result
+    /// in a new stack slot, and pushes the slot address.
+    pub(crate) fn compile_make_field_ref(&mut self, instr: &Instruction) -> Result<(), String> {
+        let (type_id, field_idx, _field_type_tag) = match &instr.operand {
+            Some(Operand::TypedField {
+                type_id,
+                field_idx,
+                field_type_tag,
+            }) => (*type_id, *field_idx, *field_type_tag),
+            _ => return Ok(()),
+        };
+
+        let offset = field_idx * 8;
+
+        if let Some(ref_addr) = self.stack_pop() {
+            // Dereference the reference to get the object
+            let obj = self
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::new(), ref_addr, 0);
+
+            // Call jit_get_field_typed to extract the field value
+            let field_idx_val = self.builder.ins().iconst(types::I64, field_idx as i64);
+            let type_id_val = self.builder.ins().iconst(types::I64, type_id as i64);
+            let offset_val = self.builder.ins().iconst(types::I64, offset as i64);
+            let inst = self.builder.ins().call(
+                self.ffi.get_field_typed,
+                &[obj, type_id_val, field_idx_val, offset_val],
+            );
+            let field_val = self.builder.inst_results(inst)[0];
+
+            // Store field value in a new stack slot and push its address
             let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 8,
-                3, // alignment = 2^3 = 8
+                3,
             ));
-
-            // Store the value to the stack slot
-            self.builder.ins().stack_store(current_val, slot, 0);
-
-            // Track this slot so we can reload the local after function calls
-            // that may have modified the value through the reference
-            self.ref_stack_slots.insert(*idx, slot);
-
-            // Get the address of the stack slot and push it
+            self.builder.ins().stack_store(field_val, slot, 0);
             let addr = self.builder.ins().stack_addr(types::I64, slot, 0);
             self.stack_push(addr);
         }

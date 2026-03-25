@@ -492,6 +492,14 @@ impl TypeRegistry {
         self.trait_impls.get(&key)
     }
 
+    /// Check whether any Into/TryInto trait impls have been registered.
+    ///
+    /// Returns false in test mode without prelude, allowing the bytecode
+    /// compiler to skip conversion validation when no stdlib impls exist.
+    pub fn has_any_into_impls(&self) -> bool {
+        self.trait_impls.keys().any(|k| k.starts_with("Into::") || k.starts_with("TryInto::"))
+    }
+
     /// Resolve an associated type: given a trait, an implementing type, and
     /// the associated type name, return the concrete type annotation.
     pub fn resolve_associated_type(

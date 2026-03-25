@@ -80,7 +80,7 @@ impl VirtualMachine {
     /// Hot path: single bounds check + write.  The stack growth and overflow
     /// checks are split into a cold `push_vw_slow` to keep the hot path tight.
     #[inline(always)]
-    pub(crate) fn push_vw(&mut self, value: ValueWord) -> Result<(), VMError> {
+    pub fn push_vw(&mut self, value: ValueWord) -> Result<(), VMError> {
         if self.sp >= self.stack.len() {
             return self.push_vw_slow(value);
         }
@@ -115,7 +115,7 @@ impl VirtualMachine {
     /// The underflow check is retained for safety but marked cold so the
     /// branch predictor always predicts the fast path (sp > 0).
     #[inline(always)]
-    pub(crate) fn pop_vw(&mut self) -> Result<ValueWord, VMError> {
+    pub fn pop_vw(&mut self) -> Result<ValueWord, VMError> {
         if self.sp == 0 {
             return Self::pop_vw_underflow();
         }

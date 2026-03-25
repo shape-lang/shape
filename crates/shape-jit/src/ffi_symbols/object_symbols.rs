@@ -17,6 +17,7 @@ use super::super::ffi::object::{
     jit_make_closure, jit_new_object, jit_object_rest, jit_set_prop,
 };
 use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
+use super::super::ffi::typed_object::jit_typed_object_set_field;
 use super::helpers::jit_format_error;
 
 /// Register object FFI symbols with the JIT builder
@@ -41,6 +42,10 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol(
         "jit_typed_merge_object",
         jit_typed_merge_object as *const u8,
+    );
+    builder.symbol(
+        "jit_typed_object_set_field",
+        super::super::ffi::typed_object::jit_typed_object_set_field as *const u8,
     );
     builder.symbol("jit_hashmap_shape_id", jit_hashmap_shape_id as *const u8);
     builder.symbol("jit_hashmap_value_at", jit_hashmap_value_at as *const u8);
@@ -209,6 +214,19 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_typed_object_alloc", Linkage::Import, &sig)
             .expect("Failed to declare jit_typed_object_alloc");
         ffi_funcs.insert("jit_typed_object_alloc".to_string(), func_id);
+    }
+
+    // jit_typed_object_set_field(obj_bits, offset, value) -> u64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // obj_bits
+        sig.params.push(AbiParam::new(types::I64)); // offset
+        sig.params.push(AbiParam::new(types::I64)); // value
+        sig.returns.push(AbiParam::new(types::I64)); // result (obj)
+        let func_id = module
+            .declare_function("jit_typed_object_set_field", Linkage::Import, &sig)
+            .expect("Failed to declare jit_typed_object_set_field");
+        ffi_funcs.insert("jit_typed_object_set_field".to_string(), func_id);
     }
 
     // jit_typed_merge_object(target_schema_id, left_size, right_size, left_obj, right_obj) -> u64

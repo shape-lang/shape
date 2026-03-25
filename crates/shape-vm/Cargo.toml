@@ -54,7 +54,7 @@ cranelift-native = { version = "0.110", optional = true }
 target-lexicon = { version = "0.12", optional = true }
 
 [features]
-default = []
+default = ["jit"]
 deep-tests = []
 jit = ["cranelift", "cranelift-jit", "cranelift-module", "cranelift-native", "target-lexicon"]
 gc = ["shape-gc", "shape-value/gc"]

@@ -48,6 +48,11 @@ impl Default for BytecodeExecutor {
 }
 
 impl BytecodeExecutor {
+    /// Get the registered extension modules.
+    pub fn extensions(&self) -> &[shape_runtime::module_exports::ModuleExports] {
+        &self.extensions
+    }
+
     /// Create a new executor
     pub fn new() -> Self {
         let mut executor = Self {

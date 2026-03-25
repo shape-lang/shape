@@ -480,6 +480,90 @@ fn test_uncaught_any_error_formats_chain_and_trace() {
     assert!(message.contains("at read_file (cfg.shape:3) [ip 11]"));
 }
 
+// =========================================================================
+// Option/Result lifting execution tests
+// =========================================================================
+
+#[test]
+fn option_some_int_as_number_lifts_to_some_number() {
+    // Option<int> as number → Option<number>: Some(42) → Some(42.0)
+    let source = r#"
+let opt: Option<int> = Some(42)
+let val = opt as number
+val
+"#;
+    let bytecode = compile_source(source).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(result.as_f64(), Some(42.0), "Some(42) as number should be 42.0");
+}
+
+#[test]
+fn option_none_as_number_lifts_to_none() {
+    // Option<int> as number → Option<number>: None → None
+    let source = r#"
+let opt: Option<int> = None
+let val = opt as number
+val == None
+"#;
+    let bytecode = compile_source(source).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(result.as_bool(), Some(true), "None as number should remain None");
+}
+
+#[test]
+fn option_some_bool_as_int_lifts_to_some_int() {
+    // Option<bool> as int → Option<int>: Some(true) → Some(1)
+    let source = r#"
+let opt: Option<bool> = Some(true)
+let val = opt as int
+val
+"#;
+    let bytecode = compile_source(source).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(result.as_i64(), Some(1), "Some(true) as int should be 1");
+}
+
+#[test]
+fn invalid_infallible_cast_option_string_as_int_fails_at_runtime() {
+    // Option<string> as int: string has no Into<int>, but the type tracker
+    // loses generic args for locals so the compiler emits lifting code and
+    // the inner conversion fails at runtime.
+    let source = r#"
+let opt: Option<string> = Some("hello")
+let val = opt as int
+"#;
+    let bytecode = compile_source(source).expect("compile should succeed with bare wrapper");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None);
+    assert!(
+        result.is_err(),
+        "Option<string> as int should fail at runtime, got: {:?}",
+        result.ok()
+    );
+}
+
+#[test]
+fn direct_number_as_int_rejected_at_compile_time() {
+    // number has no Into<int>, only TryInto<int>
+    let source = r#"
+let x: number = 42.0
+let y = x as int
+"#;
+    let result = compile_source(source);
+    assert!(
+        result.is_err(),
+        "number as int should be a compile error (no Into<int> for number), got: {:?}",
+        result.ok()
+    );
+}
+
 #[test]
 fn test_uncaught_non_any_error_uses_value_formatting() {
     let instructions = vec![

@@ -32,7 +32,63 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
             None
         };
 
-        // Check heap kinds first
+        // Detect VM-allocated heap objects vs JIT-allocated (JitAlloc).
+        // Both have TAG_HEAP (tag 0). JitAlloc has a valid kind u16 in the
+        // known range. VM Arc<HeapValue> has the enum discriminant which can
+        // collide with low JIT kinds. Reliable check: use is_unified_heap for
+        // unified arrays, then check if heap_kind matches a known JIT type.
+        // If the kind is NOT a recognized JIT type, try VM interpretation.
+        if shape_value::tags::is_tagged(obj_bits)
+            && shape_value::tags::get_tag(obj_bits) == shape_value::tags::TAG_HEAP
+        {
+            let jit_kind = heap_kind(obj_bits);
+            let is_known_jit = matches!(
+                jit_kind,
+                Some(HK_ARRAY)
+                    | Some(HK_STRING)
+                    | Some(HK_TYPED_OBJECT)
+                    | Some(HK_JIT_OBJECT)
+                    | Some(HK_DURATION)
+                    | Some(HK_TIME)
+                    | Some(HK_DATA_REFERENCE)
+                    | Some(HK_CLOSURE)
+            );
+            if !is_known_jit {
+                // Not a recognized JIT type — try VM ValueWord interpretation.
+                // SAFETY: clone_from_bits is only safe for actual VM ValueWord bits.
+                // If this is a JitAlloc with an unrecognized kind, clone_from_bits
+                // would crash. But since we checked is_known_jit first, unrecognized
+                // JIT kinds are extremely unlikely.
+                let vw = shape_value::ValueWord::clone_from_bits(obj_bits);
+                if let Some((schema_id, slots, heap_mask)) = vw.as_typed_object() {
+                    if let Some(key) = key_str {
+                        if let Some(schema) =
+                            shape_runtime::type_schema::lookup_schema_by_id_public(
+                                schema_id as u32,
+                            )
+                        {
+                            if let Some(idx) = schema.field_names().position(|n| n == key) {
+                                if idx < slots.len() {
+                                    let is_heap_field = (heap_mask >> idx) & 1 != 0;
+                                    let field_vw = slots[idx].as_value_word(is_heap_field);
+                                    return super::conversion::nanboxed_to_jit_bits(&field_vw);
+                                }
+                            }
+                        }
+                    }
+                    return TAG_NULL;
+                }
+                // Not a VM TypedObject either — fall through
+            }
+        }
+
+        // JIT-allocated heap objects (JitAlloc with kind header)
+        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+            eprintln!(
+                "[jit-get-prop] obj={:#x} heap_kind={:?} key={:?}",
+                obj_bits, heap_kind(obj_bits), key_str
+            );
+        }
         if let Some(kind) = heap_kind(obj_bits) {
             match kind {
                 HK_ARRAY => {
@@ -188,6 +244,33 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                         }
                         _ => TAG_NULL,
                     }
+                }
+                HK_TYPED_OBJECT => {
+                    // JIT-allocated TypedObject — resolve field by name via schema.
+                    // Check both the global stdlib registry AND the trampoline VM's
+                    // bytecode schema registry (for user-defined types).
+                    let ptr =
+                        unbox_typed_object(obj_bits) as *const super::super::typed_object::TypedObject;
+                    if !ptr.is_null() {
+                        if let Some(key) = key_str {
+                            let schema_id = (*ptr).schema_id;
+                            // Try global registry first
+                            let mut field_idx = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
+                                .and_then(|s| s.field_names().position(|n| n == key));
+                            // Fall back to trampoline VM's bytecode registry
+                            if field_idx.is_none() {
+                                field_idx = super::super::control::with_trampoline_vm(|vm| {
+                                    vm.program().type_schema_registry
+                                        .get_by_id(schema_id)
+                                        .and_then(|s| s.field_names().position(|n| n == key))
+                                }).flatten();
+                            }
+                            if let Some(idx) = field_idx {
+                                return (*ptr).get_field(idx * 8);
+                            }
+                        }
+                    }
+                    TAG_NULL
                 }
                 _ => TAG_NULL,
             }

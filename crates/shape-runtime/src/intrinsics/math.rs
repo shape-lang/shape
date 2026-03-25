@@ -457,4 +457,239 @@ pub fn intrinsic_from_char_code(
     Ok(ValueWord::from_string(std::sync::Arc::new(ch.to_string())))
 }
 
+// ===== Interpolation =====
+
+/// Intrinsic: Batched quadratic B-spline interpolation on a 3D grid.
+///
+/// Args: grid_data, nx, ny, nz, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, pos_flat
+///
+/// Fast path: if grid_data is a FloatArray, operates on a zero-copy &[f64].
+/// Slow path: for generic arrays, uses per-element indexing (27 lookups per point).
+pub fn intrinsic_bspline2_3d_batch(
+    args: &[ValueWord],
+    _ctx: &mut ExecutionContext,
+) -> Result<ValueWord> {
+    if args.len() != 11 {
+        return Err(ShapeError::RuntimeError {
+            message: "__intrinsic_bspline2_3d_batch requires 11 arguments".to_string(),
+            location: None,
+        });
+    }
+
+    let nx = args[1].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "nx must be a number".to_string(),
+        location: None,
+    })? as usize;
+    let ny = args[2].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "ny must be a number".to_string(),
+        location: None,
+    })? as usize;
+    let nz = args[3].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "nz must be a number".to_string(),
+        location: None,
+    })? as usize;
+    let x_lo = args[4].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "x_lo must be a number".to_string(),
+        location: None,
+    })?;
+    let x_hi = args[5].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "x_hi must be a number".to_string(),
+        location: None,
+    })?;
+    let y_lo = args[6].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "y_lo must be a number".to_string(),
+        location: None,
+    })?;
+    let y_hi = args[7].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "y_hi must be a number".to_string(),
+        location: None,
+    })?;
+    let z_lo = args[8].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "z_lo must be a number".to_string(),
+        location: None,
+    })?;
+    let z_hi = args[9].as_number_coerce().ok_or_else(|| ShapeError::RuntimeError {
+        message: "z_hi must be a number".to_string(),
+        location: None,
+    })?;
+
+    // Extract positions (small array, ~84 elements — ok to copy)
+    let pos = super::extract_f64_array(&args[10], "pos_flat")?;
+
+    // Try zero-copy grid access first (FloatArray path)
+    let grid_view = args[0].as_any_array().ok_or_else(|| ShapeError::RuntimeError {
+        message: "grid_data must be an array".to_string(),
+        location: None,
+    })?;
+
+    if let Some(grid) = grid_view.as_f64_slice() {
+        // Fast path: direct f64 slice access
+        Ok(super::f64_vec_to_nb_array(bspline2_3d_batch_slice(
+            grid, nx, ny, nz, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, &pos,
+        )))
+    } else {
+        // Slow path: per-element access via generic array
+        let generic = grid_view.to_generic();
+        let grid_fn = |idx: usize| -> f64 {
+            generic[idx].as_number_coerce().unwrap_or(0.0)
+        };
+        Ok(super::f64_vec_to_nb_array(bspline2_3d_batch_fn(
+            &grid_fn, nx, ny, nz, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, &pos,
+        )))
+    }
+}
+
+/// Core B-spline computation on a contiguous f64 slice (fastest path).
+#[inline]
+fn bspline2_3d_batch_slice(
+    grid: &[f64],
+    nx: usize, ny: usize, nz: usize,
+    x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64, z_lo: f64, z_hi: f64,
+    pos: &[f64],
+) -> Vec<f64> {
+    let n = pos.len() / 3;
+    let nxm = (nx - 1) as f64;
+    let nym = (ny - 1) as f64;
+    let nzm = (nz - 1) as f64;
+    let inv_x = nxm / (x_hi - x_lo);
+    let inv_y = nym / (y_hi - y_lo);
+    let inv_z = nzm / (z_hi - z_lo);
+    let nyz = ny * nz;
+    let mut result = Vec::with_capacity(n);
+
+    for s in 0..n {
+        let i3 = s * 3;
+        let gx = ((pos[i3] - x_lo) * inv_x).clamp(0.0, nxm);
+        let gy = ((pos[i3 + 1] - y_lo) * inv_y).clamp(0.0, nym);
+        let gz = ((pos[i3 + 2] - z_lo) * inv_z).clamp(0.0, nzm);
+
+        let cx = (gx + 0.5).floor() as isize;
+        let cy = (gy + 0.5).floor() as isize;
+        let cz = (gz + 0.5).floor() as isize;
+        let tx = gx - cx as f64;
+        let ty = gy - cy as f64;
+        let tz = gz - cz as f64;
+
+        let (wx0, wx1, wx2) = bspline_weights(tx);
+        let (wy0, wy1, wy2) = bspline_weights(ty);
+        let (wz0, wz1, wz2) = bspline_weights(tz);
+
+        let ix = [
+            (cx - 1).max(0) as usize,
+            cx as usize,
+            (cx + 1).min(nx as isize - 1) as usize,
+        ];
+        let iy = [
+            (cy - 1).max(0) as usize,
+            cy as usize,
+            (cy + 1).min(ny as isize - 1) as usize,
+        ];
+        let iz = [
+            (cz - 1).max(0) as usize,
+            cz as usize,
+            (cz + 1).min(nz as isize - 1) as usize,
+        ];
+
+        let wx = [wx0, wx1, wx2];
+        let wy = [wy0, wy1, wy2];
+        let wz = [wz0, wz1, wz2];
+
+        let mut val = 0.0;
+        for a in 0..3 {
+            let rx = ix[a] * nyz;
+            for b in 0..3 {
+                let rxy = rx + iy[b] * nz;
+                let wxy = wx[a] * wy[b];
+                for c in 0..3 {
+                    val += wxy * wz[c] * unsafe { *grid.get_unchecked(rxy + iz[c]) };
+                }
+            }
+        }
+        result.push(val);
+    }
+    result
+}
+
+/// Core B-spline computation using per-element access function (generic arrays).
+/// Only accesses 27 grid elements per query point — no bulk copy.
+#[inline]
+fn bspline2_3d_batch_fn(
+    grid: &dyn Fn(usize) -> f64,
+    nx: usize, ny: usize, nz: usize,
+    x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64, z_lo: f64, z_hi: f64,
+    pos: &[f64],
+) -> Vec<f64> {
+    let n = pos.len() / 3;
+    let nxm = (nx - 1) as f64;
+    let nym = (ny - 1) as f64;
+    let nzm = (nz - 1) as f64;
+    let inv_x = nxm / (x_hi - x_lo);
+    let inv_y = nym / (y_hi - y_lo);
+    let inv_z = nzm / (z_hi - z_lo);
+    let nyz = ny * nz;
+    let mut result = Vec::with_capacity(n);
+
+    for s in 0..n {
+        let i3 = s * 3;
+        let gx = ((pos[i3] - x_lo) * inv_x).clamp(0.0, nxm);
+        let gy = ((pos[i3 + 1] - y_lo) * inv_y).clamp(0.0, nym);
+        let gz = ((pos[i3 + 2] - z_lo) * inv_z).clamp(0.0, nzm);
+
+        let cx = (gx + 0.5).floor() as isize;
+        let cy = (gy + 0.5).floor() as isize;
+        let cz = (gz + 0.5).floor() as isize;
+        let tx = gx - cx as f64;
+        let ty = gy - cy as f64;
+        let tz = gz - cz as f64;
+
+        let (wx0, wx1, wx2) = bspline_weights(tx);
+        let (wy0, wy1, wy2) = bspline_weights(ty);
+        let (wz0, wz1, wz2) = bspline_weights(tz);
+
+        let ix = [
+            (cx - 1).max(0) as usize,
+            cx as usize,
+            (cx + 1).min(nx as isize - 1) as usize,
+        ];
+        let iy = [
+            (cy - 1).max(0) as usize,
+            cy as usize,
+            (cy + 1).min(ny as isize - 1) as usize,
+        ];
+        let iz = [
+            (cz - 1).max(0) as usize,
+            cz as usize,
+            (cz + 1).min(nz as isize - 1) as usize,
+        ];
+
+        let wx = [wx0, wx1, wx2];
+        let wy = [wy0, wy1, wy2];
+        let wz = [wz0, wz1, wz2];
+
+        let mut val = 0.0;
+        for a in 0..3 {
+            let rx = ix[a] * nyz;
+            for b in 0..3 {
+                let rxy = rx + iy[b] * nz;
+                let wxy = wx[a] * wy[b];
+                for c in 0..3 {
+                    val += wxy * wz[c] * grid(rxy + iz[c]);
+                }
+            }
+        }
+        result.push(val);
+    }
+    result
+}
+
+/// Quadratic B-spline basis weights for offset t.
+#[inline(always)]
+fn bspline_weights(t: f64) -> (f64, f64, f64) {
+    (
+        0.5 * (0.5 - t) * (0.5 - t),
+        0.75 - t * t,
+        0.5 * (0.5 + t) * (0.5 + t),
+    )
+}
+
 // ===== Tests =====

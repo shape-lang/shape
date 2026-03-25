@@ -7,6 +7,11 @@ impl VirtualMachine {
         self.output_buffer = Some(Vec::new());
     }
 
+    /// Disable output capture — print goes to stdout again.
+    pub fn disable_output_capture(&mut self) {
+        self.output_buffer = None;
+    }
+
     /// Get captured output (returns empty vec if capture not enabled)
     pub fn get_captured_output(&self) -> Vec<String> {
         self.output_buffer.clone().unwrap_or_default()

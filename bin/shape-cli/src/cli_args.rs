@@ -27,7 +27,7 @@ pub struct Cli {
     pub function: Option<String>,
 
     /// Execution mode: vm or jit
-    #[arg(short, long, default_value = "vm")]
+    #[arg(short, long, default_value_t)]
     pub mode: ExecutionModeArg,
 
     /// Extension module shared libraries to load at startup
@@ -49,13 +49,30 @@ pub struct Cli {
 }
 
 /// Execution mode for running Shape code
-#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum ExecutionModeArg {
-    /// Use bytecode VM (default execution mode)
-    #[default]
+    /// Use bytecode VM (interpreter only)
     Vm,
-    /// Use JIT compilation (~0.1-1µs/row, 100x+ faster)
+    /// Use JIT compilation (tiered: interpreter → baseline → optimizing)
     Jit,
+}
+
+impl Default for ExecutionModeArg {
+    fn default() -> Self {
+        // JIT closures and simple programs work. Module function dispatch
+        // (millis, read_table) segfaults and int-to-number casts produce
+        // wrong results — keep VM as default until those are fixed.
+        Self::Vm
+    }
+}
+
+impl std::fmt::Display for ExecutionModeArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vm => write!(f, "vm"),
+            Self::Jit => write!(f, "jit"),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -284,7 +301,7 @@ pub struct ProviderCommandOptions {
 #[derive(Args)]
 pub struct RuntimeCommandOptions {
     /// Execution mode: vm or jit
-    #[arg(short, long, default_value = "vm")]
+    #[arg(short, long, default_value_t)]
     pub mode: ExecutionModeArg,
 
     #[command(flatten)]

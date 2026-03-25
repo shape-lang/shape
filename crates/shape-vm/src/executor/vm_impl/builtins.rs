@@ -23,7 +23,7 @@ impl VirtualMachine {
     // ========================================================================
     // Builtin Dispatch
 
-    pub(crate) fn op_builtin_call(
+    pub fn op_builtin_call(
         &mut self,
         instruction: &Instruction,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -391,8 +391,14 @@ impl VirtualMachine {
                     let result = self.builtin_control_fold(args, ctx)?;
                     self.push_vw(result)?;
                 }
+                BuiltinFunction::IntrinsicMinimize => {
+                    let args = self.pop_builtin_args()?;
+                    let result = self.builtin_minimize(args, ctx)?;
+                    self.push_vw(result)?;
+                }
                 // Delegate ALL intrinsics to helper method
-                b @ (BuiltinFunction::IntrinsicSum
+                b @ (BuiltinFunction::IntrinsicBspline2_3dBatch
+                | BuiltinFunction::IntrinsicSum
                 | BuiltinFunction::IntrinsicMean
                 | BuiltinFunction::IntrinsicMin
                 | BuiltinFunction::IntrinsicMax
@@ -664,11 +670,23 @@ impl VirtualMachine {
                     }
                     let rows = args[0].as_i64().unwrap_or(0) as u32;
                     let cols = args[1].as_i64().unwrap_or(0) as u32;
-                    let mut data = shape_value::aligned_vec::AlignedVec::with_capacity(
-                        args.len().saturating_sub(2),
-                    );
-                    for v in &args[2..] {
-                        data.push(v.as_number_coerce().unwrap_or(0.0));
+                    let expected = (rows as usize) * (cols as usize);
+                    let mut data = shape_value::aligned_vec::AlignedVec::with_capacity(expected);
+                    // If the third argument is an array, extract its elements
+                    if args.len() == 3 {
+                        if let Some(arr) = args[2].as_any_array() {
+                            for i in 0..arr.len() {
+                                if let Some(v) = arr.get_nb(i) {
+                                    data.push(v.as_number_coerce().unwrap_or(0.0));
+                                }
+                            }
+                        } else {
+                            data.push(args[2].as_number_coerce().unwrap_or(0.0));
+                        }
+                    } else {
+                        for v in &args[2..] {
+                            data.push(v.as_number_coerce().unwrap_or(0.0));
+                        }
                     }
                     let mat = shape_value::heap_value::MatrixData::from_flat(data, rows, cols);
                     self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(mat)))?;

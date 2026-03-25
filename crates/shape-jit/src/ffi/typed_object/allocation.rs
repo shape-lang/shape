@@ -85,7 +85,15 @@ pub extern "C" fn jit_typed_object_alloc(schema_id: u32, data_size: u64) -> u64 
     if ptr.is_null() {
         TAG_NULL
     } else {
-        box_typed_object(ptr as *const u8)
+        let result = box_typed_object(ptr as *const u8);
+        if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
+            let payload = (result & crate::nan_boxing::PAYLOAD_MASK) as *const u8;
+            let first2 = unsafe { *(payload as *const u16) };
+            let kind = unsafe { crate::nan_boxing::heap_kind(result) };
+            eprintln!("[alloc] schema={} result={:#x} payload={:?} first2={} kind={:?} HK_TYPED_OBJECT={}",
+                schema_id, result, payload, first2, kind, crate::nan_boxing::HK_TYPED_OBJECT);
+        }
+        result
     }
 }
 

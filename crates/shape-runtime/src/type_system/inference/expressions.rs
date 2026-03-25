@@ -1280,6 +1280,17 @@ impl TypeInferenceEngine {
             return Ok(());
         }
 
+        // Check Option/Result lifting: Option<T> as M? is valid if T has TryInto<M>
+        if source_name == "Option" || source_name == "Result" {
+            if let Some(inner_type) = self.try_unwrap_inner_type(source) {
+                if let Some(inner_name) = self.try_into_type_name(&inner_type) {
+                    if self.has_try_into_impl(&inner_name, &target_selector) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         Err(TypeError::InvalidAssertion(
             self.render_type_for_diag(source),
             format!("{}?", self.render_type_for_diag(target)),
@@ -1311,6 +1322,17 @@ impl TypeInferenceEngine {
 
         if self.has_into_impl(&source_name, &target_selector) {
             return Ok(());
+        }
+
+        // Check Option/Result lifting: Option<T> as M is valid if T has Into<M>
+        if source_name == "Option" || source_name == "Result" {
+            if let Some(inner_type) = self.try_unwrap_inner_type(source) {
+                if let Some(inner_name) = self.try_into_type_name(&inner_type) {
+                    if self.has_into_impl(&inner_name, &target_selector) {
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         Err(TypeError::InvalidAssertion(

@@ -18,6 +18,10 @@ use super::super::nan_boxing::*;
 
 /// Create an Ok result wrapping the inner value
 pub extern "C" fn jit_make_ok(inner_bits: u64) -> u64 {
+    if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
+        let kind = unsafe { super::super::nan_boxing::heap_kind(inner_bits) };
+        eprintln!("[make_ok] inner={:#x} inner_kind={:?}", inner_bits, kind);
+    }
     box_ok(inner_bits)
 }
 
@@ -32,11 +36,7 @@ pub extern "C" fn jit_make_err(inner_bits: u64) -> u64 {
 
 /// Check if a value is Ok (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
 pub extern "C" fn jit_is_ok(bits: u64) -> u64 {
-    if is_ok_tag(bits) {
-        TAG_BOOL_TRUE
-    } else {
-        TAG_BOOL_FALSE
-    }
+    if is_ok_tag(bits) { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE }
 }
 
 /// Check if a value is Err (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
@@ -65,7 +65,12 @@ pub extern "C" fn jit_is_result(bits: u64) -> u64 {
 /// If not Ok, returns TAG_NULL
 pub extern "C" fn jit_unwrap_ok(bits: u64) -> u64 {
     if is_ok_tag(bits) {
-        unsafe { unbox_result_inner(bits) }
+        let inner = unsafe { unbox_result_inner(bits) };
+        if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
+            let kind = unsafe { super::super::nan_boxing::heap_kind(inner) };
+            eprintln!("[unwrap_ok] bits={:#x} inner={:#x} inner_kind={:?}", bits, inner, kind);
+        }
+        inner
     } else {
         TAG_NULL
     }

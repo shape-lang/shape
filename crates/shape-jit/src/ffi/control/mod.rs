@@ -21,31 +21,125 @@ use shape_value::ValueWord;
 use std::ffi::c_void;
 use std::sync::Arc;
 
+// ============================================================================
+// Trampoline VM — thread-local VirtualMachine for JIT-to-VM fallback
+// ============================================================================
+
+use std::cell::Cell;
+
+thread_local! {
+    /// Pointer to a fully-initialized VirtualMachine for executing bytecode
+    /// functions that weren't JIT-compiled. Set by `execute_with_jit()` before
+    /// JIT execution and cleared after. Valid only on the executor thread.
+    static TRAMPOLINE_VM: Cell<*mut shape_vm::VirtualMachine> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// Register the trampoline VM for use during JIT execution.
+///
+/// # Safety
+/// The pointer must remain valid for the entire duration of JIT execution.
+/// Caller must clear it with `unset_trampoline_vm()` after execution.
+pub unsafe fn set_trampoline_vm(vm: *mut shape_vm::VirtualMachine) {
+    TRAMPOLINE_VM.with(|cell| cell.set(vm));
+}
+
+/// Clear the trampoline VM pointer after JIT execution.
+pub fn unset_trampoline_vm() {
+    TRAMPOLINE_VM.with(|cell| cell.set(std::ptr::null_mut()));
+}
+
+/// Access the trampoline VM for read-only queries (schema lookups, etc.)
+pub fn with_trampoline_vm<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&shape_vm::VirtualMachine) -> R,
+{
+    TRAMPOLINE_VM.with(|cell| {
+        let vm_ptr = cell.get();
+        if vm_ptr.is_null() {
+            None
+        } else {
+            Some(f(unsafe { &*vm_ptr }))
+        }
+    })
+}
+
 /// Dispatch a function call through the trampoline VM for functions that
 /// aren't JIT-compiled (null entries in the function table).
-///
-/// Converts JIT-format args to ValueWord, pushes them onto the trampoline VM's
-/// stack, executes the function via the VM interpreter, and returns the result
-/// converted to JIT-format bits via `vm_result_to_jit`.
 fn dispatch_call_via_trampoline_vm(
-    _function_id: u32,
-    _jit_args: &[u64],
+    function_id: u32,
+    jit_args: &[u64],
     _jit_ctx: *const JITContext,
 ) -> u64 {
-    // TODO: Requires trampoline VM integration (TRAMPOLINE_VM thread-local).
-    // Currently unused — the JIT executor sets up its own VM trampoline.
-    TAG_NULL
+    TRAMPOLINE_VM.with(|cell| {
+        let vm_ptr = cell.get();
+        if vm_ptr.is_null() {
+            return TAG_NULL;
+        }
+        let vm = unsafe { &mut *vm_ptr };
+
+        // Convert JIT NaN-boxed args to ValueWord
+        let args: Vec<shape_value::ValueWord> = jit_args
+            .iter()
+            .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, _jit_ctx))
+            .collect();
+
+        // Use call_value_immediate_nb instead of execute_function_by_id
+        // because execute_function_by_id calls reset() which wipes VM state.
+        // call_value_immediate_nb preserves existing state for nested calls.
+        let callee = shape_value::ValueWord::from_function(function_id as u16);
+        match vm.call_value_immediate_nb(&callee, &args, None) {
+            Ok(result) => nanboxed_to_jit_bits(&result),
+            Err(_) => TAG_NULL,
+        }
+    })
 }
 
 /// Dispatch a native module function call through the trampoline VM.
 fn dispatch_module_fn_call(
-    _module_fn_id: u32,
-    _jit_args: &[u64],
-    _ctx: *mut JITContext,
+    module_fn_id: u32,
+    jit_args: &[u64],
+    ctx: *mut JITContext,
 ) -> u64 {
-    // TODO: Requires trampoline VM integration (TRAMPOLINE_VM thread-local).
-    // Currently unused — the JIT executor sets up its own VM trampoline.
-    TAG_NULL
+    TRAMPOLINE_VM.with(|cell| {
+        let vm_ptr = cell.get();
+        if vm_ptr.is_null() {
+            return TAG_NULL;
+        }
+        let vm = unsafe { &mut *vm_ptr };
+        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
+
+        // Convert JIT args to ValueWord
+        let args: Vec<shape_value::ValueWord> = jit_args
+            .iter()
+            .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, ctx as *const JITContext))
+            .collect();
+
+        // Build a ValueWord::ModuleFunction callee and call through the VM
+        let callee = shape_value::ValueWord::from_module_function(module_fn_id);
+        match vm.call_value_immediate_nb(&callee, &args, None) {
+            Ok(result) => {
+                if debug {
+                    eprintln!(
+                        "[jit-module-fn] id={} returned {:#x}",
+                        module_fn_id,
+                        result.raw_bits()
+                    );
+                }
+                nanboxed_to_jit_bits(&result)
+            }
+            Err(e) => {
+                if debug {
+                    eprintln!("[jit-module-fn] id={} ERROR: {}", module_fn_id, e);
+                }
+                // Wrap errors as Result::Err so `?` operator works correctly
+                let err_msg = format!("{}", e);
+                let err_vw = shape_value::ValueWord::from_err(
+                    shape_value::ValueWord::from_string(std::sync::Arc::new(err_msg)),
+                );
+                nanboxed_to_jit_bits(&err_vw)
+            }
+        }
+    })
 }
 
 /// Call a function by function_id
@@ -94,9 +188,22 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             return TAG_NULL;
         }
         let ctx_ref = &mut *ctx;
+        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
+
+        if debug {
+            eprintln!(
+                "[jit-call-value] entry: stack_ptr={}, stack[0..4]=[{:#x}, {:#x}, {:#x}, {:#x}]",
+                ctx_ref.stack_ptr,
+                if ctx_ref.stack_ptr > 0 { ctx_ref.stack[0] } else { 0 },
+                if ctx_ref.stack_ptr > 1 { ctx_ref.stack[1] } else { 0 },
+                if ctx_ref.stack_ptr > 2 { ctx_ref.stack[2] } else { 0 },
+                if ctx_ref.stack_ptr > 3 { ctx_ref.stack[3] } else { 0 },
+            );
+        }
 
         // Pop arg_count
         if ctx_ref.stack_ptr == 0 {
+            if debug { eprintln!("[jit-call-value] BAIL: stack_ptr=0 at arg_count pop"); }
             return TAG_NULL;
         }
         ctx_ref.stack_ptr -= 1;
@@ -140,6 +247,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             let closure = jit_unbox::<JITClosure>(callee_bits);
             closure.function_id
         } else {
+            if debug { eprintln!("[jit-call-value] BAIL: callee is neither function nor closure: {:#x}", callee_bits); }
             return TAG_NULL;
         };
 
@@ -147,12 +255,19 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         if ctx_ref.function_table.is_null()
             || (function_id as usize) >= ctx_ref.function_table_len
         {
+            if debug { eprintln!("[jit-call-value] BAIL: fn_id={} out of bounds (table_len={}, table_null={})", function_id, ctx_ref.function_table_len, ctx_ref.function_table.is_null()); }
             return TAG_NULL;
         }
         let raw_fn_ptr =
             *(ctx_ref.function_table as *const *const u8).add(function_id as usize);
         if raw_fn_ptr.is_null() {
             // Not JIT-compiled — dispatch through trampoline VM
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                eprintln!(
+                    "[jit-call-value] function {} NOT JIT-compiled, trampoline fallback (returns null!)",
+                    function_id
+                );
+            }
             return dispatch_call_via_trampoline_vm(
                 function_id as u32,
                 &args,
@@ -166,22 +281,74 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         // previous operations causes writes to wrong positions.
         ctx_ref.stack_ptr = 0;
 
+        // For closure calls, prepend captured values as leading native args.
+        // The JIT-compiled function signature is (ctx, capture0, ..., captureN, param0, ..., paramM)
+        // matching the VM calling convention where bytecode does LoadLocal/StoreLocal
+        // for captures first, then params.
+        let full_args;
+        let call_args: &[u64] = if is_heap_kind(callee_bits, HK_CLOSURE) {
+            let closure = jit_unbox::<JITClosure>(callee_bits);
+            let count = closure.captures_count as usize;
+            if debug {
+                eprintln!(
+                    "[jit-call-value] closure fn_id={}: prepending {} captures before {} args",
+                    closure.function_id, count, args.len()
+                );
+            }
+            full_args = {
+                let mut v = Vec::with_capacity(count + args.len());
+                for i in 0..count {
+                    v.push(*closure.captures_ptr.add(i));
+                }
+                v.extend_from_slice(&args);
+                v
+            };
+            &full_args
+        } else {
+            &args
+        };
+
+        if debug {
+            eprintln!(
+                "[jit-call-value] calling fn_id={} with {} args, fn_ptr={:?}, table_len={}",
+                function_id, call_args.len(), raw_fn_ptr, ctx_ref.function_table_len
+            );
+        }
         // Call the JIT-compiled function with the correct number of native args.
-        let signal = call_jit_fn_with_args(raw_fn_ptr, ctx, &args);
+        let signal = call_jit_fn_with_args(raw_fn_ptr, ctx, call_args);
+        if debug {
+            eprintln!(
+                "[jit-call-value] returned signal={}, stack_ptr={}",
+                signal, (*ctx).stack_ptr
+            );
+        }
 
         // Check for deopt signal
         if signal < 0 {
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                eprintln!(
+                    "[jit-call-value] function {} deopted (signal={})",
+                    function_id, signal
+                );
+            }
             return TAG_NULL;
         }
 
         // Read result from ctx.stack[0] (callee stores it there)
-        if ctx_ref.stack_ptr > 0 {
+        let result = if ctx_ref.stack_ptr > 0 {
             ctx_ref.stack_ptr -= 1;
             ctx_ref.stack[ctx_ref.stack_ptr]
         } else {
-            // Callee always sets stack_ptr=1, read stack[0]
             ctx_ref.stack[0]
+        };
+        if debug {
+            eprintln!(
+                "[jit-call-value] result: stack_ptr={} after pop, result={:#x} (f64={})",
+                ctx_ref.stack_ptr, result,
+                f64::from_bits(result)
+            );
         }
+        result
     }
 }
 

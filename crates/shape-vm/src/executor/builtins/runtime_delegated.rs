@@ -20,7 +20,9 @@ impl VirtualMachine {
 
         // Intrinsics that delegate directly to runtime (need ExecutionContext)
         match builtin {
-            BuiltinFunction::IntrinsicSeries | BuiltinFunction::IntrinsicLinearRecurrence => {
+            BuiltinFunction::IntrinsicSeries
+            | BuiltinFunction::IntrinsicLinearRecurrence
+            | BuiltinFunction::IntrinsicBspline2_3dBatch => {
                 return self.handle_delegated_intrinsic(builtin, &nb_args, ctx);
             }
             _ => {}
@@ -134,6 +136,9 @@ impl VirtualMachine {
             }
             BuiltinFunction::IntrinsicLinearRecurrence => {
                 intrinsics::recurrence::intrinsic_linear_recurrence(nb_args, ctx)
+            }
+            BuiltinFunction::IntrinsicBspline2_3dBatch => {
+                intrinsics::math::intrinsic_bspline2_3d_batch(nb_args, ctx)
             }
             _ => unreachable!(),
         }

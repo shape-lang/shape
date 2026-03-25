@@ -5,7 +5,10 @@
 
 use crate::executor::VirtualMachine;
 use crate::executor::objects::datatable_methods::common::extract_col_nb;
-use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
+use arrow_array::{
+    Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+};
 use shape_value::datatable::DataTable;
 use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
@@ -191,8 +194,24 @@ fn arrow_value_to_nb(col: &dyn Array, idx: usize) -> ValueWord {
     }
     if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
         ValueWord::from_f64(arr.value(idx))
+    } else if let Some(arr) = col.as_any().downcast_ref::<Float32Array>() {
+        ValueWord::from_f64(arr.value(idx) as f64)
     } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
         ValueWord::from_i64(arr.value(idx))
+    } else if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
+        ValueWord::from_i64(arr.value(idx) as i64)
+    } else if let Some(arr) = col.as_any().downcast_ref::<Int16Array>() {
+        ValueWord::from_i64(arr.value(idx) as i64)
+    } else if let Some(arr) = col.as_any().downcast_ref::<Int8Array>() {
+        ValueWord::from_i64(arr.value(idx) as i64)
+    } else if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
+        ValueWord::from_i64(arr.value(idx) as i64)
+    } else if let Some(arr) = col.as_any().downcast_ref::<UInt32Array>() {
+        ValueWord::from_i64(arr.value(idx) as i64)
+    } else if let Some(arr) = col.as_any().downcast_ref::<UInt16Array>() {
+        ValueWord::from_i64(arr.value(idx) as i64)
+    } else if let Some(arr) = col.as_any().downcast_ref::<UInt8Array>() {
+        ValueWord::from_i64(arr.value(idx) as i64)
     } else if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
         ValueWord::from_string(Arc::new(arr.value(idx).to_string()))
     } else if let Some(arr) = col.as_any().downcast_ref::<BooleanArray>() {

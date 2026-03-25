@@ -849,7 +849,10 @@ pub enum BuiltinFunction {
     /// Used by string interpolation for spec-aware rendering (fixed/table).
     FormatValueWithSpec,
 
-    // Math intrinsics (6 functions)
+    // Optimization
+    IntrinsicMinimize,
+    // Math intrinsics (7 functions)
+    IntrinsicBspline2_3dBatch,
     IntrinsicSum,
     IntrinsicMean,
     IntrinsicMin,
@@ -1132,7 +1135,10 @@ impl BuiltinFunction {
             // Format (2)
             BuiltinFunction::FormatValueWithMeta,
             BuiltinFunction::FormatValueWithSpec,
-            // Math intrinsics (6)
+            // Optimization
+            BuiltinFunction::IntrinsicMinimize,
+            // Math intrinsics (7)
+            BuiltinFunction::IntrinsicBspline2_3dBatch,
             BuiltinFunction::IntrinsicSum,
             BuiltinFunction::IntrinsicMean,
             BuiltinFunction::IntrinsicMin,

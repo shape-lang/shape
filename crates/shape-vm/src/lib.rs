@@ -32,10 +32,7 @@ pub mod hot_reload;
 pub mod linker;
 pub mod megamorphic_cache;
 pub mod mir;
-#[cfg(feature = "jit")]
-compile_error!(
-    "The `shape-vm/jit` feature is deprecated. JIT functionality moved to the `shape-jit` crate."
-);
+// JIT tiered compilation support — enabled via `jit` feature on shape-vm.
 pub mod memory;
 pub mod metrics;
 pub mod module_graph;

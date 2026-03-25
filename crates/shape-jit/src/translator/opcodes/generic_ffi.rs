@@ -28,10 +28,13 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         pop_count: usize,
         pushes_result: bool,
     ) -> Result<(), String> {
-        // Pop values from the JIT typed stack
+        // Pop values from the JIT typed stack, ensuring NaN-boxing.
+        // Raw i64 values (from unboxed int loops) must be boxed before
+        // flushing to ctx.stack, since the FFI trampoline interprets
+        // ctx.stack entries as NaN-boxed bits.
         let mut vals = Vec::with_capacity(pop_count);
         for _ in 0..pop_count {
-            if let Some(val) = self.stack_pop() {
+            if let Some(val) = self.stack_pop_boxed() {
                 vals.push(val);
             }
         }
@@ -56,7 +59,13 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         let result = self.builder.inst_results(call)[0];
 
         if pushes_result {
+            // The FFI trampoline returns a NaN-boxed value. Push it as a
+            // boxed value with explicit Float64 hint so that subsequent
+            // operations in unboxed int contexts don't misinterpret it
+            // as a raw i64 integer.
             self.stack_push(result);
+            self.typed_stack
+                .replace_top(crate::translator::storage::TypedValue::boxed(result));
         }
         Ok(())
     }

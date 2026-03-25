@@ -255,7 +255,11 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                                 self.inline_array_get_i64(obj, key_i64)
                             }
                         } else {
-                            self.inline_array_get(obj, key)
+                            // Non-integer key (string property name) — must use FFI
+                            // because the object might be a TypedObject or HashMap,
+                            // not an array.
+                            let inst = self.builder.ins().call(self.ffi.get_prop, &[obj, key]);
+                            self.builder.inst_results(inst)[0]
                         };
                         (Some(result), Some(obj), numeric_hint)
                     }

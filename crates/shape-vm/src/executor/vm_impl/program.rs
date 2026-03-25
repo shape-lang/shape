@@ -402,6 +402,32 @@ impl VirtualMachine {
     }
 
     /// Reset VM state
+    /// Get a snapshot of all module binding values.
+    pub fn module_bindings_snapshot(&self) -> Vec<ValueWord> {
+        self.module_bindings.iter().map(|vw| vw.clone()).collect()
+    }
+
+    /// Reset VM execution state for trampoline use.
+    /// Clears stack, call frames, error state, and exception handlers but
+    /// preserves the loaded program, module bindings, module_fn_table,
+    /// and registered extensions.
+    pub fn reset_for_trampoline(&mut self) {
+        for i in 0..self.sp {
+            self.stack[i] = ValueWord::none();
+        }
+        self.sp = 0;
+        self.ip = 0;
+        self.call_stack.clear();
+        self.loop_stack.clear();
+        self.timeframe_stack.clear();
+        self.exception_handlers.clear();
+        self.instruction_count = 0;
+        self.last_error_line = None;
+        self.last_error_file = None;
+        self.last_uncaught_exception = None;
+        self.module_init_done = true; // Skip re-init on next call
+    }
+
     pub fn reset(&mut self) {
         self.ip = self.program_entry_ip;
         for i in 0..self.sp {
