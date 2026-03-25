@@ -181,9 +181,14 @@ impl JITExecutor {
                 non_null
             );
         }
-        for (idx, vw) in vm_bindings.iter().enumerate() {
+        for (idx, vw) in vm_bindings.into_iter().enumerate() {
             if idx < jit_ctx.locals.len() {
                 jit_ctx.locals[idx] = vw.raw_bits();
+                // Transfer ownership to the JIT context by forgetting the
+                // ValueWord. Without this, dropping the ValueWord decrements
+                // the Arc refcount, potentially freeing the heap allocation
+                // while jit_ctx.locals still holds the raw bits (dangling pointer).
+                std::mem::forget(vw);
             }
         }
 

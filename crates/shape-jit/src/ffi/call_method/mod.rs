@@ -407,6 +407,35 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             }
         }
 
+        // Try VM-allocated object methods first (HashMap.get, TypedObject methods, etc.)
+        // These are Arc<HeapValue> values that the JIT's heap_kind check misidentifies.
+        // Check before built-in dispatch to avoid reading garbage from non-JitAlloc headers.
+        if shape_value::tags::is_tagged(receiver_bits)
+            && shape_value::tags::get_tag(receiver_bits) == shape_value::tags::TAG_HEAP
+        {
+            let vw = shape_value::ValueWord::clone_from_bits(receiver_bits);
+            if let Some(hm) = vw.as_hashmap_data() {
+                return match method_name.as_str() {
+                    "get" => {
+                        if let Some(key) = args.first() {
+                            let key_vw = shape_value::ValueWord::clone_from_bits(*key);
+                            if let Some(idx) = hm.find_key(&key_vw) {
+                                let result = super::object::conversion::nanboxed_to_jit_bits(&hm.values[idx]);
+                                return result;
+                            }
+                        }
+                        TAG_NULL
+                    }
+                    "keys" => super::object::conversion::nanboxed_to_jit_bits(
+                        &shape_value::ValueWord::from_array(std::sync::Arc::new(hm.keys.clone())),
+                    ),
+                    "length" | "len" | "size" => box_number(hm.keys.len() as f64),
+                    _ => TAG_NULL,
+                };
+            }
+            // Not a HashMap — continue to built-in dispatch
+        }
+
         // Try built-in methods first
         // Check for Result types (Ok/Err) before the heap kind match since they use sub-tags
         let builtin_result = if is_ok_tag(receiver_bits) || is_err_tag(receiver_bits) {
