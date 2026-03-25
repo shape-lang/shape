@@ -125,6 +125,9 @@ fn dispatch_module_fn_call(
                         result.raw_bits()
                     );
                 }
+                // Convert VM-format ValueWord to JIT-format using
+                // nanboxed_to_jit_bits which handles Ok/Err wrappers,
+                // TypedObjects, HashMaps etc. by converting to JitAlloc format.
                 nanboxed_to_jit_bits(&result)
             }
             Err(e) => {

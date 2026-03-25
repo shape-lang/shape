@@ -524,9 +524,17 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 }
             };
 
-            let result = self.emit_method_ffi_fallback(
+            // For unresolved methods (method_id=0xFFFF), use the string_id
+        // from the operand to get the actual method name.
+        let effective_method_id = method_id.unwrap_or(0);
+        let method_string_id = match &instr.operand {
+            Some(Operand::TypedMethodCall { string_id, .. }) => Some(*string_id),
+            _ => None,
+        };
+        let result = self.emit_method_ffi_fallback_with_string(
                 receiver,
-                method_id.unwrap_or(0),
+                effective_method_id,
+                method_string_id,
                 &args,
             );
             self.stack_push(result);
@@ -1133,11 +1141,32 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         method_id: u16,
         args: &[Value],
     ) -> Value {
+        self.emit_method_ffi_fallback_with_string(receiver, method_id, None, args)
+    }
+
+    pub(crate) fn emit_method_ffi_fallback_with_string(
+        &mut self,
+        receiver: Value,
+        method_id: u16,
+        string_id: Option<u16>,
+        args: &[Value],
+    ) -> Value {
         use crate::context::{STACK_OFFSET, STACK_PTR_OFFSET};
 
-        // Reconstruct the method name string constant from method_id
-        let method_name_str = shape_value::MethodId(method_id).name().unwrap_or("unknown");
-        let method_str = method_name_str.to_string();
+        // Get method name: prefer string_id lookup (for unresolved methods),
+        // then fall back to MethodId name table.
+        let method_str = if let Some(sid) = string_id {
+            self.program
+                .strings
+                .get(sid as usize)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string())
+        } else {
+            shape_value::MethodId(method_id)
+                .name()
+                .unwrap_or("unknown")
+                .to_string()
+        };
         let str_bits = jit_box(HK_STRING, method_str);
         let method_val = self.builder.ins().iconst(types::I64, str_bits as i64);
 

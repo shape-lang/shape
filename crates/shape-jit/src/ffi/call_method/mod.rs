@@ -172,6 +172,77 @@ unsafe fn try_call_user_method(
 /// Call a method on a value
 /// Stack layout at call: [receiver, arg1, ..., argN, method_name, arg_count]
 /// The FFI pops values from ctx.stack and dispatches to the appropriate method
+/// Dispatch a method call through the trampoline VM for receivers
+/// that the JIT's built-in method dispatch doesn't handle (VM-format
+/// HashMaps, TypedObjects, etc.).
+fn dispatch_method_via_trampoline(
+    receiver_bits: u64,
+    method_name: &str,
+    args: &[u64],
+    ctx: *mut JITContext,
+) -> Option<u64> {
+    use crate::ffi::object::conversion::{jit_bits_to_nanboxed_with_ctx, nanboxed_to_jit_bits};
+
+    crate::ffi::control::with_trampoline_vm(|_vm_ref| {
+        // Try VM-format interpretation. Only safe for actual VM values
+        // (Arc<HeapValue>). Guard: check if it's a recognized JIT type first.
+        let is_jit = matches!(
+            heap_kind(receiver_bits),
+            Some(HK_ARRAY) | Some(HK_STRING) | Some(HK_JIT_OBJECT) | Some(HK_CLOSURE)
+                | Some(HK_DURATION) | Some(HK_TIME) | Some(HK_MATRIX)
+        );
+        if is_jit {
+            return TAG_NULL; // JIT object without a matching method
+        }
+        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+            let hk = heap_kind(receiver_bits);
+            eprintln!("[trampoline-method] receiver={:#x} heap_kind={:?} method={}", receiver_bits, hk, method_name);
+        }
+        let receiver_vw = unsafe { shape_value::ValueWord::clone_from_bits(receiver_bits) };
+
+        // Args come from JIT-compiled code and might be JIT or VM format.
+        // Use jit_bits_to_nanboxed for conversion.
+        let args_vw: Vec<shape_value::ValueWord> = args
+            .iter()
+            .map(|&bits| jit_bits_to_nanboxed_with_ctx(bits, ctx as *const JITContext))
+            .collect();
+
+        // Handle common methods on VM-allocated types directly.
+        if let Some(hm) = receiver_vw.as_hashmap_data() {
+            return match method_name {
+                "get" => {
+                    if let Some(key) = args_vw.first() {
+                        if let Some(idx) = hm.find_key(key) {
+                            nanboxed_to_jit_bits(&hm.values[idx])
+                        } else {
+                            TAG_NULL
+                        }
+                    } else {
+                        TAG_NULL
+                    }
+                }
+                "keys" => {
+                    nanboxed_to_jit_bits(&shape_value::ValueWord::from_array(
+                        std::sync::Arc::new(hm.keys.clone()),
+                    ))
+                }
+                "length" | "len" | "size" => {
+                    crate::nan_boxing::box_number(hm.keys.len() as f64)
+                }
+                _ => TAG_NULL,
+            };
+        }
+
+        // TypedObject methods
+        if let Some((_schema_id, _slots, _heap_mask)) = receiver_vw.as_typed_object() {
+            // TypedObject methods are dispatched through the VM
+            // TODO: add common method handling
+        }
+
+        TAG_NULL
+    })
+}
+
 pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u64 {
     unsafe {
         if ctx.is_null() || stack_count < 3 {
@@ -365,6 +436,17 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             if let Some(user_result) = try_call_user_method(ctx, receiver_bits, &method_name, &args)
             {
                 return user_result;
+            }
+        }
+
+        // If still NULL, try dispatching through the trampoline VM.
+        // This handles VM-allocated objects (HashMap, TypedObject, etc.)
+        // that the JIT's built-in method dispatch doesn't recognize.
+        if builtin_result == TAG_NULL {
+            if let Some(result) = dispatch_method_via_trampoline(
+                receiver_bits, &method_name, &args, ctx,
+            ) {
+                return result;
             }
         }
 

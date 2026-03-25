@@ -611,9 +611,15 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
             Some(HeapValue::U64Array(buf)) => typed_array_to_jit(&buf.data, HK_U64_ARRAY, ArrayElementKind::U64),
             Some(HeapValue::F32Array(buf)) => typed_array_to_jit(&buf.data, HK_F32_ARRAY, ArrayElementKind::F32),
             // Pass through VM-allocated heap values (TypedObject, Closure,
-            // HashMap, DataTable, etc.) as raw bits. The JIT's FFI slow paths
-            // (e.g., jit_get_field_typed) handle VM-format values correctly.
-            _ => nb.raw_bits(),
+            // HashMap, DataTable, etc.) as raw bits. Clone first to bump
+            // the Arc refcount so the heap allocation stays alive after
+            // the original ValueWord is dropped.
+            _ => {
+                let cloned = nb.clone();
+                let bits = cloned.raw_bits();
+                std::mem::forget(cloned); // Leak the refcount into JIT ownership
+                bits
+            }
         },
     }
 }
