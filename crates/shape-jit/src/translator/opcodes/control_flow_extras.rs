@@ -98,7 +98,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         };
 
         if let Some(value) = self.stack_pop() {
-            let type_name_bits = jit_box(HK_STRING, type_name);
+            let type_name_bits = box_string(type_name);
             let type_name_val = self.builder.ins().iconst(types::I64, type_name_bits as i64);
             let inst = self
                 .builder
@@ -159,9 +159,14 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     }
 
     /// Promote boxed module bindings to loop-carried registers (no type conversion).
+    ///
+    /// Creates a prelude → inner_header block split so that `def_var` (initial load)
+    /// lives in the prelude and `use_var` in the inner_header creates a proper PHI
+    /// merging the initial value with back-edge accumulated values.
     pub(in crate::translator::opcodes) fn promote_register_carried_module_bindings(
         &mut self,
         info: &crate::translator::loop_analysis::LoopInfo,
+        idx: usize,
     ) {
         if !self.register_carried_module_bindings.is_empty() {
             return;
@@ -192,17 +197,23 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             return;
         }
 
-        let mut any_promoted = false;
-        let mut bindings: Vec<u16> = loop_plan
+        let mut eligible_bindings: Vec<u16> = loop_plan
             .register_carried_module_bindings
             .iter()
             .copied()
+            .filter(|mb_idx| !self.unboxed_int_module_bindings.contains(mb_idx))
             .collect();
-        bindings.sort_unstable();
-        for mb_idx in bindings {
-            if self.unboxed_int_module_bindings.contains(&mb_idx) {
-                continue;
-            }
+        eligible_bindings.sort_unstable();
+        if eligible_bindings.is_empty() {
+            return;
+        }
+
+        // Create the inner header block — back-edges will target this block.
+        let inner_header = self.builder.create_block();
+
+        // Current block is the prelude (entry-only path).
+        // Load initial values from memory and def_var here.
+        for &mb_idx in &eligible_bindings {
             let var = self.get_or_create_module_binding_var(mb_idx);
             let byte_offset = crate::context::LOCALS_OFFSET + (mb_idx as i32 * 8);
             let boxed =
@@ -211,11 +222,35 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     .load(types::I64, MemFlags::new(), self.ctx_ptr, byte_offset);
             self.builder.def_var(var, boxed);
             self.register_carried_module_bindings.insert(mb_idx);
-            any_promoted = true;
         }
-        if any_promoted {
-            self.register_carried_loop_depth = self.loop_stack.len();
+
+        // Jump from prelude to inner header.
+        self.builder.ins().jump(inner_header, &[]);
+
+        // Seal the prelude block — its only predecessor is the entry edge.
+        let prelude_block = self
+            .loop_stack
+            .last()
+            .map(|ctx| ctx.start_block)
+            .unwrap_or_else(|| self.builder.current_block().unwrap());
+        self.builder.seal_block(prelude_block);
+
+        // Switch to inner header.
+        self.builder.switch_to_block(inner_header);
+
+        // Update back-edge targets so Continue/Jump go to inner_header.
+        if let Some(loop_ctx) = self.loop_stack.last_mut() {
+            loop_ctx.start_block = inner_header;
         }
+        self.blocks.insert(idx, inner_header);
+
+        // Remove the block at idx+1 created by create_blocks_for_jumps.
+        // Without this, the main compile loop would emit a fallthrough from
+        // inner_header to blocks[idx+1], clearing typed_stack and losing
+        // the state established by the prelude.
+        self.blocks.remove(&(idx + 1));
+
+        self.register_carried_loop_depth = self.loop_stack.len();
     }
 
     pub(in crate::translator::opcodes) fn get_or_create_module_binding_var(

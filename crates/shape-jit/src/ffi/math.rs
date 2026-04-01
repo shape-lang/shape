@@ -153,29 +153,29 @@ pub extern "C" fn jit_generic_add(a_bits: u64, b_bits: u64) -> u64 {
 
     // Time + Duration or Duration + Time
     if a_kind == Some(HK_TIME) && b_kind == Some(HK_DURATION) {
-        let timestamp = *unsafe { jit_unbox::<i64>(a_bits) };
-        let dur = unsafe { jit_unbox::<JITDuration>(b_bits) };
+        let timestamp = *unsafe { unified_unbox::<i64>(a_bits) };
+        let dur = unsafe { unified_unbox::<JITDuration>(b_bits) };
         let seconds = duration_to_seconds(dur);
         let new_timestamp = timestamp + seconds as i64;
-        return jit_box(HK_TIME, new_timestamp);
+        return unified_box(HK_TIME, new_timestamp);
     }
 
     if a_kind == Some(HK_DURATION) && b_kind == Some(HK_TIME) {
-        let timestamp = *unsafe { jit_unbox::<i64>(b_bits) };
-        let dur = unsafe { jit_unbox::<JITDuration>(a_bits) };
+        let timestamp = *unsafe { unified_unbox::<i64>(b_bits) };
+        let dur = unsafe { unified_unbox::<JITDuration>(a_bits) };
         let seconds = duration_to_seconds(dur);
         let new_timestamp = timestamp + seconds as i64;
-        return jit_box(HK_TIME, new_timestamp);
+        return unified_box(HK_TIME, new_timestamp);
     }
 
     // Duration + Duration
     if a_kind == Some(HK_DURATION) && b_kind == Some(HK_DURATION) {
-        let a_dur = unsafe { jit_unbox::<JITDuration>(a_bits) };
-        let b_dur = unsafe { jit_unbox::<JITDuration>(b_bits) };
+        let a_dur = unsafe { unified_unbox::<JITDuration>(a_bits) };
+        let b_dur = unsafe { unified_unbox::<JITDuration>(b_bits) };
         let a_secs = duration_to_seconds(a_dur);
         let b_secs = duration_to_seconds(b_dur);
         let total_secs = a_secs + b_secs;
-        return jit_box(
+        return unified_box(
             HK_DURATION,
             JITDuration {
                 value: total_secs,
@@ -186,10 +186,10 @@ pub extern "C" fn jit_generic_add(a_bits: u64, b_bits: u64) -> u64 {
 
     // String concatenation
     if a_kind == Some(HK_STRING) && b_kind == Some(HK_STRING) {
-        let a_str = unsafe { jit_unbox::<String>(a_bits) };
-        let b_str = unsafe { jit_unbox::<String>(b_bits) };
+        let a_str = unsafe { unbox_string(a_bits) };
+        let b_str = unsafe { unbox_string(b_bits) };
         let result = format!("{}{}", a_str, b_str);
-        return jit_box(HK_STRING, result);
+        return box_string(result);
     }
 
     // Fallback for numbers (one might be boxed differently)
@@ -224,19 +224,19 @@ pub extern "C" fn jit_generic_sub(a_bits: u64, b_bits: u64) -> u64 {
 
     // Time - Duration
     if a_kind == Some(HK_TIME) && b_kind == Some(HK_DURATION) {
-        let timestamp = *unsafe { jit_unbox::<i64>(a_bits) };
-        let dur = unsafe { jit_unbox::<JITDuration>(b_bits) };
+        let timestamp = *unsafe { unified_unbox::<i64>(a_bits) };
+        let dur = unsafe { unified_unbox::<JITDuration>(b_bits) };
         let seconds = duration_to_seconds(dur);
         let new_timestamp = timestamp - seconds as i64;
-        return jit_box(HK_TIME, new_timestamp);
+        return unified_box(HK_TIME, new_timestamp);
     }
 
     // Time - Time = Duration (in seconds)
     if a_kind == Some(HK_TIME) && b_kind == Some(HK_TIME) {
-        let a_ts = *unsafe { jit_unbox::<i64>(a_bits) };
-        let b_ts = *unsafe { jit_unbox::<i64>(b_bits) };
+        let a_ts = *unsafe { unified_unbox::<i64>(a_bits) };
+        let b_ts = *unsafe { unified_unbox::<i64>(b_bits) };
         let diff_secs = (a_ts - b_ts) as f64;
-        return jit_box(
+        return unified_box(
             HK_DURATION,
             JITDuration {
                 value: diff_secs,
@@ -446,8 +446,8 @@ pub extern "C" fn jit_generic_eq(a_bits: u64, b_bits: u64) -> u64 {
     let b_kind = heap_kind(b_bits);
 
     if a_kind == Some(HK_STRING) && b_kind == Some(HK_STRING) {
-        let a_str = unsafe { jit_unbox::<String>(a_bits) };
-        let b_str = unsafe { jit_unbox::<String>(b_bits) };
+        let a_str = unsafe { unbox_string(a_bits) };
+        let b_str = unsafe { unbox_string(b_bits) };
         return if a_str == b_str {
             TAG_BOOL_TRUE
         } else {

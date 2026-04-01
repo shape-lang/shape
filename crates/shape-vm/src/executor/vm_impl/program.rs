@@ -65,6 +65,17 @@ impl VirtualMachine {
                     eprintln!("  - {}", e);
                 }
             }
+            if let Err(errors) =
+                crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program)
+            {
+                eprintln!(
+                    "V2 bytecode verification warning: {} violation(s) found",
+                    errors.len()
+                );
+                for e in &errors {
+                    eprintln!("  - {}", e);
+                }
+            }
         }
 
         #[cfg(not(debug_assertions))]
@@ -72,6 +83,17 @@ impl VirtualMachine {
             if let Err(errors) = crate::bytecode::verifier::verify_trusted_opcodes(&self.program) {
                 eprintln!(
                     "Bytecode verification failed: {} violation(s)",
+                    errors.len()
+                );
+                for e in &errors {
+                    eprintln!("  - {}", e);
+                }
+            }
+            if let Err(errors) =
+                crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program)
+            {
+                eprintln!(
+                    "V2 bytecode verification failed: {} violation(s)",
                     errors.len()
                 );
                 for e in &errors {
@@ -133,6 +155,7 @@ impl VirtualMachine {
                 mutable_captures: lf.mutable_captures.clone(),
                 frame_descriptor: lf.frame_descriptor.clone(),
                 osr_entry_points: Vec::new(),
+                mir_data: None,
             })
             .collect();
 

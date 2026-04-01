@@ -521,6 +521,72 @@ define_opcodes! {
     /// Pops one value, truncates to declared width, stores to module binding.
     StoreModuleBindingTyped = 0xF8, Variable, pops: 1, pushes: 0;
 
+    // ===== v2 Typed Array Operations =====
+    /// Create a new TypedArray<f64> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayF64 = 0x05, Object, pops: 0, pushes: 1;
+    /// Create a new TypedArray<i64> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayI64 = 0x06, Object, pops: 0, pushes: 1;
+    /// Create a new TypedArray<i32> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayI32 = 0x07, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<f64>: pops (arr_ptr, index), pushes f64 value
+    TypedArrayGetF64 = 0x08, Object, pops: 2, pushes: 1;
+    /// Get element from TypedArray<i64>: pops (arr_ptr, index), pushes i64 value
+    TypedArrayGetI64 = 0x09, Object, pops: 2, pushes: 1;
+    /// Get element from TypedArray<i32>: pops (arr_ptr, index), pushes i32 value
+    TypedArrayGetI32 = 0x0A, Object, pops: 2, pushes: 1;
+    /// Set element in TypedArray<f64>: pops (arr_ptr, index, value), pushes nothing
+    TypedArraySetF64 = 0x0B, Object, pops: 3, pushes: 0;
+    /// Push element to TypedArray<f64>: pops (arr_ptr, value), pushes nothing
+    TypedArrayPushF64 = 0x0C, Object, pops: 2, pushes: 0;
+    /// Push element to TypedArray<i64>: pops (arr_ptr, value), pushes nothing
+    TypedArrayPushI64 = 0x0D, Object, pops: 2, pushes: 0;
+    /// Get length of TypedArray: pops (arr_ptr), pushes len as int
+    TypedArrayLen = 0x0E, Object, pops: 1, pushes: 1;
+
+    // ===== v2 Typed Field Access Operations =====
+    /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
+    FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;
+    /// Load i64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes i64.
+    FieldLoadI64 = 0x83, Object, pops: 1, pushes: 1;
+    /// Load i32 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes i32.
+    FieldLoadI32 = 0x84, Object, pops: 1, pushes: 1;
+    /// Load bool field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes bool.
+    FieldLoadBool = 0x85, Object, pops: 1, pushes: 1;
+    /// Load ptr field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes ptr.
+    FieldLoadPtr = 0x86, Object, pops: 1, pushes: 1;
+    /// Store f64 field to typed struct at byte offset. Operand: FieldOffset(u16). Pops (struct_ptr, value).
+    FieldStoreF64 = 0x87, Object, pops: 2, pushes: 0;
+    /// Store i64 field to typed struct at byte offset. Operand: FieldOffset(u16). Pops (struct_ptr, value).
+    FieldStoreI64 = 0x8B, Object, pops: 2, pushes: 0;
+    /// Store i32 field to typed struct at byte offset. Operand: FieldOffset(u16). Pops (struct_ptr, value).
+    FieldStoreI32 = 0x8C, Object, pops: 2, pushes: 0;
+    /// Allocate a new typed struct. Operand: TypedObjectAlloc{schema_id, field_count}. Pushes ptr.
+    NewTypedStruct = 0x8D, Object, pops: 0, pushes: 1;
+
+    // ===== v2 Sized Integer (i32) Arithmetic & Comparison =====
+    /// Add (i32 x i32 -> i32)
+    AddI32 = 0x1D, Arithmetic, pops: 2, pushes: 1;
+    /// Subtract (i32 x i32 -> i32)
+    SubI32 = 0x1E, Arithmetic, pops: 2, pushes: 1;
+    /// Multiply (i32 x i32 -> i32)
+    MulI32 = 0x1F, Arithmetic, pops: 2, pushes: 1;
+    /// Divide (i32 x i32 -> i32)
+    DivI32 = 0x9E, Arithmetic, pops: 2, pushes: 1;
+    /// Modulo (i32 x i32 -> i32)
+    ModI32 = 0x9F, Arithmetic, pops: 2, pushes: 1;
+    /// Equal (i32 x i32 -> bool)
+    EqI32 = 0xAA, Comparison, pops: 2, pushes: 1;
+    /// Not equal (i32 x i32 -> bool)
+    NeqI32 = 0xAB, Comparison, pops: 2, pushes: 1;
+    /// Less than (i32 x i32 -> bool)
+    LtI32 = 0xAC, Comparison, pops: 2, pushes: 1;
+    /// Greater than (i32 x i32 -> bool)
+    GtI32 = 0xAD, Comparison, pops: 2, pushes: 1;
+    /// Less than or equal (i32 x i32 -> bool)
+    LteI32 = 0xAE, Comparison, pops: 2, pushes: 1;
+    /// Greater than or equal (i32 x i32 -> bool)
+    GteI32 = 0xAF, Comparison, pops: 2, pushes: 1;
+
 }
 
 impl OpCode {
@@ -543,6 +609,47 @@ impl OpCode {
             OpCode::JumpIfFalseTrusted => Some(OpCode::JumpIfFalse),
             _ => None,
         }
+    }
+
+    /// Returns true if this is a v2 typed opcode (typed arrays, typed fields, sized integers).
+    /// These opcodes carry their type in the opcode name and require the v2 runtime path.
+    pub const fn is_v2_typed(self) -> bool {
+        matches!(
+            self,
+            // Typed array operations
+            OpCode::NewTypedArrayF64
+            | OpCode::NewTypedArrayI64
+            | OpCode::NewTypedArrayI32
+            | OpCode::TypedArrayGetF64
+            | OpCode::TypedArrayGetI64
+            | OpCode::TypedArrayGetI32
+            | OpCode::TypedArraySetF64
+            | OpCode::TypedArrayPushF64
+            | OpCode::TypedArrayPushI64
+            | OpCode::TypedArrayLen
+            // Typed field access
+            | OpCode::FieldLoadF64
+            | OpCode::FieldLoadI64
+            | OpCode::FieldLoadI32
+            | OpCode::FieldLoadBool
+            | OpCode::FieldLoadPtr
+            | OpCode::FieldStoreF64
+            | OpCode::FieldStoreI64
+            | OpCode::FieldStoreI32
+            | OpCode::NewTypedStruct
+            // Sized integer i32 arithmetic
+            | OpCode::AddI32
+            | OpCode::SubI32
+            | OpCode::MulI32
+            | OpCode::DivI32
+            | OpCode::ModI32
+            | OpCode::EqI32
+            | OpCode::NeqI32
+            | OpCode::LtI32
+            | OpCode::GtI32
+            | OpCode::LteI32
+            | OpCode::GteI32
+        )
     }
 
     /// Map a guarded typed opcode to its trusted variant (if one exists).
@@ -758,6 +865,8 @@ pub enum Operand {
     TypedLocal(u16, NumericWidth),
     /// Module binding index + width for StoreModuleBindingTyped
     TypedModuleBinding(u16, NumericWidth),
+    /// Byte offset into a typed struct for FieldLoad/FieldStore v2 opcodes
+    FieldOffset(u16),
 }
 
 /// Built-in functions

@@ -153,7 +153,11 @@ impl BytecodeCompiler {
             mutable_captures: mutable_flags.clone(),
             frame_descriptor: None,
             osr_entry_points: Vec::new(),
+            mir_data: None,
         });
+
+        // Record closure function_id for MIR back-patching (ClosurePlaceholder → Function)
+        self.closure_function_ids.push((closure_name.clone(), func_idx as u16));
 
         // Set up mutable_closure_captures so that during body compilation,
         // variable accesses for mutable captures emit LoadClosure/StoreClosure.

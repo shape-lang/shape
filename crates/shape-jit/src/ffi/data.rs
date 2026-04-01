@@ -176,7 +176,7 @@ pub extern "C" fn jit_get_row_timestamp(ctx: *mut JITContext, row_offset: i32) -
 
         let timestamp = *ctx_ref.timestamps_ptr.add(row_idx);
         // Return as heap-allocated time value
-        jit_box(HK_TIME, timestamp)
+        unified_box(HK_TIME, timestamp)
     }
 }
 

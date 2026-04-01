@@ -2056,4 +2056,72 @@ mod tests {
         "#);
         assert!(!lowering.had_fallbacks);
     }
+
+    #[test]
+    fn test_lowered_numeric_literals_preserve_values() {
+        // This test verifies that numeric literals are lowered to MirConstant
+        // with their actual values, not placeholder MirConstant::Int(0).
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("a".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(42), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("b".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Number(2.5), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("c".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Bool(true), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test", &[], &body, span());
+
+        // Collect all constants from the MIR.
+        let mut constants: Vec<MirConstant> = Vec::new();
+        for block in &mir.blocks {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(_, Rvalue::Use(Operand::Constant(c))) = &stmt.kind {
+                    constants.push(c.clone());
+                }
+            }
+        }
+
+        // Verify: Int(42) is present, not Int(0)
+        assert!(
+            constants.contains(&MirConstant::Int(42)),
+            "expected MirConstant::Int(42) in {constants:?}"
+        );
+        // Verify: Float(2.5 bits) is present, not Float(0)
+        assert!(
+            constants.contains(&MirConstant::Float(f64::to_bits(2.5))),
+            "expected MirConstant::Float(2.5) in {constants:?}"
+        );
+        // Verify: Bool(true) is present
+        assert!(
+            constants.contains(&MirConstant::Bool(true)),
+            "expected MirConstant::Bool(true) in {constants:?}"
+        );
+    }
 }

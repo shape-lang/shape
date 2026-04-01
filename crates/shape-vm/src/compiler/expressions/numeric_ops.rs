@@ -230,7 +230,25 @@ fn numeric_type_index(nt: NumericType) -> usize {
 /// For IntWidth types, returns the compact *Typed opcode (AddTyped, etc.)
 /// that carries width information as an operand.
 pub(super) fn typed_opcode_for(op: &BinaryOp, nt: NumericType) -> Option<OpCode> {
-    // Width-specific integers use compact typed opcodes
+    // i32 gets direct v2 opcodes — no Width operand needed
+    if matches!(nt, NumericType::IntWidth(shape_ast::IntWidth::I32)) {
+        return match op {
+            BinaryOp::Add => Some(OpCode::AddI32),
+            BinaryOp::Sub => Some(OpCode::SubI32),
+            BinaryOp::Mul => Some(OpCode::MulI32),
+            BinaryOp::Div => Some(OpCode::DivI32),
+            BinaryOp::Mod => Some(OpCode::ModI32),
+            BinaryOp::Greater => Some(OpCode::GtI32),
+            BinaryOp::Less => Some(OpCode::LtI32),
+            BinaryOp::GreaterEq => Some(OpCode::GteI32),
+            BinaryOp::LessEq => Some(OpCode::LteI32),
+            BinaryOp::Equal => Some(OpCode::EqI32),
+            BinaryOp::NotEqual => Some(OpCode::NeqI32),
+            _ => None,
+        };
+    }
+
+    // Other width-specific integers use compact typed opcodes with Width operand
     if let NumericType::IntWidth(_) = nt {
         return match op {
             BinaryOp::Add => Some(OpCode::AddTyped),
@@ -395,6 +413,66 @@ mod tests {
             ),
             "u8 + u8 should be NoCoercion(U8), got {:?}",
             plan
+        );
+    }
+
+    #[test]
+    fn i32_gets_direct_opcodes_not_typed() {
+        use shape_ast::IntWidth;
+        // i32 should get direct AddI32, not AddTyped
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Add, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::AddI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Sub, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::SubI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Mul, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::MulI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Div, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::DivI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Mod, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::ModI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Equal, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::EqI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::NotEqual, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::NeqI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Greater, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::GtI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Less, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::LtI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::GreaterEq, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::GteI32)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::LessEq, NumericType::IntWidth(IntWidth::I32)),
+            Some(OpCode::LteI32)
+        );
+
+        // Other widths should still use AddTyped
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Add, NumericType::IntWidth(IntWidth::U8)),
+            Some(OpCode::AddTyped)
+        );
+        assert_eq!(
+            typed_opcode_for(&BinaryOp::Add, NumericType::IntWidth(IntWidth::I16)),
+            Some(OpCode::AddTyped)
         );
     }
 
@@ -571,6 +649,120 @@ mod tests {
                 "#
             ),
             "u64 + i8 should be a compile error"
+        );
+    }
+
+    // v2 direct i32 opcodes — i32 operations bypass AddTyped/Width indirection
+    #[test]
+    fn i32_add_uses_direct_opcode() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: i32 = 100
+                let b: i32 = 200
+                return a + b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(result.as_i64(), Some(300), "i32 add should give 300");
+    }
+
+    #[test]
+    fn i32_sub_uses_direct_opcode() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: i32 = 500
+                let b: i32 = 200
+                return a - b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(result.as_i64(), Some(300), "i32 sub should give 300");
+    }
+
+    #[test]
+    fn i32_mul_wraps_on_overflow() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: i32 = 100000
+                let b: i32 = 100000
+                return a * b
+            }
+            "#,
+            "test",
+        );
+        // 100000 * 100000 = 10_000_000_000, wraps at i32
+        let expected = (100000_i32).wrapping_mul(100000_i32) as i64;
+        assert_eq!(
+            result.as_i64(),
+            Some(expected),
+            "i32 mul should wrap on overflow"
+        );
+    }
+
+    #[test]
+    fn i32_div_and_mod() {
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: i32 = 17
+                let b: i32 = 5
+                return a / b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(result.as_i64(), Some(3), "i32 17 / 5 should give 3");
+
+        let result = eval_fn(
+            r#"
+            function test() -> int {
+                let a: i32 = 17
+                let b: i32 = 5
+                return a % b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(result.as_i64(), Some(2), "i32 17 % 5 should give 2");
+    }
+
+    #[test]
+    fn i32_comparison_uses_direct_opcodes() {
+        let result = eval_fn(
+            r#"
+            function test() -> bool {
+                let a: i32 = 10
+                let b: i32 = 20
+                return a < b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(
+            result.as_bool(),
+            Some(true),
+            "i32 comparison a < b should return true"
+        );
+
+        let result = eval_fn(
+            r#"
+            function test() -> bool {
+                let a: i32 = 42
+                let b: i32 = 42
+                return a == b
+            }
+            "#,
+            "test",
+        );
+        assert_eq!(
+            result.as_bool(),
+            Some(true),
+            "i32 equality should return true"
         );
     }
 

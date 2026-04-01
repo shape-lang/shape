@@ -2094,6 +2094,7 @@ mod tests {
             mutable_captures: vec![],
             frame_descriptor: None,
             osr_entry_points: vec![],
+            mir_data: None,
         }];
         program.function_blob_hashes = vec![Some(h1)];
 
@@ -2530,6 +2531,7 @@ mod tests {
             mutable_captures: vec![],
             frame_descriptor: None,
             osr_entry_points: vec![],
+            mir_data: None,
         }];
         program.function_blob_hashes = vec![Some(h1)];
 
@@ -2583,6 +2585,7 @@ mod tests {
             mutable_captures: vec![],
             frame_descriptor: None,
             osr_entry_points: vec![],
+            mir_data: None,
         }];
         program.function_blob_hashes = vec![Some(h1)];
 

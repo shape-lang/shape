@@ -19,7 +19,7 @@ use super::super::nan_boxing::*;
 /// Create an Ok result wrapping the inner value
 pub extern "C" fn jit_make_ok(inner_bits: u64) -> u64 {
     if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
-        let kind = unsafe { super::super::nan_boxing::heap_kind(inner_bits) };
+        let kind = super::super::nan_boxing::heap_kind(inner_bits);
         eprintln!("[make_ok] inner={:#x} inner_kind={:?}", inner_bits, kind);
     }
     box_ok(inner_bits)
@@ -61,14 +61,21 @@ pub extern "C" fn jit_is_result(bits: u64) -> u64 {
 // Result Type Unwrapping
 // ============================================================================
 
-/// Unwrap an Ok value, returning the inner value
-/// If not Ok, returns TAG_NULL
+/// Unwrap an Ok value, returning the inner value.
+/// Consumes the Ok wrapper (decrements refcount, frees if last reference).
+/// If not Ok, returns TAG_NULL.
 pub extern "C" fn jit_unwrap_ok(bits: u64) -> u64 {
     if is_ok_tag(bits) {
         let inner = unsafe { unbox_result_inner(bits) };
-        if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
-            let kind = unsafe { super::super::nan_boxing::heap_kind(inner) };
-            eprintln!("[unwrap_ok] bits={:#x} inner={:#x} inner_kind={:?}", bits, inner, kind);
+        // Free the Ok wrapper. Zero the inner field first so the Drop impl
+        // doesn't try to free the inner value (caller now owns it).
+        let ptr = shape_value::tags::unified_heap_ptr(bits)
+            as *mut shape_value::unified_wrapper::UnifiedWrapper;
+        if !ptr.is_null() {
+            unsafe {
+                (*ptr).inner = 0;
+                drop(Box::from_raw(ptr));
+            }
         }
         inner
     } else {
@@ -76,11 +83,21 @@ pub extern "C" fn jit_unwrap_ok(bits: u64) -> u64 {
     }
 }
 
-/// Unwrap an Err value, returning the inner value
-/// If not Err, returns TAG_NULL
+/// Unwrap an Err value, returning the inner value.
+/// Consumes the Err wrapper (frees the wrapper, caller owns inner).
+/// If not Err, returns TAG_NULL.
 pub extern "C" fn jit_unwrap_err(bits: u64) -> u64 {
     if is_err_tag(bits) {
-        unsafe { unbox_result_inner(bits) }
+        let inner = unsafe { unbox_result_inner(bits) };
+        let ptr = shape_value::tags::unified_heap_ptr(bits)
+            as *mut shape_value::unified_wrapper::UnifiedWrapper;
+        if !ptr.is_null() {
+            unsafe {
+                (*ptr).inner = 0;
+                drop(Box::from_raw(ptr));
+            }
+        }
+        inner
     } else {
         TAG_NULL
     }
@@ -138,11 +155,21 @@ pub extern "C" fn jit_is_none(bits: u64) -> u64 {
     }
 }
 
-/// Unwrap a Some value, returning the inner value
-/// If not Some, returns TAG_NULL
+/// Unwrap a Some value, returning the inner value.
+/// Consumes the Some wrapper (frees the wrapper, caller owns inner).
+/// If not Some, returns TAG_NULL.
 pub extern "C" fn jit_unwrap_some(bits: u64) -> u64 {
     if is_some_tag(bits) {
-        unsafe { unbox_some_inner(bits) }
+        let inner = unsafe { unbox_some_inner(bits) };
+        let ptr = shape_value::tags::unified_heap_ptr(bits)
+            as *mut shape_value::unified_wrapper::UnifiedWrapper;
+        if !ptr.is_null() {
+            unsafe {
+                (*ptr).inner = 0;
+                drop(Box::from_raw(ptr));
+            }
+        }
+        inner
     } else {
         TAG_NULL
     }

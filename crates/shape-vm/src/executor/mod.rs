@@ -22,6 +22,7 @@ mod stack_ops;
 pub mod state_builtins;
 pub mod time_travel;
 mod trait_object_ops;
+mod v2_handlers;
 mod variables;
 pub(crate) mod vm_state_snapshot;
 mod window_join;

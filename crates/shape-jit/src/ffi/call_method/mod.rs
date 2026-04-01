@@ -183,15 +183,11 @@ fn dispatch_method_via_trampoline(
 ) -> Option<u64> {
     use crate::ffi::object::conversion::{jit_bits_to_nanboxed_with_ctx, nanboxed_to_jit_bits};
 
-    crate::ffi::control::with_trampoline_vm(|_vm_ref| {
-        // Try VM-format interpretation. Only safe for actual VM values
-        // (Arc<HeapValue>). Guard: check if it's a recognized JIT type first.
-        let is_jit = matches!(
-            heap_kind(receiver_bits),
-            Some(HK_ARRAY) | Some(HK_STRING) | Some(HK_JIT_OBJECT) | Some(HK_CLOSURE)
-                | Some(HK_DURATION) | Some(HK_TIME) | Some(HK_MATRIX)
-        );
-        if is_jit {
+    crate::ffi::control::with_trampoline_vm_mut(|vm| {
+        // Guard: only dispatch VM-format heap values through the trampoline.
+        // Unified heap values (bit-47 set) are JIT-native objects that should have
+        // been handled by the built-in dispatch above.
+        if shape_value::tags::is_unified_heap(receiver_bits) {
             return TAG_NULL; // JIT object without a matching method
         }
         if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
@@ -221,9 +217,45 @@ fn dispatch_method_via_trampoline(
                         TAG_NULL
                     }
                 }
+                "set" => {
+                    if args_vw.len() >= 2 {
+                        let key = args_vw[0].clone();
+                        let val = args_vw[1].clone();
+                        let mut new_keys = hm.keys.clone();
+                        let mut new_values = hm.values.clone();
+                        if let Some(idx) = hm.find_key(&key) {
+                            new_values[idx] = val;
+                        } else {
+                            new_keys.push(key);
+                            new_values.push(val);
+                        }
+                        let new_hm = shape_value::ValueWord::from_hashmap_pairs(
+                            new_keys, new_values,
+                        );
+                        nanboxed_to_jit_bits(&new_hm)
+                    } else {
+                        TAG_NULL
+                    }
+                }
+                "has" => {
+                    if let Some(key) = args_vw.first() {
+                        if hm.find_key(key).is_some() {
+                            crate::nan_boxing::TAG_BOOL_TRUE
+                        } else {
+                            crate::nan_boxing::TAG_BOOL_FALSE
+                        }
+                    } else {
+                        crate::nan_boxing::TAG_BOOL_FALSE
+                    }
+                }
                 "keys" => {
                     nanboxed_to_jit_bits(&shape_value::ValueWord::from_array(
                         std::sync::Arc::new(hm.keys.clone()),
+                    ))
+                }
+                "values" => {
+                    nanboxed_to_jit_bits(&shape_value::ValueWord::from_array(
+                        std::sync::Arc::new(hm.values.clone()),
                     ))
                 }
                 "length" | "len" | "size" => {
@@ -237,6 +269,49 @@ fn dispatch_method_via_trampoline(
         if let Some((_schema_id, _slots, _heap_mask)) = receiver_vw.as_typed_object() {
             // TypedObject methods are dispatched through the VM
             // TODO: add common method handling
+        }
+
+        // Generic fallback: dispatch through the trampoline VM's method dispatch.
+        // This handles DataTable.column(), .toArray(), and any other VM-format
+        // object methods not explicitly handled above.
+        {
+            // Push: [receiver, arg0, ..., argN, method_name, arg_count]
+            if vm.push_vw(receiver_vw.clone()).is_ok() {
+                let mut push_ok = true;
+                for arg in &args_vw {
+                    if vm.push_vw(arg.clone()).is_err() {
+                        push_ok = false;
+                        break;
+                    }
+                }
+                if push_ok {
+                    let method_vw = shape_value::ValueWord::from_string(
+                        std::sync::Arc::new(method_name.to_string()),
+                    );
+                    let arg_count_vw = shape_value::ValueWord::from_f64(args_vw.len() as f64);
+                    if vm.push_vw(method_vw).is_ok() && vm.push_vw(arg_count_vw).is_ok() {
+                        // Use legacy stack-based calling convention (operand: None)
+                        // so method name is read from the stack, not the trampoline VM's
+                        // string table.
+                        let instr = shape_vm::bytecode::Instruction {
+                            opcode: shape_vm::bytecode::OpCode::CallMethod,
+                            operand: None,
+                        };
+                        match vm.op_call_method(&instr, None) {
+                            Ok(()) => {
+                                if let Ok(result) = vm.pop_vw() {
+                                    return nanboxed_to_jit_bits(&result);
+                                }
+                            }
+                            Err(e) => {
+                                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                                    eprintln!("[trampoline-method-vm] op_call_method FAILED: {} method={}", e, method_name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         TAG_NULL
@@ -270,7 +345,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         ctx_ref.stack_ptr -= 1;
         let method_bits = ctx_ref.stack[ctx_ref.stack_ptr];
         let method_name = if is_heap_kind(method_bits, HK_STRING) {
-            jit_unbox::<String>(method_bits).clone()
+            unbox_string(method_bits).to_string()
         } else {
             return method_bits; // Return non-string value as-is
         };
@@ -372,7 +447,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
 
                                 // Convert key to string for HashMap
                                 let key = if is_heap_kind(key_result, HK_STRING) {
-                                    jit_unbox::<String>(key_result).clone()
+                                    unbox_string(key_result).to_string()
                                 } else if is_number(key_result) {
                                     format!("{}", unbox_number(key_result))
                                 } else if key_result == TAG_BOOL_TRUE {
@@ -396,7 +471,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                             for (key, values) in groups {
                                 obj.insert(key, JitArray::from_vec(values).heap_box());
                             }
-                            jit_box(HK_JIT_OBJECT, obj)
+                            unified_box(HK_JIT_OBJECT, obj)
                         }
                         _ => TAG_NULL,
                     };
@@ -412,28 +487,44 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // Check before built-in dispatch to avoid reading garbage from non-JitAlloc headers.
         if shape_value::tags::is_tagged(receiver_bits)
             && shape_value::tags::get_tag(receiver_bits) == shape_value::tags::TAG_HEAP
+            && !shape_value::tags::is_unified_heap(receiver_bits)
         {
-            let vw = shape_value::ValueWord::clone_from_bits(receiver_bits);
+            let vw = unsafe { shape_value::ValueWord::clone_from_bits(receiver_bits) };
             if let Some(hm) = vw.as_hashmap_data() {
-                return match method_name.as_str() {
+                match method_name.as_str() {
                     "get" => {
                         if let Some(key) = args.first() {
-                            let key_vw = shape_value::ValueWord::clone_from_bits(*key);
+                            // Convert key from JIT format (unified heap) to VM format
+                            let key_vw = super::object::conversion::jit_bits_to_nanboxed(*key);
                             if let Some(idx) = hm.find_key(&key_vw) {
                                 let result = super::object::conversion::nanboxed_to_jit_bits(&hm.values[idx]);
                                 return result;
                             }
                         }
-                        TAG_NULL
+                        return TAG_NULL;
                     }
-                    "keys" => super::object::conversion::nanboxed_to_jit_bits(
-                        &shape_value::ValueWord::from_array(std::sync::Arc::new(hm.keys.clone())),
-                    ),
-                    "length" | "len" | "size" => box_number(hm.keys.len() as f64),
-                    _ => TAG_NULL,
-                };
+                    "keys" => {
+                        return super::object::conversion::nanboxed_to_jit_bits(
+                            &shape_value::ValueWord::from_array(std::sync::Arc::new(hm.keys.clone())),
+                        );
+                    }
+                    "length" | "len" | "size" => {
+                        return box_number(hm.keys.len() as f64);
+                    }
+                    // For other methods (set, has, values, entries, etc.),
+                    // fall through to the trampoline VM dispatch below.
+                    _ => {}
+                }
             }
-            // Not a HashMap — continue to built-in dispatch
+            // VM-format heap value that's not a handled HashMap method.
+            // Skip built-in dispatch (heap_kind reads garbage for Arc<HeapValue>)
+            // and go directly to the trampoline VM dispatch.
+            if let Some(result) = dispatch_method_via_trampoline(
+                receiver_bits, &method_name, &args, ctx,
+            ) {
+                return result;
+            }
+            return TAG_NULL;
         }
 
         // Try built-in methods first

@@ -48,12 +48,12 @@ pub extern "C" fn jit_new_object(ctx: *mut JITContext, field_count: usize) -> u6
 
             // Key should be a string
             if is_heap_kind(key_bits, HK_STRING) {
-                let key = jit_unbox::<String>(key_bits).clone();
+                let key = unbox_string(key_bits).to_string();
                 map.insert(key, value);
             }
         }
 
-        jit_box(HK_JIT_OBJECT, map)
+        unified_box(HK_JIT_OBJECT, map)
     }
 }
 
@@ -67,8 +67,8 @@ pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) ->
                 if !is_heap_kind(key_bits, HK_STRING) {
                     return obj_bits;
                 }
-                let obj = jit_unbox_mut::<HashMap<String, u64>>(obj_bits);
-                let key = jit_unbox::<String>(key_bits).clone();
+                let obj = unified_unbox_mut::<HashMap<String, u64>>(obj_bits);
+                let key = unbox_string(key_bits).to_string();
                 let old_bits = obj.get(&key).copied().unwrap_or(TAG_NULL);
                 super::super::gc::jit_write_barrier(old_bits, value_bits);
                 obj.insert(key, value_bits);
@@ -99,7 +99,7 @@ pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) ->
                 } else if is_heap_kind(key_bits, HK_RANGE) {
                     // Range assignment: arr[start:end] = values
                     use super::super::super::context::JITRange;
-                    let range = jit_unbox::<JITRange>(key_bits);
+                    let range = unified_unbox::<JITRange>(key_bits);
                     let start_bits = range.start;
                     let end_bits = range.end;
 
@@ -186,7 +186,7 @@ pub extern "C" fn jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64 {
         if !is_heap_kind(obj_bits, HK_JIT_OBJECT) {
             return TAG_NULL;
         }
-        let obj = jit_unbox::<HashMap<String, u64>>(obj_bits);
+        let obj = unified_unbox::<HashMap<String, u64>>(obj_bits);
 
         // Get the keys to exclude
         if !is_heap_kind(keys_bits, HK_ARRAY) {
@@ -198,8 +198,8 @@ pub extern "C" fn jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64 {
         let mut exclude = std::collections::HashSet::new();
         for &key_bits in keys.iter() {
             if is_heap_kind(key_bits, HK_STRING) {
-                let s = jit_unbox::<String>(key_bits);
-                exclude.insert(s.clone());
+                let s = unbox_string(key_bits);
+                exclude.insert(s.to_string());
             }
         }
 
@@ -215,6 +215,6 @@ pub extern "C" fn jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64 {
         }
 
         // Box and return
-        jit_box(HK_JIT_OBJECT, rest)
+        unified_box(HK_JIT_OBJECT, rest)
     }
 }

@@ -59,7 +59,7 @@ pub struct LoanSink {
 /// The complete borrow analysis for a single function.
 /// Produced by the Datafrog solver + liveness analysis.
 /// Consumed (read-only) by compiler, LSP, and diagnostics.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BorrowAnalysis {
     /// Liveness results for move/clone decisions.
     pub liveness: LivenessResult,

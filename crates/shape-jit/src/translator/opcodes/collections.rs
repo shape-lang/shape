@@ -269,7 +269,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
                     let key_val = if let Some(Operand::Property(prop_idx)) = &instr.operand {
                         let prop_name = &self.program.strings[*prop_idx as usize];
-                        let boxed_key = jit_box(HK_STRING, prop_name.clone());
+                        let boxed_key = box_string(prop_name.clone());
                         self.builder.ins().iconst(types::I64, boxed_key as i64)
                     } else {
                         key
@@ -291,7 +291,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                                     if receiver_kind == 1 {
                                         // HashMap: shape-guarded O(1) access with FFI fallback
                                         let prop_name = &self.program.strings[*prop_idx as usize];
-                                        let boxed_key = jit_box(HK_STRING, prop_name.clone());
+                                        let boxed_key = box_string(prop_name.clone());
                                         let key_val =
                                             self.builder.ins().iconst(types::I64, boxed_key as i64);
                                         Some(self.emit_shape_guarded_get_with_fallback(
@@ -321,7 +321,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                         } else {
                             // Generic property access via FFI
                             let prop_name = &self.program.strings[*prop_idx as usize];
-                            let boxed_key = jit_box(HK_STRING, prop_name.clone());
+                            let boxed_key = box_string(prop_name.clone());
                             let key_val = self.builder.ins().iconst(types::I64, boxed_key as i64);
                             let inst = self.builder.ins().call(self.ffi.get_prop, &[obj, key_val]);
                             (Some(self.builder.inst_results(inst)[0]), Some(obj), None)
@@ -418,7 +418,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 let obj = self.stack_pop().unwrap();
 
                 let prop_name = &self.program.strings[*prop_idx as usize];
-                let boxed_key = jit_box(HK_STRING, prop_name.clone());
+                let boxed_key = box_string(prop_name.clone());
                 let key_val = self.builder.ins().iconst(types::I64, boxed_key as i64);
 
                 let inst = self

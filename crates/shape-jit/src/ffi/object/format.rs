@@ -57,7 +57,7 @@ pub extern "C" fn jit_format(ctx: *mut JITContext, _arg_count: usize) -> u64 {
         if !is_heap_kind(template_bits, HK_STRING) {
             return TAG_NULL;
         }
-        let template = jit_unbox::<String>(template_bits).clone();
+        let template = unbox_string(template_bits).to_string();
 
         // Substitute placeholders
         let mut result = template;
@@ -84,7 +84,7 @@ pub extern "C" fn jit_format(ctx: *mut JITContext, _arg_count: usize) -> u64 {
             }
         }
 
-        jit_box(HK_STRING, result)
+        box_string(result)
     }
 }
 
@@ -105,10 +105,7 @@ pub(crate) fn value_to_string(bits: u64) -> String {
         "false".to_string()
     } else {
         match heap_kind(bits) {
-            Some(HK_STRING) => {
-                let s = unsafe { jit_unbox::<String>(bits) };
-                s.clone()
-            }
+            Some(HK_STRING) => unsafe { unbox_string(bits) }.to_string(),
             Some(HK_ARRAY) => "[array]".to_string(),
             Some(HK_JIT_OBJECT) | Some(HK_TYPED_OBJECT) => "[object]".to_string(),
             _ => "[unknown]".to_string(),

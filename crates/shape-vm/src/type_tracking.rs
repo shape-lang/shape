@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use shape_ast::ast::TypeAnnotation;
 use shape_runtime::type_schema::{FieldType, SchemaId, TypeSchema, TypeSchemaRegistry};
 use shape_runtime::type_system::{BuiltinTypes, StorageType};
+use shape_value::v2::struct_layout::{FieldKind, StructLayout};
 
 /// Numeric type known at compile time for typed opcode emission.
 ///
@@ -551,6 +552,10 @@ pub struct VariableTypeInfo {
     pub concrete_numeric_type: Option<String>,
     /// What kind of variable this is (value, table, row view, column)
     pub kind: VariableKind,
+    /// v2: For typed arrays, the element's FieldKind (enables typed array codegen)
+    pub v2_array_element_kind: Option<FieldKind>,
+    /// v2: For typed structs, the SchemaId referencing a StructLayout in TypeTracker
+    pub v2_struct_layout: Option<SchemaId>,
 }
 
 impl VariableTypeInfo {
@@ -564,6 +569,8 @@ impl VariableTypeInfo {
             storage_hint: StorageHint::Unknown,
             concrete_numeric_type,
             kind: VariableKind::Value,
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -576,6 +583,8 @@ impl VariableTypeInfo {
             storage_hint: StorageHint::Unknown,
             concrete_numeric_type: None,
             kind: VariableKind::Value,
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -591,6 +600,8 @@ impl VariableTypeInfo {
             storage_hint,
             concrete_numeric_type,
             kind: VariableKind::Value,
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -604,6 +615,8 @@ impl VariableTypeInfo {
             storage_hint,
             concrete_numeric_type,
             kind: VariableKind::Value,
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -616,6 +629,8 @@ impl VariableTypeInfo {
             storage_hint: StorageHint::NullableFloat64,
             concrete_numeric_type: Some("f64".to_string()),
             kind: VariableKind::Value,
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -628,6 +643,8 @@ impl VariableTypeInfo {
             storage_hint: StorageHint::Float64,
             concrete_numeric_type: Some("f64".to_string()),
             kind: VariableKind::Value,
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -642,6 +659,8 @@ impl VariableTypeInfo {
             kind: VariableKind::RowView {
                 element_type: type_name,
             },
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -656,6 +675,8 @@ impl VariableTypeInfo {
             kind: VariableKind::Table {
                 element_type: type_name,
             },
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -671,6 +692,8 @@ impl VariableTypeInfo {
                 element_type,
                 column_type: type_name,
             },
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -686,6 +709,8 @@ impl VariableTypeInfo {
                 element_type: type_name,
                 index_column,
             },
+            v2_array_element_kind: None,
+            v2_struct_layout: None,
         }
     }
 
@@ -817,6 +842,10 @@ pub struct TypeTracker {
     ///
     /// Used for callable typed-object fields where runtime schema stores only slot layout.
     object_field_contracts: HashMap<SchemaId, HashMap<String, TypeAnnotation>>,
+
+    /// v2: Computed C-compatible struct layouts indexed by SchemaId.
+    /// Enables the compiler to look up field offsets at compile time for typed codegen.
+    pub v2_layouts: HashMap<SchemaId, StructLayout>,
 }
 
 impl TypeTracker {
@@ -832,6 +861,7 @@ impl TypeTracker {
             local_binding_semantic_scopes: vec![HashMap::new()],
             function_return_types: HashMap::new(),
             object_field_contracts: HashMap::new(),
+            v2_layouts: HashMap::new(),
         }
     }
 
@@ -1214,6 +1244,28 @@ impl TypeTracker {
         self.schema_registry.register(schema);
 
         schema_id
+    }
+
+    // --- v2 helpers ---
+
+    /// Register a v2 StructLayout for the given schema ID.
+    pub fn register_v2_layout(&mut self, schema_id: SchemaId, layout: StructLayout) {
+        self.v2_layouts.insert(schema_id, layout);
+    }
+
+    /// Look up a v2 StructLayout by schema ID.
+    pub fn get_v2_layout(&self, schema_id: SchemaId) -> Option<&StructLayout> {
+        self.v2_layouts.get(&schema_id)
+    }
+
+    /// Check if a local slot is a typed array and return its element kind.
+    pub fn is_typed_array(&self, slot: u16) -> Option<FieldKind> {
+        self.local_types.get(&slot)?.v2_array_element_kind
+    }
+
+    /// Check if a local slot has a v2 struct layout and return its schema ID.
+    pub fn is_typed_struct(&self, slot: u16) -> Option<SchemaId> {
+        self.local_types.get(&slot)?.v2_struct_layout
     }
 }
 
@@ -1625,5 +1677,107 @@ mod tests {
         let info = tracker.get_local_type(1).unwrap();
         assert!(!info.is_datatable());
         assert!(info.is_row_view());
+    }
+
+    #[test]
+    fn test_v2_struct_layout_registration() {
+        use shape_value::v2::struct_layout::{FieldKind, StructLayout};
+
+        let mut tracker = TypeTracker::empty();
+
+        let layout = StructLayout::new(&[
+            ("x", FieldKind::F64),
+            ("y", FieldKind::F64),
+        ]);
+        assert_eq!(layout.total_size(), 24);
+
+        // Use a fake schema ID
+        let schema_id: SchemaId = 42;
+        tracker.register_v2_layout(schema_id, layout);
+
+        let retrieved = tracker.get_v2_layout(schema_id);
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.field_count(), 2);
+        assert_eq!(retrieved.field_offset(0), 8);
+        assert_eq!(retrieved.field_offset(1), 16);
+        assert_eq!(retrieved.total_size(), 24);
+
+        // Non-existent schema ID returns None
+        assert!(tracker.get_v2_layout(999).is_none());
+    }
+
+    #[test]
+    fn test_v2_typed_array_element_kind() {
+        use shape_value::v2::struct_layout::FieldKind;
+
+        let mut tracker = TypeTracker::empty();
+
+        // Set up a local as a typed array of F64
+        let mut info = VariableTypeInfo::named("Array<number>".to_string());
+        info.v2_array_element_kind = Some(FieldKind::F64);
+        tracker.set_local_type(0, info);
+
+        assert_eq!(tracker.is_typed_array(0), Some(FieldKind::F64));
+        assert_eq!(tracker.is_typed_array(1), None); // unset slot
+
+        // Set up a local as a typed array of I32
+        let mut info2 = VariableTypeInfo::named("Array<i32>".to_string());
+        info2.v2_array_element_kind = Some(FieldKind::I32);
+        tracker.set_local_type(1, info2);
+
+        assert_eq!(tracker.is_typed_array(1), Some(FieldKind::I32));
+    }
+
+    #[test]
+    fn test_v2_typed_struct_on_variable() {
+        use shape_value::v2::struct_layout::{FieldKind, StructLayout};
+
+        let mut tracker = TypeTracker::empty();
+
+        let layout = StructLayout::new(&[
+            ("name", FieldKind::Ptr),
+            ("age", FieldKind::I32),
+            ("score", FieldKind::F64),
+        ]);
+        let schema_id: SchemaId = 100;
+        tracker.register_v2_layout(schema_id, layout);
+
+        // Set up a local with v2_struct_layout
+        let mut info = VariableTypeInfo::named("Person".to_string());
+        info.v2_struct_layout = Some(schema_id);
+        tracker.set_local_type(0, info);
+
+        // Verify is_typed_struct returns the schema ID
+        assert_eq!(tracker.is_typed_struct(0), Some(schema_id));
+        assert_eq!(tracker.is_typed_struct(1), None);
+
+        // Verify we can look up the layout from the schema ID
+        let layout = tracker.get_v2_layout(schema_id).unwrap();
+        assert_eq!(layout.field_count(), 3);
+        assert_eq!(layout.field_kind(0), FieldKind::Ptr);
+        assert_eq!(layout.field_kind(1), FieldKind::I32);
+        assert_eq!(layout.field_kind(2), FieldKind::F64);
+        assert_eq!(layout.heap_field_mask, 0b001); // only field 0 is Ptr
+    }
+
+    #[test]
+    fn test_v2_fields_default_none() {
+        // All constructors should default v2 fields to None
+        let info = VariableTypeInfo::unknown();
+        assert!(info.v2_array_element_kind.is_none());
+        assert!(info.v2_struct_layout.is_none());
+
+        let info = VariableTypeInfo::number();
+        assert!(info.v2_array_element_kind.is_none());
+        assert!(info.v2_struct_layout.is_none());
+
+        let info = VariableTypeInfo::named("Foo".to_string());
+        assert!(info.v2_array_element_kind.is_none());
+        assert!(info.v2_struct_layout.is_none());
+
+        let info = VariableTypeInfo::known(1, "Bar".to_string());
+        assert!(info.v2_array_element_kind.is_none());
+        assert!(info.v2_struct_layout.is_none());
     }
 }

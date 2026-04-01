@@ -569,8 +569,14 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             id if id == MethodId::LENGTH.0 || id == MethodId::LEN.0 => {
                 let receiver = self.stack_pop().unwrap();
 
-                // Runtime heap kind check: is receiver an array?
+                // Runtime heap kind check: is receiver any array-like kind?
+                // All JitArray-based kinds (Array, FloatArray, IntArray, etc.)
+                // share the same struct layout, so length is at the same offset.
                 let is_array = self.emit_is_heap_kind(receiver, HK_ARRAY);
+                let is_float_array = self.emit_is_heap_kind(receiver, HK_FLOAT_ARRAY);
+                let is_int_array = self.emit_is_heap_kind(receiver, HK_INT_ARRAY);
+                let is_any_array = self.builder.ins().bor(is_array, is_float_array);
+                let is_any_array = self.builder.ins().bor(is_any_array, is_int_array);
 
                 let inline_block = self.builder.create_block();
                 let ffi_block = self.builder.create_block();
@@ -579,7 +585,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
                 self.builder
                     .ins()
-                    .brif(is_array, inline_block, &[], ffi_block, &[]);
+                    .brif(is_any_array, inline_block, &[], ffi_block, &[]);
 
                 // Inline path: read JitArray.len directly
                 self.builder.switch_to_block(inline_block);
@@ -1167,7 +1173,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                 .unwrap_or("unknown")
                 .to_string()
         };
-        let str_bits = jit_box(HK_STRING, method_str);
+        let str_bits = box_string(method_str);
         let method_val = self.builder.ins().iconst(types::I64, str_bits as i64);
 
         let arg_count = args.len();
@@ -1176,7 +1182,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
 
         // Store to ctx.stack: [receiver, ...args, method_name, arg_count]
         let total = 2 + arg_count + 1; // receiver + args + method + arg_count
-        let base_sp = self.compile_time_sp;
+        let base_sp = self.compile_time_sp.depth();
         self.builder.ins().store(
             MemFlags::trusted(),
             receiver,

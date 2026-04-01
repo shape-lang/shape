@@ -38,12 +38,12 @@ pub extern "C" fn jit_iter_done(iter_bits: u64, idx_bits: u64) -> u64 {
                 idx as usize >= arr.len()
             }
             Some(HK_STRING) => {
-                let s = jit_unbox::<String>(iter_bits);
+                let s = unbox_string(iter_bits);
                 idx as usize >= s.chars().count()
             }
             Some(HK_JIT_OBJECT) => {
                 // Check if it's a Range object with start/end fields
-                let obj = jit_unbox::<HashMap<String, u64>>(iter_bits);
+                let obj = unified_unbox::<HashMap<String, u64>>(iter_bits);
                 if let (Some(&start_bits), Some(&end_bits)) = (obj.get("start"), obj.get("end")) {
                     if is_number(start_bits) && is_number(end_bits) {
                         let start = unbox_number(start_bits) as i64;
@@ -58,7 +58,7 @@ pub extern "C" fn jit_iter_done(iter_bits: u64, idx_bits: u64) -> u64 {
                 }
             }
             Some(HK_RANGE) => {
-                let range = jit_unbox::<JITRange>(iter_bits);
+                let range = unified_unbox::<JITRange>(iter_bits);
                 if is_number(range.start) && is_number(range.end) {
                     let start = unbox_number(range.start) as i64;
                     let end = unbox_number(range.end) as i64;
@@ -96,15 +96,15 @@ pub extern "C" fn jit_iter_next(iter_bits: u64, idx_bits: u64) -> u64 {
                 arr.get(idx as usize).copied().unwrap_or(TAG_NULL)
             }
             Some(HK_STRING) => {
-                let s = jit_unbox::<String>(iter_bits);
+                let s = unbox_string(iter_bits);
                 if let Some(ch) = s.chars().nth(idx as usize) {
-                    jit_box(HK_STRING, ch.to_string())
+                    box_string(ch.to_string())
                 } else {
                     TAG_NULL
                 }
             }
             Some(HK_JIT_OBJECT) => {
-                let obj = jit_unbox::<HashMap<String, u64>>(iter_bits);
+                let obj = unified_unbox::<HashMap<String, u64>>(iter_bits);
                 if let (Some(&start_bits), Some(&end_bits)) = (obj.get("start"), obj.get("end")) {
                     if is_number(start_bits) && is_number(end_bits) {
                         let start = unbox_number(start_bits) as i64;
@@ -123,7 +123,7 @@ pub extern "C" fn jit_iter_next(iter_bits: u64, idx_bits: u64) -> u64 {
                 }
             }
             Some(HK_RANGE) => {
-                let range = jit_unbox::<JITRange>(iter_bits);
+                let range = unified_unbox::<JITRange>(iter_bits);
                 if is_number(range.start) && is_number(range.end) {
                     let start = unbox_number(range.start) as i64;
                     let end = unbox_number(range.end) as i64;

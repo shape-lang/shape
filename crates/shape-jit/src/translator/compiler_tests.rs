@@ -31,6 +31,7 @@ fn make_func_with_body(
         mutable_captures: vec![],
         frame_descriptor: None,
         osr_entry_points: vec![],
+            mir_data: None,
     }
 }
 

@@ -11,7 +11,7 @@ pub fn call_matrix_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
     if !is_heap_kind(receiver_bits, HK_MATRIX) {
         return TAG_NULL;
     }
-    let jm = unsafe { jit_unbox::<JitMatrix>(receiver_bits) };
+    let jm = unsafe { unified_unbox::<JitMatrix>(receiver_bits) };
 
     match method_name {
         "transpose" => matrix_transpose(jm),
@@ -54,7 +54,7 @@ fn matrix_transpose(jm: &JitMatrix) -> u64 {
     let arc = Arc::new(mat_data);
     let new_jm = JitMatrix::from_arc(&arc);
     std::mem::forget(arc); // JitMatrix::from_arc already cloned the Arc
-    jit_box(HK_MATRIX, new_jm)
+    unified_box(HK_MATRIX, new_jm)
 }
 
 fn matrix_flatten(jm: &JitMatrix) -> u64 {

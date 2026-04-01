@@ -208,6 +208,9 @@ pub enum MirConstant {
     Function(String),
     /// Method name for dispatch
     Method(String),
+    /// Placeholder for a closure function reference.
+    /// Patched to `Function(name)` after bytecode compilation resolves the closure's function_id.
+    ClosurePlaceholder,
 }
 
 impl fmt::Display for MirConstant {
@@ -220,6 +223,7 @@ impl fmt::Display for MirConstant {
             MirConstant::Float(bits) => write!(f, "{}", f64::from_bits(*bits)),
             MirConstant::Function(name) => write!(f, "fn:{}", name),
             MirConstant::Method(name) => write!(f, "method:{}", name),
+            MirConstant::ClosurePlaceholder => write!(f, "closure_placeholder"),
         }
     }
 }
@@ -322,9 +326,11 @@ pub enum StatementKind {
     TaskBoundary(Vec<Operand>, TaskBoundaryKind),
     /// Capture values into a closure environment.
     /// Operands are the outer values flowing into the closure.
+    /// `function_id` is patched after bytecode compilation resolves the closure's index.
     ClosureCapture {
         closure_slot: SlotId,
         operands: Vec<Operand>,
+        function_id: Option<u16>,
     },
     /// Store values into an array literal.
     /// Operands are the array elements being stored.
@@ -334,9 +340,12 @@ pub enum StatementKind {
     },
     /// Store values into an object or struct literal.
     /// Operands are the fields/spreads being stored.
+    /// `field_names` carries the string key for each operand (from the AST).
+    /// When present, JIT codegen can construct a proper object with named fields.
     ObjectStore {
         container_slot: SlotId,
         operands: Vec<Operand>,
+        field_names: Vec<String>,
     },
     /// Store values into an enum payload.
     /// Operands are the tuple/struct payload values being stored.

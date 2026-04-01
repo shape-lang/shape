@@ -315,6 +315,7 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
         content_addressed: None,
         function_blob_hashes: vec![],
         top_level_frame: None,
+        top_level_mir: None,
     }
 }
 
@@ -361,6 +362,7 @@ mod tests {
                 SlotKind::Int64, // arg1
             ])),
             osr_entry_points: vec![],
+            mir_data: None,
         };
 
         let program = BytecodeProgram {
@@ -492,6 +494,7 @@ mod tests {
                 SlotKind::Int64, // sum
             ])),
             osr_entry_points: vec![],
+            mir_data: None,
         };
 
         let program = BytecodeProgram {
@@ -575,6 +578,7 @@ mod tests {
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Unknown])),
             osr_entry_points: vec![],
+            mir_data: None,
         };
 
         let program = BytecodeProgram {

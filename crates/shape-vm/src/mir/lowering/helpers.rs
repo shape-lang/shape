@@ -41,6 +41,19 @@ pub(super) fn emit_container_store_if_needed(
     operands: Vec<Operand>,
     span: Span,
 ) {
+    emit_container_store_with_names(builder, kind, container_slot, operands, Vec::new(), span);
+}
+
+/// Like `emit_container_store_if_needed` but carries optional field names
+/// for ObjectStore. `field_names` is ignored for non-Object kinds.
+pub(super) fn emit_container_store_with_names(
+    builder: &mut MirBuilder,
+    kind: ContainerStoreKind,
+    container_slot: SlotId,
+    operands: Vec<Operand>,
+    field_names: Vec<String>,
+    span: Span,
+) {
     if operands.is_empty() {
         return;
     }
@@ -52,6 +65,7 @@ pub(super) fn emit_container_store_if_needed(
         ContainerStoreKind::Object => StatementKind::ObjectStore {
             container_slot,
             operands,
+            field_names,
         },
         ContainerStoreKind::Enum => StatementKind::EnumStore {
             container_slot,
@@ -60,6 +74,7 @@ pub(super) fn emit_container_store_if_needed(
         ContainerStoreKind::Closure => StatementKind::ClosureCapture {
             closure_slot: container_slot,
             operands,
+            function_id: None, // Patched after bytecode compilation
         },
     };
     builder.push_stmt(stmt_kind, span);
@@ -142,6 +157,21 @@ pub(super) fn assign_none(builder: &mut MirBuilder, destination: SlotId, span: S
         StatementKind::Assign(
             Place::Local(destination),
             Rvalue::Use(Operand::Constant(MirConstant::None)),
+        ),
+        span,
+    );
+}
+
+/// Assign a closure placeholder to a slot. Patched to Function(name) after bytecode compilation.
+pub(super) fn assign_closure_placeholder(
+    builder: &mut MirBuilder,
+    destination: SlotId,
+    span: Span,
+) {
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(destination),
+            Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
         ),
         span,
     );

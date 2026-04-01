@@ -358,7 +358,7 @@ pub extern "C" fn jit_time_current_time(ctx: *mut JITContext) -> u64 {
             let ts_micros = *ctx_ref.timestamps_ptr.add(ctx_ref.current_row);
             if ts_micros != 0 {
                 let ts_seconds = ts_micros / 1_000_000;
-                return jit_box(HK_TIME, ts_seconds);
+                return unified_box(HK_TIME, ts_seconds);
             }
         }
 
@@ -368,7 +368,7 @@ pub extern "C" fn jit_time_current_time(ctx: *mut JITContext) -> u64 {
             let exec_ctx = &*(ctx_ref.exec_context_ptr as *const ExecutionContext);
             if let Some(ref_dt) = exec_ctx.get_reference_datetime() {
                 let ts = ref_dt.timestamp();
-                return jit_box(HK_TIME, ts);
+                return unified_box(HK_TIME, ts);
             }
         }
 
@@ -389,7 +389,7 @@ pub extern "C" fn jit_time_symbol(ctx: *mut JITContext) -> u64 {
             use shape_runtime::context::ExecutionContext;
             let exec_ctx = &*(ctx_ref.exec_context_ptr as *const ExecutionContext);
             if let Ok(id) = exec_ctx.get_current_id() {
-                return jit_box(HK_STRING, id);
+                return box_string(id);
             }
         }
         TAG_NULL
@@ -424,7 +424,7 @@ pub extern "C" fn jit_time_range(start_bits: u64, end_bits: u64, step_bits: u64)
 
     // Extract start time
     let start_ts = if is_heap_kind(start_bits, HK_TIME) {
-        unsafe { *jit_unbox::<i64>(start_bits) }
+        unsafe { *unified_unbox::<i64>(start_bits) }
     } else if is_number(start_bits) {
         unbox_number(start_bits) as i64
     } else {
@@ -433,7 +433,7 @@ pub extern "C" fn jit_time_range(start_bits: u64, end_bits: u64, step_bits: u64)
 
     // Extract end time
     let end_ts = if is_heap_kind(end_bits, HK_TIME) {
-        unsafe { *jit_unbox::<i64>(end_bits) }
+        unsafe { *unified_unbox::<i64>(end_bits) }
     } else if is_number(end_bits) {
         unbox_number(end_bits) as i64
     } else {
@@ -443,7 +443,7 @@ pub extern "C" fn jit_time_range(start_bits: u64, end_bits: u64, step_bits: u64)
     // Extract step duration
     let step_secs = if is_heap_kind(step_bits, HK_DURATION) {
         unsafe {
-            let dur = jit_unbox::<JITDuration>(step_bits);
+            let dur = unified_unbox::<JITDuration>(step_bits);
             // Convert to seconds based on unit
             let secs = match dur.unit {
                 0 => dur.value,            // seconds
@@ -471,7 +471,7 @@ pub extern "C" fn jit_time_range(start_bits: u64, end_bits: u64, step_bits: u64)
 
     while current < end_ts {
         // Box each time value as heap-allocated
-        times.push(jit_box(HK_TIME, current));
+        times.push(unified_box(HK_TIME, current));
         current += step_secs;
     }
 

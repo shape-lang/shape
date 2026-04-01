@@ -232,7 +232,8 @@ impl BytecodeProgram {
                     | Operand::MatrixDims { .. }
                     | Operand::Width(_)
                     | Operand::TypedLocal(_, _)
-                    | Operand::TypedModuleBinding(_, _) => {}
+                    | Operand::TypedModuleBinding(_, _)
+                    | Operand::FieldOffset(_) => {}
                 }
             }
         }

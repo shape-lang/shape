@@ -16,7 +16,7 @@ pub fn call_duration_method(receiver_bits: u64, method_name: &str, args: &[u64])
         if !is_heap_kind(receiver_bits, HK_DURATION) {
             return TAG_NULL;
         }
-        let dur = jit_unbox::<JITDuration>(receiver_bits);
+        let dur = unified_unbox::<JITDuration>(receiver_bits);
 
         match method_name {
             "to_seconds" | "toSeconds" | "as_seconds" => {
@@ -80,7 +80,7 @@ pub fn call_duration_method(receiver_bits: u64, method_name: &str, args: &[u64])
                 }
                 // Get target unit from first argument (should be a string)
                 let target_unit_str = if is_heap_kind(args[0], HK_STRING) {
-                    jit_unbox::<String>(args[0]).as_str()
+                    unbox_string(args[0])
                 } else {
                     return TAG_NULL;
                 };
@@ -110,7 +110,7 @@ pub fn call_duration_method(receiver_bits: u64, method_name: &str, args: &[u64])
                 };
 
                 // Create a new JITDuration and return it
-                jit_box(
+                unified_box(
                     HK_DURATION,
                     JITDuration {
                         value: new_value,

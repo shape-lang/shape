@@ -570,6 +570,45 @@ impl JITCompiler {
             generic_builtin: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_generic_builtin"], builder.func),
+            // Arc reference counting for ownership-aware JIT (MirToIR)
+            arc_retain: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_arc_retain"], builder.func),
+            arc_release: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_arc_release"], builder.func),
+            // v2 typed array — f64
+            v2_array_new_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_new_f64"], builder.func),
+            v2_array_get_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_get_f64"], builder.func),
+            v2_array_set_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_set_f64"], builder.func),
+            v2_array_push_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_push_f64"], builder.func),
+            v2_array_len_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_len_f64"], builder.func),
+            // v2 typed array — i64
+            v2_array_new_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_new_i64"], builder.func),
+            v2_array_get_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_get_i64"], builder.func),
+            v2_array_set_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_set_i64"], builder.func),
+            v2_array_push_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_push_i64"], builder.func),
+            v2_array_len_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_len_i64"], builder.func),
+            // v2 typed array — i32
+            v2_array_new_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_new_i32"], builder.func),
+            v2_array_get_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_get_i32"], builder.func),
+            v2_array_set_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_set_i32"], builder.func),
+            v2_array_push_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_push_i32"], builder.func),
+            v2_array_len_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_len_i32"], builder.func),
+            // v2 typed field access
+            v2_field_load_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_load_f64"], builder.func),
+            v2_field_load_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_load_i64"], builder.func),
+            v2_field_load_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_load_i32"], builder.func),
+            v2_field_load_ptr: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_load_ptr"], builder.func),
+            v2_field_store_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_store_f64"], builder.func),
+            v2_field_store_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_store_i64"], builder.func),
+            v2_field_store_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_store_i32"], builder.func),
+            v2_field_store_ptr: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_store_ptr"], builder.func),
+            // v2 refcount
+            v2_retain: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_retain"], builder.func),
+            v2_release: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_release"], builder.func),
+            // v2 struct allocation
+            v2_alloc_struct: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_alloc_struct"], builder.func),
         }
     }
 }

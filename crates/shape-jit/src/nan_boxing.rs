@@ -5,13 +5,18 @@
 //!
 //! - **Inline types** (int, bool, none, unit, function, module_fn, ref) use the 3-bit
 //!   shared tags from `shape_value::tags` in negative NaN space (TAG_BASE = 0xFFF8).
-//! - **Heap types** use TAG_HEAP (tag = 0b000) with a pointer to a `JitAlloc<T>`
-//!   struct. The `JitAlloc` prefix stores a `u16` kind at offset 0 (matching
-//!   `HEAP_KIND_*` constants from `shape_value::tags`), enabling O(1) type
-//!   discrimination with a single memory load.
+//! - **Unified heap types** use TAG_HEAP (tag = 0b000) with bit-47 SET and a pointer
+//!   to a `UnifiedValue<T>` (or specialized type like `UnifiedWrapper`, `UnifiedString`,
+//!   `UnifiedArray`). The unified header `[kind:u16][flags:u8][_:u8][refcount:AtomicU32]`
+//!   stores a `u16` kind at offset 0 (matching `HEAP_KIND_*` constants), data at offset 8.
+//! - **VM heap values** use TAG_HEAP with bit-47 CLEAR, pointing to `Arc<HeapValue>`.
 //! - **Data rows** use the shared TAG_INT (0b001) encoding with the row index stored
-//!   in the 48-bit payload. Row indices are always small positive integers that fit
-//!   easily within the i48 range.
+//!   in the 48-bit payload.
+//!
+//! ## Heap value discrimination
+//!
+//! `heap_kind()` handles both unified (bit-47 set) and VM (bit-47 clear) heap values,
+//! reading the kind u16 from offset 0 via the appropriate pointer extraction.
 //!
 //! ## Number detection
 //!
@@ -24,7 +29,7 @@
 
 pub use shape_value::tags::{
     // Bit layout constants
-    CANONICAL_NAN,
+    CANONICAL_NAN, UNIFIED_HEAP_FLAG, UNIFIED_PTR_MASK,
     // HeapKind constants
     HEAP_KIND_ARRAY,
     HEAP_KIND_BIG_INT,
@@ -90,6 +95,9 @@ pub use shape_value::tags::{
     make_tagged,
     sign_extend_i48,
 };
+
+use shape_value::unified_string::UnifiedString;
+use shape_value::unified_wrapper::UnifiedWrapper;
 
 // ============================================================================
 // NaN-space detection
@@ -242,6 +250,107 @@ const _: () = {
 };
 
 // ============================================================================
+// Unified Heap Value (generic replacement for JitAlloc)
+// ============================================================================
+
+/// Generic unified heap value with the standard header format.
+///
+/// Layout: `[kind: u16][flags: u8][_reserved: u8][refcount: AtomicU32][data: T]`
+/// Data starts at offset 8, same as JitAlloc, but uses bit-47 unified encoding.
+///
+/// This is the migration target for all JitAlloc usages. After migration,
+/// all TAG_HEAP values with bit-47 set use this layout, and all TAG_HEAP
+/// values with bit-47 clear are Arc<HeapValue> from the VM.
+#[repr(C)]
+pub struct UnifiedValue<T> {
+    pub kind: u16,
+    pub flags: u8,
+    pub _reserved: u8,
+    pub refcount: std::sync::atomic::AtomicU32,
+    pub data: T,
+}
+
+impl<T> UnifiedValue<T> {
+    #[inline]
+    pub fn new(kind: u16, data: T) -> Self {
+        Self {
+            kind,
+            flags: 0,
+            _reserved: 0,
+            refcount: std::sync::atomic::AtomicU32::new(1),
+            data,
+        }
+    }
+
+    #[inline]
+    pub fn heap_box(self) -> u64 {
+        let ptr = Box::into_raw(Box::new(self));
+        shape_value::tags::make_unified_heap(ptr as *const u8)
+    }
+
+    #[inline]
+    pub unsafe fn from_heap_bits(bits: u64) -> &'static Self {
+        let ptr = shape_value::tags::unified_heap_ptr(bits) as *const Self;
+        debug_assert!(!ptr.is_null(), "UnifiedValue::from_heap_bits: null pointer");
+        unsafe { &*ptr }
+    }
+
+    #[inline]
+    pub unsafe fn from_heap_bits_mut(bits: u64) -> &'static mut Self {
+        let ptr = shape_value::tags::unified_heap_ptr(bits) as *mut Self;
+        debug_assert!(
+            !ptr.is_null(),
+            "UnifiedValue::from_heap_bits_mut: null pointer"
+        );
+        unsafe { &mut *ptr }
+    }
+
+    #[inline]
+    pub unsafe fn heap_drop(bits: u64) {
+        let ptr = shape_value::tags::unified_heap_ptr(bits) as *mut Self;
+        unsafe { drop(Box::from_raw(ptr)) };
+    }
+}
+
+/// Allocate a unified heap value with kind prefix, returning a TAG_HEAP-tagged u64
+/// with bit-47 set (unified heap encoding).
+///
+/// This is the unified replacement for `jit_box()`.
+#[inline]
+pub fn unified_box<T>(kind: u16, data: T) -> u64 {
+    UnifiedValue::new(kind, data).heap_box()
+}
+
+/// Get a reference to data within a unified or legacy heap allocation.
+///
+/// Handles both unified heap (bit-47 set) and legacy JitAlloc (bit-47 clear)
+/// formats for backward compatibility during migration.
+///
+/// # Safety
+/// `bits` must be a TAG_HEAP value pointing to a live allocation of type T.
+#[inline]
+pub unsafe fn unified_unbox<T>(bits: u64) -> &'static T {
+    if shape_value::tags::is_unified_heap(bits) {
+        &unsafe { UnifiedValue::<T>::from_heap_bits(bits) }.data
+    } else {
+        unsafe { jit_unbox::<T>(bits) }
+    }
+}
+
+/// Get a mutable reference to data within a unified or legacy heap allocation.
+///
+/// # Safety
+/// Same as `unified_unbox`, plus exclusive access must be guaranteed.
+#[inline]
+pub unsafe fn unified_unbox_mut<T>(bits: u64) -> &'static mut T {
+    if shape_value::tags::is_unified_heap(bits) {
+        &mut unsafe { UnifiedValue::<T>::from_heap_bits_mut(bits) }.data
+    } else {
+        unsafe { jit_unbox_mut::<T>(bits) }
+    }
+}
+
+// ============================================================================
 // Core Helper Functions
 // ============================================================================
 
@@ -382,19 +491,26 @@ pub fn is_heap(bits: u64) -> bool {
 }
 
 /// Get the heap kind of a value, or None if not a heap value.
+///
+/// Handles both unified heap (bit-47 set) and legacy JitAlloc (bit-47 clear) formats.
 #[inline]
 pub fn heap_kind(bits: u64) -> Option<u16> {
-    if is_heap(bits) {
-        Some(unsafe { read_heap_kind(bits) })
+    if !is_heap(bits) {
+        return None;
+    }
+    if shape_value::tags::is_unified_heap(bits) {
+        Some(unsafe { shape_value::tags::unified_heap_kind(bits) })
     } else {
-        None
+        Some(unsafe { read_heap_kind(bits) })
     }
 }
 
 /// Check if a value is a heap value with a specific kind.
+///
+/// Handles both unified heap (bit-47 set) and legacy JitAlloc (bit-47 clear) formats.
 #[inline]
 pub fn is_heap_kind(bits: u64, expected_kind: u16) -> bool {
-    is_heap(bits) && unsafe { read_heap_kind(bits) } == expected_kind
+    heap_kind(bits) == Some(expected_kind)
 }
 
 /// Extract the raw pointer from a TAG_HEAP value (points to JitAlloc header).
@@ -424,26 +540,26 @@ pub fn is_result_tag(bits: u64) -> bool {
 
 #[inline]
 pub fn box_ok(inner_bits: u64) -> u64 {
-    jit_box(HK_OK, inner_bits)
+    UnifiedWrapper::new_ok(inner_bits).heap_box()
 }
 
 #[inline]
 pub fn box_err(inner_bits: u64) -> u64 {
-    jit_box(HK_ERR, inner_bits)
+    UnifiedWrapper::new_err(inner_bits).heap_box()
 }
 
 #[inline]
 pub unsafe fn unbox_result_inner(bits: u64) -> u64 {
-    *unsafe { jit_unbox::<u64>(bits) }
+    unsafe { UnifiedWrapper::from_heap_bits(bits) }.inner
 }
 
 #[inline]
 pub fn unbox_result_pointer(bits: u64) -> *const u64 {
-    let ptr = (bits & PAYLOAD_MASK) as *const JitAlloc<u64>;
+    let ptr = shape_value::tags::unified_heap_ptr(bits) as *const UnifiedWrapper;
     if ptr.is_null() {
         std::ptr::null()
     } else {
-        unsafe { &(*ptr).data as *const u64 }
+        unsafe { &(*ptr).inner as *const u64 }
     }
 }
 
@@ -468,12 +584,12 @@ pub fn is_option_tag(bits: u64) -> bool {
 
 #[inline]
 pub fn box_some(inner_bits: u64) -> u64 {
-    jit_box(HK_SOME, inner_bits)
+    UnifiedWrapper::new_some(inner_bits).heap_box()
 }
 
 #[inline]
 pub unsafe fn unbox_some_inner(bits: u64) -> u64 {
-    *unsafe { jit_unbox::<u64>(bits) }
+    unsafe { UnifiedWrapper::from_heap_bits(bits) }.inner
 }
 
 // ============================================================================
@@ -506,12 +622,12 @@ pub fn is_data_row(bits: u64) -> bool {
 
 #[inline]
 pub fn box_column_ref(ptr: *const f64, len: usize) -> u64 {
-    jit_box(HK_COLUMN_REF, (ptr, len))
+    unified_box(HK_COLUMN_REF, (ptr, len))
 }
 
 #[inline]
 pub unsafe fn unbox_column_ref(bits: u64) -> (*const f64, usize) {
-    *unsafe { jit_unbox::<(*const f64, usize)>(bits) }
+    *unsafe { unified_unbox::<(*const f64, usize)>(bits) }
 }
 
 #[inline]
@@ -558,17 +674,49 @@ pub fn box_column_result(data: Vec<f64>) -> u64 {
 
 #[inline]
 pub fn box_typed_object(ptr: *const u8) -> u64 {
-    jit_box(HK_TYPED_OBJECT, ptr)
+    unified_box(HK_TYPED_OBJECT, ptr)
 }
 
 #[inline]
 pub fn unbox_typed_object(bits: u64) -> *const u8 {
-    *unsafe { jit_unbox::<*const u8>(bits) }
+    *unsafe { unified_unbox::<*const u8>(bits) }
 }
 
 #[inline]
 pub fn is_typed_object(bits: u64) -> bool {
     is_heap_kind(bits, HK_TYPED_OBJECT)
+}
+
+// ============================================================================
+// Unified String Helper Functions
+// ============================================================================
+
+/// Box a String as a unified heap string value.
+#[inline]
+pub fn box_string(s: String) -> u64 {
+    UnifiedString::from_string(s).heap_box()
+}
+
+/// Box a &str as a unified heap string value.
+#[inline]
+pub fn box_str(s: &str) -> u64 {
+    UnifiedString::from_str(s).heap_box()
+}
+
+/// Read a string from a NaN-boxed heap value.
+///
+/// Handles both unified heap (bit-47 set, UnifiedString) and legacy JitAlloc
+/// (bit-47 clear) formats for backward compatibility during migration.
+///
+/// # Safety
+/// `bits` must be a TAG_HEAP value pointing to a live string allocation.
+#[inline]
+pub unsafe fn unbox_string(bits: u64) -> &'static str {
+    if shape_value::tags::is_unified_heap(bits) {
+        unsafe { UnifiedString::from_heap_bits(bits) }.as_str()
+    } else {
+        unsafe { jit_unbox::<String>(bits) }.as_str()
+    }
 }
 
 // ============================================================================
@@ -645,26 +793,38 @@ mod tests {
     }
 
     #[test]
-    fn test_jit_alloc_string() {
-        let bits = jit_box(HK_STRING, "hello".to_string());
+    fn test_unified_string() {
+        let bits = box_string("hello".to_string());
         assert!(is_heap(bits));
         assert!(is_heap_kind(bits, HK_STRING));
         assert!(!is_number(bits));
         assert_eq!(heap_kind(bits), Some(HK_STRING));
-        let s = unsafe { jit_unbox::<String>(bits) };
+        assert!(shape_value::tags::is_unified_heap(bits));
+        let s = unsafe { unbox_string(bits) };
         assert_eq!(s, "hello");
-        unsafe { jit_drop::<String>(bits) };
+        unsafe { UnifiedString::heap_drop(bits) };
     }
 
     #[test]
-    fn test_jit_alloc_array() {
-        let bits = jit_box(HK_ARRAY, vec![1u64, 2, 3]);
+    fn test_box_str() {
+        let bits = box_str("world");
+        assert!(is_heap_kind(bits, HK_STRING));
+        assert!(shape_value::tags::is_unified_heap(bits));
+        let s = unsafe { unbox_string(bits) };
+        assert_eq!(s, "world");
+        unsafe { UnifiedString::heap_drop(bits) };
+    }
+
+    #[test]
+    fn test_unified_value_generic() {
+        let bits = unified_box(HK_ARRAY, vec![1u64, 2, 3]);
         assert!(is_heap(bits));
         assert!(is_heap_kind(bits, HK_ARRAY));
         assert_eq!(heap_kind(bits), Some(HK_ARRAY));
-        let arr = unsafe { jit_unbox::<Vec<u64>>(bits) };
+        assert!(shape_value::tags::is_unified_heap(bits));
+        let arr = unsafe { unified_unbox::<Vec<u64>>(bits) };
         assert_eq!(arr.len(), 3);
-        unsafe { jit_drop::<Vec<u64>>(bits) };
+        unsafe { UnifiedValue::<Vec<u64>>::heap_drop(bits) };
     }
 
     #[test]
@@ -695,18 +855,22 @@ mod tests {
         assert!(!is_err_tag(ok_val));
         assert!(is_result_tag(ok_val));
 
+        // Verify unified heap encoding (bit 47 set)
+        assert!(shape_value::tags::is_unified_heap(ok_val));
+
         let err_val = box_err(box_number(42.0));
         assert!(is_err_tag(err_val));
         assert!(!is_ok_tag(err_val));
         assert!(is_result_tag(err_val));
+        assert!(shape_value::tags::is_unified_heap(err_val));
 
         // TAG_BOOL values must not be detected as ERR
         assert!(!is_err_tag(TAG_BOOL_FALSE));
         assert!(!is_err_tag(TAG_BOOL_TRUE));
 
-        // Clean up
-        unsafe { jit_drop::<u64>(ok_val) };
-        unsafe { jit_drop::<u64>(err_val) };
+        // Clean up via unified heap drop
+        unsafe { UnifiedWrapper::heap_drop(ok_val) };
+        unsafe { UnifiedWrapper::heap_drop(err_val) };
     }
 
     #[test]
@@ -716,7 +880,7 @@ mod tests {
         assert!(is_ok_tag(ok_val));
         let recovered = unsafe { unbox_result_inner(ok_val) };
         assert_eq!(unbox_number(recovered), 99.5);
-        unsafe { jit_drop::<u64>(ok_val) };
+        unsafe { UnifiedWrapper::heap_drop(ok_val) };
     }
 
     #[test]
@@ -729,13 +893,14 @@ mod tests {
         assert!(is_some_tag(some_val));
         assert!(is_option_tag(some_val));
         assert!(!is_none_tag(some_val));
+        assert!(shape_value::tags::is_unified_heap(some_val));
 
         // Round-trip
         let inner = unsafe { unbox_some_inner(some_val) };
         assert_eq!(unbox_number(inner), 3.14);
 
-        // Clean up
-        unsafe { jit_drop::<u64>(some_val) };
+        // Clean up via unified heap drop
+        unsafe { UnifiedWrapper::heap_drop(some_val) };
     }
 
     #[test]
@@ -754,7 +919,7 @@ mod tests {
         assert!(!is_typed_object(box_number(42.0)));
 
         // Clean up
-        unsafe { jit_drop::<*const u8>(boxed) };
+        unsafe { UnifiedValue::<*const u8>::heap_drop(boxed) };
     }
 
     #[test]
@@ -763,12 +928,13 @@ mod tests {
         let bits = box_column_ref(data.as_ptr(), data.len());
         assert!(is_column_ref(bits));
         assert!(!is_number(bits));
+        assert!(shape_value::tags::is_unified_heap(bits));
 
         let (ptr, len) = unsafe { unbox_column_ref(bits) };
         assert_eq!(ptr, data.as_ptr());
         assert_eq!(len, 3);
 
         // Clean up
-        unsafe { jit_drop::<(*const f64, usize)>(bits) };
+        unsafe { UnifiedValue::<(*const f64, usize)>::heap_drop(bits) };
     }
 }

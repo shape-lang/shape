@@ -94,12 +94,8 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
                 sliced.heap_box()
             }
             "join" => {
-                let separator = if !args.is_empty() {
-                    if is_heap_kind(args[0], HK_STRING) {
-                        jit_unbox::<String>(args[0]).clone()
-                    } else {
-                        ",".to_string()
-                    }
+                let separator = if !args.is_empty() && is_heap_kind(args[0], HK_STRING) {
+                    unbox_string(args[0]).to_string()
                 } else {
                     ",".to_string()
                 };
@@ -110,7 +106,7 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
                         if is_number(elem) {
                             format!("{}", unbox_number(elem))
                         } else if is_heap_kind(elem, HK_STRING) {
-                            jit_unbox::<String>(elem).clone()
+                            unbox_string(elem).to_string()
                         } else if elem == TAG_NULL {
                             "null".to_string()
                         } else if elem == TAG_BOOL_TRUE {
@@ -124,7 +120,7 @@ pub fn call_array_method(receiver_bits: u64, method_name: &str, args: &[u64]) ->
                     .collect();
 
                 let joined = parts.join(&separator);
-                jit_box(HK_STRING, joined)
+                box_string(joined)
             }
             "sum" => {
                 let mut total = 0.0;

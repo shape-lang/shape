@@ -239,12 +239,18 @@ impl BytecodeCompiler {
 
         let result_type = apply_coercion(self, plan);
         if let Some(opcode) = typed_opcode_for(op, result_type) {
-            // Compact typed opcodes (AddTyped, etc.) need Width operand
+            // Compact typed opcodes (AddTyped, etc.) need Width operand.
+            // Direct v2 opcodes (AddI32, etc.) are self-describing — no operand needed.
             if let NumericType::IntWidth(w) = result_type {
-                self.emit(Instruction::new(
-                    opcode,
-                    Some(Operand::Width(NumericWidth::from_int_width(w))),
-                ));
+                if w == shape_ast::IntWidth::I32 {
+                    // Direct i32 opcodes — no Width operand
+                    self.emit(Instruction::simple(opcode));
+                } else {
+                    self.emit(Instruction::new(
+                        opcode,
+                        Some(Operand::Width(NumericWidth::from_int_width(w))),
+                    ));
+                }
             } else {
                 self.emit(Instruction::simple(opcode));
             }

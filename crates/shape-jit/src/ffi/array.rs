@@ -163,12 +163,22 @@ pub extern "C" fn jit_array_pop(array_bits: u64) -> u64 {
     create_array_from_elements(std::ptr::null_mut(), &elements)
 }
 
-/// Push single element onto array (returns new array with element appended)
-/// Used by ArrayPush opcode in list comprehensions
+/// Push single element onto array (returns new array with element appended).
+/// Used by ArrayPush opcode in list comprehensions.
+/// Creates a new allocation with pre-allocated capacity — the old array is
+/// abandoned because the general ArrayPush path doesn't guarantee single-ownership.
+/// (The single-ownership path uses jit_array_push_local via ArrayPushLocal.)
 pub extern "C" fn jit_array_push_elem(array_bits: u64, value_bits: u64) -> u64 {
-    let mut elements = get_array_elements(array_bits);
-    elements.push(value_bits);
-    create_array_from_elements(std::ptr::null_mut(), &elements)
+    if !is_heap_kind(array_bits, HK_ARRAY) {
+        return JitArray::from_slice(&[value_bits]).heap_box();
+    }
+    let old = unsafe { JitArray::from_heap_bits(array_bits) };
+    let mut new_arr = JitArray::with_capacity(old.len() + 1);
+    for &elem in old.as_slice() {
+        new_arr.push(elem);
+    }
+    new_arr.push(value_bits);
+    new_arr.heap_box()
 }
 
 /// Push a value into an array in-place, mutating the existing JitArray.
@@ -295,7 +305,7 @@ pub extern "C" fn jit_slice(arr_bits: u64, start_bits: u64, end_bits: u64) -> u6
     unsafe {
         // Handle string slicing
         if is_heap_kind(arr_bits, HK_STRING) {
-            let s = jit_unbox::<String>(arr_bits);
+            let s = unbox_string(arr_bits);
 
             let start = if is_number(start_bits) {
                 unbox_number(start_bits) as usize
@@ -312,11 +322,11 @@ pub extern "C" fn jit_slice(arr_bits: u64, start_bits: u64, end_bits: u64) -> u6
             let end = end.min(s.len());
 
             if start > end {
-                return jit_box(HK_STRING, String::new());
+                return box_str("");
             }
 
             let sliced = s[start..end].to_string();
-            return jit_box(HK_STRING, sliced);
+            return box_string(sliced);
         }
 
         // Handle array slicing
@@ -454,12 +464,15 @@ pub extern "C" fn jit_array_reverse(arr_bits: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_array_push_element(arr_bits: u64, element_bits: u64) -> u64 {
     if !is_heap_kind(arr_bits, HK_ARRAY) {
-        return TAG_NULL;
+        return JitArray::from_slice(&[element_bits]).heap_box();
     }
-    let arr = unsafe { JitArray::from_heap_bits(arr_bits) };
-    let mut elements = arr.as_slice().to_vec();
-    elements.push(element_bits);
-    JitArray::from_vec(elements).heap_box()
+    let old = unsafe { JitArray::from_heap_bits(arr_bits) };
+    let mut new_arr = JitArray::with_capacity(old.len() + 1);
+    for &elem in old.as_slice() {
+        new_arr.push(elem);
+    }
+    new_arr.push(element_bits);
+    new_arr.heap_box()
 }
 
 /// Allocate a new empty array with pre-allocated capacity.

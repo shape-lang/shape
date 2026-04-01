@@ -572,6 +572,18 @@ impl VirtualMachine {
                 return self.exec_jit_ops(instruction);
             }
 
+            // v2 typed struct field operations
+            FieldLoadF64 | FieldLoadI64 | FieldLoadI32 | FieldLoadBool | FieldLoadPtr
+            | FieldStoreF64 | FieldStoreI64 | FieldStoreI32 | NewTypedStruct => {
+                return self.exec_v2_typed_field(instruction);
+            }
+
+            // v2 sized integer (i32) arithmetic and comparison
+            AddI32 | SubI32 | MulI32 | DivI32 | ModI32 | EqI32 | NeqI32 | LtI32 | GtI32
+            | LteI32 | GteI32 => {
+                return self.exec_v2_sized_int(instruction);
+            }
+
             // Async operations
             Yield | Suspend | Resume | Poll | AwaitBar | AwaitTick | EmitAlert | EmitEvent
             | Await | SpawnTask | JoinInit | JoinAwait | CancelTask | AsyncScopeEnter
@@ -621,6 +633,20 @@ impl VirtualMachine {
             // Trait object operations
             BoxTraitObject | DynMethodCall | DropCall | DropCallAsync => {
                 return self.exec_trait_object_ops(instruction, ctx);
+            }
+
+            // v2 typed array operations
+            NewTypedArrayF64
+            | NewTypedArrayI64
+            | NewTypedArrayI32
+            | TypedArrayGetF64
+            | TypedArrayGetI64
+            | TypedArrayGetI32
+            | TypedArraySetF64
+            | TypedArrayPushF64
+            | TypedArrayPushI64
+            | TypedArrayLen => {
+                return self.exec_v2_typed_array(instruction);
             }
 
             // Special

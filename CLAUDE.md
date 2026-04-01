@@ -127,16 +127,20 @@ Shape supports:
 
 ## Architecture
 
+> **v2 Runtime**: The runtime is migrating to fully typed, zero-tag native values. See `docs/runtime-v2-spec.md` for the authoritative spec. The v1 NaN-boxing system described below is being replaced — all new code should target the v2 architecture.
+
 ### Compilation Pipeline
 1. **Parser** (shape-ast): Pest grammar → AST
 2. **Bytecode Compiler** (shape-runtime): Two-pass — register functions, then compile. Type inference and checking happen during compilation. Emits typed opcodes when types are proven at compile time.
-3. **VM Interpreter** (shape-vm): Stack-based execution with NaN-boxed values, feedback vectors for type profiling
-4. **JIT** (shape-jit): Cranelift codegen, tiered (Tier 1 baseline @ 100 calls, Tier 2 optimizing @ 10k), OSR for hot loops, deoptimization back to interpreter
+3. **VM Interpreter** (shape-vm): Stack-based execution with typed 8-byte slots (v2: raw native values, no NaN-boxing), feedback vectors for type profiling
+4. **JIT** (shape-jit): Cranelift codegen via MirToIR, tiered (Tier 1 baseline @ 100 calls, Tier 2 optimizing @ 10k), OSR for hot loops, deoptimization back to interpreter
 
-### Value Representation
-- **NaN-boxing**: All values fit in 8 bytes (`ValueWord`/`NanBoxed`). Plain f64 stored directly; tagged values use the NaN payload space with a 3-bit tag (i48 int, bool, none, unit, function, heap pointer).
-- **HeapValue**: 40-byte enum for heap-allocated types (String, Array, TypedObject, Closure, Decimal, BigInt, HashMap, DateTime, Content, IoHandle, etc.)
-- **TypedObject**: Compile-time schema → NaN-boxed 8-byte `ValueSlot` fields → O(1) field access via precomputed offsets. `heap_mask: u64` bitmap tracks which slots are pointers.
+### Value Representation (v1 → v2 transition)
+- **v1 (NaN-boxing)**: `ValueWord`/`NanBoxed` — all values in 8 bytes with 3-bit tag. Being removed.
+- **v2 (native types)**: Raw `f64`/`i64`/`i32`/`i8`/`bool`/`*const T` in 8-byte stack slots. Opcodes encode the type — no runtime tag checking. See `docs/runtime-v2-spec.md`.
+- **HeapHeader**: 8-byte `repr(C)` header (refcount `AtomicU32` at offset 0, kind `u16`, flags `u8`). All heap objects share this header.
+- **TypedArray\<T\>**: Contiguous native buffer (`HeapHeader` + `*mut T` + len/cap). `Array<number>` → `TypedArray<f64>` with `arr[i]` = `load f64 [data + i*8]`.
+- **TypedStruct**: C-compatible fixed layout with compile-time field offsets. `point.x` = `load f64 [ptr + 8]`.
 
 ### Method Dispatch
 - **PHF maps**: O(1) compile-time perfect hash for builtin type methods (Array, String, HashMap, DateTime, etc.)
@@ -222,5 +226,6 @@ A linter hook modifies `module_resolution.rs` after edits — it changes the ret
 | VM executor | `crates/shape-vm/src/executor/` |
 | JIT compiler | `crates/shape-jit/src/` |
 | Ed25519 signing | `crates/shape-runtime/src/crypto/signing.rs` |
+| Runtime v2 spec | `docs/runtime-v2-spec.md` |
 | Landing page | `../shape-web/landing/index.html` |
 | Book (Astro) | `../shape-web/book/` |

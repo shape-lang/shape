@@ -23,21 +23,21 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         self.builder.ins().iadd(data_ptr, byte_offset)
     }
 
-    /// Extract the 48-bit payload pointer from a NaN-boxed heap value.
+    /// Extract the heap pointer from a NaN-boxed heap value.
     ///
-    /// Masks off the tag bits (upper 16 bits) and returns the raw pointer
-    /// value as an i64. This is the common first step for all heap value
-    /// access: `bits & PAYLOAD_MASK`.
+    /// Uses `UNIFIED_PTR_MASK` which masks off both the tag bits (upper 16 bits)
+    /// AND the unified heap flag (bit 47). This works correctly for both legacy
+    /// JitAlloc and unified heap values, since user-space pointers never have bit 47 set.
     #[inline]
     pub(in crate::translator) fn emit_payload_ptr(&mut self, boxed: Value) -> Value {
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        self.builder.ins().band(boxed, payload_mask)
+        let ptr_mask = self.builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
+        self.builder.ins().band(boxed, ptr_mask)
     }
 
-    /// Extract the JitAlloc data pointer from a NaN-boxed heap value.
+    /// Extract the data pointer from a NaN-boxed heap value.
     ///
-    /// Combines `emit_payload_ptr` with adding the JitAlloc header offset
-    /// to skip past the `[kind: u16, _pad: [u8; 6]]` prefix to the data.
+    /// Combines `emit_payload_ptr` with adding the header offset (8 bytes)
+    /// to skip past the `[kind: u16][flags/pad: 2][refcount: u32]` prefix.
     #[inline]
     pub(in crate::translator) fn emit_jit_alloc_data_ptr(&mut self, boxed: Value) -> Value {
         let alloc_ptr = self.emit_payload_ptr(boxed);

@@ -512,6 +512,40 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             | OpCode::TryConvertToChar => {
                 self.compile_opcode_via_generic_ffi(instr.opcode, 1, true)
             }
+
+            // v2 typed opcodes — not handled by BytecodeToIR (MirToIR path only)
+            OpCode::NewTypedArrayF64
+            | OpCode::NewTypedArrayI64
+            | OpCode::NewTypedArrayI32
+            | OpCode::TypedArrayGetF64
+            | OpCode::TypedArrayGetI64
+            | OpCode::TypedArrayGetI32
+            | OpCode::TypedArraySetF64
+            | OpCode::TypedArrayPushF64
+            | OpCode::TypedArrayPushI64
+            | OpCode::TypedArrayLen
+            | OpCode::FieldLoadF64
+            | OpCode::FieldLoadI64
+            | OpCode::FieldLoadI32
+            | OpCode::FieldLoadBool
+            | OpCode::FieldLoadPtr
+            | OpCode::FieldStoreF64
+            | OpCode::FieldStoreI64
+            | OpCode::FieldStoreI32
+            | OpCode::AddI32
+            | OpCode::SubI32
+            | OpCode::MulI32
+            | OpCode::DivI32
+            | OpCode::ModI32
+            | OpCode::NewTypedStruct
+            | OpCode::EqI32
+            | OpCode::NeqI32
+            | OpCode::LtI32
+            | OpCode::GtI32
+            | OpCode::LteI32
+            | OpCode::GteI32 => {
+                Err(format!("v2 opcode {:?} not supported in BytecodeToIR — use MirToIR path", instr.opcode))
+            }
         }?;
 
         // Verify stack effect

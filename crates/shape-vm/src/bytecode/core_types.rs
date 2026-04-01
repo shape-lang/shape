@@ -1,5 +1,18 @@
 use super::*;
 use crate::type_tracking::{FrameDescriptor, SlotKind, StorageHint};
+use std::sync::Arc;
+
+/// Cached MIR analysis data for JIT v2 (MirToIR compilation).
+///
+/// Preserves the MIR and its analysis results so the JIT can compile directly
+/// from MIR, getting access to CFG structure, Move/Copy/Drop semantics,
+/// liveness, and storage plans lost in the bytecode encoding.
+#[derive(Debug)]
+pub struct MirFunctionData {
+    pub mir: crate::mir::MirFunction,
+    pub storage_plan: crate::mir::StoragePlan,
+    pub borrow_analysis: crate::mir::BorrowAnalysis,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DataFrameSchema {
@@ -312,6 +325,10 @@ pub struct BytecodeProgram {
     #[serde(default)]
     pub native_struct_layouts: Vec<NativeStructLayoutEntry>,
 
+    /// Cached MIR for the top-level function (JIT v2).
+    #[serde(skip)]
+    pub top_level_mir: Option<Arc<MirFunctionData>>,
+
     /// Content-addressed program built alongside the flat bytecode.
     ///
     /// When present, this contains per-function `FunctionBlob`s with content
@@ -394,6 +411,9 @@ pub struct Function {
     /// from the interpreter into JIT-compiled code mid-function.
     #[serde(default)]
     pub osr_entry_points: Vec<OsrEntryPoint>,
+    /// Cached MIR data for JIT v2. Wrapped in Arc for cheap Clone.
+    #[serde(skip)]
+    pub mir_data: Option<Arc<MirFunctionData>>,
 }
 
 /// A compiled annotation definition.
@@ -625,7 +645,17 @@ impl Instruction {
                 Operand::TypedLocal(_, _) => 3,
                 // TypedModuleBinding: binding_idx (2) + width (1) = 3 bytes
                 Operand::TypedModuleBinding(_, _) => 3,
+                // FieldOffset: u16 (2 bytes)
+                Operand::FieldOffset(_) => 2,
             },
+        }
+    }
+
+    /// Extract the byte offset from a FieldOffset operand (v2 typed field ops).
+    pub fn operand_field_offset(&self) -> u16 {
+        match self.operand {
+            Some(Operand::FieldOffset(off)) => off,
+            _ => panic!("expected FieldOffset operand"),
         }
     }
 }

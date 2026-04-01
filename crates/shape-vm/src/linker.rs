@@ -169,7 +169,8 @@ fn remap_operand(
         | Operand::MatrixDims { .. }
         | Operand::Width(_)
         | Operand::TypedLocal(_, _)
-        | Operand::TypedModuleBinding(_, _) => operand,
+        | Operand::TypedModuleBinding(_, _)
+        | Operand::FieldOffset(_) => operand,
     }
 }
 
@@ -575,6 +576,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
             mutable_captures: lf.mutable_captures.clone(),
             frame_descriptor: lf.frame_descriptor.clone(),
             osr_entry_points: Vec::new(),
+            mir_data: None,
         })
         .collect();
 
@@ -592,6 +594,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         module_binding_storage_hints: linked.module_binding_storage_hints.clone(),
         function_local_storage_hints: linked.function_local_storage_hints.clone(),
         top_level_frame: linked.top_level_frame.clone(),
+        top_level_mir: None,
         compiled_annotations: HashMap::new(),
         trait_method_symbols: linked.trait_method_symbols.clone(),
         expanded_function_defs: HashMap::new(),

@@ -187,21 +187,34 @@ fn dispatch_opcode(ctx_ref: &mut JITContext, builtin_id: u16, arg_count: u16) ->
     const TRY_CONVERT_TO_STRING: u8 = 0x7E;
     const TRY_CONVERT_TO_BOOL: u8 = 0x7F;
 
+    // Helper: wrap result in Ok() for TryConvert opcodes
+    let is_try = matches!(
+        opcode_byte,
+        TRY_CONVERT_TO_NUMBER | TRY_CONVERT_TO_INT | TRY_CONVERT_TO_STRING
+            | TRY_CONVERT_TO_BOOL
+    );
+    let wrap_ok = |val: &ValueWord| -> u64 {
+        if is_try {
+            nanboxed_to_jit_bits(&ValueWord::from_ok(val.clone()))
+        } else {
+            nanboxed_to_jit_bits(val)
+        }
+    };
+
     match opcode_byte {
         CONVERT_TO_NUMBER | TRY_CONVERT_TO_NUMBER => {
             if let Some(n) = arg_vw.as_number_coerce() {
-                return nanboxed_to_jit_bits(&ValueWord::from_f64(n));
+                return wrap_ok(&ValueWord::from_f64(n));
             }
             if let Some(s) = arg_vw.as_str() {
                 if let Ok(n) = s.parse::<f64>() {
-                    return nanboxed_to_jit_bits(&ValueWord::from_f64(n));
+                    return wrap_ok(&ValueWord::from_f64(n));
                 }
             }
             if let Some(b) = arg_vw.as_bool() {
-                return nanboxed_to_jit_bits(&ValueWord::from_f64(if b { 1.0 } else { 0.0 }));
+                return wrap_ok(&ValueWord::from_f64(if b { 1.0 } else { 0.0 }));
             }
-            if opcode_byte == TRY_CONVERT_TO_NUMBER {
-                // TryConvert returns Result::Err on failure
+            if is_try {
                 return nanboxed_to_jit_bits(&ValueWord::from_err(
                     ValueWord::from_string(std::sync::Arc::new("cannot convert to number".into())),
                 ));
@@ -210,25 +223,30 @@ fn dispatch_opcode(ctx_ref: &mut JITContext, builtin_id: u16, arg_count: u16) ->
         }
         CONVERT_TO_INT | TRY_CONVERT_TO_INT => {
             if let Some(i) = arg_vw.as_i64() {
-                return nanboxed_to_jit_bits(&ValueWord::from_i64(i));
+                return wrap_ok(&ValueWord::from_i64(i));
             }
             if let Some(n) = arg_vw.as_number_coerce() {
-                return nanboxed_to_jit_bits(&ValueWord::from_i64(n as i64));
+                return wrap_ok(&ValueWord::from_i64(n as i64));
             }
             if let Some(s) = arg_vw.as_str() {
                 if let Ok(i) = s.parse::<i64>() {
-                    return nanboxed_to_jit_bits(&ValueWord::from_i64(i));
+                    return wrap_ok(&ValueWord::from_i64(i));
                 }
+            }
+            if is_try {
+                return nanboxed_to_jit_bits(&ValueWord::from_err(
+                    ValueWord::from_string(std::sync::Arc::new("cannot convert to int".into())),
+                ));
             }
             TAG_NULL
         }
         CONVERT_TO_STRING | TRY_CONVERT_TO_STRING => {
             let s = format!("{}", arg_vw);
-            nanboxed_to_jit_bits(&ValueWord::from_string(std::sync::Arc::new(s)))
+            wrap_ok(&ValueWord::from_string(std::sync::Arc::new(s)))
         }
         CONVERT_TO_BOOL | TRY_CONVERT_TO_BOOL => {
             let b = arg_vw.is_truthy();
-            nanboxed_to_jit_bits(&ValueWord::from_bool(b))
+            wrap_ok(&ValueWord::from_bool(b))
         }
         _ => {
             // Unhandled opcode — dispatch through the trampoline VM.

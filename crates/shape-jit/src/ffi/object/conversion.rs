@@ -12,11 +12,53 @@
 //! Functions for bidirectional conversion between the JIT's NaN-boxed u64
 //! representation and the runtime's value types (ValueWord and Value).
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use super::super::super::context::JITDuration;
 use super::super::super::jit_array::{ArrayElementKind, JitArray};
 use super::super::super::nan_boxing::*;
+
+// Thread-local accumulator for unified heap refs whose refcount was bumped
+// in nanboxed_to_jit_bits. Drained after JIT execution to balance refcounts.
+thread_local! {
+    static UNIFIED_HEAP_REFS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+}
+
+/// Drain all unified heap refs accumulated during JIT execution,
+/// decrementing each one's refcount. If the refcount reaches zero,
+/// free the allocation (mirrors ValueWord::Drop logic).
+pub fn drain_unified_heap_refs() {
+    UNIFIED_HEAP_REFS.with(|cell| {
+        let refs = cell.borrow_mut().split_off(0);
+        for bits in refs {
+            let ptr = shape_value::tags::unified_heap_ptr(bits);
+            if ptr.is_null() {
+                continue;
+            }
+            unsafe {
+                let rc = (ptr.add(4)) as *const std::sync::atomic::AtomicU32;
+                let prev = (*rc).fetch_sub(1, std::sync::atomic::Ordering::Release);
+                if prev == 1 {
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                    let kind = *(ptr as *const u16);
+                    if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
+                        shape_value::unified_array::UnifiedArray::heap_drop(bits);
+                    } else if kind == shape_value::tags::HEAP_KIND_MATRIX as u16 {
+                        shape_value::unified_matrix::UnifiedMatrix::heap_drop(bits);
+                    } else if kind == shape_value::tags::HEAP_KIND_OK as u16
+                        || kind == shape_value::tags::HEAP_KIND_ERR as u16
+                        || kind == shape_value::tags::HEAP_KIND_SOME as u16
+                    {
+                        shape_value::unified_wrapper::UnifiedWrapper::heap_drop(bits);
+                    } else if kind == shape_value::tags::HEAP_KIND_STRING as u16 {
+                        shape_value::unified_string::UnifiedString::heap_drop(bits);
+                    }
+                }
+            }
+        }
+    });
+}
 
 /// JIT-side representation of a TaskGroup for heap boxing.
 #[derive(Clone)]
@@ -106,11 +148,9 @@ impl IntoTyped<f64> for f64 { fn into_typed(self) -> f64 { self } }
 pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
     use shape_value::ValueWord;
 
-    // Unified heap values (bit-47 set) are already in VM format.
-    // Clone via refcount bump and pass through.
-    if shape_value::tags::is_unified_heap(bits) {
-        return unsafe { ValueWord::clone_from_bits(bits) };
-    }
+    // NOTE: Unified heap values (bit-47 set) are NOT passed through directly.
+    // The VM's as_heap_ref() returns None for unified heap, so we must convert
+    // them to VM-format ValueWords via the heap_kind match block below.
 
     if is_number(bits) {
         return ValueWord::from_f64(unbox_number(bits));
@@ -127,10 +167,26 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
     if bits == TAG_UNIT {
         return ValueWord::unit();
     }
+    // NaN-boxed i48 integers (TAG_INT, tag=1)
+    if shape_value::tags::is_tagged(bits)
+        && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_INT
+    {
+        let int_val = shape_value::tags::sign_extend_i48(shape_value::tags::get_payload(bits));
+        return ValueWord::from_i64(int_val);
+    }
     if is_inline_function(bits) {
         let func_id = unbox_function_id(bits);
         return ValueWord::from_function_ref(format!("__func_{}", func_id), None);
     }
+    // VM-format heap values (TAG_HEAP, bit-47 clear) point to Arc<HeapValue>.
+    // These are passed through from nanboxed_to_jit_bits for types like HashMap,
+    // DataTable, TypedObject that have no JIT-native representation.
+    // Recover them via clone_from_bits (bumps Arc refcount).
+    if is_heap(bits) && !shape_value::tags::is_unified_heap(bits) {
+        return unsafe { ValueWord::clone_from_bits(bits) };
+    }
+
+    // Unified heap Ok/Err/Some wrappers — extract inner and convert recursively.
     if is_ok_tag(bits) {
         let inner_bits = unsafe { unbox_result_inner(bits) };
         let inner = jit_bits_to_nanboxed(inner_bits);
@@ -147,10 +203,11 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         return ValueWord::from_some(inner);
     }
 
+    // Unified heap values — match on kind to convert to VM format.
     match heap_kind(bits) {
         Some(HK_STRING) => {
-            let s = unsafe { jit_unbox::<String>(bits) };
-            ValueWord::from_string(Arc::new(s.clone()))
+            let s = unsafe { unbox_string(bits) };
+            ValueWord::from_string(Arc::new(s.to_string()))
         }
         Some(HK_ARRAY) => {
             let arr = unsafe { JitArray::from_heap_bits(bits) };
@@ -158,15 +215,15 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
             ValueWord::from_array(Arc::new(values))
         }
         Some(HK_CLOSURE) => {
-            let closure = unsafe { jit_unbox::<super::super::super::context::JITClosure>(bits) };
+            let closure = unsafe { unified_unbox::<super::super::super::context::JITClosure>(bits) };
             ValueWord::from_function_ref(format!("__func_{}", closure.function_id), None)
         }
         Some(HK_TASK_GROUP) => {
-            let tg = unsafe { jit_unbox::<JitTaskGroup>(bits) };
+            let tg = unsafe { unified_unbox::<JitTaskGroup>(bits) };
             ValueWord::from_task_group(tg.kind, tg.task_ids.clone())
         }
         Some(HK_FUTURE) => {
-            let id = unsafe { jit_unbox::<u64>(bits) };
+            let id = unsafe { unified_unbox::<u64>(bits) };
             ValueWord::from_future(*id)
         }
         Some(HK_FLOAT_ARRAY) => {
@@ -238,7 +295,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         Some(HK_MATRIX) => {
             // Reconstruct Matrix with original Arc<MatrixData>.
             let jm = unsafe {
-                jit_unbox::<crate::jit_matrix::JitMatrix>(bits)
+                unified_unbox::<crate::jit_matrix::JitMatrix>(bits)
             };
             let mat_arc = jm.to_arc();
             ValueWord::from_matrix(mat_arc)
@@ -264,8 +321,9 @@ pub fn jit_bits_to_nanboxed_with_ctx(
 ) -> shape_value::ValueWord {
     use shape_value::ValueWord;
 
-    // Unified heap values (bit-47 set) are already in VM format.
-    if shape_value::tags::is_unified_heap(bits) {
+    // VM-format heap values (TAG_HEAP, bit-47 clear) are Arc<HeapValue> pointers.
+    // Recover them directly — no conversion needed.
+    if is_heap(bits) && !shape_value::tags::is_unified_heap(bits) {
         return unsafe { ValueWord::clone_from_bits(bits) };
     }
 
@@ -281,7 +339,7 @@ pub fn jit_bits_to_nanboxed_with_ctx(
     }
 
     if is_heap_kind(bits, HK_CLOSURE) {
-        let closure = unsafe { jit_unbox::<super::super::super::context::JITClosure>(bits) };
+        let closure = unsafe { unified_unbox::<super::super::super::context::JITClosure>(bits) };
         let name = lookup_function_name(ctx, closure.function_id);
         return ValueWord::from_function_ref(name, None);
     }
@@ -424,10 +482,20 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
     use shape_value::NanTag;
     use shape_value::heap_value::HeapValue;
 
-    // Unified arrays (bit-47 set) are already in JIT-compatible format.
-    // Pass through the raw bits — the UnifiedArray layout is shared.
+    // Unified heap values (bit-47 set) are already in JIT-compatible format.
+    // Bump refcount before returning the bits, since the source ValueWord will
+    // be dropped by the caller (which decrements the refcount). Without this,
+    // the JIT holds a dangling pointer to a freed allocation.
+    // Track the ref so drain_unified_heap_refs() can balance the count at JIT exit.
     if shape_value::tags::is_unified_heap(nb.raw_bits()) {
-        return nb.raw_bits();
+        let bits = nb.raw_bits();
+        let ptr = shape_value::tags::unified_heap_ptr(bits);
+        unsafe {
+            let rc = (ptr.add(4)) as *const std::sync::atomic::AtomicU32;
+            (*rc).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        UNIFIED_HEAP_REFS.with(|cell| cell.borrow_mut().push(bits));
+        return bits;
     }
 
     match nb.tag() {
@@ -449,7 +517,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
         NanTag::ModuleFunction => TAG_NULL,
         NanTag::Ref => TAG_NULL,
         NanTag::Heap => match nb.as_heap_ref() {
-            Some(HeapValue::String(s)) => jit_box(HK_STRING, s.clone()),
+            Some(HeapValue::String(s)) => box_str(s),
             Some(HeapValue::Array(arr)) => {
                 // AUDIT(C4): heap island — each element converted via nanboxed_to_jit_bits
                 // may itself call jit_box (for strings, nested arrays, etc.), producing
@@ -459,7 +527,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                 let boxed_arr: Vec<u64> = arr.iter().map(|v| nanboxed_to_jit_bits(v)).collect();
                 JitArray::from_vec(boxed_arr).heap_box()
             }
-            Some(HeapValue::Time(dt)) => jit_box(HK_TIME, dt.timestamp()),
+            Some(HeapValue::Time(dt)) => unified_box(HK_TIME, dt.timestamp()),
             Some(HeapValue::Duration(dur)) => {
                 let unit_code = match dur.unit {
                     crate::ast::DurationUnit::Seconds => 0,
@@ -471,7 +539,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                     crate::ast::DurationUnit::Years => 6,
                     crate::ast::DurationUnit::Samples => 7,
                 };
-                jit_box(
+                unified_box(
                     HK_DURATION,
                     JITDuration {
                         value: dur.value,
@@ -496,7 +564,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                         crate::ast::TimeframeUnit::Year => crate::ast::data::TimeframeUnit::Year,
                     },
                 );
-                jit_box(HK_TIMEFRAME, internal_tf)
+                unified_box(HK_TIMEFRAME, internal_tf)
             }
             Some(HeapValue::Ok(inner)) => {
                 let inner_bits = nanboxed_to_jit_bits(inner);
@@ -512,14 +580,14 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
             }
             // BigInt → f64: precision loss for |i| > 2^53
             Some(HeapValue::BigInt(i)) => box_number(*i as f64),
-            Some(HeapValue::TaskGroup { kind, task_ids }) => jit_box(
+            Some(HeapValue::TaskGroup { kind, task_ids }) => unified_box(
                 HK_TASK_GROUP,
                 JitTaskGroup {
                     kind: *kind,
                     task_ids: task_ids.clone(),
                 },
             ),
-            Some(HeapValue::Future(id)) => jit_box(HK_FUTURE, *id),
+            Some(HeapValue::Future(id)) => unified_box(HK_FUTURE, *id),
             Some(HeapValue::FloatArray(buf)) => {
                 // Bridge FloatArray → JitArray with typed_data pointing to
                 // the AlignedTypedBuffer's f64 data for direct numeric access.
@@ -598,7 +666,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
             Some(HeapValue::Matrix(mat_arc)) => {
                 // Bridge Matrix → JitMatrix with direct f64 data pointer.
                 let jm = crate::jit_matrix::JitMatrix::from_arc(mat_arc);
-                jit_box(HK_MATRIX, jm)
+                unified_box(HK_MATRIX, jm)
             }
             // Width-specific typed arrays
             Some(HeapValue::BoolArray(buf)) => typed_array_to_jit(&buf.data, HK_BOOL_ARRAY, ArrayElementKind::Bool),

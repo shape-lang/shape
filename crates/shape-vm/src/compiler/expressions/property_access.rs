@@ -8,6 +8,8 @@ use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
 use shape_runtime::type_system::{BuiltinTypes, Type};
 
+use shape_value::v2::struct_layout::FieldKind;
+
 use super::super::BytecodeCompiler;
 
 /// Map a FieldType to a NumericType for typed opcode emission.
@@ -288,12 +290,43 @@ impl BytecodeCompiler {
             }
         }
 
-        let (typed_field, field_numeric_type, field_type_info) =
+        // Try v2 typed field access first (direct byte-offset load), then fall back to v1.
+        let (typed_field, field_numeric_type, field_type_info, v2_load_opcode, v2_field_offset) =
             if let Some(schema_id) = self.last_expr_schema {
                 if schema_id > u16::MAX as u32 {
-                    (None, None, None)
+                    (None, None, None, None, None)
                 } else {
-                    self.type_tracker
+                    // Check for v2 StructLayout first
+                    let v2_info = self
+                        .type_tracker
+                        .get_v2_layout(schema_id)
+                        .and_then(|layout| {
+                            // Find the field index by name in the layout
+                            let field_idx = layout
+                                .fields
+                                .iter()
+                                .position(|f| f.name == property)?;
+                            let byte_offset = layout.field_offset(field_idx);
+                            let field_kind = layout.field_kind(field_idx);
+                            // Map FieldKind to v2 load opcode
+                            let opcode = match field_kind {
+                                FieldKind::F64 => OpCode::FieldLoadF64,
+                                FieldKind::I64 | FieldKind::U64 => OpCode::FieldLoadI64,
+                                FieldKind::I32 | FieldKind::U32 => OpCode::FieldLoadI32,
+                                FieldKind::Bool => OpCode::FieldLoadBool,
+                                FieldKind::Ptr => OpCode::FieldLoadPtr,
+                                // Smaller types don't have dedicated v2 opcodes yet
+                                _ => return None,
+                            };
+                            if byte_offset <= u16::MAX as usize {
+                                Some((opcode, byte_offset as u16))
+                            } else {
+                                None
+                            }
+                        });
+
+                    let schema_result = self
+                        .type_tracker
                         .schema_registry()
                         .get_by_id(schema_id)
                         .and_then(|schema| {
@@ -315,10 +348,18 @@ impl BytecodeCompiler {
                                 }
                             })
                         })
-                        .unwrap_or((None, None, None))
+                        .unwrap_or((None, None, None));
+
+                    (
+                        schema_result.0,
+                        schema_result.1,
+                        schema_result.2,
+                        v2_info.map(|(op, _)| op),
+                        v2_info.map(|(_, off)| off),
+                    )
                 }
             } else {
-                (None, None, None)
+                (None, None, None, None, None)
             };
 
         let _unresolved_property_error = || ShapeError::SemanticError {
@@ -340,7 +381,9 @@ impl BytecodeCompiler {
             self.emit(Instruction::simple(OpCode::Eq));
             let unit_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
 
-            if let Some(operand) = typed_field {
+            if let (Some(opcode), Some(offset)) = (v2_load_opcode, v2_field_offset) {
+                self.emit(Instruction::new(opcode, Some(Operand::FieldOffset(offset))));
+            } else if let Some(operand) = typed_field {
                 self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
             } else if property == "length" {
                 self.emit(Instruction::simple(OpCode::Length));
@@ -362,6 +405,8 @@ impl BytecodeCompiler {
             self.emit(Instruction::simple(OpCode::Pop));
             self.emit(Instruction::simple(OpCode::PushNull));
             self.patch_jump(end_jump);
+        } else if let (Some(opcode), Some(offset)) = (v2_load_opcode, v2_field_offset) {
+            self.emit(Instruction::new(opcode, Some(Operand::FieldOffset(offset))));
         } else if let Some(operand) = typed_field {
             self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
         } else if property == "length" {

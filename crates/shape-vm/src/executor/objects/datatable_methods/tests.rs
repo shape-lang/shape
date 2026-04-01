@@ -635,6 +635,7 @@ fn test_simulate_event_log_and_seed() {
         mutable_captures: Vec::new(),
         frame_descriptor: None,
         osr_entry_points: Vec::new(),
+        mir_data: None,
     }];
 
     program.instructions = instructions;

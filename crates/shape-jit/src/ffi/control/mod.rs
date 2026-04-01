@@ -63,6 +63,21 @@ where
     })
 }
 
+/// Execute a closure with mutable access to the trampoline VM.
+pub fn with_trampoline_vm_mut<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut shape_vm::VirtualMachine) -> R,
+{
+    TRAMPOLINE_VM.with(|cell| {
+        let vm_ptr = cell.get();
+        if vm_ptr.is_null() {
+            None
+        } else {
+            Some(f(unsafe { &mut *vm_ptr }))
+        }
+    })
+}
+
 /// Dispatch a function call through the trampoline VM for functions that
 /// aren't JIT-compiled (null entries in the function table).
 fn dispatch_call_via_trampoline_vm(
@@ -247,7 +262,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         let function_id = if is_inline_function(callee_bits) {
             unbox_function_id(callee_bits)
         } else if is_heap_kind(callee_bits, HK_CLOSURE) {
-            let closure = jit_unbox::<JITClosure>(callee_bits);
+            let closure = unified_unbox::<JITClosure>(callee_bits);
             closure.function_id
         } else {
             if debug { eprintln!("[jit-call-value] BAIL: callee is neither function nor closure: {:#x}", callee_bits); }
@@ -290,7 +305,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         // for captures first, then params.
         let full_args;
         let call_args: &[u64] = if is_heap_kind(callee_bits, HK_CLOSURE) {
-            let closure = jit_unbox::<JITClosure>(callee_bits);
+            let closure = unified_unbox::<JITClosure>(callee_bits);
             let count = closure.captures_count as usize;
             if debug {
                 eprintln!(

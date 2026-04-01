@@ -20,6 +20,8 @@ mod table_iteration;
 mod try_operator;
 mod type_system_integration;
 mod typed_array_ops;
+mod v2_opcode_tests;
+mod v2_struct_integration;
 
 // Deep tests — gated behind `deep-tests` feature
 #[cfg(feature = "deep-tests")]

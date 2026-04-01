@@ -719,20 +719,20 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         // values[0] was the top of stack (last element), should go to highest index
         // values[count-1] was bottom of the N elements, should go to lowest index
         for (i, val) in values.iter().rev().enumerate() {
-            let offset = STACK_OFFSET + (self.compile_time_sp + i) as i32 * 8;
+            let offset = STACK_OFFSET + (self.compile_time_sp.depth() + i) as i32 * 8;
             self.builder
                 .ins()
                 .store(MemFlags::trusted(), *val, self.ctx_ptr, offset);
         }
 
         // Update compile-time stack pointer tracking
-        self.compile_time_sp += count;
+        self.compile_time_sp.push(count);
 
         // Generate code to update ctx.stack_ptr at runtime
         let new_sp = self
             .builder
             .ins()
-            .iconst(types::I64, self.compile_time_sp as i64);
+            .iconst(types::I64, self.compile_time_sp.depth() as i64);
         self.builder
             .ins()
             .store(MemFlags::trusted(), new_sp, self.ctx_ptr, STACK_PTR_OFFSET);
@@ -741,8 +741,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// Update compile-time stack pointer after FFI call consumes values and pushes result.
     /// This doesn't generate any code - just updates our tracking.
     pub(in crate::translator) fn update_sp_after_ffi(&mut self, consumed: usize, produced: usize) {
-        self.compile_time_sp -= consumed;
-        self.compile_time_sp += produced;
+        self.compile_time_sp.update(consumed, produced);
     }
 
     /// Look back at the previous instruction to extract arg_count for Call opcodes.

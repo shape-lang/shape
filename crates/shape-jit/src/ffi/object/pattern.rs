@@ -26,7 +26,7 @@ pub extern "C" fn jit_pattern_check_constructor(obj_bits: u64, mode: u64) -> u64
             return TAG_BOOL_FALSE;
         }
 
-        let obj = jit_unbox::<HashMap<String, u64>>(obj_bits);
+        let obj = unified_unbox::<HashMap<String, u64>>(obj_bits);
 
         let (primary, fallback) = if mode == 0 {
             ("Ok", "value")
@@ -52,7 +52,7 @@ pub extern "C" fn jit_pattern_extract_constructor(obj_bits: u64, mode: u64) -> u
             return TAG_NULL;
         }
 
-        let obj = jit_unbox::<HashMap<String, u64>>(obj_bits);
+        let obj = unified_unbox::<HashMap<String, u64>>(obj_bits);
 
         let (primary, fallback) = if mode == 0 {
             ("Ok", "value")

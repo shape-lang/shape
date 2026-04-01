@@ -41,6 +41,7 @@ pub mod unified_array;
 pub mod unified_matrix;
 pub mod unified_string;
 pub mod unified_wrapper;
+pub mod v2;
 pub mod value;
 
 pub use aligned_vec::AlignedVec;
@@ -82,3 +83,10 @@ pub use value::{
     FilterLiteral, FilterNode, FilterOp, HostCallable, PrintResult, PrintSpan, Upvalue, VMArray,
     VTable, VTableEntry, vmarray_from_nanboxed, vmarray_from_value_words,
 };
+
+// v2 runtime re-exports
+pub use v2::heap_header::HeapHeader as V2HeapHeader;
+pub use v2::refcount::{v2_release, v2_retain};
+pub use v2::string_obj::StringObj as V2StringObj;
+pub use v2::struct_layout::{FieldInfo, FieldKind, StructLayout};
+pub use v2::typed_array::TypedArray as V2TypedArray;

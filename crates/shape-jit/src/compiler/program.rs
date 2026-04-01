@@ -448,6 +448,7 @@ impl JITCompiler {
                 module_binding_storage_hints: program.module_binding_storage_hints.clone(),
                 function_local_storage_hints: Vec::new(),
                 top_level_frame: None,
+                top_level_mir: None,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),
                 expanded_function_defs: program.expanded_function_defs.clone(),
@@ -458,31 +459,97 @@ impl JITCompiler {
                 function_blob_hashes: Vec::new(),
             };
 
-            let mut compiler = BytecodeToIR::new(
-                &mut builder,
-                &sub_program,
-                ctx_ptr,
-                ffi,
-                user_func_refs,
-                user_func_arities.clone(),
-            );
-            compiler.numeric_param_hints =
-                collect_numeric_param_hints(&sub_program, func.arity, &func.ref_params);
+            // Try MIR compilation when MIR data is available and preflight passes.
+            // MirToIR is the primary JIT path — no env var gate.
+            let use_mir = func.mir_data.as_ref().is_some_and(|md| {
+                crate::mir_compiler::preflight(md).can_compile
+            });
 
-            let entry_params = compiler.builder.block_params(entry_block).to_vec();
-            // Set up all native params: captures first (indices 0..captures_count),
-            // then user params (indices captures_count..captures_count+arity).
-            // This matches the VM calling convention where the bytecode body
-            // does LoadLocal/StoreLocal for each slot in order.
-            let total_native_params = (func.captures_count + func.arity) as usize;
-            for arg_idx in 0..total_native_params {
-                let arg_val = entry_params[arg_idx + 1]; // +1 for ctx_ptr
-                let var = compiler.get_or_create_local(arg_idx as u16);
-                compiler.builder.def_var(var, arg_val);
+            if use_mir {
+                let mir_data = func.mir_data.as_ref().unwrap();
+                let slot_kinds = func
+                    .frame_descriptor
+                    .as_ref()
+                    .map(|fd| fd.slots.clone())
+                    .unwrap_or_default();
+                // Build function name → index map for Call terminator resolution
+                let function_indices: std::collections::HashMap<String, u16> = sub_program
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.name.clone(), i as u16))
+                    .collect();
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new(
+                    &mut builder,
+                    ctx_ptr,
+                    ffi,
+                    mir_data,
+                    slot_kinds,
+                    &sub_program.strings,
+                    entry_block,
+                    &function_indices,
+                );
+                // Set up blocks and locals, then store function parameters.
+                mir_compiler.create_blocks();
+                mir_compiler.declare_locals();
+
+                // Store function parameters to MIR local variables.
+                // MIR slot layout: [return_slot(0), param0(1), param1(2), ..., locals...]
+                // Entry block params: [ctx_ptr, capture0..N, param0..N]
+                // Use mir.param_slots to map params to their actual MIR slots.
+                let entry_params = mir_compiler.builder.block_params(entry_block).to_vec();
+                let param_slots = &mir_data.mir.param_slots;
+
+                // Initialize ALL locals to TAG_NULL first
+                let null_val = mir_compiler.builder.ins().iconst(
+                    cranelift::prelude::types::I64,
+                    crate::nan_boxing::TAG_NULL as i64,
+                );
+                for slot_idx in 0..mir_compiler.mir.num_locals {
+                    let slot = shape_vm::mir::types::SlotId(slot_idx);
+                    if let Some(&var) = mir_compiler.locals.get(&slot) {
+                        mir_compiler.builder.def_var(var, null_val);
+                    }
+                }
+
+                // Overwrite param slots with actual function arguments
+                // Skip captures_count entries (closures) to get to user params
+                let captures = func.captures_count as usize;
+                for (param_idx, &mir_slot) in param_slots.iter().enumerate() {
+                    let native_idx = captures + param_idx + 1; // +1 for ctx_ptr
+                    if native_idx < entry_params.len() {
+                        if let Some(&var) = mir_compiler.locals.get(&mir_slot) {
+                            mir_compiler.builder.def_var(var, entry_params[native_idx]);
+                        }
+                    }
+                }
+                mir_compiler.compile_body()?;
+                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                    eprintln!("[jit-mir] Compiled function '{}' via MirToIR", func.name);
+                }
+            } else {
+                let mut compiler = BytecodeToIR::new(
+                    &mut builder,
+                    &sub_program,
+                    ctx_ptr,
+                    ffi,
+                    user_func_refs,
+                    user_func_arities.clone(),
+                );
+                compiler.numeric_param_hints =
+                    collect_numeric_param_hints(&sub_program, func.arity, &func.ref_params);
+
+                let entry_params = compiler.builder.block_params(entry_block).to_vec();
+                let total_native_params = (func.captures_count + func.arity) as usize;
+                for arg_idx in 0..total_native_params {
+                    let arg_val = entry_params[arg_idx + 1]; // +1 for ctx_ptr
+                    let var = compiler.get_or_create_local(arg_idx as u16);
+                    compiler.builder.def_var(var, arg_val);
+                }
+
+                let result = compiler.compile()?;
+                builder.ins().return_(&[result]);
             }
-
-            let result = compiler.compile()?;
-            builder.ins().return_(&[result]);
             builder.finalize();
         }
 
@@ -594,6 +661,7 @@ impl JITCompiler {
                 module_binding_storage_hints: program.module_binding_storage_hints.clone(),
                 function_local_storage_hints: Vec::new(),
                 top_level_frame: None,
+                top_level_mir: None,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),
                 expanded_function_defs: program.expanded_function_defs.clone(),
@@ -925,6 +993,7 @@ impl JITCompiler {
                     module_binding_storage_hints: program.module_binding_storage_hints.clone(),
                     function_local_storage_hints: Vec::new(),
                     top_level_frame: None,
+                    top_level_mir: None,
                     compiled_annotations: program.compiled_annotations.clone(),
                     trait_method_symbols: program.trait_method_symbols.clone(),
                     expanded_function_defs: program.expanded_function_defs.clone(),
@@ -1160,6 +1229,10 @@ impl JITCompiler {
         maybe_emit_numeric_metrics(program);
 
         // Phase 1: Per-function preflight to classify each function.
+        // A function is JIT-compatible if EITHER:
+        //   (a) its bytecode passes BytecodeToIR preflight, OR
+        //   (b) it has MIR data that passes MirToIR preflight.
+        // MirToIR is the preferred path — no env-var gate required.
         let mut jit_compatible: Vec<bool> = Vec::with_capacity(program.functions.len());
 
         for (_idx, func) in program.functions.iter().enumerate() {
@@ -1170,7 +1243,11 @@ impl JITCompiler {
             let func_end = func.entry_point + func.body_length;
             let instructions = &program.instructions[func.entry_point..func_end];
             let report = preflight_instructions(instructions);
-            jit_compatible.push(report.can_jit());
+            let bytecode_ok = report.can_jit();
+            let mir_ok = func.mir_data.as_ref().is_some_and(|md| {
+                crate::mir_compiler::preflight(md).can_compile
+            });
+            jit_compatible.push(bytecode_ok || mir_ok);
         }
 
         // Phase 1b: Preflight main code (non-stdlib, non-function-body instructions).
@@ -1237,17 +1314,31 @@ impl JITCompiler {
         // Phase 4: Compile only JIT-compatible function bodies.
         // Functions that fail to compile are demoted to interpreted fallback.
         for (idx, func) in program.functions.iter().enumerate() {
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some()
+                && (jit_compatible[idx] || func.mir_data.is_some())
+            {
+                eprintln!(
+                    "[jit-mir] func[{}]='{}' jit_compat={} has_mir={}",
+                    idx, func.name, jit_compatible[idx], func.mir_data.is_some()
+                );
+            }
             if !jit_compatible[idx] {
                 continue;
             }
             let func_name = format!("{}_f{}_{}", name, idx, func.name);
-            if let Err(_e) = self.compile_function_with_user_funcs(
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() && func.mir_data.is_some() {
+                eprintln!("[jit-mir] compiling '{}' idx={}", func.name, idx);
+            }
+            if let Err(e) = self.compile_function_with_user_funcs(
                 &func_name,
                 program,
                 idx,
                 &user_func_ids,
                 &user_func_arities,
             ) {
+                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                    eprintln!("[jit-mir] compile failed for '{}': {}", func.name, e);
+                }
                 // Demote to interpreted — the function table slot stays null
                 // so CallValue will fall back through the trampoline VM.
                 jit_compatible[idx] = false;

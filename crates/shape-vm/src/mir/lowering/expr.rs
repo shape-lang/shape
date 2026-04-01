@@ -10,7 +10,7 @@ use super::stmt::{lower_statement, lower_statements, lower_var_decl, StatementSp
 use super::MirBuilder;
 use super::immutable_binding_metadata;
 use crate::mir::types::*;
-use shape_ast::ast::{self, Expr, Span, Spanned, Statement};
+use shape_ast::ast::{self, Expr, Literal, Span, Spanned, Statement};
 use shape_runtime::closure::EnvironmentAnalyzer;
 
 // ---------------------------------------------------------------------------
@@ -180,7 +180,8 @@ fn lower_function_expr(
 ) {
     let captures = collect_function_expr_capture_operands(builder, params, body);
     emit_container_store_if_needed(builder, ContainerStoreKind::Closure, temp, captures, span);
-    assign_none(builder, temp, span);
+    // Emit ClosurePlaceholder instead of None — patched to Function(name) after bytecode compilation
+    assign_closure_placeholder(builder, temp, span);
 }
 
 // ---------------------------------------------------------------------------
@@ -947,8 +948,31 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
     let temp = builder.alloc_temp(LocalTypeInfo::Unknown);
 
     match expr {
-        Expr::Literal(_, _)
-        | Expr::DataRef(_, _)
+        Expr::Literal(lit, _) => {
+            let constant = match lit {
+                Literal::Int(v) => MirConstant::Int(*v),
+                Literal::UInt(v) => MirConstant::Int(*v as i64),
+                Literal::TypedInt(v, _) => MirConstant::Int(*v),
+                Literal::Number(v) => MirConstant::Float(f64::to_bits(*v)),
+                Literal::Decimal(_) => MirConstant::Float(0), // decimal not yet modeled
+                Literal::String(_) => MirConstant::StringId(0),
+                Literal::Char(c) => MirConstant::Int(*c as i64),
+                Literal::FormattedString { .. } => MirConstant::StringId(0), // interpolation handled elsewhere
+                Literal::ContentString { .. } => MirConstant::StringId(0),
+                Literal::Bool(v) => MirConstant::Bool(*v),
+                Literal::None => MirConstant::None,
+                Literal::Unit => MirConstant::Int(0), // unit is zero-sized
+                Literal::Timeframe(_) => MirConstant::Int(0), // timeframe not yet modeled
+            };
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(temp),
+                    Rvalue::Use(Operand::Constant(constant)),
+                ),
+                span,
+            );
+        }
+        Expr::DataRef(_, _)
         | Expr::DataDateTimeRef(_, _)
         | Expr::TimeRef(_, _)
         | Expr::DateTime(_, _)
@@ -1248,13 +1272,17 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
         },
         Expr::Object(entries, _) => {
             let mut operands = Vec::new();
+            let mut field_names = Vec::new();
             for entry in entries {
                 match entry {
-                    ast::ObjectEntry::Field { value, .. } => {
+                    ast::ObjectEntry::Field { key, value, .. } => {
                         operands.push(lower_expr_as_moved_operand(builder, value));
+                        field_names.push(key.clone());
                     }
                     ast::ObjectEntry::Spread(expr) => {
                         operands.push(lower_expr_as_moved_operand(builder, expr));
+                        // Spread entries don't have a single key — use empty string as marker
+                        field_names.push(String::new());
                     }
                 }
             }
@@ -1262,11 +1290,12 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                 span,
             );
-            emit_container_store_if_needed(
+            emit_container_store_with_names(
                 builder,
                 ContainerStoreKind::Object,
                 temp,
                 operands,
+                field_names,
                 span,
             );
         }
@@ -1355,15 +1384,20 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 .iter()
                 .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr))
                 .collect();
+            let field_names: Vec<_> = fields
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                 span,
             );
-            emit_container_store_if_needed(
+            emit_container_store_with_names(
                 builder,
                 ContainerStoreKind::Object,
                 temp,
                 operands,
+                field_names,
                 span,
             );
         }

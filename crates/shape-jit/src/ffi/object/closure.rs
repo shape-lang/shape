@@ -48,6 +48,6 @@ pub extern "C" fn jit_make_closure(
 
         // Create closure struct with dynamic captures
         let closure = JITClosure::new(function_id, &captures);
-        jit_box(HK_CLOSURE, *closure)
+        unified_box(HK_CLOSURE, *closure)
     }
 }

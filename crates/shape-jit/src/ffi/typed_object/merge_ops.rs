@@ -111,7 +111,7 @@ pub extern "C" fn jit_typed_object_from_hashmap(
 
     // Get the HashMap reference
     let map_ptr = unsafe {
-        jit_unbox::<std::collections::HashMap<String, u64>>(obj_bits)
+        unified_unbox::<std::collections::HashMap<String, u64>>(obj_bits)
             as *const std::collections::HashMap<String, u64>
     };
 

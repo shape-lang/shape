@@ -889,4 +889,490 @@ mod tests {
         };
         assert_eq!(run_program_get_number("test_u32_wrap", program), 0.0);
     }
+
+    /// Regression test: nested loops with array access by computed index.
+    ///
+    /// Tests the pattern:
+    ///   let arr = [10, 20, 30, 40, 50]
+    ///   let sum = 0
+    ///   for t in 0..3 {
+    ///       for i in 0..5 {
+    ///           sum = sum + arr[i]
+    ///       }
+    ///   }
+    ///   // expect sum = 3 * (10+20+30+40+50) = 450
+    ///
+    /// This exercises nested loop compilation, LICM state management across
+    /// loop boundaries, and integer unboxing with array indexing.
+    #[test]
+    fn test_jit_nested_loop_array_access() {
+        // Constants: 0=10.0, 1=20.0, 2=30.0, 3=40.0, 4=50.0, 5=0.0, 6=3.0, 7=5.0, 8=1(int)
+        let program = BytecodeProgram {
+            instructions: vec![
+                // Create array [10, 20, 30, 40, 50] → local 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 0: 10.0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),  // 1: 20.0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),  // 2: 30.0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),  // 3: 40.0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),  // 4: 50.0
+                Instruction::new(OpCode::NewArray, Some(Operand::Count(5))),   // 5
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))), // 6: arr
+
+                // sum = 0.0 → local 1
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(5))),  // 7: 0.0
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 8: sum
+
+                // Outer loop setup: t = 0, __end_t = 3
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(5))),  // 9: 0.0
+                Instruction::simple(OpCode::NumberToInt),                       // 10
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 11: t = 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(6))),  // 12: 3.0
+                Instruction::simple(OpCode::NumberToInt),                       // 13
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(3))), // 14: __end_t = 3
+
+                // Outer LoopStart
+                Instruction::simple(OpCode::LoopStart),                        // 15
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),  // 16: t
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(3))),  // 17: __end_t
+                Instruction::simple(OpCode::LtInt),                            // 18: t < 3
+                // JumpIfFalse to past outer LoopEnd (idx 48+1=49)
+                // offset = 49 - (19+1) = 29
+                Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(29))), // 19
+
+                // Inner loop setup: i = 0, __end_i = 5
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(5))),  // 20: 0.0
+                Instruction::simple(OpCode::NumberToInt),                       // 21
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(4))), // 22: i = 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(7))),  // 23: 5.0
+                Instruction::simple(OpCode::NumberToInt),                       // 24
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(5))), // 25: __end_i = 5
+
+                // Inner LoopStart
+                Instruction::simple(OpCode::LoopStart),                        // 26
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 27: i
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(5))),  // 28: __end_i
+                Instruction::simple(OpCode::LtInt),                            // 29: i < 5
+                // JumpIfFalse to past inner LoopEnd (idx 42+1=43)
+                // offset = 43 - (30+1) = 12
+                Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(12))), // 30
+
+                // Body: sum = sum + arr[i]
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),  // 31: sum
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),  // 32: arr
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 33: i (index)
+                Instruction::simple(OpCode::GetProp),                          // 34: arr[i]
+                Instruction::simple(OpCode::Add),                              // 35: sum + arr[i]
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 36: sum = ...
+
+                // Inner loop increment: i = i + 1
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 37: i
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(8))),  // 38: 1 (int)
+                Instruction::simple(OpCode::AddInt),                           // 39: i + 1
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(4))), // 40: i = ...
+                // Jump back to inner LoopStart: target=26, offset = 26 - (41+1) = -16
+                Instruction::new(OpCode::Jump, Some(Operand::Offset(-16))),    // 41
+                Instruction::simple(OpCode::LoopEnd),                          // 42
+
+                // Outer loop increment: t = t + 1
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),  // 43: t
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(8))),  // 44: 1 (int)
+                Instruction::simple(OpCode::AddInt),                           // 45: t + 1
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 46: t = ...
+                // Jump back to outer LoopStart: target=15, offset = 15 - (47+1) = -33
+                Instruction::new(OpCode::Jump, Some(Operand::Offset(-33))),    // 47
+                Instruction::simple(OpCode::LoopEnd),                          // 48
+
+                // Push result
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),  // 49: sum
+            ],
+            constants: vec![
+                Constant::Number(10.0), // 0
+                Constant::Number(20.0), // 1
+                Constant::Number(30.0), // 2
+                Constant::Number(40.0), // 3
+                Constant::Number(50.0), // 4
+                Constant::Number(0.0),  // 5
+                Constant::Number(3.0),  // 6
+                Constant::Number(5.0),  // 7
+                Constant::Int(1),       // 8
+            ],
+            top_level_locals_count: 6,
+            top_level_local_storage_hints: vec![
+                StorageHint::Unknown, // 0: arr (array)
+                StorageHint::Float64, // 1: sum (number)
+                StorageHint::Int64,   // 2: t (counter)
+                StorageHint::Int64,   // 3: __end_t
+                StorageHint::Int64,   // 4: i (counter)
+                StorageHint::Int64,   // 5: __end_i
+            ],
+            ..Default::default()
+        };
+
+        let result = run_program_get_number("test_nested_loop_array", program);
+        // Expected: 3 outer iterations * (10+20+30+40+50) = 3 * 150 = 450
+        assert_eq!(result, 450.0, "nested loop array access should produce 450.0");
+    }
+
+    /// Regression test: nested loops with computed index (t * width + i).
+    ///
+    /// Tests the pattern:
+    ///   let arr = Array.filled(6, 7.0)  // simulated as [7,7,7,7,7,7]
+    ///   let sum = 0
+    ///   for t in 0..2 {
+    ///       for i in 0..3 {
+    ///           let idx = t * 3 + i
+    ///           sum = sum + arr[idx]
+    ///       }
+    ///   }
+    ///   // expect sum = 6 * 7.0 = 42.0
+    #[test]
+    fn test_jit_nested_loop_computed_index() {
+        // Constants: 0-5=7.0 (array), 6=0.0, 7=2.0, 8=3.0, 9=1(int), 10=3(int)
+        let program = BytecodeProgram {
+            instructions: vec![
+                // Create array [7,7,7,7,7,7] → local 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 1
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 2
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 3
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 4
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 5
+                Instruction::new(OpCode::NewArray, Some(Operand::Count(6))),   // 6
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))), // 7: arr
+
+                // sum = 0.0 → local 1
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),  // 8: 0.0
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 9: sum
+
+                // Outer loop: t in 0..2, counter=local2, end=local3
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),  // 10: 0.0
+                Instruction::simple(OpCode::NumberToInt),                       // 11
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 12: t = 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),  // 13: 2.0
+                Instruction::simple(OpCode::NumberToInt),                       // 14
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(3))), // 15: __end_t = 2
+
+                // Outer LoopStart
+                Instruction::simple(OpCode::LoopStart),                        // 16
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),  // 17: t
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(3))),  // 18: __end_t
+                Instruction::simple(OpCode::LtInt),                            // 19: t < 2
+                // JumpIfFalse → past outer LoopEnd at 55; offset = 56 - 21 = 35
+                Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(35))), // 20
+
+                // Inner loop: i in 0..3, counter=local4, end=local5
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),  // 21: 0.0
+                Instruction::simple(OpCode::NumberToInt),                       // 22
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(4))), // 23: i = 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),  // 24: 3.0
+                Instruction::simple(OpCode::NumberToInt),                       // 25
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(5))), // 26: __end_i = 3
+
+                // Inner LoopStart
+                Instruction::simple(OpCode::LoopStart),                        // 27
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 28: i
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(5))),  // 29: __end_i
+                Instruction::simple(OpCode::LtInt),                            // 30: i < 3
+                // JumpIfFalse → past inner LoopEnd at 48; offset = 49 - 32 = 17
+                Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(17))), // 31
+
+                // Body: idx = t * 3 + i → local 6
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),  // 32: t
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),  // 33: 3 (int)
+                Instruction::simple(OpCode::MulInt),                           // 34: t * 3
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 35: i
+                Instruction::simple(OpCode::AddInt),                           // 36: t*3 + i
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(6))), // 37: idx
+
+                // sum = sum + arr[idx]
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),  // 38: sum
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),  // 39: arr
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(6))),  // 40: idx
+                Instruction::simple(OpCode::GetProp),                          // 41: arr[idx]
+                Instruction::simple(OpCode::Add),                              // 42: sum + arr[idx]
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 43: sum = ...
+
+                // Inner increment: i = i + 1
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 44: i
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(5))),  // 45: 1 (int)
+                Instruction::simple(OpCode::AddInt),                           // 46: i + 1
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(4))), // 47: i = ...
+                // Jump → inner LoopStart at 27; offset = 27 - 49 = -22
+                Instruction::new(OpCode::Jump, Some(Operand::Offset(-22))),    // 48
+                Instruction::simple(OpCode::LoopEnd),                          // 49
+
+                // Outer increment: t = t + 1
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),  // 50: t
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(5))),  // 51: 1 (int)
+                Instruction::simple(OpCode::AddInt),                           // 52: t + 1
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 53: t = ...
+                // Jump → outer LoopStart at 16; offset = 16 - 55 = -39
+                Instruction::new(OpCode::Jump, Some(Operand::Offset(-39))),    // 54
+                Instruction::simple(OpCode::LoopEnd),                          // 55
+
+                // Push result
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),  // 56: sum
+            ],
+            constants: vec![
+                Constant::Number(7.0),  // 0
+                Constant::Number(0.0),  // 1
+                Constant::Number(2.0),  // 2
+                Constant::Number(3.0),  // 3
+                Constant::Int(3),       // 4
+                Constant::Int(1),       // 5
+            ],
+            top_level_locals_count: 7,
+            top_level_local_storage_hints: vec![
+                StorageHint::Unknown, // 0: arr
+                StorageHint::Float64, // 1: sum
+                StorageHint::Int64,   // 2: t
+                StorageHint::Int64,   // 3: __end_t
+                StorageHint::Int64,   // 4: i
+                StorageHint::Int64,   // 5: __end_i
+                StorageHint::Int64,   // 6: idx
+            ],
+            ..Default::default()
+        };
+
+        let result = run_program_get_number("test_nested_computed_idx", program);
+        // Expected: 2 * 3 * 7.0 = 42.0
+        assert_eq!(result, 42.0, "nested loop computed index should produce 42.0");
+    }
+
+    /// Stress test: many iterations of nested loops (500 x 5) with array access.
+    ///
+    /// Uses high outer loop count to stress-test LICM state management
+    /// and array pointer stability across many iterations.
+    /// Simulates the 500x127 pattern from load_xgb_model at reduced scale.
+    #[test]
+    fn test_jit_nested_loop_many_iterations() {
+        // Constants: 0=10.0, 1=20.0, 2=30.0, 3=40.0, 4=50.0, 5=0.0, 6=500.0, 7=5.0, 8=1(int)
+        let program = BytecodeProgram {
+            instructions: vec![
+                // Create array [10, 20, 30, 40, 50] → local 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 0: 10.0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),  // 1: 20.0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),  // 2: 30.0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),  // 3: 40.0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),  // 4: 50.0
+                Instruction::new(OpCode::NewArray, Some(Operand::Count(5))),   // 5
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))), // 6: arr
+
+                // sum = 0.0 → local 1
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(5))),  // 7: 0.0
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 8: sum
+
+                // Outer loop: t in 0..500
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(5))),  // 9: 0.0
+                Instruction::simple(OpCode::NumberToInt),                       // 10
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 11: t = 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(6))),  // 12: 500.0
+                Instruction::simple(OpCode::NumberToInt),                       // 13
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(3))), // 14: __end_t = 500
+
+                Instruction::simple(OpCode::LoopStart),                        // 15
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),  // 16
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(3))),  // 17
+                Instruction::simple(OpCode::LtInt),                            // 18
+                // JumpIfFalse → past outer LoopEnd at 48; offset = 49-20 = 29
+                Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(29))), // 19
+
+                // Inner loop: i in 0..5
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(5))),  // 20: 0.0
+                Instruction::simple(OpCode::NumberToInt),                       // 21
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(4))), // 22: i = 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(7))),  // 23: 5.0
+                Instruction::simple(OpCode::NumberToInt),                       // 24
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(5))), // 25: __end_i = 5
+
+                Instruction::simple(OpCode::LoopStart),                        // 26
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 27
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(5))),  // 28
+                Instruction::simple(OpCode::LtInt),                            // 29
+                // JumpIfFalse → past inner LoopEnd at 42; offset = 43-31 = 12
+                Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(12))), // 30
+
+                // Body: sum = sum + arr[i]
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),  // 31: sum
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),  // 32: arr
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 33: i
+                Instruction::simple(OpCode::GetProp),                          // 34: arr[i]
+                Instruction::simple(OpCode::Add),                              // 35
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 36
+
+                // Inner increment
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 37
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(8))),  // 38: 1 (int)
+                Instruction::simple(OpCode::AddInt),                           // 39
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(4))), // 40
+                // Jump → inner LoopStart at 26; offset = 26-42 = -16
+                Instruction::new(OpCode::Jump, Some(Operand::Offset(-16))),    // 41
+                Instruction::simple(OpCode::LoopEnd),                          // 42
+
+                // Outer increment
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),  // 43
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(8))),  // 44: 1 (int)
+                Instruction::simple(OpCode::AddInt),                           // 45
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 46
+                // Jump → outer LoopStart at 15; offset = 15-48 = -33
+                Instruction::new(OpCode::Jump, Some(Operand::Offset(-33))),    // 47
+                Instruction::simple(OpCode::LoopEnd),                          // 48
+
+                // Push result
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),  // 49
+            ],
+            constants: vec![
+                Constant::Number(10.0),  // 0
+                Constant::Number(20.0),  // 1
+                Constant::Number(30.0),  // 2
+                Constant::Number(40.0),  // 3
+                Constant::Number(50.0),  // 4
+                Constant::Number(0.0),   // 5
+                Constant::Number(500.0), // 6
+                Constant::Number(5.0),   // 7
+                Constant::Int(1),        // 8
+            ],
+            top_level_locals_count: 6,
+            top_level_local_storage_hints: vec![
+                StorageHint::Unknown, // 0: arr
+                StorageHint::Float64, // 1: sum
+                StorageHint::Int64,   // 2: t
+                StorageHint::Int64,   // 3: __end_t
+                StorageHint::Int64,   // 4: i
+                StorageHint::Int64,   // 5: __end_i
+            ],
+            ..Default::default()
+        };
+
+        let result = run_program_get_number("test_nested_many_iter", program);
+        // Expected: 500 * (10+20+30+40+50) = 500 * 150 = 75000
+        assert_eq!(result, 75000.0, "many-iteration nested loop should produce 75000.0");
+    }
+
+    /// Test: nested loop accessing array via module binding (loads from ctx.locals memory).
+    ///
+    /// This tests the scenario where the array is a module-level variable,
+    /// loaded via LoadModuleBinding (which reads from ctx.locals[] memory),
+    /// rather than a local variable (which uses Cranelift Variables).
+    #[test]
+    fn test_jit_nested_loop_module_binding_array() {
+        use crate::jit_array::JitArray;
+        use crate::nan_boxing::box_number;
+
+        // Create a pre-populated array of 10 elements
+        let elements: Vec<u64> = (0..10).map(|i| box_number(i as f64)).collect();
+        let arr = JitArray::from_vec(elements);
+        let arr_bits = arr.heap_box();
+
+        // Bytecode:
+        //   module_binding 0 = arr (pre-loaded via ctx.locals[0])
+        //   local 0 = sum = 0.0
+        //   for t in 0..50:     (local 1 = t, local 2 = 50)
+        //     for i in 0..10:   (local 3 = i, local 4 = 10)
+        //       sum = sum + arr[i]
+        //   push sum
+        // Expected: 50 * sum(0..9) = 50 * 45 = 2250.0
+
+        let program = BytecodeProgram {
+            instructions: vec![
+                // sum = 0.0 → local 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 0: 0.0
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))), // 1: sum
+
+                // Outer loop: t in 0..50
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 2: 0.0
+                Instruction::simple(OpCode::NumberToInt),                       // 3
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 4: t = 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),  // 5: 50.0
+                Instruction::simple(OpCode::NumberToInt),                       // 6
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 7: __end_t = 50
+
+                Instruction::simple(OpCode::LoopStart),                        // 8
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),  // 9
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),  // 10
+                Instruction::simple(OpCode::LtInt),                            // 11
+                // JumpIfFalse → past outer LoopEnd at 41; offset = 42-13 = 29
+                Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(29))), // 12
+
+                // Inner loop: i in 0..10
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),  // 13: 0.0
+                Instruction::simple(OpCode::NumberToInt),                       // 14
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(3))), // 15: i = 0
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),  // 16: 10.0
+                Instruction::simple(OpCode::NumberToInt),                       // 17
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(4))), // 18: __end_i = 10
+
+                Instruction::simple(OpCode::LoopStart),                        // 19
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(3))),  // 20
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 21
+                Instruction::simple(OpCode::LtInt),                            // 22
+                // JumpIfFalse → past inner LoopEnd at 35; offset = 36-24 = 12
+                Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(12))), // 23
+
+                // Body: sum = sum + arr[i]
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),  // 24: sum
+                // Load arr via module binding (reads from ctx.locals[0])
+                Instruction::new(OpCode::LoadModuleBinding, Some(Operand::ModuleBinding(0))), // 25: arr
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(3))),  // 26: i
+                Instruction::simple(OpCode::GetProp),                          // 27: arr[i]
+                Instruction::simple(OpCode::Add),                              // 28
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))), // 29
+
+                // Inner increment
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(3))),  // 30
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),  // 31: 1 (int)
+                Instruction::simple(OpCode::AddInt),                           // 32
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(3))), // 33
+                // Jump → inner LoopStart at 19; offset = 19-35 = -16
+                Instruction::new(OpCode::Jump, Some(Operand::Offset(-16))),    // 34
+                Instruction::simple(OpCode::LoopEnd),                          // 35
+
+                // Outer increment
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),  // 36
+                Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),  // 37: 1 (int)
+                Instruction::simple(OpCode::AddInt),                           // 38
+                Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 39
+                // Jump → outer LoopStart at 8; offset = 8-41 = -33
+                Instruction::new(OpCode::Jump, Some(Operand::Offset(-33))),    // 40
+                Instruction::simple(OpCode::LoopEnd),                          // 41
+
+                // Push result
+                Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),  // 42
+            ],
+            constants: vec![
+                Constant::Number(0.0),   // 0
+                Constant::Number(50.0),  // 1
+                Constant::Number(10.0),  // 2
+                Constant::Int(1),        // 3
+            ],
+            top_level_locals_count: 5,
+            top_level_local_storage_hints: vec![
+                StorageHint::Float64, // 0: sum
+                StorageHint::Int64,   // 1: t
+                StorageHint::Int64,   // 2: __end_t
+                StorageHint::Int64,   // 3: i
+                StorageHint::Int64,   // 4: __end_i
+            ],
+            module_binding_names: vec!["arr".to_string()],
+            module_binding_storage_hints: vec![StorageHint::Unknown],
+            ..Default::default()
+        };
+
+        let mut jit = JITCompiler::new(crate::context::JITConfig::default()).unwrap();
+        let func = jit.compile_program("test_nested_mb_array", &program).unwrap();
+
+        let mut ctx = JITContext::default();
+        // Pre-load the array into module binding slot 0 (ctx.locals[0])
+        ctx.locals[0] = arr_bits;
+
+        let signal = unsafe { func(&mut ctx) };
+        assert_eq!(signal, 0, "JIT execution should succeed");
+        assert!(ctx.stack_ptr > 0, "Should have result on stack");
+
+        let result = ctx.stack[0];
+        assert!(is_number(result), "Result should be a number, got {result:#x}");
+        let value = unbox_number(result);
+        // Expected: 50 * sum(0..9) = 50 * 45 = 2250
+        assert_eq!(value, 2250.0, "Module binding nested loop should produce 2250.0, got {value}");
+    }
 }

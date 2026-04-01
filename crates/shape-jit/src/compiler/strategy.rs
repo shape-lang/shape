@@ -103,6 +103,11 @@ impl JITCompiler {
         let mut ctx = self.module.make_context();
         ctx.func.signature = sig;
 
+        // Check if top-level MIR is available and passes preflight.
+        let use_mir = program.top_level_mir.as_ref().is_some_and(|md| {
+            crate::mir_compiler::preflight(md).can_compile
+        });
+
         let mut func_builder_ctx = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_builder_ctx);
@@ -121,25 +126,70 @@ impl JITCompiler {
 
             let ffi = self.build_ffi_refs(&mut builder);
 
-            let mut compiler = BytecodeToIR::new(
-                &mut builder,
-                program,
-                ctx_ptr,
-                ffi,
-                user_func_refs,
-                user_func_arities.clone(),
-            );
+            if use_mir {
+                let mir_data = program.top_level_mir.as_ref().unwrap();
+                let slot_kinds = program
+                    .top_level_frame
+                    .as_ref()
+                    .map(|fd| fd.slots.clone())
+                    .unwrap_or_default();
+                // Build function name -> index map for Call terminator resolution
+                let function_indices: std::collections::HashMap<String, u16> = program
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.name.clone(), i as u16))
+                    .collect();
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new(
+                    &mut builder,
+                    ctx_ptr,
+                    ffi,
+                    mir_data,
+                    slot_kinds,
+                    &program.strings,
+                    entry_block,
+                    &function_indices,
+                );
+                mir_compiler.create_blocks();
+                mir_compiler.declare_locals();
 
-            // Set skip ranges so the main function compilation ignores function
-            // body instructions (they are compiled separately via
-            // compile_function_with_user_funcs). Without this, LoopStart/LoopEnd
-            // and Jump targets inside function bodies create blocks in the main
-            // function context, causing dead code compilation and stack corruption.
-            compiler.skip_ranges = Self::compute_skip_ranges(program);
+                // Initialize all locals to TAG_NULL
+                let null_val = mir_compiler.builder.ins().iconst(
+                    cranelift::prelude::types::I64,
+                    crate::nan_boxing::TAG_NULL as i64,
+                );
+                for slot_idx in 0..mir_compiler.mir.num_locals {
+                    let slot = shape_vm::mir::types::SlotId(slot_idx);
+                    if let Some(&var) = mir_compiler.locals.get(&slot) {
+                        mir_compiler.builder.def_var(var, null_val);
+                    }
+                }
 
-            let result = compiler.compile()?;
+                mir_compiler.compile_body()?;
+                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                    eprintln!("[jit-mir] Compiled top-level code via MirToIR");
+                }
+            } else {
+                let mut compiler = BytecodeToIR::new(
+                    &mut builder,
+                    program,
+                    ctx_ptr,
+                    ffi,
+                    user_func_refs,
+                    user_func_arities.clone(),
+                );
 
-            builder.ins().return_(&[result]);
+                // Set skip ranges so the main function compilation ignores function
+                // body instructions (they are compiled separately via
+                // compile_function_with_user_funcs). Without this, LoopStart/LoopEnd
+                // and Jump targets inside function bodies create blocks in the main
+                // function context, causing dead code compilation and stack corruption.
+                compiler.skip_ranges = Self::compute_skip_ranges(program);
+
+                let result = compiler.compile()?;
+
+                builder.ins().return_(&[result]);
+            }
             builder.finalize();
         }
 

@@ -12,6 +12,65 @@ use shape_vm::bytecode::{BytecodeProgram, DeoptInfo};
 use shape_vm::feedback::FeedbackVector;
 use shape_vm::type_tracking::{SlotKind, StorageHint};
 
+// ============================================================================
+// Compile-time stack pointer safety
+// ============================================================================
+
+/// Newtype wrapper for the JIT context's compile-time stack pointer,
+/// enforcing balanced push/pop and overflow detection.
+///
+/// The compile-time SP tracks how many values have been spilled to
+/// `ctx.stack[]` during the current FFI materialization sequence.
+/// Imbalanced push/pop causes memory corruption at runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct CtxStackDepth(usize);
+
+impl CtxStackDepth {
+    pub const MAX_DEPTH: usize = 512;
+
+    pub fn new() -> Self {
+        Self(0)
+    }
+
+    /// Increase depth by `n` pushed values.
+    pub fn push(&mut self, n: usize) {
+        self.0 += n;
+        debug_assert!(
+            self.0 <= Self::MAX_DEPTH,
+            "CtxStackDepth overflow: {} > {} — ctx.stack corruption imminent",
+            self.0,
+            Self::MAX_DEPTH
+        );
+    }
+
+    /// Decrease depth by `n` consumed values, increase by `m` produced values.
+    pub fn update(&mut self, consumed: usize, produced: usize) {
+        debug_assert!(
+            self.0 >= consumed,
+            "CtxStackDepth underflow: depth {} < consumed {}",
+            self.0,
+            consumed
+        );
+        self.0 -= consumed;
+        self.0 += produced;
+        debug_assert!(
+            self.0 <= Self::MAX_DEPTH,
+            "CtxStackDepth overflow after update: {}",
+            self.0
+        );
+    }
+
+    /// Current depth as usize (for offset computation).
+    pub fn depth(&self) -> usize {
+        self.0
+    }
+
+    /// Reset depth to zero (e.g., at block boundaries).
+    pub fn reset(&mut self) {
+        self.0 = 0;
+    }
+}
+
 /// Compilation mode for BytecodeToIR
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CompilationMode {
@@ -235,6 +294,40 @@ pub struct FFIFuncRefs {
     pub(crate) hashmap_value_at: FuncRef,
     // Generic builtin trampoline (handles any builtin not lowered by dedicated JIT paths)
     pub(crate) generic_builtin: FuncRef,
+    // Arc reference counting for ownership-aware JIT (MirToIR)
+    pub(crate) arc_retain: FuncRef,
+    pub(crate) arc_release: FuncRef,
+
+    // v2 typed array (native types, not NaN-boxed)
+    pub(crate) v2_array_new_f64: FuncRef,
+    pub(crate) v2_array_get_f64: FuncRef,
+    pub(crate) v2_array_set_f64: FuncRef,
+    pub(crate) v2_array_push_f64: FuncRef,
+    pub(crate) v2_array_len_f64: FuncRef,
+    pub(crate) v2_array_new_i64: FuncRef,
+    pub(crate) v2_array_get_i64: FuncRef,
+    pub(crate) v2_array_set_i64: FuncRef,
+    pub(crate) v2_array_push_i64: FuncRef,
+    pub(crate) v2_array_len_i64: FuncRef,
+    pub(crate) v2_array_new_i32: FuncRef,
+    pub(crate) v2_array_get_i32: FuncRef,
+    pub(crate) v2_array_set_i32: FuncRef,
+    pub(crate) v2_array_push_i32: FuncRef,
+    pub(crate) v2_array_len_i32: FuncRef,
+    // v2 typed field access
+    pub(crate) v2_field_load_f64: FuncRef,
+    pub(crate) v2_field_load_i64: FuncRef,
+    pub(crate) v2_field_load_i32: FuncRef,
+    pub(crate) v2_field_load_ptr: FuncRef,
+    pub(crate) v2_field_store_f64: FuncRef,
+    pub(crate) v2_field_store_i64: FuncRef,
+    pub(crate) v2_field_store_i32: FuncRef,
+    pub(crate) v2_field_store_ptr: FuncRef,
+    // v2 refcount
+    pub(crate) v2_retain: FuncRef,
+    pub(crate) v2_release: FuncRef,
+    // v2 struct allocation
+    pub(crate) v2_alloc_struct: FuncRef,
 }
 
 /// Information about a function eligible for inlining at call sites.
@@ -343,6 +436,16 @@ pub(crate) struct UnboxedScope {
     pub depth: usize,
 }
 
+/// Saved LICM state for one loop nesting level.
+/// Pushed when entering a nested loop, popped when exiting it.
+pub(crate) struct SavedLicmState {
+    pub hoisted_locals: HashMap<u16, Value>,
+    pub hoisted_array_info: HashMap<u16, (Value, Value)>,
+    pub hoisted_ref_array_info: HashMap<u16, (Value, Value)>,
+    pub licm_hoisted_results: HashMap<usize, Variable>,
+    pub licm_skip_indices: std::collections::HashSet<usize>,
+}
+
 /// Information for 4x loop unrolling at the back-edge.
 ///
 /// Set at LoopStart for eligible loops, consumed at the back-edge Jump.
@@ -378,7 +481,7 @@ pub struct BytecodeToIR<'a, 'b> {
     pub(super) loop_stack: Vec<LoopContext>,
     pub(crate) loop_ends: HashMap<usize, usize>,
     pub(crate) exit_block: Option<Block>,
-    pub(crate) compile_time_sp: usize,
+    pub(crate) compile_time_sp: CtxStackDepth,
     pub(crate) merge_blocks: std::collections::HashSet<usize>,
     pub(crate) block_stack_depth: HashMap<usize, usize>,
     pub(crate) pending_data_offset: Option<Value>,
@@ -542,6 +645,12 @@ pub struct BytecodeToIR<'a, 'b> {
     /// Maps ref_slot local index → (data_ptr, length) from deref + extraction at loop entry.
     /// Eliminates redundant deref + tag check + pointer extraction per iteration.
     pub(crate) hoisted_ref_array_info: HashMap<u16, (Value, Value)>,
+
+    /// Save stack for hoisted LICM state across nested loops.
+    /// When entering a nested loop, the outer loop's hoisted state is pushed here.
+    /// When exiting the nested loop, the outer state is popped and restored.
+    /// This prevents inner loops from destroying the outer loop's LICM optimizations.
+    pub(crate) hoisted_licm_stack: Vec<SavedLicmState>,
 
     // ========================================================================
     // Call LICM (Loop-Invariant Code Motion for Pure Calls)

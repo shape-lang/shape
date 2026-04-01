@@ -10,7 +10,7 @@ use super::types::*;
 use std::collections::{HashMap, HashSet};
 
 /// Result of liveness analysis for a MIR function.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LivenessResult {
     /// Variables live at the entry of each block.
     pub live_in: HashMap<BasicBlockId, HashSet<SlotId>>,

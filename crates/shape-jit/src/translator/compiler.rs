@@ -11,7 +11,7 @@ use shape_vm::feedback::FeedbackVector;
 use shape_vm::type_tracking::{SlotKind, StorageHint};
 
 use super::loop_analysis;
-use super::types::{BytecodeToIR, CompilationMode, FFIFuncRefs, InlineCandidate};
+use super::types::{BytecodeToIR, CompilationMode, CtxStackDepth, FFIFuncRefs, InlineCandidate};
 use crate::optimizer;
 
 impl<'a, 'b> BytecodeToIR<'a, 'b> {
@@ -81,7 +81,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             loop_stack: Vec::new(),
             loop_ends,
             exit_block: None,
-            compile_time_sp: 0,
+            compile_time_sp: CtxStackDepth::new(),
             merge_blocks: std::collections::HashSet::new(),
             block_stack_depth: HashMap::new(),
             pending_data_offset: None,
@@ -131,6 +131,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // Array LICM
             hoisted_array_info: HashMap::new(),
             hoisted_ref_array_info: HashMap::new(),
+            hoisted_licm_stack: Vec::new(),
             // Call LICM
             licm_hoisted_results: HashMap::new(),
             licm_skip_indices: std::collections::HashSet::new(),
@@ -230,7 +231,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             loop_stack: Vec::new(),
             loop_ends,
             exit_block: None,
-            compile_time_sp: 0,
+            compile_time_sp: CtxStackDepth::new(),
             merge_blocks: std::collections::HashSet::new(),
             block_stack_depth: HashMap::new(),
             pending_data_offset: None,
@@ -280,6 +281,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // Array LICM
             hoisted_array_info: HashMap::new(),
             hoisted_ref_array_info: HashMap::new(),
+            hoisted_licm_stack: Vec::new(),
             // Call LICM
             licm_hoisted_results: HashMap::new(),
             licm_skip_indices: std::collections::HashSet::new(),
@@ -458,7 +460,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     // Reset physical stack tracking at block boundary: predecessors
                     // may have materialized values at different offsets, so the
                     // compile-time stack pointer must restart from 0.
-                    self.compile_time_sp = 0;
+                    self.compile_time_sp.reset();
                     // Clear typed_stack at block boundaries: f64 SSA Values from
                     // predecessor blocks may not dominate this block, so cached
                     // shadows are invalid. The optimization still applies within

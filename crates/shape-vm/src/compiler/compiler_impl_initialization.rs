@@ -25,6 +25,7 @@ impl BytecodeCompiler {
             next_global: 0,
             loop_stack: Vec::new(),
             closure_counter: 0,
+            closure_function_ids: Vec::new(),
             closure_row_schema: None,
             last_expr_type_info: None,
             type_tracker: TypeTracker::with_stdlib(),
@@ -218,6 +219,7 @@ impl BytecodeCompiler {
                 mutable_captures: Vec::new(),
                 frame_descriptor: self.program.top_level_frame.clone(),
                 osr_entry_points: Vec::new(),
+                mir_data: None,
             };
 
             let blob = main_builder.finalize(

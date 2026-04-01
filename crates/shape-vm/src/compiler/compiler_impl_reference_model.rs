@@ -1252,6 +1252,32 @@ impl BytecodeCompiler {
         // Transfer final function definitions after comptime mutation/specialization.
         self.program.expanded_function_defs = self.function_defs.clone();
 
+        // Cache top-level MIR data for JIT v2 (MirToIR compilation of __main__).
+        // The MIR and borrow analysis were computed by analyze_non_function_items_with_mir
+        // above; we combine them with a storage plan here.
+        {
+            let mir_opt = self.mir_functions.get("__main__").cloned();
+            let borrow_opt = self.mir_borrow_analyses.get("__main__").cloned();
+            if let (Some(mir), Some(borrow_analysis)) = (mir_opt, borrow_opt) {
+                use std::collections::{HashMap as StdHashMap, HashSet as StdHashSet};
+                let planner_input = crate::mir::storage_planning::StoragePlannerInput {
+                    mir: &mir,
+                    analysis: &borrow_analysis,
+                    binding_semantics: &StdHashMap::new(),
+                    closure_captures: &StdHashSet::new(),
+                    mutable_captures: &StdHashSet::new(),
+                    had_fallbacks: true, // conservative: top-level MIR often has fallbacks
+                };
+                let storage_plan = crate::mir::storage_planning::plan_storage(&planner_input);
+                self.program.top_level_mir =
+                    Some(std::sync::Arc::new(crate::bytecode::MirFunctionData {
+                        mir,
+                        storage_plan,
+                        borrow_analysis,
+                    }));
+            }
+        }
+
         // Finalize the __main__ blob and build the content-addressed program.
         self.build_content_addressed_program();
 

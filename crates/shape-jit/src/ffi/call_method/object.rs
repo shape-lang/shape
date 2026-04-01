@@ -15,7 +15,7 @@ pub fn call_object_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
         if !is_heap_kind(receiver_bits, HK_JIT_OBJECT) {
             return TAG_NULL;
         }
-        let obj = jit_unbox::<HashMap<String, u64>>(receiver_bits);
+        let obj = unified_unbox::<HashMap<String, u64>>(receiver_bits);
 
         match method_name {
             "hasOwnProperty" | "has" => {
@@ -23,8 +23,8 @@ pub fn call_object_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
                     return TAG_BOOL_FALSE;
                 }
                 if is_heap_kind(args[0], HK_STRING) {
-                    let key = jit_unbox::<String>(args[0]);
-                    if obj.contains_key(key.as_str()) {
+                    let key = unbox_string(args[0]);
+                    if obj.contains_key(key) {
                         return TAG_BOOL_TRUE;
                     }
                 }
@@ -36,7 +36,7 @@ pub fn call_object_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
                 // Check if this is a RollingWindow object
                 if let Some(&type_bits) = obj.get("__type") {
                     if is_heap_kind(type_bits, HK_STRING) {
-                        let type_str = jit_unbox::<String>(type_bits);
+                        let type_str = unbox_string(type_bits);
                         if type_str == "RollingWindow" {
                             // Get series and window
                             let series_bits = obj.get("series").copied().unwrap_or(TAG_NULL);

@@ -367,6 +367,7 @@ mod tests {
             mutable_captures: Vec::new(),
             frame_descriptor: None,
             osr_entry_points: Vec::new(),
+            mir_data: None,
         }
     }
 

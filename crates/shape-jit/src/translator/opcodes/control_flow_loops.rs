@@ -754,8 +754,16 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         // Inside the loop, LoadLocal for these slots reuses the cached value
         // instead of emitting a redundant memory load.
         if let Some(info) = self.loop_info.get(&idx).cloned() {
-            // Clear any previous hoisted locals from outer loops
-            self.hoisted_locals.clear();
+            // Save outer loop's LICM state before overwriting.
+            // This is restored in compile_loop_end so that nested loops
+            // don't destroy the outer loop's hoisted optimizations.
+            self.hoisted_licm_stack.push(crate::translator::types::SavedLicmState {
+                hoisted_locals: std::mem::take(&mut self.hoisted_locals),
+                hoisted_array_info: std::mem::take(&mut self.hoisted_array_info),
+                hoisted_ref_array_info: std::mem::take(&mut self.hoisted_ref_array_info),
+                licm_hoisted_results: std::mem::take(&mut self.licm_hoisted_results),
+                licm_skip_indices: std::mem::take(&mut self.licm_skip_indices),
+            });
             for &local_idx in &info.invariant_locals {
                 let var = self.get_or_create_local(local_idx);
                 let val = self.builder.use_var(var);
@@ -765,8 +773,8 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // Array LICM: for call-free loops, pre-extract (data_ptr, length) for
             // invariant array locals used in GetProp or SetIndexRef patterns.
             // This eliminates redundant tag checks + pointer extraction per iteration.
-            self.hoisted_array_info.clear();
-            self.hoisted_ref_array_info.clear();
+            // (hoisted_array_info and hoisted_ref_array_info are already empty
+            //  from std::mem::take above — no need to clear again.)
             {
                 let has_calls = ((info.header_idx + 1)..info.end_idx).any(|i| {
                     matches!(
@@ -1098,7 +1106,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             // for the loop duration (boxed representation, no type conversion).
             // This is skipped for loops with calls and for currently-unboxed
             // bindings, which are handled by the unboxing path above.
-            self.promote_register_carried_module_bindings(&info);
+            self.promote_register_carried_module_bindings(&info, idx);
 
             // Loop unrolling eligibility: single IV(step=1), no nested/calls/alloc, compact body.
             self.pending_unroll = None;
@@ -1543,12 +1551,22 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         }
 
         self.loop_stack.pop();
-        // Clear hoisted locals, array LICM, and call LICM when exiting loop scope
-        self.hoisted_locals.clear();
-        self.hoisted_array_info.clear();
-        self.hoisted_ref_array_info.clear();
-        self.licm_hoisted_results.clear();
-        self.licm_skip_indices.clear();
+        // Restore outer loop's LICM state (saved at LoopStart).
+        // This ensures nested loops don't destroy the outer loop's hoisted optimizations.
+        if let Some(saved) = self.hoisted_licm_stack.pop() {
+            self.hoisted_locals = saved.hoisted_locals;
+            self.hoisted_array_info = saved.hoisted_array_info;
+            self.hoisted_ref_array_info = saved.hoisted_ref_array_info;
+            self.licm_hoisted_results = saved.licm_hoisted_results;
+            self.licm_skip_indices = saved.licm_skip_indices;
+        } else {
+            // No saved state (shouldn't happen, but be safe)
+            self.hoisted_locals.clear();
+            self.hoisted_array_info.clear();
+            self.hoisted_ref_array_info.clear();
+            self.licm_hoisted_results.clear();
+            self.licm_skip_indices.clear();
+        }
         self.local_f64_cache.clear();
         self.pending_unroll = None;
         // Pop precomputed f64 scope: remove entries added at this loop level

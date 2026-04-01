@@ -266,6 +266,7 @@ impl BytecodeCompiler {
                     mutable_captures: Vec::new(),
                     frame_descriptor: None,
                     osr_entry_points: Vec::new(),
+                    mir_data: None,
                 };
                 self.program.functions.push(func);
 
@@ -332,6 +333,7 @@ impl BytecodeCompiler {
                         mutable_captures: Vec::new(),
                         frame_descriptor: None,
                         osr_entry_points: Vec::new(),
+                        mir_data: None,
                     };
                     self.program.functions.push(func);
 
@@ -590,6 +592,7 @@ impl BytecodeCompiler {
             mutable_captures: Vec::new(),
             frame_descriptor: None,
             osr_entry_points: Vec::new(),
+            mir_data: None,
         };
 
         self.program.functions.push(func);

@@ -181,14 +181,10 @@ impl JITExecutor {
                 non_null
             );
         }
+        let mut owned_locals = crate::context::OwnedLocals::new();
         for (idx, vw) in vm_bindings.into_iter().enumerate() {
-            if idx < jit_ctx.locals.len() {
-                jit_ctx.locals[idx] = vw.raw_bits();
-                // Transfer ownership to the JIT context by forgetting the
-                // ValueWord. Without this, dropping the ValueWord decrements
-                // the Arc refcount, potentially freeing the heap allocation
-                // while jit_ctx.locals still holds the raw bits (dangling pointer).
-                std::mem::forget(vw);
+            if idx < jit_ctx.locals.len() && !vw.is_none() {
+                owned_locals.transfer_binding(&mut jit_ctx, idx, vw);
             }
         }
 
@@ -211,8 +207,16 @@ impl JITExecutor {
         let signal = unsafe { jit_fn(&mut jit_ctx) };
         let jit_exec_ms = jit_exec_start.elapsed().as_millis();
 
+        // Drain unified heap refs whose refcounts were bumped during VM→JIT
+        // conversion (nanboxed_to_jit_bits). This balances the refcounts so
+        // unified heap values aren't permanently leaked.
+        crate::ffi::object::conversion::drain_unified_heap_refs();
+
         // Clear the trampoline VM pointer (VM is about to be dropped)
         crate::ffi::control::unset_trampoline_vm();
+
+        // Release ownership of pre-populated module binding slots.
+        owned_locals.cleanup(&mut jit_ctx);
 
         // Get result from JIT context stack via TypedScalar boundary
         let raw_result = if jit_ctx.stack_ptr > 0 {
@@ -225,6 +229,23 @@ impl JITExecutor {
         if signal < 0 {
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: format!("JIT execution error (code: {})", signal),
+                location: None,
+            });
+        }
+
+        // Check if the result is an Err value from `?` propagation at the top level.
+        // In the interpreter, uncaught `?` on Err raises a runtime error.
+        // Match that behavior: extract the Err inner value and return a RuntimeError.
+        if crate::nan_boxing::is_err_tag(raw_result) {
+            let inner = unsafe { crate::nan_boxing::unbox_result_inner(raw_result) };
+            let err_msg = if crate::nan_boxing::is_heap_kind(inner, crate::nan_boxing::HK_STRING) {
+                let s = unsafe { crate::nan_boxing::unbox_string(inner) };
+                s.to_string()
+            } else {
+                format!("Error (uncaught)")
+            };
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: err_msg,
                 location: None,
             });
         }
@@ -296,8 +317,8 @@ impl JITExecutor {
 
     fn nan_boxed_to_wire(&self, bits: u64) -> WireValue {
         use crate::nan_boxing::{
-            HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number, jit_unbox,
-            unbox_number,
+            HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number,
+            unbox_number, unbox_string, is_ok_tag, is_err_tag,
         };
         use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
@@ -314,11 +335,31 @@ impl JITExecutor {
             let int_val = sign_extend_i48(get_payload(bits));
             WireValue::Integer(int_val)
         } else if is_heap_kind(bits, HK_STRING) {
-            let s = unsafe { jit_unbox::<String>(bits) };
-            WireValue::String(s.clone())
+            let s = unsafe { unbox_string(bits) };
+            WireValue::String(s.to_string())
+        } else if is_ok_tag(bits) {
+            let inner = unsafe { crate::nan_boxing::unbox_result_inner(bits) };
+            let inner_wire = self.nan_boxed_to_wire(inner);
+            WireValue::String(format!("Ok({})", wire_value_display(&inner_wire)))
+        } else if is_err_tag(bits) {
+            let inner = unsafe { crate::nan_boxing::unbox_result_inner(bits) };
+            let inner_wire = self.nan_boxed_to_wire(inner);
+            WireValue::String(format!("Err({})", wire_value_display(&inner_wire)))
         } else {
             // Default to interpreting as a number for unknown tags
             WireValue::Number(f64::from_bits(bits))
         }
+    }
+}
+
+/// Simple display for WireValue (used in Ok/Err formatting).
+fn wire_value_display(v: &WireValue) -> String {
+    match v {
+        WireValue::String(s) => s.clone(),
+        WireValue::Number(n) => format!("{}", n),
+        WireValue::Integer(n) => format!("{}", n),
+        WireValue::Bool(b) => format!("{}", b),
+        WireValue::Null => "null".to_string(),
+        _ => format!("{:?}", v),
     }
 }

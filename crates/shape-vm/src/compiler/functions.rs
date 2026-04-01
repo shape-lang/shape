@@ -411,6 +411,81 @@ impl BytecodeCompiler {
         // Restore previous flag (safe for nested compilation).
         self.allow_internal_builtins = saved_allow_internal;
 
+        // Cache MIR data in the Function struct for JIT v2 (MirToIR compilation).
+        // Clone from the compiler's caches so both the compiler (for diagnostics/LSP)
+        // and the JIT (via Function.mir_data) have access.
+        if let Some(func_idx) = self.find_function(&effective_def.name) {
+            let mir_opt = self.mir_functions.get(&effective_def.name).cloned();
+            let borrow_opt = self.mir_borrow_analyses.get(&effective_def.name).cloned();
+            let storage_opt = self.mir_storage_plans.get(&effective_def.name).cloned();
+            if let (Some(mut mir), Some(borrow_analysis), Some(storage_plan)) =
+                (mir_opt, borrow_opt, storage_opt)
+            {
+                // Back-patch MIR: replace ClosurePlaceholder and ClosureCapture
+                // with resolved closure function names/IDs from bytecode compilation.
+                if !self.closure_function_ids.is_empty() {
+                    let mut closure_idx = 0;
+                    let closure_ids = self.closure_function_ids.clone();
+                    for block in &mut mir.blocks {
+                        for stmt in &mut block.statements {
+                            // Check for ClosurePlaceholder in Assign
+                            let is_placeholder = matches!(
+                                &stmt.kind,
+                                crate::mir::types::StatementKind::Assign(
+                                    _,
+                                    crate::mir::types::Rvalue::Use(
+                                        crate::mir::types::Operand::Constant(
+                                            crate::mir::types::MirConstant::ClosurePlaceholder,
+                                        ),
+                                    ),
+                                )
+                            );
+                            if is_placeholder {
+                                if closure_idx < closure_ids.len() {
+                                    let (ref name, _) = closure_ids[closure_idx];
+                                    stmt.kind = crate::mir::types::StatementKind::Assign(
+                                        crate::mir::types::Place::Local(
+                                            // Extract the place from the current statement
+                                            match &stmt.kind {
+                                                crate::mir::types::StatementKind::Assign(p, _) => p.root_local(),
+                                                _ => unreachable!(),
+                                            }
+                                        ),
+                                        crate::mir::types::Rvalue::Use(
+                                            crate::mir::types::Operand::Constant(
+                                                crate::mir::types::MirConstant::Function(name.clone()),
+                                            ),
+                                        ),
+                                    );
+                                    closure_idx += 1;
+                                }
+                                continue;
+                            }
+                            // Patch ClosureCapture with function_id
+                            if let crate::mir::types::StatementKind::ClosureCapture {
+                                function_id,
+                                ..
+                            } = &mut stmt.kind {
+                                if closure_idx < closure_ids.len() {
+                                    let (_, idx) = closure_ids[closure_idx];
+                                    *function_id = Some(idx);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Clear closure_function_ids for the next function
+                self.closure_function_ids.clear();
+
+                self.program.functions[func_idx].mir_data =
+                    Some(std::sync::Arc::new(crate::bytecode::MirFunctionData {
+                        mir,
+                        storage_plan,
+                        borrow_analysis,
+                    }));
+            }
+        }
+
         // Clean up __original__ alias after the replacement body is compiled.
         if has_original_alias {
             self.function_aliases.remove("__original__");
@@ -2603,6 +2678,20 @@ mod tests {
             .expect("borrow analysis should be recorded");
         assert_eq!(analysis.loans.len(), 0);
         assert!(analysis.errors.is_empty(), "analysis should be clean");
+
+        // JIT v2: verify mir_data is cached on the Function struct.
+        let func_entry = compiler
+            .program
+            .functions
+            .iter()
+            .find(|f| f.name == "choose")
+            .expect("choose should be in program.functions");
+        assert!(
+            func_entry.mir_data.is_some(),
+            "mir_data should be populated on the Function struct"
+        );
+        let mir_data = func_entry.mir_data.as_ref().unwrap();
+        assert_eq!(mir_data.mir.name, "choose");
     }
 
     #[test]

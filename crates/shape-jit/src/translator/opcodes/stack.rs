@@ -139,7 +139,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     // typed_stack auto-pushed boxed — correct for bool
                 }
                 Constant::String(s) => {
-                    let boxed = jit_box(HK_STRING, s.clone());
+                    let boxed = box_string(s.clone());
                     let boxed_val = self.builder.ins().iconst(types::I64, boxed as i64);
                     self.stack_push_typed(boxed_val, StorageHint::String);
                     // typed_stack auto-pushed boxed — correct for string
@@ -162,17 +162,17 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
                     self.stack_push(boxed_val);
                 }
                 Constant::TimeReference(time_ref) => {
-                    let boxed = jit_box(HK_TIME, time_ref.clone());
+                    let boxed = unified_box(HK_TIME, time_ref.clone());
                     let boxed_val = self.builder.ins().iconst(types::I64, boxed as i64);
                     self.stack_push(boxed_val);
                 }
                 Constant::DateTimeExpr(dt_expr) => {
-                    let boxed = jit_box(HK_TIME, dt_expr.clone());
+                    let boxed = unified_box(HK_TIME, dt_expr.clone());
                     let boxed_val = self.builder.ins().iconst(types::I64, boxed as i64);
                     self.stack_push(boxed_val);
                 }
                 Constant::DataDateTimeRef(dt_ref) => {
-                    let boxed = jit_box(HK_DATA_REFERENCE, dt_ref.clone());
+                    let boxed = unified_box(HK_DATA_REFERENCE, dt_ref.clone());
                     let boxed_val = self.builder.ins().iconst(types::I64, boxed as i64);
                     self.stack_push(boxed_val);
                 }

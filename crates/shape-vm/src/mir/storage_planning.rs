@@ -565,6 +565,7 @@ mod tests {
                         StatementKind::ClosureCapture {
                             closure_slot: SlotId(0),
                             operands: vec![Operand::Copy(Place::Local(SlotId(0)))],
+                            function_id: None,
                         },
                         1,
                     ),
@@ -822,6 +823,7 @@ mod tests {
                                 Operand::Copy(Place::Local(SlotId(0))),
                                 Operand::Copy(Place::Local(SlotId(1))),
                             ],
+                            function_id: None,
                         },
                         2,
                     ),
@@ -869,6 +871,7 @@ mod tests {
                         StatementKind::ClosureCapture {
                             closure_slot: SlotId(0),
                             operands: vec![Operand::Copy(Place::Local(SlotId(0)))],
+                            function_id: None,
                         },
                         1,
                     ),
@@ -1034,6 +1037,7 @@ mod tests {
                         StatementKind::ClosureCapture {
                             closure_slot: SlotId(0),
                             operands: vec![Operand::Copy(Place::Local(SlotId(0)))],
+                            function_id: None,
                         },
                         1,
                     ),
@@ -1209,6 +1213,7 @@ mod tests {
                         StatementKind::ClosureCapture {
                             closure_slot: SlotId(1),
                             operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                            function_id: None,
                         },
                         1,
                     ),
@@ -1247,6 +1252,7 @@ mod tests {
                         StatementKind::ClosureCapture {
                             closure_slot: SlotId(1),
                             operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                            function_id: None,
                         },
                         1,
                     ),

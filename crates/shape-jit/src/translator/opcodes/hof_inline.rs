@@ -156,7 +156,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// Invoke a callback function with (element, index) arguments via FFI.
     /// Pushes [callee, element, index, arg_count=2] onto ctx.stack, calls jit_call_value.
     fn emit_callback_call(&mut self, callback: Value, element: Value, index: Value) -> Value {
-        let base_sp = self.compile_time_sp;
+        let base_sp = self.compile_time_sp.depth();
 
         // Push callee
         self.builder.ins().store(
@@ -224,7 +224,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         element: Value,
         index: Value,
     ) -> Value {
-        let base_sp = self.compile_time_sp;
+        let base_sp = self.compile_time_sp.depth();
 
         // Push callee
         self.builder.ins().store(
@@ -356,9 +356,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
         //   offset 0: function_id (u16)
         //   offset 2: captures_count (u16)
         //   offset 8: captures_ptr (*const u64) — aligned to 8
-        let payload_mask = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let alloc_ptr = self.builder.ins().band(callback, payload_mask);
-        // Data starts at JIT_ALLOC_DATA_OFFSET (8)
+        let ptr_mask = self.builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
+        let alloc_ptr = self.builder.ins().band(callback, ptr_mask);
+        // Data starts at offset 8 (unified header size)
         let data_ptr = self
             .builder
             .ins()
@@ -414,7 +414,7 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
     /// takes the fast path (no closure unboxing), while captures are included
     /// as "args" so the function sees them as its first locals.
     fn emit_closure_fast_call(&mut self, preloaded: &PreloadedClosure, args: &[Value]) -> Value {
-        let base_sp = self.compile_time_sp;
+        let base_sp = self.compile_time_sp.depth();
         let eight = self.builder.ins().iconst(types::I64, 8);
 
         // Construct inline function ref from pre-extracted function_id

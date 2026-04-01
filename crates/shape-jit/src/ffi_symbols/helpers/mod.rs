@@ -16,7 +16,7 @@ pub extern "C" fn jit_eval_datetime_expr(datetime_expr_bits: u64) -> u64 {
             return TAG_NULL;
         }
 
-        let expr = jit_unbox::<DateTimeExpr>(datetime_expr_bits);
+        let expr = unified_unbox::<DateTimeExpr>(datetime_expr_bits);
 
         // Evaluate the datetime expression
         let timestamp = match expr {
@@ -56,7 +56,7 @@ pub extern "C" fn jit_eval_datetime_expr(datetime_expr_bits: u64) -> u64 {
                 duration,
             } => {
                 // Recursively evaluate the base expression
-                let base_bits = jit_box(HK_TIME, base.as_ref().clone());
+                let base_bits = unified_box(HK_TIME, base.as_ref().clone());
                 let base_result = jit_eval_datetime_expr(base_bits);
 
                 if !is_heap_kind(base_result, HK_TIME) {
@@ -64,7 +64,7 @@ pub extern "C" fn jit_eval_datetime_expr(datetime_expr_bits: u64) -> u64 {
                 }
 
                 // Get the base timestamp
-                let base_ts = *jit_unbox::<i64>(base_result);
+                let base_ts = *unified_unbox::<i64>(base_result);
 
                 // Convert duration to seconds
                 use crate::ast::DurationUnit;
@@ -88,7 +88,7 @@ pub extern "C" fn jit_eval_datetime_expr(datetime_expr_bits: u64) -> u64 {
             }
             DateTimeExpr::Relative { base, offset } => {
                 // Recursively evaluate the base expression
-                let base_bits = jit_box(HK_TIME, base.as_ref().clone());
+                let base_bits = unified_box(HK_TIME, base.as_ref().clone());
                 let base_result = jit_eval_datetime_expr(base_bits);
 
                 if !is_heap_kind(base_result, HK_TIME) {
@@ -96,7 +96,7 @@ pub extern "C" fn jit_eval_datetime_expr(datetime_expr_bits: u64) -> u64 {
                 }
 
                 // Get the base timestamp
-                let base_ts = *jit_unbox::<i64>(base_result);
+                let base_ts = *unified_unbox::<i64>(base_result);
 
                 // Convert offset duration to seconds
                 use crate::ast::DurationUnit;
@@ -121,7 +121,7 @@ pub extern "C" fn jit_eval_datetime_expr(datetime_expr_bits: u64) -> u64 {
         };
 
         // Box the timestamp as heap-allocated time value
-        jit_box(HK_TIME, timestamp)
+        unified_box(HK_TIME, timestamp)
     }
 }
 
@@ -135,7 +135,7 @@ pub extern "C" fn jit_eval_time_reference(time_ref_bits: u64) -> u64 {
             return TAG_NULL;
         }
 
-        let time_ref = jit_unbox::<TimeReference>(time_ref_bits);
+        let time_ref = unified_unbox::<TimeReference>(time_ref_bits);
 
         // Evaluate the time reference
         let timestamp = match time_ref {
@@ -173,7 +173,7 @@ pub extern "C" fn jit_eval_time_reference(time_ref_bits: u64) -> u64 {
         };
 
         // Box the timestamp as heap-allocated time value
-        jit_box(HK_TIME, timestamp)
+        unified_box(HK_TIME, timestamp)
     }
 }
 
@@ -186,14 +186,13 @@ pub extern "C" fn jit_format_error(ctx: *mut JITContext) -> u64 {
         let ctx_ref = &mut *ctx;
 
         if ctx_ref.stack_ptr == 0 {
-            let msg = "Runtime error: unknown".to_string();
-            return jit_box(HK_STRING, msg);
+            return box_str("Runtime error: unknown");
         }
         ctx_ref.stack_ptr -= 1;
         let error_bits = ctx_ref.stack[ctx_ref.stack_ptr];
 
         let error_msg = if is_heap_kind(error_bits, HK_STRING) {
-            let s = jit_unbox::<String>(error_bits);
+            let s = unbox_string(error_bits);
             format!("Runtime error: {}", s)
         } else if is_number(error_bits) {
             format!("Runtime error: {}", unbox_number(error_bits))
@@ -201,7 +200,7 @@ pub extern "C" fn jit_format_error(ctx: *mut JITContext) -> u64 {
             "Runtime error: unknown".to_string()
         };
 
-        jit_box(HK_STRING, error_msg)
+        box_string(error_msg)
     }
 }
 

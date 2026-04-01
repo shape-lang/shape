@@ -67,8 +67,8 @@ pub extern "C" fn jit_align_series(ctx: *mut JITContext, symbols_bits: u64, mode
                 .iter()
                 .map(|&bits| {
                     if is_heap_kind(bits, HK_STRING) {
-                        let s = jit_unbox::<String>(bits);
-                        shape_value::ValueWord::from_string(Arc::new(s.clone()))
+                        let s = unbox_string(bits);
+                        shape_value::ValueWord::from_string(Arc::new(s.to_string()))
                     } else {
                         shape_value::ValueWord::none()
                     }
@@ -81,8 +81,8 @@ pub extern "C" fn jit_align_series(ctx: *mut JITContext, symbols_bits: u64, mode
 
         // Convert mode from bits
         let mode_val = if is_heap_kind(mode_bits, HK_STRING) {
-            let s = jit_unbox::<String>(mode_bits);
-            shape_value::ValueWord::from_string(Arc::new(s.clone()))
+            let s = unbox_string(mode_bits);
+            shape_value::ValueWord::from_string(Arc::new(s.to_string()))
         } else {
             shape_value::ValueWord::from_string(Arc::new("intersection".to_string()))
         };

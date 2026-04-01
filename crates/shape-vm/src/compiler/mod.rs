@@ -501,6 +501,11 @@ pub struct BytecodeCompiler {
     /// Counter for synthetic closure function names
     pub(crate) closure_counter: u64,
 
+    /// Closure function indices discovered during bytecode compilation of the
+    /// current function. Each entry is (closure_function_name, function_index).
+    /// Used to back-patch MIR ClosurePlaceholder/ClosureCapture after compilation.
+    pub(crate) closure_function_ids: Vec<(String, u16)>,
+
     /// When compiling a DataTable closure method (e.g. dt.filter(row => ...)),
     /// this holds the (schema_id, type_name) to tag the closure's row parameter as RowView.
     pub(crate) closure_row_schema: Option<(u32, String)>,

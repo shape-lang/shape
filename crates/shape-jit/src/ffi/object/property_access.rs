@@ -27,7 +27,7 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
     unsafe {
         // Get key as string if it's a string
         let key_str: Option<&str> = if is_heap_kind(key_bits, HK_STRING) {
-            Some(jit_unbox::<String>(key_bits).as_str())
+            Some(unbox_string(key_bits))
         } else {
             None
         };
@@ -52,6 +52,18 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                     | Some(HK_TIME)
                     | Some(HK_DATA_REFERENCE)
                     | Some(HK_CLOSURE)
+                    | Some(HK_FLOAT_ARRAY)
+                    | Some(HK_INT_ARRAY)
+                    | Some(HK_FLOAT_ARRAY_SLICE)
+                    | Some(HK_BOOL_ARRAY)
+                    | Some(HK_I8_ARRAY)
+                    | Some(HK_I16_ARRAY)
+                    | Some(HK_I32_ARRAY)
+                    | Some(HK_U8_ARRAY)
+                    | Some(HK_U16_ARRAY)
+                    | Some(HK_U32_ARRAY)
+                    | Some(HK_U64_ARRAY)
+                    | Some(HK_F32_ARRAY)
             );
             if !is_known_jit {
                 // Not a recognized JIT type — try VM ValueWord interpretation.
@@ -91,7 +103,10 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
         }
         if let Some(kind) = heap_kind(obj_bits) {
             match kind {
-                HK_ARRAY => {
+                HK_ARRAY | HK_FLOAT_ARRAY | HK_INT_ARRAY | HK_FLOAT_ARRAY_SLICE
+                | HK_BOOL_ARRAY | HK_I8_ARRAY | HK_I16_ARRAY | HK_I32_ARRAY
+                | HK_U8_ARRAY | HK_U16_ARRAY | HK_U32_ARRAY | HK_U64_ARRAY
+                | HK_F32_ARRAY => {
                     let arr = JitArray::from_heap_bits(obj_bits);
 
                     // Handle array properties
@@ -122,14 +137,14 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                     }
                 }
                 HK_JIT_OBJECT => {
-                    let obj = jit_unbox::<HashMap<String, u64>>(obj_bits);
+                    let obj = unified_unbox::<HashMap<String, u64>>(obj_bits);
                     match key_str {
                         Some(key) => obj.get(key).copied().unwrap_or(TAG_NULL),
                         None => TAG_NULL,
                     }
                 }
                 HK_STRING => {
-                    let s = jit_unbox::<String>(obj_bits);
+                    let s = unbox_string(obj_bits);
 
                     // Handle string properties
                     match key_str {
@@ -151,7 +166,7 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                                     idx_f64 as usize
                                 };
                                 if let Some(c) = s.chars().nth(idx) {
-                                    jit_box(HK_STRING, c.to_string())
+                                    box_string(c.to_string())
                                 } else {
                                     TAG_NULL
                                 }
@@ -162,7 +177,7 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                     }
                 }
                 HK_DURATION => {
-                    let dur = jit_unbox::<JITDuration>(obj_bits);
+                    let dur = unified_unbox::<JITDuration>(obj_bits);
                     match key_str {
                         Some("value") => box_number(dur.value),
                         Some("unit") => box_number(dur.unit as f64),
@@ -172,7 +187,7 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                 HK_TIME => {
                     // Time is stored as i64 timestamp in JitAlloc
                     use chrono::{Datelike, TimeZone, Timelike, Utc};
-                    let timestamp = *jit_unbox::<i64>(obj_bits);
+                    let timestamp = *unified_unbox::<i64>(obj_bits);
 
                     match key_str {
                         Some("timestamp") | Some("unix") | Some("ts") => {
@@ -205,15 +220,15 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                     }
                 }
                 HK_DATA_REFERENCE => {
-                    let data_ref = jit_unbox::<JITDataReference>(obj_bits);
+                    let data_ref = unified_unbox::<JITDataReference>(obj_bits);
                     match key_str {
                         Some("datetime") | Some("time") | Some("timestamp") => {
-                            jit_box(HK_TIME, data_ref.timestamp)
+                            unified_box(HK_TIME, data_ref.timestamp)
                         }
                         Some("symbol") => {
                             if !data_ref.symbol.is_null() {
                                 let symbol = (*data_ref.symbol).clone();
-                                jit_box(HK_STRING, symbol)
+                                box_string(symbol)
                             } else {
                                 TAG_NULL
                             }
@@ -232,14 +247,14 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                                 _ => crate::ast::TimeframeUnit::Minute,
                             };
                             let tf = crate::ast::Timeframe::new(tf_value, unit);
-                            jit_box(HK_TIMEFRAME, tf)
+                            unified_box(HK_TIMEFRAME, tf)
                         }
                         Some("timezone") => {
                             if data_ref.has_timezone && !data_ref.timezone.is_null() {
                                 let tz = (*data_ref.timezone).clone();
-                                jit_box(HK_STRING, tz)
+                                box_string(tz)
                             } else {
-                                jit_box(HK_STRING, "UTC".to_string())
+                                box_str("UTC")
                             }
                         }
                         _ => TAG_NULL,
@@ -332,20 +347,36 @@ pub extern "C" fn jit_hashmap_value_at(obj_bits: u64, slot_index: u64) -> u64 {
 #[inline(always)]
 pub extern "C" fn jit_length(value_bits: u64) -> u64 {
     let len = match heap_kind(value_bits) {
-        Some(HK_ARRAY) => {
+        Some(HK_ARRAY) | Some(HK_FLOAT_ARRAY) | Some(HK_INT_ARRAY)
+        | Some(HK_FLOAT_ARRAY_SLICE) | Some(HK_BOOL_ARRAY)
+        | Some(HK_I8_ARRAY) | Some(HK_I16_ARRAY) | Some(HK_I32_ARRAY)
+        | Some(HK_U8_ARRAY) | Some(HK_U16_ARRAY) | Some(HK_U32_ARRAY)
+        | Some(HK_U64_ARRAY) | Some(HK_F32_ARRAY) => {
             let arr = unsafe { JitArray::from_heap_bits(value_bits) };
             arr.len()
         }
         Some(HK_STRING) => {
-            let s = unsafe { jit_unbox::<String>(value_bits) };
+            let s = unsafe { unbox_string(value_bits) };
             s.chars().count()
         }
         Some(HK_JIT_OBJECT) => {
-            let obj = unsafe { jit_unbox::<HashMap<String, u64>>(value_bits) };
+            let obj = unsafe { unified_unbox::<HashMap<String, u64>>(value_bits) };
             obj.len()
         }
         Some(HK_COLUMN_REF) => 0,
-        _ => 0,
+        _ => {
+            // VM-format heap values (HashMap, DataTable, etc.)
+            if is_heap(value_bits) && !shape_value::tags::is_unified_heap(value_bits) {
+                let vw = unsafe { shape_value::ValueWord::clone_from_bits(value_bits) };
+                if let Some(hm) = vw.as_hashmap_data() {
+                    return box_number(hm.keys.len() as f64);
+                }
+                if let Some(s) = vw.as_str() {
+                    return box_number(s.chars().count() as f64);
+                }
+            }
+            0
+        }
     };
     box_number(len as f64)
 }

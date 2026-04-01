@@ -1,6 +1,6 @@
 // Heap allocation audit (PR-9 V8 Gap Closure):
 //   Category A (NaN-boxed returns): 2 sites
-//     jit_box(HK_STRING, ...) — toFixed, toString
+//     box_string(...) — toFixed, toString
 //   Category B (intermediate/consumed): 0 sites
 //   Category C (heap islands): 0 sites
 //!
@@ -25,11 +25,11 @@ pub fn call_number_method(receiver_bits: u64, method_name: &str, args: &[u64]) -
                 2
             };
             let formatted = format!("{:.prec$}", num, prec = precision);
-            jit_box(HK_STRING, formatted)
+            box_string(formatted)
         }
         "toString" | "to_string" => {
             let s = format!("{}", num);
-            jit_box(HK_STRING, s)
+            box_string(s)
         }
         _ => TAG_NULL,
     }

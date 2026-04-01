@@ -157,7 +157,7 @@ impl VirtualMachine {
     ///    arg count from the stack (backward compatibility with old bytecode).
     ///    Stack: `[receiver, arg1, ..., argN, method_name, arg_count]`
     #[inline]
-    pub(in crate::executor) fn op_call_method(
+    pub fn op_call_method(
         &mut self,
         instruction: &crate::bytecode::Instruction,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,

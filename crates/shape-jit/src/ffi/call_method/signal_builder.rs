@@ -17,7 +17,7 @@ pub fn call_signalbuilder_method(receiver_bits: u64, method_name: &str, args: &[
         if !is_heap_kind(receiver_bits, HK_JIT_SIGNAL_BUILDER) {
             return TAG_NULL;
         }
-        let builder = jit_unbox_mut::<JITSignalBuilder>(receiver_bits);
+        let builder = unified_unbox_mut::<JITSignalBuilder>(receiver_bits);
 
         match method_name {
             "where" => {
@@ -49,7 +49,7 @@ pub fn call_signalbuilder_method(receiver_bits: u64, method_name: &str, args: &[
                 }
                 let capture_obj = args[0];
                 if is_heap_kind(capture_obj, HK_JIT_OBJECT) {
-                    let obj = jit_unbox::<HashMap<String, u64>>(capture_obj);
+                    let obj = unified_unbox::<HashMap<String, u64>>(capture_obj);
                     for (key, &value) in obj.iter() {
                         builder.add_capture(key.clone(), value);
                     }

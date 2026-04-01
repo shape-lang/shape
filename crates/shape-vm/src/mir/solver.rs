@@ -389,6 +389,7 @@ pub fn extract_facts(
                 StatementKind::ClosureCapture {
                     closure_slot,
                     operands,
+                    ..
                 } => {
                     for loan_id in local_loans_from_operands(&slot_loans, operands) {
                         facts.closure_capture_loans.push((loan_id, stmt.span));
@@ -417,6 +418,7 @@ pub fn extract_facts(
                 StatementKind::ObjectStore {
                     container_slot,
                     operands,
+                    ..
                 } => {
                     for loan_id in local_loans_from_operands(&slot_loans, operands) {
                         facts.object_store_loans.push((loan_id, stmt.span));

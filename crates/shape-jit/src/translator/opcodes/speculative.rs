@@ -159,9 +159,9 @@ impl<'a, 'b> BytecodeToIR<'a, 'b> {
             self.deopt_if_false_with_id(is_typed_obj, deopt_id as u32);
         }
 
-        // Extract the heap pointer (payload)
-        let payload_mask_val = self.builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-        let heap_ptr = self.builder.ins().band(obj, payload_mask_val);
+        // Extract the heap pointer (masking out tag bits and unified heap flag)
+        let ptr_mask_val = self.builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
+        let heap_ptr = self.builder.ins().band(obj, ptr_mask_val);
 
         // Guard 2: check schema_id.
         //

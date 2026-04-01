@@ -1,6 +1,6 @@
 // Heap allocation audit (PR-9 V8 Gap Closure):
 //   Category A (NaN-boxed returns): 2 sites
-//     jit_box(HK_STRING, ...) — format, toString
+//     box_string(...) — format, toString
 //   Category B (intermediate/consumed): 0 sites
 //   Category C (heap islands): 0 sites
 //!
@@ -16,7 +16,7 @@ pub fn call_time_method(receiver_bits: u64, method_name: &str, _args: &[u64]) ->
     if !is_heap_kind(receiver_bits, HK_TIME) {
         return TAG_NULL;
     }
-    let timestamp = unsafe { *jit_unbox::<i64>(receiver_bits) };
+    let timestamp = unsafe { *unified_unbox::<i64>(receiver_bits) };
 
     // Try to create DateTime from timestamp (treating as seconds)
     let dt = match Utc.timestamp_opt(timestamp, 0) {
@@ -34,7 +34,7 @@ pub fn call_time_method(receiver_bits: u64, method_name: &str, _args: &[u64]) ->
         "format" => {
             // Default format
             let formatted = dt.format("%Y-%m-%d").to_string();
-            jit_box(HK_STRING, formatted)
+            box_string(formatted)
         }
         "year" => box_number(dt.year() as f64),
         "month" => box_number(dt.month() as f64),
@@ -49,7 +49,7 @@ pub fn call_time_method(receiver_bits: u64, method_name: &str, _args: &[u64]) ->
         "timestamp" | "unix" => box_number(timestamp as f64),
         "toString" | "to_string" => {
             let s = dt.to_rfc3339();
-            jit_box(HK_STRING, s)
+            box_string(s)
         }
         _ => TAG_NULL,
     }
