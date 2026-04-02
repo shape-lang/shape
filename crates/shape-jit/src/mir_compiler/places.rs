@@ -83,11 +83,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().select(in_bounds, index, zero)
     }
 
+    /// Convert an index value to i64, specializing for native types.
+    /// For native I32: sextend (1 instruction).
+    /// For NaN-boxed I64: extract payload (7 instructions via emit_index_to_i64).
+    fn index_to_i64(&mut self, index_val: Value) -> Value {
+        let idx_type = self.builder.func.dfg.value_type(index_val);
+        if idx_type == types::I32 {
+            // Native I32 index — just sign-extend to I64
+            self.builder.ins().sextend(types::I64, index_val)
+        } else if idx_type == types::I8 {
+            // Native I8 (bool used as index?) — zero-extend
+            self.builder.ins().uextend(types::I64, index_val)
+        } else {
+            // I64: could be NaN-boxed int or NaN-boxed float
+            self.emit_index_to_i64(index_val)
+        }
+    }
+
     /// Inline array element read: arr[index] → direct memory load.
     /// ~8 Cranelift instructions instead of an FFI call.
-    fn inline_array_get(&mut self, arr_boxed: Value, index_bits: Value) -> Value {
+    fn inline_array_get(&mut self, arr_boxed: Value, index_val: Value) -> Value {
         let (data_ptr, length) = self.emit_array_data_and_len(arr_boxed);
-        let idx_i64 = self.emit_index_to_i64(index_bits);
+        let idx_i64 = self.index_to_i64(index_val);
         let final_idx = self.normalize_index(idx_i64, length);
         let safe_idx = self.bounds_check(final_idx, length);
 
@@ -98,9 +115,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 
     /// Inline array element write: arr[index] = value → direct memory store.
-    fn inline_array_set(&mut self, arr_boxed: Value, index_bits: Value, val: Value) {
+    fn inline_array_set(&mut self, arr_boxed: Value, index_val: Value, val: Value) {
         let (data_ptr, length) = self.emit_array_data_and_len(arr_boxed);
-        let idx_i64 = self.emit_index_to_i64(index_bits);
+        let idx_i64 = self.index_to_i64(index_val);
         let final_idx = self.normalize_index(idx_i64, length);
         let safe_idx = self.bounds_check(final_idx, length);
 
@@ -152,10 +169,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             Place::Index(base, operand) => {
                 let raw_base = self.read_place(base)?;
-                // Inline array access operates on NaN-boxed values
+                // Array base must be NaN-boxed (heap pointer)
                 let base_val = self.ensure_nanboxed(raw_base);
-                let raw_idx = self.compile_operand_raw(operand)?;
-                let index_val = self.ensure_nanboxed(raw_idx);
+                // Index can stay native — index_to_i64 handles all types
+                let index_val = self.compile_operand_raw(operand)?;
                 Ok(self.inline_array_get(base_val, index_val))
             }
             Place::Deref(inner) => {
@@ -201,8 +218,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Place::Index(base, operand) => {
                 let raw_base = self.read_place(base)?;
                 let base_val = self.ensure_nanboxed(raw_base);
-                let raw_idx = self.compile_operand_raw(operand)?;
-                let index_val = self.ensure_nanboxed(raw_idx);
+                let index_val = self.compile_operand_raw(operand)?;
                 let boxed_val = self.ensure_nanboxed(val);
                 self.inline_array_set(base_val, index_val, boxed_val);
                 Ok(())

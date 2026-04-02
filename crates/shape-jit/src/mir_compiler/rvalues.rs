@@ -20,6 +20,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Rvalue::Use(operand) => self.compile_operand(operand),
 
             Rvalue::BinaryOp(op, lhs, rhs) => {
+                // Check source operand kinds BEFORE compiling (needed for I64 disambiguation).
+                let lhs_kind = self.operand_slot_kind(lhs);
+                let rhs_kind = self.operand_slot_kind(rhs);
+
                 let l = self.compile_operand(lhs)?;
                 let r = self.compile_operand(rhs)?;
 
@@ -45,6 +49,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 } else if l_type == types::I8 && r_type == types::I8 {
                     // Both operands are native I8 (Bool) — inline bool ops.
                     self.compile_binop_bool(op, l, r)
+                } else if self.both_int64(lhs_kind, rhs_kind) {
+                    // Both operands are Int64 slots (NaN-boxed ints) — inline i64 arithmetic.
+                    // Extract 48-bit payload, operate natively, re-box.
+                    self.compile_binop_int64(op, l, r)
                 } else {
                     // Mixed or unknown types — use FFI generic path.
                     self.compile_binop(op, l, r)
@@ -107,6 +115,48 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(arr)
             }
         }
+    }
+
+    // ── Operand kind helpers ───────────────────────────────────────
+
+    /// Get the SlotKind of an operand's source (before compilation).
+    fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::SlotKind> {
+        match operand {
+            Operand::Constant(MirConstant::Int(_)) => {
+                Some(shape_vm::type_tracking::SlotKind::Int64)
+            }
+            Operand::Constant(MirConstant::Float(_)) => {
+                Some(shape_vm::type_tracking::SlotKind::Float64)
+            }
+            Operand::Constant(MirConstant::Bool(_)) => {
+                Some(shape_vm::type_tracking::SlotKind::Bool)
+            }
+            Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
+                let slot = p.root_local();
+                let kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
+                if kind != shape_vm::type_tracking::SlotKind::Unknown {
+                    Some(kind)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if both operand kinds are Int64 (NaN-boxed integers suitable for inline i64 ops).
+    fn both_int64(
+        &self,
+        lhs: Option<shape_vm::type_tracking::SlotKind>,
+        rhs: Option<shape_vm::type_tracking::SlotKind>,
+    ) -> bool {
+        matches!(
+            (lhs, rhs),
+            (
+                Some(shape_vm::type_tracking::SlotKind::Int64),
+                Some(shape_vm::type_tracking::SlotKind::Int64)
+            )
+        )
     }
 
     // ── Inline Float64 arithmetic and comparisons ──────────────────
@@ -213,6 +263,77 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         };
         // icmp returns I8 (native bool)
         Ok(self.builder.ins().icmp(cc, lhs, rhs))
+    }
+
+    // ── Inline Int64 arithmetic (NaN-boxed ints) ──────────────────
+
+    /// Compile a binary op on proven Int64 operands — extract payload, operate, re-box.
+    /// Eliminates FFI call overhead (~50-100ns → ~5ns per operation).
+    fn compile_binop_int64(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        // Extract 48-bit signed int payload: shift left 16, arithmetic shift right 16
+        let l = self.builder.ins().ishl_imm(lhs, 16);
+        let l = self.builder.ins().sshr_imm(l, 16);
+        let r = self.builder.ins().ishl_imm(rhs, 16);
+        let r = self.builder.ins().sshr_imm(r, 16);
+
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                let result = match op {
+                    BinOp::Add => self.builder.ins().iadd(l, r),
+                    BinOp::Sub => self.builder.ins().isub(l, r),
+                    BinOp::Mul => self.builder.ins().imul(l, r),
+                    BinOp::Div => {
+                        let zero = self.builder.ins().iconst(types::I64, 0);
+                        let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
+                        self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                        self.builder.ins().sdiv(l, r)
+                    }
+                    BinOp::Mod => {
+                        let zero = self.builder.ins().iconst(types::I64, 0);
+                        let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
+                        self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                        self.builder.ins().srem(l, r)
+                    }
+                    _ => unreachable!(),
+                };
+                // Re-box: mask to 48-bit payload, apply INT tag
+                let payload_mask = self
+                    .builder
+                    .ins()
+                    .iconst(types::I64, shape_value::tags::PAYLOAD_MASK as i64);
+                let payload = self.builder.ins().band(result, payload_mask);
+                let int_tag = self.builder.ins().iconst(
+                    types::I64,
+                    (shape_value::tags::TAG_BASE
+                        | (shape_value::tags::TAG_INT << shape_value::tags::TAG_SHIFT))
+                        as i64,
+                );
+                Ok(self.builder.ins().bor(int_tag, payload))
+            }
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                let cc = match op {
+                    BinOp::Eq => IntCC::Equal,
+                    BinOp::Ne => IntCC::NotEqual,
+                    BinOp::Lt => IntCC::SignedLessThan,
+                    BinOp::Le => IntCC::SignedLessThanOrEqual,
+                    BinOp::Gt => IntCC::SignedGreaterThan,
+                    BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+                    _ => unreachable!(),
+                };
+                let cmp = self.builder.ins().icmp(cc, l, r);
+                // icmp returns I8 (native bool)
+                Ok(cmp)
+            }
+            _ => {
+                // Logical ops — use FFI path
+                self.compile_binop(op, lhs, rhs)
+            }
+        }
     }
 
     // ── Native Bool operations ──────────────────────────────────────
