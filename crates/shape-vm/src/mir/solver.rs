@@ -1807,6 +1807,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -1856,6 +1857,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -1917,6 +1919,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -1967,6 +1970,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2028,6 +2032,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2081,6 +2086,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2125,6 +2131,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2198,6 +2205,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2253,6 +2261,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2301,6 +2310,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::Copy, LocalTypeInfo::Copy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2481,6 +2491,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -2557,6 +2568,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2621,6 +2633,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -2718,6 +2731,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();

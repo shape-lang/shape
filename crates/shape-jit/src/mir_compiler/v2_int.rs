@@ -42,8 +42,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             _ => return Err(format!("unsupported i32 binop: {:?}", op)),
         };
 
-        // Sign-extend back to i64 for NaN-boxed storage
-        Ok(self.builder.ins().sextend(types::I64, result))
+        // Sign-extend back to i64, then NaN-box as integer.
+        // NaN-boxed int = TAG_BASE | (TAG_INT << TAG_SHIFT) | (val & PAYLOAD_MASK)
+        let extended = self.builder.ins().sextend(types::I64, result);
+        let payload_mask = self.builder.ins().iconst(types::I64, shape_value::tags::PAYLOAD_MASK as i64);
+        let payload = self.builder.ins().band(extended, payload_mask);
+        let int_tag = self.builder.ins().iconst(
+            types::I64,
+            (shape_value::tags::TAG_BASE | (shape_value::tags::TAG_INT << shape_value::tags::TAG_SHIFT)) as i64,
+        );
+        Ok(self.builder.ins().bor(int_tag, payload))
     }
 
     /// Compile i32 comparison — returns NaN-boxed boolean.

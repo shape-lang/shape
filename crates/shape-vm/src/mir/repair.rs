@@ -474,6 +474,7 @@ mod tests {
                 LocalTypeInfo::NonCopy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[error.clone()]);
@@ -507,6 +508,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[]);
@@ -533,6 +535,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[]);
@@ -561,6 +564,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         assert!(analysis.errors[0].repairs.is_empty());

@@ -285,6 +285,21 @@ impl JITCompiler {
             generic_neq: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_generic_neq"], builder.func),
+            generic_lt: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_generic_lt"], builder.func),
+            generic_le: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_generic_le"], builder.func),
+            generic_gt: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_generic_gt"], builder.func),
+            generic_ge: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_generic_ge"], builder.func),
+            generic_mod: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_generic_mod"], builder.func),
             series_shift: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_series_shift"], builder.func),
@@ -508,6 +523,9 @@ impl JITCompiler {
             typed_object_alloc: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_typed_object_alloc"], builder.func),
+            typed_object_get_field: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_typed_object_get_field"], builder.func),
             typed_object_set_field: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_typed_object_set_field"], builder.func),

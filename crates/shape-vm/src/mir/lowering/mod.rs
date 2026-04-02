@@ -489,6 +489,7 @@ impl MirBuilder {
                 param_reference_kinds: self.param_reference_kinds,
                 local_types,
                 span: self.span,
+                field_name_table: field_names.clone(),
             },
             had_fallbacks,
             fallback_spans,

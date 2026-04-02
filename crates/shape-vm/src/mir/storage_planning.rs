@@ -460,6 +460,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: (0..num_locals).map(|_| LocalTypeInfo::Unknown).collect(),
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         }
     }
 

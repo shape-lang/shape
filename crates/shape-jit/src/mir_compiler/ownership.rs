@@ -25,19 +25,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let val = self.read_place(place)?;
                 {
                     let slot = place.root_local();
-                    let type_info = self
-                        .local_types
-                        .get(slot.0 as usize)
-                        .cloned()
-                        .unwrap_or(LocalTypeInfo::Unknown);
-                    if super::types::is_heap_type(&type_info) {
-                        // arc_retain increments the Arc refcount.
-                        // For non-heap values, arc_retain is a no-op.
-                        self.builder.ins().call(self.ffi.arc_retain, &[val]);
-                    } else if matches!(type_info, LocalTypeInfo::Unknown) {
-                        // Unknown type: conservatively retain (arc_retain handles
-                        // non-heap values as no-ops via tag classification).
-                        self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                    let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
+                    // Native primitive types (Float64, Int32, Bool) never need refcounting.
+                    if !super::types::is_native_slot(slot_kind) {
+                        let type_info = self
+                            .local_types
+                            .get(slot.0 as usize)
+                            .cloned()
+                            .unwrap_or(LocalTypeInfo::Unknown);
+                        if super::types::is_heap_type(&type_info) {
+                            self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                        } else if matches!(type_info, LocalTypeInfo::Unknown) {
+                            self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                        }
                     }
                 }
                 Ok(val)
@@ -84,13 +84,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64))
             }
             MirConstant::StringId(id) => {
-                // String constants are heap-allocated. Use the FFI to materialize.
-                // For now, create a tagged string pointer via the string table.
-                // This requires runtime support — emit a call to jit_intern_string.
-                let str_id = self.builder.ins().iconst(types::I64, *id as i64);
-                // Use generic_builtin for string materialization
-                // TODO: Direct string constant support
-                Ok(str_id)
+                // Look up the string from the string table and NaN-box it at compile time.
+                let idx = *id as usize;
+                if idx < self.strings.len() {
+                    let s = self.strings[idx].clone();
+                    let boxed = crate::nan_boxing::box_string(s);
+                    Ok(self.builder.ins().iconst(types::I64, boxed as i64))
+                } else {
+                    Ok(self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64))
+                }
+            }
+            MirConstant::Str(s) => {
+                // String literal carried in MIR — NaN-box at compile time.
+                let boxed = crate::nan_boxing::box_string(s.clone());
+                Ok(self.builder.ins().iconst(types::I64, boxed as i64))
             }
             MirConstant::Function(name) => {
                 // Resolve function name to index, NaN-box as function ref
@@ -102,10 +112,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
             }
             MirConstant::Method(name) => {
-                // Method name for dispatch — encoded as a string ID.
-                let _ = name;
-                let zero = self.builder.ins().iconst(types::I64, 0);
-                Ok(zero)
+                // Method name for dispatch — NaN-box the string at compile time.
+                let boxed = crate::nan_boxing::box_string(name.clone());
+                Ok(self.builder.ins().iconst(types::I64, boxed as i64))
             }
             MirConstant::ClosurePlaceholder => {
                 // Should have been patched to Function(name) during bytecode compilation.
@@ -117,10 +126,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Emit Drop for a local: release refcount if it's a heap type.
     pub(crate) fn emit_drop(&mut self, place: &Place) -> Result<(), String> {
-        let val = self.read_place(place)?;
+        let slot = place.root_local();
+        let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
 
-        {
-            let slot = place.root_local();
+        // Native primitive types never need refcounting.
+        if !super::types::is_native_slot(slot_kind) {
+            let val = self.read_place(place)?;
             let type_info = self
                 .local_types
                 .get(slot.0 as usize)
@@ -128,13 +139,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 .unwrap_or(LocalTypeInfo::Unknown);
 
             if super::types::is_heap_type(&type_info) {
-                // Known heap type: always release.
                 self.builder.ins().call(self.ffi.arc_release, &[val]);
             } else if matches!(type_info, LocalTypeInfo::Unknown) {
-                // Unknown type: arc_release handles non-heap values as no-ops.
                 self.builder.ins().call(self.ffi.arc_release, &[val]);
             }
-            // Copy types: no-op (no refcount to manage).
         }
 
         // Null the slot to prevent use-after-drop.
@@ -150,6 +158,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ) -> Result<(), String> {
         let slot = place.root_local();
         if matches!(place, Place::Local(_)) {
+            let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
+            // Native primitive types never need refcounting.
+            if super::types::is_native_slot(slot_kind) {
+                return Ok(());
+            }
+
             let type_info = self
                 .local_types
                 .get(slot.0 as usize)

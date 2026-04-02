@@ -426,50 +426,22 @@ impl BytecodeCompiler {
                 if !self.closure_function_ids.is_empty() {
                     let mut closure_idx = 0;
                     let closure_ids = self.closure_function_ids.clone();
+                    let mut has_capture = false;
                     for block in &mut mir.blocks {
                         for stmt in &mut block.statements {
-                            // Check for ClosurePlaceholder in Assign
-                            let is_placeholder = matches!(
-                                &stmt.kind,
-                                crate::mir::types::StatementKind::Assign(
-                                    _,
-                                    crate::mir::types::Rvalue::Use(
-                                        crate::mir::types::Operand::Constant(
-                                            crate::mir::types::MirConstant::ClosurePlaceholder,
-                                        ),
-                                    ),
-                                )
-                            );
+                            let is_placeholder = matches!(&stmt.kind, crate::mir::types::StatementKind::Assign(_, crate::mir::types::Rvalue::Use(crate::mir::types::Operand::Constant(crate::mir::types::MirConstant::ClosurePlaceholder))));
                             if is_placeholder {
-                                if closure_idx < closure_ids.len() {
+                                if has_capture { stmt.kind = crate::mir::types::StatementKind::Nop; has_capture = false; }
+                                else if closure_idx < closure_ids.len() {
                                     let (ref name, _) = closure_ids[closure_idx];
-                                    stmt.kind = crate::mir::types::StatementKind::Assign(
-                                        crate::mir::types::Place::Local(
-                                            // Extract the place from the current statement
-                                            match &stmt.kind {
-                                                crate::mir::types::StatementKind::Assign(p, _) => p.root_local(),
-                                                _ => unreachable!(),
-                                            }
-                                        ),
-                                        crate::mir::types::Rvalue::Use(
-                                            crate::mir::types::Operand::Constant(
-                                                crate::mir::types::MirConstant::Function(name.clone()),
-                                            ),
-                                        ),
-                                    );
+                                    let slot = match &stmt.kind { crate::mir::types::StatementKind::Assign(p, _) => p.root_local(), _ => unreachable!() };
+                                    stmt.kind = crate::mir::types::StatementKind::Assign(crate::mir::types::Place::Local(slot), crate::mir::types::Rvalue::Use(crate::mir::types::Operand::Constant(crate::mir::types::MirConstant::Function(name.clone()))));
                                     closure_idx += 1;
                                 }
                                 continue;
                             }
-                            // Patch ClosureCapture with function_id
-                            if let crate::mir::types::StatementKind::ClosureCapture {
-                                function_id,
-                                ..
-                            } = &mut stmt.kind {
-                                if closure_idx < closure_ids.len() {
-                                    let (_, idx) = closure_ids[closure_idx];
-                                    *function_id = Some(idx);
-                                }
+                            if let crate::mir::types::StatementKind::ClosureCapture { function_id, .. } = &mut stmt.kind {
+                                if closure_idx < closure_ids.len() { let (_, idx) = closure_ids[closure_idx]; *function_id = Some(idx); closure_idx += 1; has_capture = true; }
                             }
                         }
                     }

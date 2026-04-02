@@ -30,6 +30,18 @@ impl JITCompiler {
         name: &str,
         program: &BytecodeProgram,
     ) -> Result<JittedStrategyFn, String> {
+        // MirToIR is the ONLY compilation path.
+        let mir_data = program.top_level_mir.as_ref().ok_or_else(|| {
+            "MirToIR: top-level code has no MIR data".to_string()
+        })?;
+        let preflight = crate::mir_compiler::preflight(mir_data);
+        if !preflight.can_compile {
+            return Err(format!(
+                "MirToIR: top-level preflight failed: {}",
+                preflight.blockers.join("; ")
+            ));
+        }
+
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I32));
@@ -54,17 +66,35 @@ impl JITCompiler {
 
             let ffi = self.build_ffi_refs(&mut builder);
 
-            let mut compiler = BytecodeToIR::new(
-                &mut builder,
-                program,
-                ctx_ptr,
-                ffi,
-                HashMap::new(),
-                HashMap::new(),
-            );
-            let result = compiler.compile()?;
-
-            builder.ins().return_(&[result]);
+            {
+                let slot_kinds = program
+                    .top_level_frame
+                    .as_ref()
+                    .map(|fd| fd.slots.clone())
+                    .unwrap_or_default();
+                let function_indices: std::collections::HashMap<String, u16> = program
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.name.clone(), i as u16))
+                    .collect();
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new(
+                    &mut builder,
+                    ctx_ptr,
+                    ffi,
+                    mir_data,
+                    slot_kinds,
+                    &program.strings,
+                    entry_block,
+                    &function_indices,
+                    HashMap::new(),
+                    HashMap::new(),
+                );
+                mir_compiler.create_blocks();
+                mir_compiler.declare_locals();
+                mir_compiler.initialize_locals();
+                mir_compiler.compile_body()?;
+            }
             builder.finalize();
         }
 
@@ -103,10 +133,17 @@ impl JITCompiler {
         let mut ctx = self.module.make_context();
         ctx.func.signature = sig;
 
-        // Check if top-level MIR is available and passes preflight.
-        let use_mir = program.top_level_mir.as_ref().is_some_and(|md| {
-            crate::mir_compiler::preflight(md).can_compile
-        });
+        // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
+        let mir_data = program.top_level_mir.as_ref().ok_or_else(|| {
+            "MirToIR: top-level code has no MIR data".to_string()
+        })?;
+        let preflight = crate::mir_compiler::preflight(mir_data);
+        if !preflight.can_compile {
+            return Err(format!(
+                "MirToIR: top-level preflight failed: {}",
+                preflight.blockers.join("; ")
+            ));
+        }
 
         let mut func_builder_ctx = FunctionBuilderContext::new();
         {
@@ -126,14 +163,12 @@ impl JITCompiler {
 
             let ffi = self.build_ffi_refs(&mut builder);
 
-            if use_mir {
-                let mir_data = program.top_level_mir.as_ref().unwrap();
+            {
                 let slot_kinds = program
                     .top_level_frame
                     .as_ref()
                     .map(|fd| fd.slots.clone())
                     .unwrap_or_default();
-                // Build function name -> index map for Call terminator resolution
                 let function_indices: std::collections::HashMap<String, u16> = program
                     .functions
                     .iter()
@@ -149,46 +184,16 @@ impl JITCompiler {
                     &program.strings,
                     entry_block,
                     &function_indices,
+                    user_func_refs.clone(),
+                    user_func_arities.clone(),
                 );
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
-
-                // Initialize all locals to TAG_NULL
-                let null_val = mir_compiler.builder.ins().iconst(
-                    cranelift::prelude::types::I64,
-                    crate::nan_boxing::TAG_NULL as i64,
-                );
-                for slot_idx in 0..mir_compiler.mir.num_locals {
-                    let slot = shape_vm::mir::types::SlotId(slot_idx);
-                    if let Some(&var) = mir_compiler.locals.get(&slot) {
-                        mir_compiler.builder.def_var(var, null_val);
-                    }
-                }
-
+                mir_compiler.initialize_locals();
                 mir_compiler.compile_body()?;
                 if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                     eprintln!("[jit-mir] Compiled top-level code via MirToIR");
                 }
-            } else {
-                let mut compiler = BytecodeToIR::new(
-                    &mut builder,
-                    program,
-                    ctx_ptr,
-                    ffi,
-                    user_func_refs,
-                    user_func_arities.clone(),
-                );
-
-                // Set skip ranges so the main function compilation ignores function
-                // body instructions (they are compiled separately via
-                // compile_function_with_user_funcs). Without this, LoopStart/LoopEnd
-                // and Jump targets inside function bodies create blocks in the main
-                // function context, causing dead code compilation and stack corruption.
-                compiler.skip_ranges = Self::compute_skip_ranges(program);
-
-                let result = compiler.compile()?;
-
-                builder.ins().return_(&[result]);
             }
             builder.finalize();
         }

@@ -37,16 +37,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     format!("MirToIR: unknown false block {}", false_bb)
                 })?;
 
-                // NaN-boxed booleans: TAG_TRUE vs anything else.
-                // Compare against TAG_TRUE to get a boolean condition.
-                let tag_true = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, crate::nan_boxing::TAG_BOOL_TRUE as i64);
-                let is_true =
+                // Check if the condition is a native I8 bool or NaN-boxed I64.
+                let cond_type = self.builder.func.dfg.value_type(cond_val);
+                let is_true = if cond_type == types::I8 {
+                    // Native bool: I8 value, 0 = false, nonzero = true.
+                    cond_val
+                } else {
+                    // NaN-boxed boolean: compare against TAG_BOOL_TRUE.
+                    let tag_true = self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, crate::nan_boxing::TAG_BOOL_TRUE as i64);
                     self.builder
                         .ins()
-                        .icmp(IntCC::Equal, cond_val, tag_true);
+                        .icmp(IntCC::Equal, cond_val, tag_true)
+                };
 
                 self.builder
                     .ins()
@@ -71,36 +76,81 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     _ => None,
                 };
 
-                // 1. Compile and store each argument to ctx.stack[stack_ptr + i]
-                let stack_base_offset = crate::context::STACK_OFFSET as i32;
-                let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
+                // Check if we have a direct FuncRef for the callee.
+                let func_ref = func_id.and_then(|fid| self.user_func_refs.get(&fid).copied());
 
-                // Load current stack_ptr
-                let old_sp = self.builder.ins().load(
-                    types::I64,
-                    MemFlags::new(),
-                    self.ctx_ptr,
-                    sp_offset,
-                );
+                let result = if let Some(func_ref) = func_ref {
+                    // ── DIRECT CALL PATH ──────────────────────────────────
+                    // Compile args as SSA values and pass as native Cranelift params.
+                    // ABI: fn(ctx_ptr, arg0, arg1, ..., argN) -> i32
+                    // The callee stores its return value to ctx.stack[0].
+                    // Args are NaN-boxed since the callee ABI uses I64 params.
+                    let mut arg_vals = Vec::with_capacity(args.len() + 1);
+                    arg_vals.push(self.ctx_ptr);
+                    for arg in args.iter() {
+                        let val = self.compile_operand(arg)?;
+                        let boxed = self.ensure_nanboxed(val);
+                        arg_vals.push(boxed);
+                    }
 
-                for (i, arg) in args.iter().enumerate() {
-                    let val = self.compile_operand(arg)?;
-                    // ctx.stack[stack_ptr + i]: byte offset = STACK_OFFSET + (sp + i) * 8
-                    let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
-                    let byte_off = self.builder.ins().ishl_imm(slot_idx, 3); // * 8
-                    let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
-                    // Store to ctx + abs_off
-                    let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
-                    self.builder.ins().store(MemFlags::new(), val, store_addr, 0);
-                }
+                    let inst = self.builder.ins().call(func_ref, &arg_vals);
+                    let signal = self.builder.inst_results(inst)[0];
 
-                // 2. Update ctx.stack_ptr += arg_count
-                let new_sp = self.builder.ins().iadd_imm(old_sp, args.len() as i64);
-                self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+                    // Deopt: if signal < 0, the callee encountered an error.
+                    // Propagate by returning the negative signal immediately.
+                    let zero = self.builder.ins().iconst(types::I32, 0);
+                    let is_error =
+                        self.builder
+                            .ins()
+                            .icmp(IntCC::SignedLessThan, signal, zero);
+                    let deopt_block = self.builder.create_block();
+                    let continue_block = self.builder.create_block();
+                    self.builder
+                        .ins()
+                        .brif(is_error, deopt_block, &[], continue_block, &[]);
 
-                // 3. Call the function
-                let result = if let Some(fid) = func_id {
-                    // Direct call: jit_call_function(ctx, function_id, null, arg_count)
+                    // Deopt block: return the error signal.
+                    self.builder.switch_to_block(deopt_block);
+                    self.builder.seal_block(deopt_block);
+                    self.builder.ins().return_(&[signal]);
+
+                    // Continue block: read return value from ctx.stack[0].
+                    self.builder.switch_to_block(continue_block);
+                    self.builder.seal_block(continue_block);
+                    let stack_offset = crate::context::STACK_OFFSET as i32;
+                    self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        self.ctx_ptr,
+                        stack_offset,
+                    )
+                } else if func_id.is_some() {
+                    // ── FFI CALL PATH (known function, no FuncRef) ────────
+                    // Stage args to ctx.stack (NaN-boxed), then call jit_call_function.
+                    let fid = func_id.unwrap();
+                    let stack_base_offset = crate::context::STACK_OFFSET as i32;
+                    let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
+
+                    let old_sp = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        self.ctx_ptr,
+                        sp_offset,
+                    );
+
+                    for (i, arg) in args.iter().enumerate() {
+                        let val = self.compile_operand(arg)?;
+                        let boxed = self.ensure_nanboxed(val);
+                        let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
+                        let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
+                        let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
+                        let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
+                        self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
+                    }
+
+                    let new_sp = self.builder.ins().iadd_imm(old_sp, args.len() as i64);
+                    self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+
                     let func_id_val = self.builder.ins().iconst(types::I16, fid as i64);
                     let null_ptr = self.builder.ins().iconst(types::I64, 0);
                     let argc = self.builder.ins().iconst(types::I64, args.len() as i64);
@@ -110,17 +160,52 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     );
                     self.builder.inst_results(inst)[0]
                 } else {
-                    // Indirect call: push callee value onto stack, then call_value
+                    // ── INDIRECT CALL (closures/first-class functions) ────
+                    let stack_base_offset = crate::context::STACK_OFFSET as i32;
+                    let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
+
+                    let old_sp = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        self.ctx_ptr,
+                        sp_offset,
+                    );
+
+                    // Push callee onto stack first (NaN-boxed)
                     let callee_val = self.compile_operand(func)?;
-                    // Store callee at stack[new_sp] (after the args)
-                    let callee_slot = self.builder.ins().ishl_imm(new_sp, 3);
-                    let callee_off = self.builder.ins().iadd_imm(callee_slot, stack_base_offset as i64);
-                    let callee_addr = self.builder.ins().iadd(self.ctx_ptr, callee_off);
-                    self.builder.ins().store(MemFlags::new(), callee_val, callee_addr, 0);
-                    // Update stack_ptr to include callee
-                    let sp_with_callee = self.builder.ins().iadd_imm(new_sp, 1);
-                    self.builder.ins().store(MemFlags::new(), sp_with_callee, self.ctx_ptr, sp_offset);
-                    // call_value reads callee + args from stack
+                    let callee_boxed = self.ensure_nanboxed(callee_val);
+                    let callee_slot_idx = old_sp;
+                    let callee_byte_off = self.builder.ins().ishl_imm(callee_slot_idx, 3);
+                    let callee_abs_off = self.builder.ins().iadd_imm(callee_byte_off, stack_base_offset as i64);
+                    let callee_addr = self.builder.ins().iadd(self.ctx_ptr, callee_abs_off);
+                    self.builder.ins().store(MemFlags::new(), callee_boxed, callee_addr, 0);
+
+                    // Push args after callee (NaN-boxed)
+                    for (i, arg) in args.iter().enumerate() {
+                        let val = self.compile_operand(arg)?;
+                        let boxed = self.ensure_nanboxed(val);
+                        let slot_idx = self.builder.ins().iadd_imm(old_sp, (i + 1) as i64);
+                        let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
+                        let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
+                        let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
+                        self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
+                    }
+
+                    // Push arg_count as NaN-boxed number
+                    let total_items = 1 + args.len() + 1; // callee + args + arg_count
+                    let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (1 + args.len()) as i64);
+                    let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
+                    let argc_abs_off = self.builder.ins().iadd_imm(argc_byte_off, stack_base_offset as i64);
+                    let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
+                    let argc_val = self.builder.ins().iconst(types::I64,
+                        crate::nan_boxing::box_number(args.len() as f64) as i64);
+                    self.builder.ins().store(MemFlags::new(), argc_val, argc_addr, 0);
+
+                    // Update stack_ptr
+                    let new_sp = self.builder.ins().iadd_imm(old_sp, total_items as i64);
+                    self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+
+                    // jit_call_value reads callee + args + arg_count from stack
                     let inst = self.builder.ins().call(
                         self.ffi.call_value,
                         &[self.ctx_ptr],
@@ -150,14 +235,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 //
                 // The return value is in the dedicated return slot (slot 0 by convention).
                 // Write it to ctx.stack[0] for the JIT calling convention.
+                // ctx.stack stores NaN-boxed I64 values, so box if native-typed.
                 let return_slot = SlotId(0);
                 if let Some(&var) = self.locals.get(&return_slot) {
                     let ret_val = self.builder.use_var(var);
+                    // Ensure the return value is NaN-boxed I64 for ctx.stack.
+                    let boxed = self.ensure_nanboxed(ret_val);
                     // Store to ctx.stack[0]
                     let stack_offset = crate::context::STACK_OFFSET as i32;
                     self.builder.ins().store(
                         MemFlags::new(),
-                        ret_val,
+                        boxed,
                         self.ctx_ptr,
                         stack_offset,
                     );

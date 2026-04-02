@@ -459,21 +459,29 @@ impl JITCompiler {
                 function_blob_hashes: Vec::new(),
             };
 
-            // Try MIR compilation when MIR data is available and preflight passes.
-            // MirToIR is the primary JIT path — no env var gate.
-            let use_mir = func.mir_data.as_ref().is_some_and(|md| {
-                crate::mir_compiler::preflight(md).can_compile
-            });
+            // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
+            // All functions must have valid MIR data. If not, report the error.
+            let mir_data = func.mir_data.as_ref().ok_or_else(|| {
+                format!("MirToIR: function '{}' has no MIR data (bytecode-only functions are no longer supported)", func.name)
+            })?;
+            let preflight = crate::mir_compiler::preflight(mir_data);
+            if !preflight.can_compile {
+                return Err(format!(
+                    "MirToIR: function '{}' failed preflight: {}",
+                    func.name,
+                    preflight.blockers.join("; ")
+                ));
+            }
 
-            if use_mir {
-                let mir_data = func.mir_data.as_ref().unwrap();
+            {
                 let slot_kinds = func
                     .frame_descriptor
                     .as_ref()
                     .map(|fd| fd.slots.clone())
                     .unwrap_or_default();
-                // Build function name → index map for Call terminator resolution
-                let function_indices: std::collections::HashMap<String, u16> = sub_program
+                // Build function name → index map for Call terminator resolution.
+                // Use the original program's functions (sub_program has empty functions list).
+                let function_indices: std::collections::HashMap<String, u16> = program
                     .functions
                     .iter()
                     .enumerate()
@@ -488,6 +496,8 @@ impl JITCompiler {
                     &sub_program.strings,
                     entry_block,
                     &function_indices,
+                    user_func_refs.clone(),
+                    user_func_arities.clone(),
                 );
                 // Set up blocks and locals, then store function parameters.
                 mir_compiler.create_blocks();
@@ -500,26 +510,26 @@ impl JITCompiler {
                 let entry_params = mir_compiler.builder.block_params(entry_block).to_vec();
                 let param_slots = &mir_data.mir.param_slots;
 
-                // Initialize ALL locals to TAG_NULL first
-                let null_val = mir_compiler.builder.ins().iconst(
-                    cranelift::prelude::types::I64,
-                    crate::nan_boxing::TAG_NULL as i64,
-                );
-                for slot_idx in 0..mir_compiler.mir.num_locals {
-                    let slot = shape_vm::mir::types::SlotId(slot_idx);
-                    if let Some(&var) = mir_compiler.locals.get(&slot) {
-                        mir_compiler.builder.def_var(var, null_val);
-                    }
-                }
+                // Initialize ALL locals with type-appropriate defaults.
+                mir_compiler.initialize_locals();
 
-                // Overwrite param slots with actual function arguments
-                // Skip captures_count entries (closures) to get to user params
-                let captures = func.captures_count as usize;
+                // Store function parameters (including captures) to MIR local variables.
+                // MIR param_slots includes capture slots followed by user param slots.
+                // Entry block params: [ctx_ptr, capture0..N, param0..M]
+                // param_slots aligns 1:1 with captures+params, so native_idx = param_idx + 1.
+                // Entry params are I64 (NaN-boxed); convert to native type if needed.
                 for (param_idx, &mir_slot) in param_slots.iter().enumerate() {
-                    let native_idx = captures + param_idx + 1; // +1 for ctx_ptr
+                    let native_idx = param_idx + 1; // +1 for ctx_ptr
                     if native_idx < entry_params.len() {
                         if let Some(&var) = mir_compiler.locals.get(&mir_slot) {
-                            mir_compiler.builder.def_var(var, entry_params[native_idx]);
+                            let kind = crate::mir_compiler::types::slot_kind_for_local(
+                                &mir_compiler.slot_kinds,
+                                mir_slot.0,
+                            );
+                            let param_val = entry_params[native_idx];
+                            let converted =
+                                mir_compiler.unbox_from_nanboxed(param_val, kind);
+                            mir_compiler.builder.def_var(var, converted);
                         }
                     }
                 }
@@ -527,28 +537,6 @@ impl JITCompiler {
                 if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                     eprintln!("[jit-mir] Compiled function '{}' via MirToIR", func.name);
                 }
-            } else {
-                let mut compiler = BytecodeToIR::new(
-                    &mut builder,
-                    &sub_program,
-                    ctx_ptr,
-                    ffi,
-                    user_func_refs,
-                    user_func_arities.clone(),
-                );
-                compiler.numeric_param_hints =
-                    collect_numeric_param_hints(&sub_program, func.arity, &func.ref_params);
-
-                let entry_params = compiler.builder.block_params(entry_block).to_vec();
-                let total_native_params = (func.captures_count + func.arity) as usize;
-                for arg_idx in 0..total_native_params {
-                    let arg_val = entry_params[arg_idx + 1]; // +1 for ctx_ptr
-                    let var = compiler.get_or_create_local(arg_idx as u16);
-                    compiler.builder.def_var(var, arg_val);
-                }
-
-                let result = compiler.compile()?;
-                builder.ins().return_(&[result]);
             }
             builder.finalize();
         }
@@ -562,7 +550,11 @@ impl JITCompiler {
         Ok(())
     }
 
-    /// Compile a single function for Tier 1 whole-function JIT.
+    /// Compile a single function for Tier 1 whole-function JIT (legacy BytecodeToIR path).
+    ///
+    /// This path uses BytecodeToIR because it requires feedback-vector-guided
+    /// speculation and deopt infrastructure that MirToIR doesn't support yet.
+    /// The main compilation path (compile_function_with_user_funcs) uses MirToIR.
     ///
     /// ABI matches JitFnPtr: `extern "C" fn(*mut u8, *const u8) -> u64`
     /// - param 0 (i64): ctx_ptr — pointer to a JITContext-shaped buffer

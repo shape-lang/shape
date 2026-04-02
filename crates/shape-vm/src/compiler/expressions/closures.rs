@@ -169,7 +169,9 @@ impl BytecodeCompiler {
         }
 
         let jump_over = self.emit_jump(OpCode::Jump, 0);
+        let saved_closure_ids = self.closure_function_ids.clone();
         self.compile_function(&closure_def)?;
+        self.closure_function_ids = saved_closure_ids;
         self.patch_jump(jump_over);
 
         // Restore mutable_closure_captures

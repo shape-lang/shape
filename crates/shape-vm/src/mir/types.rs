@@ -200,8 +200,10 @@ pub enum MirConstant {
     Int(i64),
     Bool(bool),
     None,
-    /// String interned index
+    /// String interned index (legacy — prefer Str for new code)
     StringId(u32),
+    /// String literal value (carried through MIR for direct JIT materialization)
+    Str(String),
     /// Float (stored as bits for Eq/Hash)
     Float(u64),
     /// Function reference by name
@@ -220,6 +222,7 @@ impl fmt::Display for MirConstant {
             MirConstant::Bool(v) => write!(f, "{}", v),
             MirConstant::None => write!(f, "none"),
             MirConstant::StringId(id) => write!(f, "str#{}", id),
+            MirConstant::Str(s) => write!(f, "\"{}\"", s),
             MirConstant::Float(bits) => write!(f, "{}", f64::from_bits(*bits)),
             MirConstant::Function(name) => write!(f, "fn:{}", name),
             MirConstant::Method(name) => write!(f, "method:{}", name),
@@ -419,6 +422,8 @@ pub struct MirFunction {
     pub local_types: Vec<LocalTypeInfo>,
     /// Source span of the function.
     pub span: Span,
+    /// Mapping from FieldIdx to field name, for JIT field access resolution.
+    pub field_name_table: std::collections::HashMap<FieldIdx, String>,
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.

@@ -139,14 +139,17 @@ pub extern "C" fn jit_pow(base_bits: u64, exp_bits: u64) -> u64 {
 // Generic Binary Operations (for non-numeric types)
 // ============================================================================
 
-/// Generic add that handles Time + Duration, Duration + Duration, etc.
+fn is_nanboxed_int(bits: u64) -> bool { shape_value::tags::is_tagged(bits) && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_INT }
+fn unbox_nanboxed_int(bits: u64) -> i64 { shape_value::tags::sign_extend_i48(shape_value::tags::get_payload(bits)) }
+fn box_nanboxed_int(val: i64) -> u64 { shape_value::ValueWord::from_i64(val).raw_bits() }
+fn as_numeric_f64(bits: u64) -> Option<f64> { if is_number(bits) { Some(unbox_number(bits)) } else if is_nanboxed_int(bits) { Some(unbox_nanboxed_int(bits) as f64) } else { None } }
+
+/// Generic add that handles int+int, Time + Duration, Duration + Duration, etc.
 pub extern "C" fn jit_generic_add(a_bits: u64, b_bits: u64) -> u64 {
     use super::super::context::JITDuration;
-
-    // Both numbers - fast path
-    if is_number(a_bits) && is_number(b_bits) {
-        return box_number(unbox_number(a_bits) + unbox_number(b_bits));
-    }
+    if is_number(a_bits) && is_number(b_bits) { return box_number(unbox_number(a_bits) + unbox_number(b_bits)); }
+    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) { return box_nanboxed_int(unbox_nanboxed_int(a_bits).wrapping_add(unbox_nanboxed_int(b_bits))); }
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) { return box_number(a + b); }
 
     let a_kind = heap_kind(a_bits);
     let b_kind = heap_kind(b_bits);
@@ -210,14 +213,12 @@ pub extern "C" fn jit_generic_add(a_bits: u64, b_bits: u64) -> u64 {
     TAG_NULL
 }
 
-/// Generic subtract that handles Time - Duration, Duration - Duration, etc.
+/// Generic subtract that handles int-int, Time - Duration, Duration - Duration, etc.
 pub extern "C" fn jit_generic_sub(a_bits: u64, b_bits: u64) -> u64 {
     use super::super::context::JITDuration;
-
-    // Both numbers - fast path
-    if is_number(a_bits) && is_number(b_bits) {
-        return box_number(unbox_number(a_bits) - unbox_number(b_bits));
-    }
+    if is_number(a_bits) && is_number(b_bits) { return box_number(unbox_number(a_bits) - unbox_number(b_bits)); }
+    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) { return box_nanboxed_int(unbox_nanboxed_int(a_bits).wrapping_sub(unbox_nanboxed_int(b_bits))); }
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) { return box_number(a - b); }
 
     let a_kind = heap_kind(a_bits);
     let b_kind = heap_kind(b_bits);
@@ -263,13 +264,12 @@ pub extern "C" fn jit_generic_sub(a_bits: u64, b_bits: u64) -> u64 {
     TAG_NULL
 }
 
-/// Generic multiplication for JIT (Series * Series, Series * number, number * Series, etc.)
+/// Generic multiplication for JIT
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_generic_mul(a_bits: u64, b_bits: u64) -> u64 {
-    // Both numbers - fast path
-    if is_number(a_bits) && is_number(b_bits) {
-        return box_number(unbox_number(a_bits) * unbox_number(b_bits));
-    }
+    if is_number(a_bits) && is_number(b_bits) { return box_number(unbox_number(a_bits) * unbox_number(b_bits)); }
+    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) { return box_nanboxed_int(unbox_nanboxed_int(a_bits).wrapping_mul(unbox_nanboxed_int(b_bits))); }
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) { return box_number(a * b); }
 
     // Fallback for numbers
     if is_number(a_bits) || is_number(b_bits) {
@@ -289,18 +289,12 @@ pub extern "C" fn jit_generic_mul(a_bits: u64, b_bits: u64) -> u64 {
     TAG_NULL
 }
 
-/// Generic division for JIT (Series / Series, Series / number, number / Series, etc.)
+/// Generic division for JIT
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_generic_div(a_bits: u64, b_bits: u64) -> u64 {
-    // Both numbers - fast path
-    if is_number(a_bits) && is_number(b_bits) {
-        let b = unbox_number(b_bits);
-        return box_number(if b == 0.0 {
-            f64::NAN
-        } else {
-            unbox_number(a_bits) / b
-        });
-    }
+    if is_number(a_bits) && is_number(b_bits) { let b = unbox_number(b_bits); return box_number(if b == 0.0 { f64::NAN } else { unbox_number(a_bits) / b }); }
+    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) { let a = unbox_nanboxed_int(a_bits); let b = unbox_nanboxed_int(b_bits); if b == 0 { return box_number(f64::NAN); } return box_nanboxed_int(a / b); }
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) { return box_number(if b == 0.0 { f64::NAN } else { a / b }); }
 
     // Fallback for numbers
     if is_number(a_bits) || is_number(b_bits) {
@@ -422,6 +416,59 @@ where
         };
     }
     TAG_BOOL_FALSE
+}
+
+/// Generic less-than comparison that handles numbers, NaN-boxed ints, and mixed types.
+pub extern "C" fn jit_generic_lt(a_bits: u64, b_bits: u64) -> u64 {
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
+        return if a < b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE };
+    }
+    TAG_BOOL_FALSE
+}
+
+/// Generic less-than-or-equal comparison that handles numbers, NaN-boxed ints, and mixed types.
+pub extern "C" fn jit_generic_le(a_bits: u64, b_bits: u64) -> u64 {
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
+        return if a <= b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE };
+    }
+    TAG_BOOL_FALSE
+}
+
+/// Generic greater-than comparison that handles numbers, NaN-boxed ints, and mixed types.
+pub extern "C" fn jit_generic_gt(a_bits: u64, b_bits: u64) -> u64 {
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
+        return if a > b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE };
+    }
+    TAG_BOOL_FALSE
+}
+
+/// Generic greater-than-or-equal comparison that handles numbers, NaN-boxed ints, and mixed types.
+pub extern "C" fn jit_generic_ge(a_bits: u64, b_bits: u64) -> u64 {
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
+        return if a >= b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE };
+    }
+    TAG_BOOL_FALSE
+}
+
+/// Generic modulo that handles numbers and NaN-boxed ints.
+pub extern "C" fn jit_generic_mod(a_bits: u64, b_bits: u64) -> u64 {
+    if is_number(a_bits) && is_number(b_bits) {
+        let a = unbox_number(a_bits);
+        let b = unbox_number(b_bits);
+        if b == 0.0 { return box_number(f64::NAN); }
+        return box_number(a - (a / b).floor() * b);
+    }
+    if is_nanboxed_int(a_bits) && is_nanboxed_int(b_bits) {
+        let a = unbox_nanboxed_int(a_bits);
+        let b = unbox_nanboxed_int(b_bits);
+        if b == 0 { return box_number(f64::NAN); }
+        return box_nanboxed_int(a % b);
+    }
+    if let (Some(a), Some(b)) = (as_numeric_f64(a_bits), as_numeric_f64(b_bits)) {
+        if b == 0.0 { return box_number(f64::NAN); }
+        return box_number(a - (a / b).floor() * b);
+    }
+    TAG_NULL
 }
 
 /// Generic equality that handles strings, booleans, and other non-numeric types.

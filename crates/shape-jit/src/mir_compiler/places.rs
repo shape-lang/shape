@@ -109,6 +109,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
     }
 
+    // ── Field offset resolution ────────────────────────────────────────
+
+    fn try_resolve_field_byte_offset(&self, field_idx: &FieldIdx) -> Option<u16> {
+        let name = self.mir.field_name_table.get(field_idx)?;
+        self.field_byte_offsets.get(name).copied()
+    }
+
+    fn field_idx_to_boxed_key(&self, field_idx: &FieldIdx) -> Option<u64> {
+        let name = self.mir.field_name_table.get(field_idx)?;
+        Some(crate::nan_boxing::box_string(name.clone()))
+    }
+
     // ── Place resolution ─────────────────────────────────────────────────
 
     /// Read a value from a Place.
@@ -121,21 +133,29 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.use_var(*var))
             }
             Place::Field(base, field_idx) => {
-                let base_val = self.read_place(base)?;
-                let field = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, field_idx.0 as i64);
-                let inst = self
-                    .builder
-                    .ins()
-                    .call(self.ffi.get_prop, &[base_val, field]);
-                Ok(self.builder.inst_results(inst)[0])
+                let raw_base = self.read_place(base)?;
+                // FFI field access expects NaN-boxed I64
+                let base_val = self.ensure_nanboxed(raw_base);
+                if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
+                    let offset = self.builder.ins().iconst(types::I64, byte_off as i64);
+                    let inst = self.builder.ins().call(self.ffi.typed_object_get_field, &[base_val, offset]);
+                    Ok(self.builder.inst_results(inst)[0])
+                } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
+                    let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
+                    let inst = self.builder.ins().call(self.ffi.get_prop, &[base_val, key]);
+                    Ok(self.builder.inst_results(inst)[0])
+                } else {
+                    let field = self.builder.ins().iconst(types::I64, field_idx.0 as i64);
+                    let inst = self.builder.ins().call(self.ffi.get_prop, &[base_val, field]);
+                    Ok(self.builder.inst_results(inst)[0])
+                }
             }
             Place::Index(base, operand) => {
-                let base_val = self.read_place(base)?;
-                let index_val = self.compile_operand_raw(operand)?;
-                // Inline array access: direct memory load, no FFI call
+                let raw_base = self.read_place(base)?;
+                // Inline array access operates on NaN-boxed values
+                let base_val = self.ensure_nanboxed(raw_base);
+                let raw_idx = self.compile_operand_raw(operand)?;
+                let index_val = self.ensure_nanboxed(raw_idx);
                 Ok(self.inline_array_get(base_val, index_val))
             }
             Place::Deref(inner) => {
@@ -145,7 +165,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
-    /// Write a value to a Place.
+    /// Write a value to a Place, converting to the slot's native type if needed.
     pub(crate) fn write_place(
         &mut self,
         place: &Place,
@@ -153,40 +173,52 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ) -> Result<(), String> {
         match place {
             Place::Local(slot) => {
-                let var = self.locals.get(slot).ok_or_else(|| {
+                let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
+                let var = *self.locals.get(slot).ok_or_else(|| {
                     format!("MirToIR: unknown local slot {}", slot)
                 })?;
-                self.builder.def_var(*var, val);
+                // Convert value to match the slot's declared Cranelift type.
+                let converted = self.ensure_kind(val, target_kind);
+                self.builder.def_var(var, converted);
                 Ok(())
             }
             Place::Field(base, field_idx) => {
-                let base_val = self.read_place(base)?;
-                let field = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, field_idx.0 as i64);
-                self.builder
-                    .ins()
-                    .call(self.ffi.set_prop, &[base_val, field, val]);
+                let raw_base = self.read_place(base)?;
+                let base_val = self.ensure_nanboxed(raw_base);
+                let boxed_val = self.ensure_nanboxed(val);
+                if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
+                    let offset = self.builder.ins().iconst(types::I64, byte_off as i64);
+                    self.builder.ins().call(self.ffi.typed_object_set_field, &[base_val, offset, boxed_val]);
+                } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
+                    let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
+                    self.builder.ins().call(self.ffi.set_prop, &[base_val, key, boxed_val]);
+                } else {
+                    let field = self.builder.ins().iconst(types::I64, field_idx.0 as i64);
+                    self.builder.ins().call(self.ffi.set_prop, &[base_val, field, boxed_val]);
+                }
                 Ok(())
             }
             Place::Index(base, operand) => {
-                let base_val = self.read_place(base)?;
-                let index_val = self.compile_operand_raw(operand)?;
-                // Inline array set: direct memory store, no FFI call
-                self.inline_array_set(base_val, index_val, val);
+                let raw_base = self.read_place(base)?;
+                let base_val = self.ensure_nanboxed(raw_base);
+                let raw_idx = self.compile_operand_raw(operand)?;
+                let index_val = self.ensure_nanboxed(raw_idx);
+                let boxed_val = self.ensure_nanboxed(val);
+                self.inline_array_set(base_val, index_val, boxed_val);
                 Ok(())
             }
             Place::Deref(inner) => {
                 let ref_addr = self.read_place(inner)?;
-                self.builder.ins().store(MemFlags::new(), val, ref_addr, 0);
+                let boxed_val = self.ensure_nanboxed(val);
+                self.builder.ins().store(MemFlags::new(), boxed_val, ref_addr, 0);
                 Ok(())
             }
         }
     }
 
-    /// Write null (TAG_NULL) to a Place's root local.
+    /// Write zero/null to a Place's root local.
     /// Used after Move to prevent double-drop.
+    /// Uses type-appropriate zero for native slots (0.0 for F64, 0 for I32, etc.)
     pub(crate) fn null_place(&mut self, place: &Place) -> Result<(), String> {
         let slot = place.root_local();
         // Only null the root local for simple locals.
@@ -195,10 +227,29 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             let var = self.locals.get(&slot).ok_or_else(|| {
                 format!("MirToIR: unknown local slot {}", slot)
             })?;
-            let null = self
-                .builder
-                .ins()
-                .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64);
+            let kind = self.slot_kind_of(slot);
+            let null = match kind {
+                shape_vm::type_tracking::SlotKind::Float64 => {
+                    self.builder.ins().f64const(0.0)
+                }
+                shape_vm::type_tracking::SlotKind::Int32
+                | shape_vm::type_tracking::SlotKind::UInt32 => {
+                    self.builder.ins().iconst(types::I32, 0)
+                }
+                shape_vm::type_tracking::SlotKind::Bool
+                | shape_vm::type_tracking::SlotKind::Int8
+                | shape_vm::type_tracking::SlotKind::UInt8 => {
+                    self.builder.ins().iconst(types::I8, 0)
+                }
+                shape_vm::type_tracking::SlotKind::Int16
+                | shape_vm::type_tracking::SlotKind::UInt16 => {
+                    self.builder.ins().iconst(types::I16, 0)
+                }
+                _ => self
+                    .builder
+                    .ins()
+                    .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64),
+            };
             self.builder.def_var(*var, null);
         }
         Ok(())

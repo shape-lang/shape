@@ -20,26 +20,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Rvalue::Use(operand) => self.compile_operand(operand),
 
             Rvalue::BinaryOp(op, lhs, rhs) => {
-                // Check if both operands are i32-typed for v2 native i32 codegen.
-                let lhs_i32 = self.operand_is_i32(lhs);
-                let rhs_i32 = self.operand_is_i32(rhs);
-
                 let l = self.compile_operand(lhs)?;
                 let r = self.compile_operand(rhs)?;
 
-                if lhs_i32 && rhs_i32 {
-                    // Both operands are i32 — use native i32 instructions.
+                // Check operand types for native inline paths.
+                let l_type = self.builder.func.dfg.value_type(l);
+                let r_type = self.builder.func.dfg.value_type(r);
+
+                if l_type == types::F64 && r_type == types::F64 {
+                    // Both operands are native F64 — inline float ops.
+                    self.compile_binop_f64(op, l, r)
+                } else if l_type == types::I32 && r_type == types::I32 {
+                    // Both operands are native I32 — inline i32 ops.
                     match op {
                         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                            self.compile_binop_i32(op, l, r)
+                            self.compile_binop_i32_native(op, l, r)
                         }
                         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le
                         | BinOp::Gt | BinOp::Ge => {
-                            self.compile_cmp_i32(op, l, r)
+                            self.compile_cmp_i32_native(op, l, r)
                         }
                         _ => self.compile_binop(op, l, r),
                     }
+                } else if l_type == types::I8 && r_type == types::I8 {
+                    // Both operands are native I8 (Bool) — inline bool ops.
+                    self.compile_binop_bool(op, l, r)
                 } else {
+                    // Mixed or unknown types — use FFI generic path.
                     self.compile_binop(op, l, r)
                 }
             }
@@ -52,14 +59,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Rvalue::Clone(operand) => {
                 // Explicit clone: get the value and retain.
                 let val = self.compile_operand_raw(operand)?;
-                self.builder.ins().call(self.ffi.arc_retain, &[val]);
-                Ok(val)
+                // arc_retain expects NaN-boxed I64
+                let boxed = self.ensure_nanboxed(val);
+                self.builder.ins().call(self.ffi.arc_retain, &[boxed]);
+                Ok(boxed)
             }
 
             Rvalue::Borrow(_kind, place) => {
                 // StackSlot-based references (ported from BytecodeToIR):
-                // 1. Read the current value from the place
-                let val = self.read_place(place)?;
+                // 1. Read the current value from the place (box for stack slot)
+                let raw_val = self.read_place(place)?;
+                let val = self.ensure_nanboxed(raw_val);
                 // 2. Allocate an 8-byte stack slot to hold the referenced value
                 let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -77,20 +87,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
             Rvalue::Aggregate(operands) => {
                 // Create an empty array via jit_new_array(ctx, 0), then push elements.
-                // Using count=0 avoids popping from ctx.stack — MirToIR compiles
-                // operands directly instead of staging through the stack.
                 let zero = self.builder.ins().iconst(types::I64, 0i64);
                 let inst = self.builder.ins().call(
                     self.ffi.new_array,
                     &[self.ctx_ptr, zero],
                 );
-                let arr = self.builder.inst_results(inst)[0];
+                let mut arr = self.builder.inst_results(inst)[0];
 
+                // jit_array_push_elem expects NaN-boxed I64 elements.
                 for operand in operands {
-                    let elem = self.compile_operand(operand)?;
-                    self.builder
+                    let raw = self.compile_operand_raw(operand)?;
+                    let elem = self.ensure_nanboxed(raw);
+                    let inst = self.builder
                         .ins()
                         .call(self.ffi.array_push_elem, &[arr, elem]);
+                    arr = self.builder.inst_results(inst)[0];
                 }
 
                 Ok(arr)
@@ -98,83 +109,165 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
-    /// Check if an operand references an i32-typed local slot.
-    fn operand_is_i32(&self, operand: &Operand) -> bool {
-        let place = match operand {
-            Operand::Move(p) | Operand::MoveExplicit(p) | Operand::Copy(p) => p,
-            Operand::Constant(_) => return false,
-        };
-        let slot = place.root_local();
-        let kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
-        super::types::is_i32_slot(kind)
-    }
+    // ── Inline Float64 arithmetic and comparisons ──────────────────
 
-    /// Compile a binary operation using native Cranelift f64 instructions.
-    ///
-    /// NaN-boxed numbers are stored as plain f64 bits (not tagged), so we can
-    /// bitcast i64→f64, do the operation natively, and bitcast f64→i64.
-    /// Comparisons return NaN-boxed booleans (TAG_BOOL_TRUE / TAG_BOOL_FALSE).
-    fn compile_binop(
+    /// Compile a binary op on native F64 operands — direct Cranelift float instructions.
+    /// ~100x faster per operation vs FFI generic_add/etc.
+    fn compile_binop_f64(
         &mut self,
         op: &BinOp,
         lhs: Value,
         rhs: Value,
     ) -> Result<Value, String> {
         match op {
-            // Arithmetic: bitcast to f64, operate, bitcast back
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                let l_f64 = self.builder.ins().bitcast(types::F64, MemFlags::new(), lhs);
-                let r_f64 = self.builder.ins().bitcast(types::F64, MemFlags::new(), rhs);
-                let result_f64 = match op {
-                    BinOp::Add => self.builder.ins().fadd(l_f64, r_f64),
-                    BinOp::Sub => self.builder.ins().fsub(l_f64, r_f64),
-                    BinOp::Mul => self.builder.ins().fmul(l_f64, r_f64),
-                    BinOp::Div => self.builder.ins().fdiv(l_f64, r_f64),
-                    BinOp::Mod => {
-                        // f64 modulo: a - floor(a/b) * b
-                        let div = self.builder.ins().fdiv(l_f64, r_f64);
-                        let floored = self.builder.ins().floor(div);
-                        let prod = self.builder.ins().fmul(floored, r_f64);
-                        self.builder.ins().fsub(l_f64, prod)
-                    }
-                    _ => unreachable!(),
-                };
-                Ok(self.builder.ins().bitcast(types::I64, MemFlags::new(), result_f64))
+            BinOp::Add => Ok(self.builder.ins().fadd(lhs, rhs)),
+            BinOp::Sub => Ok(self.builder.ins().fsub(lhs, rhs)),
+            BinOp::Mul => Ok(self.builder.ins().fmul(lhs, rhs)),
+            BinOp::Div => Ok(self.builder.ins().fdiv(lhs, rhs)),
+            BinOp::Mod => {
+                // f64 fmod not a single instruction — use FFI
+                let l = self.box_to_nanboxed(lhs, shape_vm::type_tracking::SlotKind::Float64);
+                let r = self.box_to_nanboxed(rhs, shape_vm::type_tracking::SlotKind::Float64);
+                let inst = self.builder.ins().call(self.ffi.generic_mod, &[l, r]);
+                Ok(self.builder.inst_results(inst)[0])
             }
-
-            // Comparisons: bitcast to f64, compare, return NaN-boxed boolean
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let l_f64 = self.builder.ins().bitcast(types::F64, MemFlags::new(), lhs);
-                let r_f64 = self.builder.ins().bitcast(types::F64, MemFlags::new(), rhs);
-                let cc = match op {
-                    BinOp::Eq => FloatCC::Equal,
-                    BinOp::Ne => FloatCC::NotEqual,
-                    BinOp::Lt => FloatCC::LessThan,
-                    BinOp::Le => FloatCC::LessThanOrEqual,
-                    BinOp::Gt => FloatCC::GreaterThan,
-                    BinOp::Ge => FloatCC::GreaterThanOrEqual,
-                    _ => unreachable!(),
-                };
-                let cmp = self.builder.ins().fcmp(cc, l_f64, r_f64);
-                let true_val = self.builder.ins().iconst(
-                    types::I64,
-                    crate::nan_boxing::TAG_BOOL_TRUE as i64,
-                );
-                let false_val = self.builder.ins().iconst(
-                    types::I64,
-                    crate::nan_boxing::TAG_BOOL_FALSE as i64,
-                );
-                Ok(self.builder.ins().select(cmp, true_val, false_val))
+            BinOp::Eq => {
+                let cmp = self.builder.ins().fcmp(FloatCC::Equal, lhs, rhs);
+                // fcmp returns I8 (native bool) — this is fine for Bool slots
+                Ok(cmp)
             }
+            BinOp::Ne => {
+                let cmp = self.builder.ins().fcmp(FloatCC::NotEqual, lhs, rhs);
+                Ok(cmp)
+            }
+            BinOp::Lt => {
+                let cmp = self.builder.ins().fcmp(FloatCC::LessThan, lhs, rhs);
+                Ok(cmp)
+            }
+            BinOp::Le => {
+                let cmp = self.builder.ins().fcmp(FloatCC::LessThanOrEqual, lhs, rhs);
+                Ok(cmp)
+            }
+            BinOp::Gt => {
+                let cmp = self.builder.ins().fcmp(FloatCC::GreaterThan, lhs, rhs);
+                Ok(cmp)
+            }
+            BinOp::Ge => {
+                let cmp = self
+                    .builder
+                    .ins()
+                    .fcmp(FloatCC::GreaterThanOrEqual, lhs, rhs);
+                Ok(cmp)
+            }
+            BinOp::And | BinOp::Or => {
+                // Logical ops on floats — box and use generic path
+                self.compile_binop(op, lhs, rhs)
+            }
+        }
+    }
 
-            // Logical: check truthiness (== TAG_BOOL_TRUE)
+    // ── Native I32 arithmetic (no ireduce/sextend needed) ───────────
+
+    /// Compile i32 binary arithmetic on native I32 values (no boxing overhead).
+    fn compile_binop_i32_native(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        match op {
+            BinOp::Add => Ok(self.builder.ins().iadd(lhs, rhs)),
+            BinOp::Sub => Ok(self.builder.ins().isub(lhs, rhs)),
+            BinOp::Mul => Ok(self.builder.ins().imul(lhs, rhs)),
+            BinOp::Div => {
+                let zero = self.builder.ins().iconst(types::I32, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
+                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                Ok(self.builder.ins().sdiv(lhs, rhs))
+            }
+            BinOp::Mod => {
+                let zero = self.builder.ins().iconst(types::I32, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
+                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                Ok(self.builder.ins().srem(lhs, rhs))
+            }
+            _ => Err(format!("unsupported native i32 binop: {:?}", op)),
+        }
+    }
+
+    /// Compile i32 comparison on native I32 values — returns I8 (native bool).
+    fn compile_cmp_i32_native(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        let cc = match op {
+            BinOp::Eq => IntCC::Equal,
+            BinOp::Ne => IntCC::NotEqual,
+            BinOp::Lt => IntCC::SignedLessThan,
+            BinOp::Le => IntCC::SignedLessThanOrEqual,
+            BinOp::Gt => IntCC::SignedGreaterThan,
+            BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+            _ => return Err(format!("unsupported native i32 cmp: {:?}", op)),
+        };
+        // icmp returns I8 (native bool)
+        Ok(self.builder.ins().icmp(cc, lhs, rhs))
+    }
+
+    // ── Native Bool operations ──────────────────────────────────────
+
+    /// Compile a binary op on native I8 (Bool) operands.
+    fn compile_binop_bool(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        match op {
+            BinOp::Eq => Ok(self.builder.ins().icmp(IntCC::Equal, lhs, rhs)),
+            BinOp::Ne => Ok(self.builder.ins().icmp(IntCC::NotEqual, lhs, rhs)),
+            BinOp::And => Ok(self.builder.ins().band(lhs, rhs)),
+            BinOp::Or => Ok(self.builder.ins().bor(lhs, rhs)),
+            _ => {
+                // Other ops on bools — box and use generic path
+                self.compile_binop(op, lhs, rhs)
+            }
+        }
+    }
+
+    /// Compile a binary operation using generic FFI calls for unknown types.
+    /// Ensures both operands are NaN-boxed I64 before calling FFI.
+    fn compile_binop(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        // FFI generic_* functions expect NaN-boxed I64 arguments.
+        let l = self.ensure_nanboxed(lhs);
+        let r = self.ensure_nanboxed(rhs);
+        match op {
+            BinOp::Add => { let inst = self.builder.ins().call(self.ffi.generic_add, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Sub => { let inst = self.builder.ins().call(self.ffi.generic_sub, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Mul => { let inst = self.builder.ins().call(self.ffi.generic_mul, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Div => { let inst = self.builder.ins().call(self.ffi.generic_div, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Mod => { let inst = self.builder.ins().call(self.ffi.generic_mod, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Eq => { let inst = self.builder.ins().call(self.ffi.generic_eq, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Ne => { let inst = self.builder.ins().call(self.ffi.generic_neq, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Lt => { let inst = self.builder.ins().call(self.ffi.generic_lt, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Le => { let inst = self.builder.ins().call(self.ffi.generic_le, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Gt => { let inst = self.builder.ins().call(self.ffi.generic_gt, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+            BinOp::Ge => { let inst = self.builder.ins().call(self.ffi.generic_ge, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
+
+            // Logical: check truthiness
             BinOp::And => {
                 let tag_true = self.builder.ins().iconst(
                     types::I64,
                     crate::nan_boxing::TAG_BOOL_TRUE as i64,
                 );
-                let l_is_true = self.builder.ins().icmp(IntCC::Equal, lhs, tag_true);
-                let r_is_true = self.builder.ins().icmp(IntCC::Equal, rhs, tag_true);
+                let l_is_true = self.builder.ins().icmp(IntCC::Equal, l, tag_true);
+                let r_is_true = self.builder.ins().icmp(IntCC::Equal, r, tag_true);
                 let both = self.builder.ins().band(l_is_true, r_is_true);
                 let false_val = self.builder.ins().iconst(
                     types::I64,
@@ -187,8 +280,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     types::I64,
                     crate::nan_boxing::TAG_BOOL_TRUE as i64,
                 );
-                let l_is_true = self.builder.ins().icmp(IntCC::Equal, lhs, tag_true);
-                let r_is_true = self.builder.ins().icmp(IntCC::Equal, rhs, tag_true);
+                let l_is_true = self.builder.ins().icmp(IntCC::Equal, l, tag_true);
+                let r_is_true = self.builder.ins().icmp(IntCC::Equal, r, tag_true);
                 let either = self.builder.ins().bor(l_is_true, r_is_true);
                 let false_val = self.builder.ins().iconst(
                     types::I64,
@@ -201,24 +294,37 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Compile a unary operation.
     fn compile_unop(&mut self, op: &UnOp, val: Value) -> Result<Value, String> {
+        let val_type = self.builder.func.dfg.value_type(val);
         match op {
             UnOp::Neg => {
-                let f64_val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
-                let neg = self.builder.ins().fneg(f64_val);
-                Ok(self.builder.ins().bitcast(types::I64, MemFlags::new(), neg))
+                if val_type == types::F64 {
+                    // Native F64: direct fneg
+                    Ok(self.builder.ins().fneg(val))
+                } else {
+                    // NaN-boxed: bitcast to F64, negate, bitcast back
+                    let f64_val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
+                    let neg = self.builder.ins().fneg(f64_val);
+                    Ok(self.builder.ins().bitcast(types::I64, MemFlags::new(), neg))
+                }
             }
             UnOp::Not => {
-                let tag_true = self.builder.ins().iconst(
-                    types::I64,
-                    crate::nan_boxing::TAG_BOOL_TRUE as i64,
-                );
-                let false_val = self.builder.ins().iconst(
-                    types::I64,
-                    crate::nan_boxing::TAG_BOOL_FALSE as i64,
-                );
-                let is_true = self.builder.ins().icmp(IntCC::Equal, val, tag_true);
-                // !true = false, !false = true
-                Ok(self.builder.ins().select(is_true, false_val, tag_true))
+                if val_type == types::I8 {
+                    // Native I8 bool: XOR with 1 to flip
+                    let one = self.builder.ins().iconst(types::I8, 1);
+                    Ok(self.builder.ins().bxor(val, one))
+                } else {
+                    // NaN-boxed: compare against TAG_BOOL_TRUE
+                    let tag_true = self.builder.ins().iconst(
+                        types::I64,
+                        crate::nan_boxing::TAG_BOOL_TRUE as i64,
+                    );
+                    let false_val = self.builder.ins().iconst(
+                        types::I64,
+                        crate::nan_boxing::TAG_BOOL_FALSE as i64,
+                    );
+                    let is_true = self.builder.ins().icmp(IntCC::Equal, val, tag_true);
+                    Ok(self.builder.ins().select(is_true, false_val, tag_true))
+                }
             }
         }
     }

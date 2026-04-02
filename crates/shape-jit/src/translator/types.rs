@@ -179,6 +179,11 @@ pub struct FFIFuncRefs {
     pub(crate) generic_div: FuncRef,
     pub(crate) generic_eq: FuncRef,
     pub(crate) generic_neq: FuncRef,
+    pub(crate) generic_lt: FuncRef,
+    pub(crate) generic_le: FuncRef,
+    pub(crate) generic_gt: FuncRef,
+    pub(crate) generic_ge: FuncRef,
+    pub(crate) generic_mod: FuncRef,
     pub(crate) series_shift: FuncRef,
     pub(crate) series_fillna: FuncRef,
     pub(crate) series_rolling_mean: FuncRef,
@@ -264,7 +269,8 @@ pub struct FFIFuncRefs {
     pub(crate) set_field_typed: FuncRef,
     // TypedObject allocation
     pub(crate) typed_object_alloc: FuncRef,
-    // TypedObject field set via FFI
+    // TypedObject field get/set via FFI
+    pub(crate) typed_object_get_field: FuncRef,
     pub(crate) typed_object_set_field: FuncRef,
     // TypedObject merge (O(1) memcpy-based)
     pub(crate) typed_merge_object: FuncRef,

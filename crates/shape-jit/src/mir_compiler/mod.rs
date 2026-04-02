@@ -19,18 +19,23 @@
 //! - **Explicit Drop points**: Scope cleanup from MIR, not heuristic
 
 mod blocks;
+mod conversions;
 mod ownership;
 mod places;
 mod rvalues;
 mod statements;
 mod terminators;
-mod types;
+pub(crate) mod types;
 pub(crate) mod v2_array;
 pub(crate) mod v2_field;
 pub(crate) mod v2_int;
 pub(crate) mod v2_refcount;
+pub(crate) mod v2_string;
 
-use cranelift::codegen::ir::StackSlot;
+#[cfg(test)]
+mod integration_tests;
+
+use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::HashMap;
 
@@ -59,11 +64,12 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) block_map: HashMap<BasicBlockId, Block>,
 
     // ── Local variables ────────────────────────────────────────────
-    /// MIR SlotId → Cranelift Variable (NaN-boxed i64 representation).
+    /// MIR SlotId → Cranelift Variable.
     pub(crate) locals: HashMap<SlotId, Variable>,
     /// Type info for each local slot (from MIR's LocalTypeInfo).
     pub(crate) local_types: Vec<LocalTypeInfo>,
-    /// Frame descriptor slot kinds (from bytecode Function.frame_descriptor).
+    /// Frame descriptor slot kinds (from bytecode Function.frame_descriptor),
+    /// enriched by MIR-level type inference.
     pub(crate) slot_kinds: Vec<SlotKind>,
     /// Next Cranelift variable index.
     pub(crate) next_var: usize,
@@ -78,10 +84,18 @@ pub struct MirToIR<'a, 'b> {
     /// Function name → index mapping for resolving Call terminators.
     pub(crate) function_indices: &'a HashMap<String, u16>,
 
+    // ── Direct call support ─────────────────────────────────────────
+    /// Function index → Cranelift FuncRef for direct calls (bypasses FFI).
+    pub(crate) user_func_refs: HashMap<u16, FuncRef>,
+    /// Function index → arity for call validation.
+    pub(crate) user_func_arities: HashMap<u16, u16>,
+
     // ── Borrow support ──────────────────────────────────────────────
     /// MIR SlotId → Cranelift StackSlot for references created by Rvalue::Borrow.
     /// After calls, all referenced locals are reloaded from their stack slots.
     pub(crate) ref_stack_slots: HashMap<SlotId, StackSlot>,
+    /// Mapping from field name to byte offset within a TypedObject.
+    pub(crate) field_byte_offsets: HashMap<String, u16>,
 }
 
 /// Result of MIR preflight check.
@@ -174,8 +188,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         strings: &'a [String],
         entry_block: Block,
         function_indices: &'a HashMap<String, u16>,
+        user_func_refs: HashMap<u16, FuncRef>,
+        user_func_arities: HashMap<u16, u16>,
     ) -> Self {
         let local_types = mir_data.mir.local_types.clone();
+        // Enrich slot_kinds with MIR-level type inference when the bytecode
+        // compiler didn't provide them.
+        let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &slot_kinds);
         Self {
             builder,
             ctx_ptr,
@@ -190,7 +209,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             mir_data,
             strings,
             function_indices,
+            user_func_refs,
+            user_func_arities,
             ref_stack_slots: HashMap::new(),
+            field_byte_offsets: HashMap::new(),
         }
     }
 
@@ -264,7 +286,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         for (slot_id, stack_slot) in refs {
             let reloaded = self.builder.ins().stack_load(cranelift::prelude::types::I64, stack_slot, 0);
             if let Some(&var) = self.locals.get(&slot_id) {
-                self.builder.def_var(var, reloaded);
+                // Stack slots store NaN-boxed I64; convert to native if needed.
+                let kind = types::slot_kind_for_local(&self.slot_kinds, slot_id.0);
+                let converted = self.unbox_from_nanboxed(reloaded, kind);
+                self.builder.def_var(var, converted);
             }
         }
     }

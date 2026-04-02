@@ -557,6 +557,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -633,6 +634,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -719,6 +721,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -789,6 +792,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -839,6 +843,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -929,6 +934,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -970,6 +976,7 @@ mod tests {
             param_reference_kinds: vec![],
             local_types: vec![],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -1027,6 +1034,7 @@ mod tests {
                 LocalTypeInfo::Copy,
             ],
             span: span(),
+            field_name_table: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);

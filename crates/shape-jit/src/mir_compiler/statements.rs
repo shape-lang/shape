@@ -35,9 +35,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 container_slot,
                 operands,
             } => {
-                // Create an empty array via jit_new_array(ctx, 0), then push elements.
-                // Using count=0 avoids popping anything from ctx.stack — MirToIR
-                // compiles operands directly rather than staging through the stack.
                 let zero = self.builder.ins().iconst(
                     cranelift::prelude::types::I64,
                     0i64,
@@ -46,13 +43,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.ffi.new_array,
                     &[self.ctx_ptr, zero],
                 );
-                let arr = self.builder.inst_results(inst)[0];
+                let mut arr = self.builder.inst_results(inst)[0];
 
+                // jit_array_push_elem expects NaN-boxed I64 elements.
                 for op in operands {
-                    let val = self.compile_operand(op)?;
-                    self.builder
+                    let raw = self.compile_operand(op)?;
+                    let val = self.ensure_nanboxed(raw);
+                    let inst = self.builder
                         .ins()
                         .call(self.ffi.array_push_elem, &[arr, val]);
+                    arr = self.builder.inst_results(inst)[0];
                 }
 
                 let place = Place::Local(*container_slot);
@@ -66,39 +66,50 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 operands,
                 field_names,
             } => {
-                // Create a new empty object via jit_new_object(ctx, 0).
-                // Using field_count=0 avoids popping anything from ctx.stack.
-                let zero = self.builder.ins().iconst(
+                // Register a schema for cross-boundary compatibility.
+                let real_field_names: Vec<String> = field_names
+                    .iter()
+                    .filter(|n| !n.is_empty())
+                    .cloned()
+                    .collect();
+                let sid = shape_runtime::type_schema::register_predeclared_any_schema(
+                    &real_field_names,
+                );
+
+                let schema_id = self.builder.ins().iconst(
+                    cranelift::prelude::types::I32,
+                    sid as i64,
+                );
+                let data_size = self.builder.ins().iconst(
                     cranelift::prelude::types::I64,
-                    0i64,
+                    (operands.len() as i64) * 8,
                 );
                 let inst = self.builder.ins().call(
-                    self.ffi.new_object,
-                    &[self.ctx_ptr, zero],
+                    self.ffi.typed_object_alloc,
+                    &[schema_id, data_size],
                 );
                 let mut obj = self.builder.inst_results(inst)[0];
 
-                // Set each field on the object using jit_set_prop(obj, key, value).
-                // field_names carries the string keys from the AST (aligned with operands).
-                for (i, op) in operands.iter().enumerate() {
-                    let val = self.compile_operand(op)?;
-
-                    if let Some(name) = field_names.get(i) {
-                        if !name.is_empty() {
-                            // Box the field name as a NaN-boxed string at JIT compile time.
-                            let boxed_key = crate::nan_boxing::box_string(name.clone());
-                            let key_val = self.builder.ins().iconst(
-                                cranelift::prelude::types::I64,
-                                boxed_key as i64,
-                            );
-                            let inst = self.builder.ins().call(
-                                self.ffi.set_prop,
-                                &[obj, key_val, val],
-                            );
-                            obj = self.builder.inst_results(inst)[0];
-                        }
-                        // Empty name = spread entry — skip (spread merging not yet supported in MIR path)
+                // Record field_name -> positional byte offset mapping.
+                for (i, name) in field_names.iter().enumerate() {
+                    if !name.is_empty() {
+                        self.field_byte_offsets.insert(name.clone(), (i as u16) * 8);
                     }
+                }
+
+                // Use compile_operand_raw; box for FFI.
+                for (i, op) in operands.iter().enumerate() {
+                    let raw = self.compile_operand_raw(op)?;
+                    let val = self.ensure_nanboxed(raw);
+                    let offset_val = self.builder.ins().iconst(
+                        cranelift::prelude::types::I64,
+                        (i as i64) * 8,
+                    );
+                    let inst = self.builder.ins().call(
+                        self.ffi.typed_object_set_field,
+                        &[obj, offset_val, val],
+                    );
+                    obj = self.builder.inst_results(inst)[0];
                 }
 
                 let place = Place::Local(*container_slot);
@@ -132,13 +143,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.ffi.new_array,
                         &[self.ctx_ptr, zero],
                     );
-                    let arr = self.builder.inst_results(inst)[0];
+                    let mut arr = self.builder.inst_results(inst)[0];
 
+                    // jit_array_push_elem expects NaN-boxed I64 elements.
                     for op in operands {
-                        let val = self.compile_operand(op)?;
-                        self.builder
+                        let raw = self.compile_operand(op)?;
+                        let val = self.ensure_nanboxed(raw);
+                        let inst = self.builder
                             .ins()
                             .call(self.ffi.array_push_elem, &[arr, val]);
+                        arr = self.builder.inst_results(inst)[0];
                     }
 
                     let place = Place::Local(*container_slot);
@@ -178,7 +192,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 );
 
                 for (i, op) in operands.iter().enumerate() {
-                    let val = self.compile_operand(op)?;
+                    let raw = self.compile_operand(op)?;
+                    let val = self.ensure_nanboxed(raw);
                     let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
                     let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
                     let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base as i64);
@@ -192,11 +207,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                 // Call jit_make_closure(ctx, function_id, captures_count)
                 let fid_val = self.builder.ins().iconst(
-                    cranelift::prelude::types::I16,
+                    cranelift::prelude::types::I64,
                     fid as i64,
                 );
                 let cap_count = self.builder.ins().iconst(
-                    cranelift::prelude::types::I16,
+                    cranelift::prelude::types::I64,
                     operands.len() as i64,
                 );
                 let inst = self.builder.ins().call(
