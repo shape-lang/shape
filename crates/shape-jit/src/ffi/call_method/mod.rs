@@ -382,16 +382,19 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                     let working_array_bits = receiver_bits;
 
                     // Handle reduce separately (needs initial value)
+                    // Shape syntax: arr.reduce(initial, callback)
+                    // So args[0] = initial, args[1] = callback
                     if method_name == "reduce" {
-                        let initial = if args.len() > 1 {
-                            args[1]
+                        let (callback, initial) = if args.len() > 1 {
+                            (args[1], args[0])
                         } else {
-                            box_number(0.0)
+                            // Single arg — treat it as callback with default initial
+                            (args[0], box_number(0.0))
                         };
                         // Push: [array, callback, initial, arg_count=3]
                         ctx_ref.stack[ctx_ref.stack_ptr] = working_array_bits;
                         ctx_ref.stack_ptr += 1;
-                        ctx_ref.stack[ctx_ref.stack_ptr] = predicate;
+                        ctx_ref.stack[ctx_ref.stack_ptr] = callback;
                         ctx_ref.stack_ptr += 1;
                         ctx_ref.stack[ctx_ref.stack_ptr] = initial;
                         ctx_ref.stack_ptr += 1;

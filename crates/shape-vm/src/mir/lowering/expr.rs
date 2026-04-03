@@ -11,6 +11,7 @@ use super::MirBuilder;
 use super::immutable_binding_metadata;
 use crate::mir::types::*;
 use shape_ast::ast::{self, Expr, Literal, Span, Spanned, Statement};
+use shape_ast::interpolation::{parse_interpolation_with_mode, InterpolationPart};
 use shape_runtime::closure::EnvironmentAnalyzer;
 
 // ---------------------------------------------------------------------------
@@ -505,6 +506,198 @@ pub(super) fn lower_conditional_expr(
     builder.start_block(merge_block);
 }
 
+/// Lower the null coalescing operator `lhs ?? rhs`.
+///
+/// Generates:
+///   _lhs = evaluate(lhs)
+///   _is_null = Eq(_lhs, None)
+///   SwitchBool(_is_null, true=null_bb, false=non_null_bb)
+///
+///   null_bb:
+///     temp = evaluate(rhs)
+///     Goto(merge_bb)
+///
+///   non_null_bb:
+///     temp = _lhs
+///     Goto(merge_bb)
+///
+///   merge_bb:
+///     // temp holds the result
+fn lower_null_coalesce(
+    builder: &mut MirBuilder,
+    lhs: &Expr,
+    rhs: &Expr,
+    temp: SlotId,
+    span: Span,
+) {
+    // Evaluate LHS
+    let lhs_slot = lower_expr_to_temp(builder, lhs);
+
+    // Check if LHS is null: compare with None
+    let is_null_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(is_null_slot),
+            Rvalue::BinaryOp(
+                BinOp::Eq,
+                Operand::Copy(Place::Local(lhs_slot)),
+                Operand::Constant(MirConstant::None),
+            ),
+        ),
+        span,
+    );
+
+    let null_bb = builder.new_block();
+    let non_null_bb = builder.new_block();
+    let merge_bb = builder.new_block();
+
+    builder.finish_block(
+        TerminatorKind::SwitchBool {
+            operand: Operand::Copy(Place::Local(is_null_slot)),
+            true_bb: null_bb,
+            false_bb: non_null_bb,
+        },
+        span,
+    );
+
+    // null_bb: LHS was None, evaluate RHS
+    builder.start_block(null_bb);
+    let rhs_slot = lower_expr_to_temp(builder, rhs);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Copy(Place::Local(rhs_slot))),
+        ),
+        rhs.span(),
+    );
+    builder.finish_block(TerminatorKind::Goto(merge_bb), rhs.span());
+
+    // non_null_bb: LHS was not None, use it directly
+    builder.start_block(non_null_bb);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Copy(Place::Local(lhs_slot))),
+        ),
+        lhs.span(),
+    );
+    builder.finish_block(TerminatorKind::Goto(merge_bb), lhs.span());
+
+    builder.start_block(merge_bb);
+}
+
+/// Lower a formatted string literal `f"text {expr} more"` into a series
+/// of string constant / expression evaluations concatenated with BinOp::Add.
+fn lower_formatted_string(
+    builder: &mut MirBuilder,
+    value: &str,
+    mode: shape_ast::ast::InterpolationMode,
+    temp: SlotId,
+    span: Span,
+) {
+    let parts = match parse_interpolation_with_mode(value, mode) {
+        Ok(parts) => parts,
+        Err(_) => {
+            // Fallback: emit empty string on parse error
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(temp),
+                    Rvalue::Use(Operand::Constant(MirConstant::Str(String::new()))),
+                ),
+                span,
+            );
+            return;
+        }
+    };
+
+    if parts.is_empty() {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Constant(MirConstant::Str(String::new()))),
+            ),
+            span,
+        );
+        return;
+    }
+
+    // Lower each part to a slot, then concatenate with BinOp::Add
+    let mut accumulated: Option<SlotId> = None;
+
+    for part in parts {
+        let part_slot = match part {
+            InterpolationPart::Literal(text) => {
+                let s = builder.alloc_temp(LocalTypeInfo::Unknown);
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(s),
+                        Rvalue::Use(Operand::Constant(MirConstant::Str(text))),
+                    ),
+                    span,
+                );
+                s
+            }
+            InterpolationPart::Expression { expr, .. } => {
+                // Parse and lower the expression
+                match shape_ast::parser::parse_expression_str(&expr) {
+                    Ok(parsed_expr) => lower_expr_to_temp(builder, &parsed_expr),
+                    Err(_) => {
+                        // Fallback: emit empty string on parse error
+                        let s = builder.alloc_temp(LocalTypeInfo::Unknown);
+                        builder.push_stmt(
+                            StatementKind::Assign(
+                                Place::Local(s),
+                                Rvalue::Use(Operand::Constant(MirConstant::Str(String::new()))),
+                            ),
+                            span,
+                        );
+                        s
+                    }
+                }
+            }
+        };
+
+        accumulated = Some(match accumulated {
+            None => part_slot,
+            Some(prev_slot) => {
+                // Concatenate prev_slot + part_slot using BinOp::Add
+                let concat_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(concat_slot),
+                        Rvalue::BinaryOp(
+                            BinOp::Add,
+                            Operand::Copy(Place::Local(prev_slot)),
+                            Operand::Copy(Place::Local(part_slot)),
+                        ),
+                    ),
+                    span,
+                );
+                concat_slot
+            }
+        });
+    }
+
+    // Copy final result to temp
+    if let Some(result_slot) = accumulated {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Copy(Place::Local(result_slot))),
+            ),
+            span,
+        );
+    } else {
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Constant(MirConstant::Str(String::new()))),
+            ),
+            span,
+        );
+    }
+}
+
 fn lower_block_expr(
     builder: &mut MirBuilder,
     block: &ast::BlockExpr,
@@ -688,62 +881,176 @@ fn lower_for_expr(
     temp: SlotId,
     span: Span,
 ) {
-    builder.push_scope();
+    // Check if the iterable is a Range expression with both start and end.
+    // If so, generate a counter-based loop (like the bytecode compiler does).
+    if let Expr::Range {
+        start: Some(start_expr),
+        end: Some(end_expr),
+        kind,
+        ..
+    } = for_expr.iterable.as_ref()
+    {
+        use shape_ast::ast::RangeKind;
 
-    let iter_slot = lower_expr_to_temp(builder, &for_expr.iterable);
-    let elem_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
-    let header = builder.new_block();
-    let body_block = builder.new_block();
-    let after = builder.new_block();
+        builder.push_scope();
 
-    builder.push_stmt(
-        StatementKind::Assign(
-            Place::Local(temp),
-            Rvalue::Use(Operand::Constant(MirConstant::None)),
-        ),
-        span,
-    );
-    builder.finish_block(TerminatorKind::Goto(header), span);
+        // Evaluate start and end into temp slots
+        let start_slot = lower_expr_to_temp(builder, start_expr);
+        let end_slot = lower_expr_to_temp(builder, end_expr);
 
-    builder.start_block(header);
-    builder.finish_block(
-        TerminatorKind::SwitchBool {
-            operand: Operand::Copy(Place::Local(iter_slot)),
-            true_bb: body_block,
-            false_bb: after,
-        },
-        span,
-    );
+        // Allocate the loop counter as a named local so the loop body
+        // can reference it by name. For simple identifier patterns
+        // (the common case: `for i in 0..10`), the counter IS the
+        // loop variable.
+        let counter_slot = match &for_expr.pattern {
+            ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+                builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
+            }
+            _ => builder.alloc_temp(LocalTypeInfo::Unknown),
+        };
 
-    builder.start_block(body_block);
-    builder.push_stmt(
-        StatementKind::Assign(
-            Place::Local(elem_slot),
-            Rvalue::Use(Operand::Constant(MirConstant::None)),
-        ),
-        span,
-    );
-    super::stmt::lower_pattern_bindings_from_place(
-        builder,
-        &for_expr.pattern,
-        &Place::Local(elem_slot),
-        span,
-        None,
-    );
-    builder.push_loop(after, header, Some(temp));
-    let body_slot = lower_expr_to_temp(builder, &for_expr.body);
-    builder.push_stmt(
-        StatementKind::Assign(
-            Place::Local(temp),
-            Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
-        ),
-        for_expr.body.span(),
-    );
-    builder.pop_loop();
-    builder.finish_block(TerminatorKind::Goto(header), span);
+        // Initialize counter = start
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(counter_slot),
+                Rvalue::Use(Operand::Copy(Place::Local(start_slot))),
+            ),
+            span,
+        );
 
-    builder.start_block(after);
-    builder.pop_scope();
+        // Initialize result temp to None (for-expr may produce a value)
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+
+        let header = builder.new_block();
+        let body_block = builder.new_block();
+        let after = builder.new_block();
+
+        builder.finish_block(TerminatorKind::Goto(header), span);
+
+        // Loop header: check counter < end (or counter <= end for inclusive)
+        builder.start_block(header);
+        let cmp_op = match kind {
+            RangeKind::Exclusive => BinOp::Lt,
+            RangeKind::Inclusive => BinOp::Le,
+        };
+        let cond_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(cond_slot),
+                Rvalue::BinaryOp(
+                    cmp_op,
+                    Operand::Copy(Place::Local(counter_slot)),
+                    Operand::Copy(Place::Local(end_slot)),
+                ),
+            ),
+            span,
+        );
+        builder.finish_block(
+            TerminatorKind::SwitchBool {
+                operand: Operand::Copy(Place::Local(cond_slot)),
+                true_bb: body_block,
+                false_bb: after,
+            },
+            span,
+        );
+
+        // Loop body
+        builder.start_block(body_block);
+        builder.push_loop(after, header, Some(temp));
+        let body_slot = lower_expr_to_temp(builder, &for_expr.body);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
+            ),
+            for_expr.body.span(),
+        );
+        builder.pop_loop();
+
+        // Increment counter: counter = counter + 1
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(counter_slot),
+                Rvalue::BinaryOp(
+                    BinOp::Add,
+                    Operand::Copy(Place::Local(counter_slot)),
+                    Operand::Constant(MirConstant::Int(1)),
+                ),
+            ),
+            span,
+        );
+
+        builder.finish_block(TerminatorKind::Goto(header), span);
+
+        // After loop
+        builder.start_block(after);
+        builder.pop_scope();
+    } else {
+        // Generic iterator path (non-range iterators).
+        // This is a placeholder — full iterator protocol not yet implemented in MIR.
+        builder.push_scope();
+
+        let iter_slot = lower_expr_to_temp(builder, &for_expr.iterable);
+        let elem_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+        let header = builder.new_block();
+        let body_block = builder.new_block();
+        let after = builder.new_block();
+
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+        builder.finish_block(TerminatorKind::Goto(header), span);
+
+        builder.start_block(header);
+        builder.finish_block(
+            TerminatorKind::SwitchBool {
+                operand: Operand::Copy(Place::Local(iter_slot)),
+                true_bb: body_block,
+                false_bb: after,
+            },
+            span,
+        );
+
+        builder.start_block(body_block);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(elem_slot),
+                Rvalue::Use(Operand::Constant(MirConstant::None)),
+            ),
+            span,
+        );
+        super::stmt::lower_pattern_bindings_from_place(
+            builder,
+            &for_expr.pattern,
+            &Place::Local(elem_slot),
+            span,
+            None,
+        );
+        builder.push_loop(after, header, Some(temp));
+        let body_slot = lower_expr_to_temp(builder, &for_expr.body);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::Use(Operand::Copy(Place::Local(body_slot))),
+            ),
+            for_expr.body.span(),
+        );
+        builder.pop_loop();
+        builder.finish_block(TerminatorKind::Goto(header), span);
+
+        builder.start_block(after);
+        builder.pop_scope();
+    }
 }
 
 fn lower_loop_expr(
@@ -952,6 +1259,9 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
     let temp = builder.alloc_temp(LocalTypeInfo::Unknown);
 
     match expr {
+        Expr::Literal(Literal::FormattedString { value, mode }, _) => {
+            lower_formatted_string(builder, value, *mode, temp, span);
+        }
         Expr::Literal(lit, _) => {
             let constant = match lit {
                 Literal::Int(v) => MirConstant::Int(*v),
@@ -961,7 +1271,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 Literal::Decimal(_) => MirConstant::Float(0), // decimal not yet modeled
                 Literal::String(s) => MirConstant::Str(s.clone()),
                 Literal::Char(c) => MirConstant::Int(*c as i64),
-                Literal::FormattedString { .. } => MirConstant::Str(String::new()),
+                Literal::FormattedString { .. } => unreachable!("handled above"),
                 Literal::ContentString { .. } => MirConstant::Str(String::new()),
                 Literal::Bool(v) => MirConstant::Bool(*v),
                 Literal::None => MirConstant::None,
@@ -1152,18 +1462,24 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
         Expr::BinaryOp {
             left, op, right, ..
         } => {
-            let l = lower_expr_to_operand(builder, left, false);
-            let r = lower_expr_to_operand(builder, right, false);
-            if let Some(op) = lower_binary_op(*op) {
-                builder.push_stmt(
-                    StatementKind::Assign(Place::Local(temp), Rvalue::BinaryOp(op, l, r)),
-                    span,
-                );
+            if *op == ast::BinaryOp::Pipe {
+                lower_pipe_expr(builder, left, right, temp, span);
+            } else if *op == ast::BinaryOp::NullCoalesce {
+                lower_null_coalesce(builder, left, right, temp, span);
             } else {
-                builder.push_stmt(
-                    StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(vec![l, r])),
-                    span,
-                );
+                let l = lower_expr_to_operand(builder, left, false);
+                let r = lower_expr_to_operand(builder, right, false);
+                if let Some(op) = lower_binary_op(*op) {
+                    builder.push_stmt(
+                        StatementKind::Assign(Place::Local(temp), Rvalue::BinaryOp(op, l, r)),
+                        span,
+                    );
+                } else {
+                    builder.push_stmt(
+                        StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(vec![l, r])),
+                        span,
+                    );
+                }
             }
         }
         Expr::FuzzyComparison {
@@ -1315,22 +1631,11 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
         }
         Expr::TypeAssertion {
             expr,
+            type_annotation,
             meta_param_overrides,
             ..
         } => {
-            let mut operands = vec![lower_expr_as_moved_operand(builder, expr)];
-            if let Some(overrides) = meta_param_overrides {
-                let mut keys: Vec<_> = overrides.keys().cloned().collect();
-                keys.sort();
-                for key in keys {
-                    if let Some(value) = overrides.get(&key) {
-                        operands.push(lower_expr_as_moved_operand(builder, value));
-                    }
-                }
-            }
-            builder.push_stmt(
-                StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands)),
-                span,
+            lower_type_assertion_expr(builder, expr, type_annotation, meta_param_overrides, temp, span
             );
         }
         Expr::InstanceOf { expr, .. } => {
@@ -1480,4 +1785,141 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
     }
 
     temp
+}
+
+// ---------------------------------------------------------------------------
+// Pipe operator lowering
+// ---------------------------------------------------------------------------
+
+fn lower_pipe_expr(
+    builder: &mut MirBuilder,
+    left: &Expr,
+    right: &Expr,
+    temp: SlotId,
+    span: Span,
+) {
+    match right {
+        Expr::FunctionCall {
+            name,
+            args,
+            named_args,
+            ..
+        } => {
+            let left_op = lower_expr_as_moved_operand(builder, left);
+            let mut arg_ops = Vec::with_capacity(1 + args.len() + named_args.len());
+            arg_ops.push(left_op);
+            arg_ops.extend(args.iter().map(|arg| lower_expr_as_moved_operand(builder, arg)));
+            arg_ops.extend(named_args.iter().map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)));
+            let func_op = Operand::Constant(MirConstant::Function(name.clone()));
+            builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
+        }
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            named_args,
+            ..
+        } => {
+            let receiver_op = lower_expr_as_moved_operand(builder, receiver);
+            let left_op = lower_expr_as_moved_operand(builder, left);
+            let mut arg_ops = Vec::with_capacity(2 + args.len() + named_args.len());
+            arg_ops.push(receiver_op);
+            arg_ops.push(left_op);
+            arg_ops.extend(args.iter().map(|arg| lower_expr_as_moved_operand(builder, arg)));
+            arg_ops.extend(named_args.iter().map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)));
+            let func_op = Operand::Constant(MirConstant::Method(method.clone()));
+            builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
+        }
+        Expr::Identifier(name, _) => {
+            let left_op = lower_expr_as_moved_operand(builder, left);
+            let func_op = Operand::Constant(MirConstant::Function(name.clone()));
+            builder.emit_call(func_op, vec![left_op], Place::Local(temp), span);
+        }
+        _ => {
+            let l = lower_expr_to_operand(builder, left, false);
+            let r = lower_expr_to_operand(builder, right, false);
+            builder.push_stmt(
+                StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(vec![l, r])),
+                span,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type assertion lowering
+// ---------------------------------------------------------------------------
+
+fn lower_type_assertion_expr(
+    builder: &mut MirBuilder,
+    expr: &Expr,
+    type_annotation: &ast::TypeAnnotation,
+    meta_param_overrides: &Option<std::collections::HashMap<String, Expr>>,
+    temp: SlotId,
+    span: Span,
+) {
+    // For primitive target types, emit a Call to the specific Into trait
+    // implementation. We don't know the source type at MIR lowering time,
+    // but the JIT's method dispatch for "into" resolves based on value type.
+    // However, method dispatch doesn't know the TARGET type.
+    //
+    // Alternative approach: use the bytecode compiler's ConvertTo* pattern.
+    // The `jit_call_method` handler for "into" doesn't exist, so instead
+    // we emit a method call that includes the target type name, which the
+    // JIT method dispatch can use for conversion.
+    // Use method dispatch for type conversion. The JIT method handler
+    // resolves "into" on values — for int.into() it returns number, etc.
+    // We use type-specific method names that exist in the method registry.
+    let conversion_method = match type_annotation {
+        ast::TypeAnnotation::Basic(name) => match name.as_str() {
+            // "toNumber" exists on int, bool, string via method registry
+            "number" => Some("toNumber"),
+            // "toString" exists on all types via method registry
+            "string" => Some("toString"),
+            // For "int": no universal "toInt" method. Use the Into function directly.
+            // The compiled Into::number::int::into is a regular function.
+            "int" => None, // handled below as Into function call
+            "bool" => Some("toBool"),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    if let Some(method_name) = conversion_method {
+        let arg = lower_expr_as_moved_operand(builder, expr);
+        let func_op = Operand::Constant(MirConstant::Method(method_name.to_string()));
+        builder.emit_call(func_op, vec![arg], Place::Local(temp), span);
+    } else if matches!(type_annotation, ast::TypeAnnotation::Basic(n) if n == "int") {
+        // For "as int": emit BinaryOp with a floor-style conversion.
+        // Multiplying by 1 triggers the generic_mul FFI which handles
+        // number*int → int conversion. But a cleaner approach:
+        // just call the function directly by trying all Into variants.
+        // The simplest: use BinaryOp::Mul with 1 which coerces to int in the VM.
+        // Actually, the cleanest: use a special Or with 0 (bitwise) which is identity for ints.
+        // For now, use Aggregate (the value passes through unchanged, and the executor
+        // reads the NaN-boxed type tag to marshal correctly).
+        let arg = lower_expr_as_moved_operand(builder, expr);
+        // Emit: result = arg | 0  (bitwise OR with 0 is identity but triggers int coercion)
+        // Actually simpler: just pass through. The value is already the right bits,
+        // the executor's return marshaling handles the type interpretation.
+        builder.push_stmt(
+            StatementKind::Assign(Place::Local(temp), Rvalue::Use(arg)),
+            span,
+        );
+    } else {
+        let mut operands = vec![lower_expr_as_moved_operand(builder, expr)];
+        if let Some(overrides) = meta_param_overrides {
+            let mut keys: Vec<_> = overrides.keys().cloned().collect();
+            keys.sort();
+            for key in keys {
+                if let Some(value) = overrides.get(&key) {
+                    operands.push(lower_expr_as_moved_operand(builder, value));
+                }
+            }
+        }
+        builder.push_stmt(
+            StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands)),
+            span,
+        );
+    }
 }

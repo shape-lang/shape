@@ -43,14 +43,45 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // Native bool: I8 value, 0 = false, nonzero = true.
                     cond_val
                 } else {
-                    // NaN-boxed boolean: compare against TAG_BOOL_TRUE.
-                    let tag_true = self
+                    // NaN-boxed truthiness: a value is falsy if it is
+                    // TAG_NULL, TAG_NONE, TAG_BOOL_FALSE, or 0.
+                    // Everything else (numbers, strings, arrays, objects,
+                    // TAG_BOOL_TRUE) is truthy.
+                    //
+                    // We check: value != TAG_NULL && value != TAG_NONE
+                    //        && value != TAG_BOOL_FALSE && value != 0
+                    let tag_null = self
                         .builder
                         .ins()
-                        .iconst(types::I64, crate::nan_boxing::TAG_BOOL_TRUE as i64);
-                    self.builder
+                        .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64);
+                    let tag_none = self
+                        .builder
                         .ins()
-                        .icmp(IntCC::Equal, cond_val, tag_true)
+                        .iconst(types::I64, crate::nan_boxing::TAG_NONE as i64);
+                    let tag_false = self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, crate::nan_boxing::TAG_BOOL_FALSE as i64);
+                    let zero = self.builder.ins().iconst(types::I64, 0i64);
+                    let not_null = self
+                        .builder
+                        .ins()
+                        .icmp(IntCC::NotEqual, cond_val, tag_null);
+                    let not_none = self
+                        .builder
+                        .ins()
+                        .icmp(IntCC::NotEqual, cond_val, tag_none);
+                    let not_false = self
+                        .builder
+                        .ins()
+                        .icmp(IntCC::NotEqual, cond_val, tag_false);
+                    let not_zero = self
+                        .builder
+                        .ins()
+                        .icmp(IntCC::NotEqual, cond_val, zero);
+                    let t1 = self.builder.ins().band(not_null, not_none);
+                    let t2 = self.builder.ins().band(t1, not_false);
+                    self.builder.ins().band(t2, not_zero)
                 };
 
                 self.builder
@@ -65,6 +96,123 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 destination,
                 next,
             } => {
+                // ── METHOD CALL PATH ─────────────────────────────────────
+                // Method calls use MirConstant::Method(name). The MIR args
+                // are [receiver, arg0, arg1, ...]. We need to push them to
+                // ctx.stack in the format jit_call_method expects:
+                //   [receiver, arg0, ..., method_name_string, arg_count_number]
+                // then call jit_call_method(ctx, total_count).
+                if let Operand::Constant(MirConstant::Method(method_name)) = func {
+                    let stack_base_offset = crate::context::STACK_OFFSET as i32;
+                    let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
+
+                    let old_sp = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        self.ctx_ptr,
+                        sp_offset,
+                    );
+
+                    // args[0] = receiver, args[1..] = actual method arguments
+                    // Push all args (receiver first, then method args) NaN-boxed
+                    for (i, arg) in args.iter().enumerate() {
+                        let val = self.compile_operand(arg)?;
+                        let boxed = self.ensure_nanboxed(val);
+                        let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
+                        let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
+                        let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
+                        let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
+                        self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
+                    }
+
+                    // Push method_name as NaN-boxed string
+                    let method_str_bits = crate::nan_boxing::box_string(method_name.clone());
+                    let method_val = self.builder.ins().iconst(types::I64, method_str_bits as i64);
+                    let method_slot_idx = self.builder.ins().iadd_imm(old_sp, args.len() as i64);
+                    let method_byte_off = self.builder.ins().ishl_imm(method_slot_idx, 3);
+                    let method_abs_off = self.builder.ins().iadd_imm(method_byte_off, stack_base_offset as i64);
+                    let method_addr = self.builder.ins().iadd(self.ctx_ptr, method_abs_off);
+                    self.builder.ins().store(MemFlags::new(), method_val, method_addr, 0);
+
+                    // Push arg_count as NaN-boxed number (count of actual args, NOT receiver)
+                    let actual_arg_count = if args.is_empty() { 0 } else { args.len() - 1 };
+                    let argc_bits = crate::nan_boxing::box_number(actual_arg_count as f64);
+                    let argc_val = self.builder.ins().iconst(types::I64, argc_bits as i64);
+                    let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (args.len() + 1) as i64);
+                    let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
+                    let argc_abs_off = self.builder.ins().iadd_imm(argc_byte_off, stack_base_offset as i64);
+                    let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
+                    self.builder.ins().store(MemFlags::new(), argc_val, argc_addr, 0);
+
+                    // Update stack_ptr: receiver + args + method_name + arg_count
+                    let total_items = args.len() + 2; // args (including receiver) + method_name + arg_count
+                    let new_sp = self.builder.ins().iadd_imm(old_sp, total_items as i64);
+                    self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+
+                    // Call jit_call_method(ctx, total_count)
+                    let count_val = self.builder.ins().iconst(types::I64, total_items as i64);
+                    let inst = self.builder.ins().call(
+                        self.ffi.call_method,
+                        &[self.ctx_ptr, count_val],
+                    );
+                    let result = self.builder.inst_results(inst)[0];
+
+                    // Restore stack_ptr to old value
+                    self.builder.ins().store(MemFlags::new(), old_sp, self.ctx_ptr, sp_offset);
+
+                    // Store result to destination
+                    self.release_old_value_if_heap(destination)?;
+                    self.write_place(destination, result)?;
+
+                    // Reload locals that may have been mutated via references
+                    self.reload_referenced_locals();
+
+                    // Jump to continuation block
+                    let next_block = self.block_map.get(next).ok_or_else(|| {
+                        format!("MirToIR: unknown call continuation block {}", next)
+                    })?;
+                    self.builder.ins().jump(*next_block, &[]);
+                    return Ok(());
+                }
+
+                // ── ENUM CONSTRUCTOR PATH ─────────────────────────────
+                // Qualified function calls like "Shape::Circle" that don't
+                // exist in the function index are enum variant constructors.
+                // Enums are represented as arrays in the JIT, so we just
+                // create an array from the constructor arguments.
+                if let Operand::Constant(MirConstant::Function(name)) = func {
+                    if name.contains("::") && self.function_indices.get(name.as_str()).is_none() {
+                        // Create array from args (enum payload)
+                        let zero = self.builder.ins().iconst(types::I64, 0i64);
+                        let inst = self.builder.ins().call(
+                            self.ffi.new_array,
+                            &[self.ctx_ptr, zero],
+                        );
+                        let mut arr = self.builder.inst_results(inst)[0];
+
+                        for arg in args.iter() {
+                            let raw = self.compile_operand(arg)?;
+                            let val = self.ensure_nanboxed(raw);
+                            let inst = self.builder.ins().call(
+                                self.ffi.array_push_elem,
+                                &[arr, val],
+                            );
+                            arr = self.builder.inst_results(inst)[0];
+                        }
+
+                        // Store result to destination
+                        self.release_old_value_if_heap(destination)?;
+                        self.write_place(destination, arr)?;
+
+                        // Jump to continuation block
+                        let next_block = self.block_map.get(next).ok_or_else(|| {
+                            format!("MirToIR: unknown call continuation block {}", next)
+                        })?;
+                        self.builder.ins().jump(*next_block, &[]);
+                        return Ok(());
+                    }
+                }
+
                 // Resolve function ID from the func operand.
                 // Direct calls use MirConstant::Function(name) → look up index.
                 // Indirect calls (closures/first-class functions) fall back to
