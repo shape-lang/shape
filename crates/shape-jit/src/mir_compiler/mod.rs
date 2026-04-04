@@ -294,3 +294,5 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 }
+
+pub(crate) mod v2_call_abi;

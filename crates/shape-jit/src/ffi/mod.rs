@@ -45,3 +45,5 @@ pub use result::*;
 pub use simd::*;
 pub use typed_object::*;
 pub use window::*;
+
+pub mod v2_math;

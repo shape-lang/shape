@@ -1,25 +1,28 @@
-//! Fixed-layout heap object header for JIT-friendly type dispatch.
+//! Unified heap object header (v2 runtime spec).
 //!
-//! `HeapHeader` is a `#[repr(C, align(16))]` struct that prefixes heap-allocated
-//! objects, giving the JIT a stable memory layout to read the object's kind, length,
-//! and capacity without depending on Rust's enum discriminant layout.
+//! `HeapHeader` is a `#[repr(C)]` 8-byte struct that prefixes every heap-allocated
+//! object, giving the JIT a stable memory layout to read kind/flags and perform
+//! atomic reference counting without depending on Rust's enum discriminant layout.
 //!
-//! ## Memory layout (32 bytes, 16-byte aligned)
+//! ## Memory layout (8 bytes)
 //!
 //! ```text
 //! Offset  Size  Field
 //! ------  ----  -----
-//!   0       2   kind (HeapKind as u16)
-//!   2       1   elem_type (element type hint for arrays/typed objects)
-//!   3       1   flags (bitfield: MARKED, PINNED, READONLY, etc.)
-//!   4       4   len (element count / field count)
-//!   8       4   cap (allocated capacity, 0 if not applicable)
-//!  12       4   (padding)
-//!  16       8   aux (auxiliary data: schema_id, function_id, etc.)
-//!  24       8   (reserved / future use)
+//!   0       4   refcount (AtomicU32)
+//!   4       2   kind (HeapKind as u16)
+//!   6       1   flags (bitfield: MARKED, PINNED, READONLY, etc.)
+//!   7       1   _pad (reserved, always 0)
 //! ```
+//!
+//! Data starts at offset 8 (`DATA_OFFSET`).
+//!
+//! Clone = `atomic_fetch_add([ptr+0], 1, Relaxed)`.
+//! Drop  = `atomic_fetch_sub([ptr+0], 1, Release)`.
 
-use crate::heap_value::{HeapKind, HeapValue};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::heap_value::HeapKind;
 
 /// Flag: object has been marked by the GC during a collection cycle.
 pub const FLAG_MARKED: u8 = 0b0000_0001;
@@ -28,166 +31,90 @@ pub const FLAG_PINNED: u8 = 0b0000_0010;
 /// Flag: object is read-only (immutable after construction).
 pub const FLAG_READONLY: u8 = 0b0000_0100;
 
-/// Fixed-layout header for heap-allocated objects.
+/// Byte offset from the start of a heap allocation where payload data begins
+/// (immediately after the 8-byte HeapHeader).
+pub const DATA_OFFSET: usize = 8;
+
+/// Fixed-layout header for heap-allocated objects (v2 runtime spec).
 ///
 /// This struct is designed to be readable by JIT-generated code at known offsets.
-/// The JIT can load `kind` at offset 0, `len` at offset 4, and `aux` at offset 16
-/// without any Rust ABI knowledge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C, align(16))]
+/// The refcount lives at offset 0 for single-cycle atomic access.  Kind and flags
+/// follow at offsets 4 and 6 respectively.
+#[repr(C)]
 pub struct HeapHeader {
+    /// Reference count. Starts at 1 on allocation.
+    /// Clone: `fetch_add(1, Relaxed)`.  Drop: `fetch_sub(1, Release)`.
+    pub refcount: AtomicU32,
     /// Object type discriminator (matches `HeapKind` and `HEAP_KIND_*` constants).
     pub kind: u16,
-    /// Element type hint for homogeneous containers (0 = untyped/mixed).
-    /// For arrays: 1=f64, 2=i64, 3=string, 4=bool, 5=typed_object.
-    /// For typed objects: unused (0).
-    pub elem_type: u8,
     /// Bitfield flags (FLAG_MARKED, FLAG_PINNED, FLAG_READONLY).
     pub flags: u8,
-    /// Element count (array length, field count, string byte length, etc.).
-    pub len: u32,
-    /// Allocated capacity (for growable containers). 0 if not applicable.
-    pub cap: u32,
-    /// Padding to align `aux` at offset 16.
-    _pad: u32,
-    /// Auxiliary data interpreted per-kind:
-    /// - TypedObject: schema_id (u64)
-    /// - Closure: function_id (low u16) | captures_count (next u16)
-    /// - TypedTable/RowView/ColumnRef/IndexedTable: schema_id (u64)
-    /// - Future: future_id (u64)
-    /// - Enum: variant_id (low u32)
-    /// - Other: 0
-    pub aux: u64,
-    /// Reserved for future use (e.g., GC forwarding pointer).
-    _reserved: u64,
+    /// Padding byte to reach 8-byte total size. Must be zero.
+    pub _pad: u8,
 }
 
 /// Compile-time size and offset assertions.
 const _: () = {
-    assert!(std::mem::size_of::<HeapHeader>() == 32);
-    assert!(std::mem::align_of::<HeapHeader>() == 16);
+    assert!(std::mem::size_of::<HeapHeader>() == 8);
+    assert!(std::mem::align_of::<HeapHeader>() == 4);
+    assert!(DATA_OFFSET == 8);
 };
 
-/// Element type hints for the `elem_type` field.
-pub mod elem_types {
-    /// Untyped or mixed-type container.
-    pub const UNTYPED: u8 = 0;
-    /// All elements are f64.
-    pub const F64: u8 = 1;
-    /// All elements are i64.
-    pub const I64: u8 = 2;
-    /// All elements are strings.
-    pub const STRING: u8 = 3;
-    /// All elements are bools.
-    pub const BOOL: u8 = 4;
-    /// All elements are typed objects.
-    pub const TYPED_OBJECT: u8 = 5;
-}
-
 impl HeapHeader {
-    /// Create a new HeapHeader with the given kind. All other fields are zeroed.
+    /// Byte offset of the `refcount` field (AtomicU32, 4 bytes).
+    pub const OFFSET_REFCOUNT: usize = 0;
+    /// Byte offset of the `kind` field (u16, 2 bytes).
+    pub const OFFSET_KIND: usize = 4;
+    /// Byte offset of the `flags` field (u8, 1 byte).
+    pub const OFFSET_FLAGS: usize = 6;
+
+    /// Byte offset where payload data starts, immediately after the header.
+    pub const DATA_OFFSET: usize = DATA_OFFSET;
+
+    /// Create a new HeapHeader with the given kind. Refcount starts at 1,
+    /// flags and padding are zeroed.
     #[inline]
-    pub fn new(kind: HeapKind) -> Self {
+    pub fn new(kind: u16) -> Self {
         Self {
-            kind: kind as u16,
-            elem_type: 0,
+            refcount: AtomicU32::new(1),
+            kind,
             flags: 0,
-            len: 0,
-            cap: 0,
             _pad: 0,
-            aux: 0,
-            _reserved: 0,
         }
     }
 
-    /// Create a HeapHeader with kind, length, and auxiliary data.
-    #[inline]
-    pub fn with_len_aux(kind: HeapKind, len: u32, aux: u64) -> Self {
-        Self {
-            kind: kind as u16,
-            elem_type: 0,
-            flags: 0,
-            len,
-            cap: 0,
-            _pad: 0,
-            aux,
-            _reserved: 0,
-        }
-    }
-
-    /// Build a HeapHeader from an existing HeapValue.
+    /// Increment the reference count (clone semantics).
     ///
-    /// Extracts kind, length, and auxiliary data from the HeapValue's contents.
-    pub fn from_heap_value(value: &HeapValue) -> Self {
-        let kind = value.kind();
-        let mut header = Self::new(kind);
+    /// Uses `Relaxed` ordering — the caller is responsible for establishing
+    /// a happens-before relationship when sharing the pointer across threads.
+    #[inline]
+    pub fn retain(&self) {
+        self.refcount.fetch_add(1, Ordering::Relaxed);
+    }
 
-        match value {
-            HeapValue::String(s) => {
-                header.len = s.len() as u32;
-            }
-            HeapValue::Array(arr) => {
-                header.len = arr.len() as u32;
-                header.cap = arr.len() as u32;
-            }
-            HeapValue::TypedObject {
-                schema_id, slots, ..
-            } => {
-                header.len = slots.len() as u32;
-                header.aux = *schema_id;
-            }
-            HeapValue::Closure {
-                function_id,
-                upvalues,
-            } => {
-                header.len = upvalues.len() as u32;
-                header.aux = *function_id as u64;
-            }
-            HeapValue::DataTable(dt) => {
-                header.len = dt.row_count() as u32;
-            }
-            HeapValue::TypedTable { schema_id, table } => {
-                header.len = table.row_count() as u32;
-                header.aux = *schema_id;
-            }
-            HeapValue::RowView {
-                schema_id, row_idx, ..
-            } => {
-                header.len = 1;
-                header.aux = *schema_id;
-                // Store row_idx in the lower 32 bits of _reserved via cap field
-                header.cap = *row_idx as u32;
-            }
-            HeapValue::ColumnRef {
-                schema_id, col_id, ..
-            } => {
-                header.aux = *schema_id;
-                header.cap = *col_id;
-            }
-            HeapValue::IndexedTable {
-                schema_id,
-                table,
-                index_col,
-            } => {
-                header.len = table.row_count() as u32;
-                header.aux = *schema_id;
-                header.cap = *index_col;
-            }
-            HeapValue::Enum(_) => {
-                // Enum variant is identified by name, not index; no numeric aux needed.
-            }
-            HeapValue::Future(id) => {
-                header.aux = *id;
-            }
-            HeapValue::TaskGroup { kind, task_ids } => {
-                header.elem_type = *kind;
-                header.len = task_ids.len() as u32;
-            }
-            // Remaining types: kind is sufficient, no extra metadata needed.
-            _ => {}
+    /// Decrement the reference count (drop semantics).
+    ///
+    /// Returns `true` if the refcount reached zero, meaning the caller should
+    /// deallocate the object.  Uses `Release` ordering on the decrement and
+    /// an `Acquire` fence when the count reaches zero, matching the
+    /// Arc drop protocol.
+    #[inline]
+    pub fn release(&self) -> bool {
+        let prev = self.refcount.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            // Ensure all prior writes to the object are visible before we
+            // read/deallocate it.
+            std::sync::atomic::fence(Ordering::Acquire);
+            true
+        } else {
+            false
         }
+    }
 
-        header
+    /// Get the current reference count (for debugging / testing only).
+    #[inline]
+    pub fn refcount(&self) -> u32 {
+        self.refcount.load(Ordering::Relaxed)
     }
 
     /// Get the HeapKind from this header.
@@ -213,19 +140,18 @@ impl HeapHeader {
     pub fn clear_flag(&mut self, flag: u8) {
         self.flags &= !flag;
     }
+}
 
-    /// Byte offset of the `kind` field from the start of the header.
-    pub const OFFSET_KIND: usize = 0;
-    /// Byte offset of the `elem_type` field.
-    pub const OFFSET_ELEM_TYPE: usize = 2;
-    /// Byte offset of the `flags` field.
-    pub const OFFSET_FLAGS: usize = 3;
-    /// Byte offset of the `len` field.
-    pub const OFFSET_LEN: usize = 4;
-    /// Byte offset of the `cap` field.
-    pub const OFFSET_CAP: usize = 8;
-    /// Byte offset of the `aux` field.
-    pub const OFFSET_AUX: usize = 16;
+/// HeapHeader contains an AtomicU32 which is not Clone/Copy. We provide a
+/// manual Debug impl since we cannot derive it on the atomic field cleanly.
+impl std::fmt::Debug for HeapHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeapHeader")
+            .field("refcount", &self.refcount.load(Ordering::Relaxed))
+            .field("kind", &self.kind)
+            .field("flags", &self.flags)
+            .finish()
+    }
 }
 
 impl HeapKind {
@@ -266,54 +192,86 @@ mod tests {
 
     #[test]
     fn test_header_size_and_alignment() {
-        assert_eq!(std::mem::size_of::<HeapHeader>(), 32);
-        assert_eq!(std::mem::align_of::<HeapHeader>(), 16);
+        assert_eq!(std::mem::size_of::<HeapHeader>(), 8);
+        // Natural alignment of AtomicU32 is 4.
+        assert_eq!(std::mem::align_of::<HeapHeader>(), 4);
     }
 
     #[test]
-    fn test_header_field_offsets() {
-        // Verify offsets match the documented layout using offset_of!
-        assert_eq!(HeapHeader::OFFSET_KIND, 0);
-        assert_eq!(HeapHeader::OFFSET_ELEM_TYPE, 2);
-        assert_eq!(HeapHeader::OFFSET_FLAGS, 3);
-        assert_eq!(HeapHeader::OFFSET_LEN, 4);
-        assert_eq!(HeapHeader::OFFSET_CAP, 8);
-        assert_eq!(HeapHeader::OFFSET_AUX, 16);
-
-        // Verify with actual struct field offsets
-        let h = HeapHeader::new(HeapKind::String);
+    fn test_header_field_offsets_via_pointer_arithmetic() {
+        let h = HeapHeader::new(HeapKind::String as u16);
         let base = &h as *const _ as usize;
-        assert_eq!(&h.kind as *const _ as usize - base, HeapHeader::OFFSET_KIND);
-        assert_eq!(
-            &h.elem_type as *const _ as usize - base,
-            HeapHeader::OFFSET_ELEM_TYPE
-        );
-        assert_eq!(
-            &h.flags as *const _ as usize - base,
-            HeapHeader::OFFSET_FLAGS
-        );
-        assert_eq!(&h.len as *const _ as usize - base, HeapHeader::OFFSET_LEN);
-        assert_eq!(&h.cap as *const _ as usize - base, HeapHeader::OFFSET_CAP);
-        assert_eq!(&h.aux as *const _ as usize - base, HeapHeader::OFFSET_AUX);
+
+        let refcount_offset = &h.refcount as *const _ as usize - base;
+        let kind_offset = &h.kind as *const _ as usize - base;
+        let flags_offset = &h.flags as *const _ as usize - base;
+        let pad_offset = &h._pad as *const _ as usize - base;
+
+        assert_eq!(refcount_offset, 0, "refcount must be at offset 0");
+        assert_eq!(kind_offset, 4, "kind must be at offset 4");
+        assert_eq!(flags_offset, 6, "flags must be at offset 6");
+        assert_eq!(pad_offset, 7, "_pad must be at offset 7");
+    }
+
+    #[test]
+    fn test_header_offset_constants() {
+        assert_eq!(HeapHeader::OFFSET_REFCOUNT, 0);
+        assert_eq!(HeapHeader::OFFSET_KIND, 4);
+        assert_eq!(HeapHeader::OFFSET_FLAGS, 6);
+        assert_eq!(HeapHeader::DATA_OFFSET, 8);
+        assert_eq!(DATA_OFFSET, 8);
     }
 
     #[test]
     fn test_new_header() {
-        let h = HeapHeader::new(HeapKind::Array);
+        let h = HeapHeader::new(HeapKind::Array as u16);
+        assert_eq!(h.refcount(), 1);
         assert_eq!(h.kind, HeapKind::Array as u16);
-        assert_eq!(h.elem_type, 0);
         assert_eq!(h.flags, 0);
-        assert_eq!(h.len, 0);
-        assert_eq!(h.cap, 0);
-        assert_eq!(h.aux, 0);
+        assert_eq!(h._pad, 0);
     }
 
     #[test]
-    fn test_with_len_aux() {
-        let h = HeapHeader::with_len_aux(HeapKind::TypedObject, 5, 0xDEAD_BEEF);
-        assert_eq!(h.kind, HeapKind::TypedObject as u16);
-        assert_eq!(h.len, 5);
-        assert_eq!(h.aux, 0xDEAD_BEEF);
+    fn test_retain_increments_refcount() {
+        let h = HeapHeader::new(HeapKind::String as u16);
+        assert_eq!(h.refcount(), 1);
+        h.retain();
+        assert_eq!(h.refcount(), 2);
+        h.retain();
+        assert_eq!(h.refcount(), 3);
+    }
+
+    #[test]
+    fn test_release_decrements_refcount() {
+        let h = HeapHeader::new(HeapKind::String as u16);
+        h.retain(); // refcount = 2
+        h.retain(); // refcount = 3
+
+        assert!(!h.release()); // 3 -> 2, not zero
+        assert_eq!(h.refcount(), 2);
+
+        assert!(!h.release()); // 2 -> 1, not zero
+        assert_eq!(h.refcount(), 1);
+
+        assert!(h.release()); // 1 -> 0, reached zero!
+        assert_eq!(h.refcount(), 0);
+    }
+
+    #[test]
+    fn test_release_returns_true_on_last_drop() {
+        let h = HeapHeader::new(HeapKind::Array as u16);
+        // refcount starts at 1; single release should return true
+        assert!(h.release());
+    }
+
+    #[test]
+    fn test_data_offset_after_header() {
+        // Verify that DATA_OFFSET equals the size of the header.
+        assert_eq!(
+            DATA_OFFSET,
+            std::mem::size_of::<HeapHeader>(),
+            "DATA_OFFSET must equal sizeof(HeapHeader)"
+        );
     }
 
     #[test]
@@ -379,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_flags() {
-        let mut h = HeapHeader::new(HeapKind::Array);
+        let mut h = HeapHeader::new(HeapKind::Array as u16);
         assert!(!h.has_flag(FLAG_MARKED));
         assert!(!h.has_flag(FLAG_PINNED));
 
@@ -397,35 +355,20 @@ mod tests {
     }
 
     #[test]
-    fn test_from_heap_value_string() {
-        let hv = HeapValue::String(std::sync::Arc::new("hello".to_string()));
-        let h = HeapHeader::from_heap_value(&hv);
-        assert_eq!(h.kind, HeapKind::String as u16);
-        assert_eq!(h.len, 5);
+    fn test_heap_kind_accessor() {
+        let h = HeapHeader::new(HeapKind::Closure as u16);
+        assert_eq!(h.heap_kind(), Some(HeapKind::Closure));
+
+        let h2 = HeapHeader::new(0xFFFF);
+        assert_eq!(h2.heap_kind(), None);
     }
 
     #[test]
-    fn test_from_heap_value_typed_object() {
-        let hv = HeapValue::TypedObject {
-            schema_id: 42,
-            slots: vec![crate::slot::ValueSlot::from_number(0.0); 3].into_boxed_slice(),
-            heap_mask: 0,
-        };
-        let h = HeapHeader::from_heap_value(&hv);
-        assert_eq!(h.kind, HeapKind::TypedObject as u16);
-        assert_eq!(h.len, 3);
-        assert_eq!(h.aux, 42);
-    }
-
-    #[test]
-    fn test_from_heap_value_closure() {
-        let hv = HeapValue::Closure {
-            function_id: 7,
-            upvalues: vec![],
-        };
-        let h = HeapHeader::from_heap_value(&hv);
-        assert_eq!(h.kind, HeapKind::Closure as u16);
-        assert_eq!(h.len, 0);
-        assert_eq!(h.aux, 7);
+    fn test_debug_impl() {
+        let h = HeapHeader::new(HeapKind::String as u16);
+        let dbg = format!("{:?}", h);
+        assert!(dbg.contains("HeapHeader"));
+        assert!(dbg.contains("refcount"));
+        assert!(dbg.contains("kind"));
     }
 }

@@ -87,3 +87,5 @@ pub fn declare_ffi_functions(module: &mut JITModule) -> HashMap<String, FuncId> 
 
     ffi_funcs
 }
+
+pub mod v2_math_symbols;

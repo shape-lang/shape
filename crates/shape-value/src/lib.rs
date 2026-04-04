@@ -90,3 +90,7 @@ pub use v2::refcount::{v2_release, v2_retain};
 pub use v2::string_obj::StringObj as V2StringObj;
 pub use v2::struct_layout::{FieldInfo, FieldKind, StructLayout};
 pub use v2::typed_array::TypedArray as V2TypedArray;
+
+// v2 runtime types (zero-tag native values)
+pub mod v2_typed_array;
+pub mod v2_struct_layout;
