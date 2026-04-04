@@ -37,19 +37,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     format!("MirToIR: unknown false block {}", false_bb)
                 })?;
 
-                // Check if the condition is a native I8 bool or NaN-boxed I64.
+                // Convert condition to I8 bool based on its Cranelift type.
                 let cond_type = self.builder.func.dfg.value_type(cond_val);
                 let is_true = if cond_type == types::I8 {
-                    // Native bool: I8 value, 0 = false, nonzero = true.
+                    // Native bool: 0 = false, nonzero = true.
                     cond_val
+                } else if cond_type == types::F64 {
+                    // Native F64: truthy if != 0.0 and not NaN
+                    let zero = self.builder.ins().f64const(0.0);
+                    // fcmp ordered-not-equal: false for NaN and 0.0
+                    self.builder
+                        .ins()
+                        .fcmp(FloatCC::OrderedNotEqual, cond_val, zero)
+                } else if cond_type == types::I32 {
+                    // Native I32: truthy if != 0
+                    let zero = self.builder.ins().iconst(types::I32, 0);
+                    self.builder.ins().icmp(IntCC::NotEqual, cond_val, zero)
                 } else {
-                    // NaN-boxed truthiness: a value is falsy if it is
-                    // TAG_NULL, TAG_NONE, TAG_BOOL_FALSE, or 0.
-                    // Everything else (numbers, strings, arrays, objects,
-                    // TAG_BOOL_TRUE) is truthy.
-                    //
-                    // We check: value != TAG_NULL && value != TAG_NONE
-                    //        && value != TAG_BOOL_FALSE && value != 0
+                    // I64 (NaN-boxed): falsy if TAG_NULL, TAG_NONE, TAG_BOOL_FALSE, or 0
                     let tag_null = self
                         .builder
                         .ins()

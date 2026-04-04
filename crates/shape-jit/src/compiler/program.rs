@@ -325,7 +325,7 @@ impl JITCompiler {
         let mut user_func_ids: HashMap<u16, cranelift_module::FuncId> = HashMap::new();
 
         for (idx, func) in program.functions.iter().enumerate() {
-            let func_name = format!("{}_{}", name, func.name);
+            let func_name = format!("{}_{}", name, func.name.replace("::", "__"));
             let mut user_sig = self.module.make_signature();
             user_sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
             for _ in 0..func.arity {
@@ -348,7 +348,7 @@ impl JITCompiler {
         )?;
 
         for (idx, func) in program.functions.iter().enumerate() {
-            let func_name = format!("{}_{}", name, func.name);
+            let func_name = format!("{}_{}", name, func.name.replace("::", "__"));
             self.compile_function_with_user_funcs(
                 &func_name,
                 program,
@@ -368,7 +368,7 @@ impl JITCompiler {
 
         self.function_table.clear();
         for (idx, func) in program.functions.iter().enumerate() {
-            let func_name = format!("{}_{}", name, func.name);
+            let func_name = format!("{}_{}", name, func.name.replace("::", "__"));
             if let Some(&func_id) = user_func_ids.get(&(idx as u16)) {
                 let ptr = self.module.get_finalized_function(func_id);
                 while self.function_table.len() <= idx {
@@ -1277,7 +1277,7 @@ impl JITCompiler {
             // Use function index in the name to avoid collisions between
             // closures with the same auto-generated name but different arities
             // (e.g., multiple __closure_0 from different stdlib modules).
-            let func_name = format!("{}_f{}_{}", name, idx, func.name);
+            let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
             let mut user_sig = self.module.make_signature();
             user_sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
             // Closures receive captures as leading native args, followed by user params.
@@ -1317,7 +1317,7 @@ impl JITCompiler {
             if !jit_compatible[idx] {
                 continue;
             }
-            let func_name = format!("{}_f{}_{}", name, idx, func.name);
+            let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
             if std::env::var_os("SHAPE_JIT_DEBUG").is_some() && func.mir_data.is_some() {
                 eprintln!("[jit-mir] compiling '{}' idx={}", func.name, idx);
             }
@@ -1331,8 +1331,32 @@ impl JITCompiler {
                 if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                     eprintln!("[jit-mir] compile failed for '{}': {}", func.name, e);
                 }
-                // Demote to interpreted — the function table slot stays null
-                // so CallValue will fall back through the trampoline VM.
+                // Define a stub body so Cranelift doesn't panic on undefined symbol.
+                // The stub returns signal -1 (error), causing the caller to deopt.
+                if let Some(&fid) = user_func_ids.get(&(idx as u16)) {
+                    let mut stub_sig = self.module.make_signature();
+                    stub_sig.params.push(AbiParam::new(types::I64));
+                    let effective_arity = func.captures_count + func.arity;
+                    for _ in 0..effective_arity {
+                        stub_sig.params.push(AbiParam::new(types::I64));
+                    }
+                    stub_sig.returns.push(AbiParam::new(types::I32));
+                    let mut stub_ctx = self.module.make_context();
+                    stub_ctx.func.signature = stub_sig;
+                    let mut stub_builder_ctx = FunctionBuilderContext::new();
+                    {
+                        let mut b = FunctionBuilder::new(&mut stub_ctx.func, &mut stub_builder_ctx);
+                        let block = b.create_block();
+                        b.append_block_params_for_function_params(block);
+                        b.switch_to_block(block);
+                        b.seal_block(block);
+                        let neg = b.ins().iconst(types::I32, -1);
+                        b.ins().return_(&[neg]);
+                        b.finalize();
+                    }
+                    let _ = self.module.define_function(fid, &mut stub_ctx);
+                    self.module.clear_context(&mut stub_ctx);
+                }
                 jit_compatible[idx] = false;
             }
         }
@@ -1357,7 +1381,7 @@ impl JITCompiler {
                         self.function_table.push(std::ptr::null());
                     }
                     self.function_table[idx] = ptr;
-                    let func_name = format!("{}_f{}_{}", name, idx, func.name);
+                    let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
                     self.compiled_functions.insert(func_name, ptr);
                     mixed_table.insert(idx, FunctionEntry::Native(ptr));
                 }

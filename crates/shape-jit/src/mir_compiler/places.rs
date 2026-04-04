@@ -88,14 +88,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// For NaN-boxed I64: extract payload (7 instructions via emit_index_to_i64).
     fn index_to_i64(&mut self, index_val: Value) -> Value {
         let idx_type = self.builder.func.dfg.value_type(index_val);
-        if idx_type == types::I32 {
-            // Native I32 index — just sign-extend to I64
+        if idx_type == types::F64 {
+            // Native F64 index — convert to I64 via fcvt_to_sint_sat
+            self.builder.ins().fcvt_to_sint_sat(types::I64, index_val)
+        } else if idx_type == types::I32 {
+            // Native I32 index — sign-extend to I64
             self.builder.ins().sextend(types::I64, index_val)
         } else if idx_type == types::I8 {
-            // Native I8 (bool used as index?) — zero-extend
+            // Native I8 — zero-extend
             self.builder.ins().uextend(types::I64, index_val)
         } else {
-            // I64: could be NaN-boxed int or NaN-boxed float
+            // I64: NaN-boxed int or NaN-boxed float
             self.emit_index_to_i64(index_val)
         }
     }
