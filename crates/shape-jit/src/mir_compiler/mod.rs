@@ -39,7 +39,7 @@ use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::HashMap;
 
-use crate::translator::types::FFIFuncRefs;
+use crate::ffi_refs::FFIFuncRefs;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::SlotKind;

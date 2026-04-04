@@ -10,7 +10,9 @@
 //! - `nan_boxing` - NaN-boxing constants and helper functions for type tagging
 //! - `context` - JITContext, JITDataFrame, and related structures
 //! - `ffi` - FFI functions called from JIT-compiled code
-//! - `translator` - BytecodeToIR bytecode-to-IR translation
+//! - `loop_analysis` - Loop analysis for JIT optimization
+//! - `osr_compiler` - OSR (On-Stack Replacement) loop compilation
+//! - `ffi_refs` - FFI function references for heap operations
 //! - `compiler` - JITCompiler implementation (split into logical modules)
 //! - `core` - Legacy re-exports and tests
 
@@ -20,23 +22,20 @@ mod core;
 pub mod error;
 pub mod executor;
 pub mod ffi;
-pub mod loop_analysis;
 pub(crate) mod ffi_refs;
 mod ffi_symbols;
 mod foreign_bridge;
 pub mod jit_array;
 pub mod jit_cache;
 pub mod jit_matrix;
-pub mod mir_compiler;
+pub mod loop_analysis;
 pub mod mixed_table;
 pub mod nan_boxing;
+pub mod mir_compiler;
 mod numeric_compiler;
 mod optimizer;
-mod translator;
+pub mod osr_compiler;
 pub mod worker;
-
-#[cfg(test)]
-mod v2_regression_tests;
 
 // Re-export commonly used items at module level
 pub use context::*;
@@ -62,6 +61,5 @@ pub use self::compiler::get_unsupported_opcodes;
 pub use self::compiler::preflight_blob_jit_compatibility;
 pub use self::compiler::preflight_instructions;
 pub use self::compiler::preflight_jit_compatibility;
-pub use self::translator::BytecodeToIR;
-pub use self::translator::{OsrCompilationResult, compile_osr_loop};
+pub use self::osr_compiler::{OsrCompilationResult, compile_osr_loop};
 pub use self::worker::JitCompilationBackend;

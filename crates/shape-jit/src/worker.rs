@@ -9,8 +9,8 @@ use shape_vm::type_tracking::FrameDescriptor;
 
 use crate::compiler::JITCompiler;
 use crate::context::JITConfig;
-use crate::translator::loop_analysis;
-use crate::translator::osr_compiler;
+use crate::loop_analysis;
+use crate::osr_compiler;
 
 /// JIT compilation backend that compiles hot loops to native code via Cranelift.
 ///
@@ -313,9 +313,9 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
         foreign_functions: Vec::new(),
         native_struct_layouts: vec![],
         content_addressed: None,
+            top_level_mir: None,
         function_blob_hashes: vec![],
         top_level_frame: None,
-        top_level_mir: None,
     }
 }
 
@@ -355,6 +355,7 @@ mod tests {
             captures_count: 0,
             is_async: false,
             ref_params: vec![],
+                    mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
@@ -362,7 +363,6 @@ mod tests {
                 SlotKind::Int64, // arg1
             ])),
             osr_entry_points: vec![],
-            mir_data: None,
         };
 
         let program = BytecodeProgram {
@@ -385,6 +385,7 @@ mod tests {
             foreign_functions: Vec::new(),
             native_struct_layouts: vec![],
             content_addressed: None,
+            top_level_mir: None,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -434,6 +435,7 @@ mod tests {
             foreign_functions: Vec::new(),
             native_struct_layouts: vec![],
             content_addressed: None,
+            top_level_mir: None,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -486,6 +488,7 @@ mod tests {
             captures_count: 0,
             is_async: false,
             ref_params: vec![],
+                    mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
@@ -494,7 +497,6 @@ mod tests {
                 SlotKind::Int64, // sum
             ])),
             osr_entry_points: vec![],
-            mir_data: None,
         };
 
         let program = BytecodeProgram {
@@ -517,6 +519,7 @@ mod tests {
             foreign_functions: Vec::new(),
             native_struct_layouts: vec![],
             content_addressed: None,
+            top_level_mir: None,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -574,11 +577,11 @@ mod tests {
             captures_count: 0,
             is_async: false,
             ref_params: vec![],
+                    mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Unknown])),
             osr_entry_points: vec![],
-            mir_data: None,
         };
 
         let program = BytecodeProgram {
@@ -601,6 +604,7 @@ mod tests {
             foreign_functions: Vec::new(),
             native_struct_layouts: vec![],
             content_addressed: None,
+            top_level_mir: None,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()

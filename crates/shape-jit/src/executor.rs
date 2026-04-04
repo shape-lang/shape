@@ -11,7 +11,19 @@ use std::time::Instant;
 /// JIT-compatible functions are compiled to native code; incompatible functions
 /// (e.g. those using async, pattern matching, or unsupported builtins) are left
 /// as `Interpreted` entries in the mixed function table for VM fallback.
-pub struct JITExecutor;
+pub struct JITExecutor {
+    /// Bytecode executor used for extension loading, module resolution,
+    /// and other pre-compilation setup that the CLI wires through.
+    pub bytecode_executor: shape_vm::BytecodeExecutor,
+}
+
+impl JITExecutor {
+    pub fn new() -> Self {
+        Self {
+            bytecode_executor: shape_vm::BytecodeExecutor::new(),
+        }
+    }
+}
 
 impl ProgramExecutor for JITExecutor {
     fn execute_program(

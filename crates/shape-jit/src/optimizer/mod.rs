@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use shape_vm::bytecode::BytecodeProgram;
 
-use crate::translator::loop_analysis::LoopInfo;
+use crate::loop_analysis::LoopInfo;
 
 pub use bounds::{AffineGuardArraySource, AffineSquareGuard, LinearBoundGuard};
 pub use call_path::CallPathPlan;

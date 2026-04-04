@@ -1,7 +1,7 @@
 //! FFI function reference building
 
 use super::setup::JITCompiler;
-use crate::translator::FFIFuncRefs;
+use crate::ffi_refs::FFIFuncRefs;
 use cranelift::prelude::*;
 use cranelift_module::Module;
 

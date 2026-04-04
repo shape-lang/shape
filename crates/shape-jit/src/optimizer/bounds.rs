@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use cranelift::prelude::IntCC;
 use shape_vm::bytecode::{BytecodeProgram, OpCode, Operand};
 
-use crate::translator::loop_analysis::LoopInfo;
+use crate::loop_analysis::LoopInfo;
 
 use super::loop_lowering::LoopLoweringPlan;
 
@@ -828,7 +828,7 @@ pub fn analyze_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::translator::loop_analysis;
+    use crate::loop_analysis;
     use shape_vm::bytecode::{BytecodeProgram, Constant, DebugInfo, Instruction};
 
     fn make_instr(opcode: OpCode, operand: Option<Operand>) -> Instruction {

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use shape_vm::bytecode::{BytecodeProgram, OpCode};
 
-use crate::translator::loop_analysis::LoopInfo;
+use crate::loop_analysis::LoopInfo;
 
 use super::typed_mir::TypedMirFunction;
 
@@ -165,7 +165,7 @@ mod tests {
     use cranelift::prelude::IntCC;
     use shape_vm::bytecode::{BytecodeProgram, DebugInfo, Instruction, Operand};
 
-    use crate::translator::loop_analysis::{InductionVar, LoopInfo};
+    use crate::loop_analysis::{InductionVar, LoopInfo};
 
     fn make_instr(opcode: OpCode, operand: Option<Operand>) -> Instruction {
         Instruction { opcode, operand }

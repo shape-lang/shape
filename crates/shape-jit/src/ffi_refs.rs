@@ -1,14 +1,11 @@
-//! FFI function references for JIT-compiled code.
-//!
-//! `FFIFuncRefs` holds Cranelift `FuncRef` handles for every FFI helper
-//! that JIT-generated IR can call. Extracted from `translator::types` so
-//! that non-translator code (compiler, optimizer, mir_compiler) can depend
-//! on it without pulling in the full translator module.
+//! FFI function references for Cranelift codegen.
+//! Extracted from translator/types.rs for standalone use.
 
+use cranelift::codegen;
 use cranelift::codegen::ir::FuncRef;
+use cranelift::prelude::*;
+use std::collections::HashMap;
 
-/// FFI function references for heap operations
-#[allow(dead_code)]
 pub struct FFIFuncRefs {
     pub(crate) new_array: FuncRef,
     pub(crate) new_object: FuncRef,
@@ -104,6 +101,11 @@ pub struct FFIFuncRefs {
     pub(crate) generic_div: FuncRef,
     pub(crate) generic_eq: FuncRef,
     pub(crate) generic_neq: FuncRef,
+    pub(crate) generic_lt: FuncRef,
+    pub(crate) generic_le: FuncRef,
+    pub(crate) generic_gt: FuncRef,
+    pub(crate) generic_ge: FuncRef,
+    pub(crate) generic_mod: FuncRef,
     pub(crate) series_shift: FuncRef,
     pub(crate) series_fillna: FuncRef,
     pub(crate) series_rolling_mean: FuncRef,
@@ -189,6 +191,9 @@ pub struct FFIFuncRefs {
     pub(crate) set_field_typed: FuncRef,
     // TypedObject allocation
     pub(crate) typed_object_alloc: FuncRef,
+    // TypedObject field get/set via FFI
+    pub(crate) typed_object_get_field: FuncRef,
+    pub(crate) typed_object_set_field: FuncRef,
     // TypedObject merge (O(1) memcpy-based)
     pub(crate) typed_merge_object: FuncRef,
     // Typed column access (Arrow-backed LoadCol* opcodes)
@@ -217,4 +222,38 @@ pub struct FFIFuncRefs {
     pub(crate) hashmap_value_at: FuncRef,
     // Generic builtin trampoline (handles any builtin not lowered by dedicated JIT paths)
     pub(crate) generic_builtin: FuncRef,
+    // Arc reference counting for ownership-aware JIT (MirToIR)
+    pub(crate) arc_retain: FuncRef,
+    pub(crate) arc_release: FuncRef,
+
+    // v2 typed array (native types, not NaN-boxed)
+    pub(crate) v2_array_new_f64: FuncRef,
+    pub(crate) v2_array_get_f64: FuncRef,
+    pub(crate) v2_array_set_f64: FuncRef,
+    pub(crate) v2_array_push_f64: FuncRef,
+    pub(crate) v2_array_len_f64: FuncRef,
+    pub(crate) v2_array_new_i64: FuncRef,
+    pub(crate) v2_array_get_i64: FuncRef,
+    pub(crate) v2_array_set_i64: FuncRef,
+    pub(crate) v2_array_push_i64: FuncRef,
+    pub(crate) v2_array_len_i64: FuncRef,
+    pub(crate) v2_array_new_i32: FuncRef,
+    pub(crate) v2_array_get_i32: FuncRef,
+    pub(crate) v2_array_set_i32: FuncRef,
+    pub(crate) v2_array_push_i32: FuncRef,
+    pub(crate) v2_array_len_i32: FuncRef,
+    // v2 typed field access
+    pub(crate) v2_field_load_f64: FuncRef,
+    pub(crate) v2_field_load_i64: FuncRef,
+    pub(crate) v2_field_load_i32: FuncRef,
+    pub(crate) v2_field_load_ptr: FuncRef,
+    pub(crate) v2_field_store_f64: FuncRef,
+    pub(crate) v2_field_store_i64: FuncRef,
+    pub(crate) v2_field_store_i32: FuncRef,
+    pub(crate) v2_field_store_ptr: FuncRef,
+    // v2 refcount
+    pub(crate) v2_retain: FuncRef,
+    pub(crate) v2_release: FuncRef,
+    // v2 struct allocation
+    pub(crate) v2_alloc_struct: FuncRef,
 }

@@ -46,6 +46,8 @@ pub const RETURN_TAG_I64: u8 = 2;
 pub const RETURN_TAG_I32: u8 = 3;
 /// Raw bool (0 or 1). Executor reads as `stack[0] != 0`.
 pub const RETURN_TAG_BOOL: u8 = 4;
+/// Byte offset of `return_type_tag` in JITContext (for Cranelift codegen).
+pub const RETURN_TYPE_TAG_OFFSET: usize = std::mem::offset_of!(JITContext, return_type_tag);
 
 // ============================================================================
 // Compile-time layout verification for JITContext

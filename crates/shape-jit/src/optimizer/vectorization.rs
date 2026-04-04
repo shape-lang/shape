@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use shape_vm::bytecode::{BytecodeProgram, OpCode, Operand};
 
-use crate::translator::loop_analysis::LoopInfo;
+use crate::loop_analysis::LoopInfo;
 
 use super::loop_lowering::LoopLoweringPlan;
 use super::typed_mir::TypedMirFunction;
@@ -400,7 +400,7 @@ mod tests {
         BytecodeProgram, Constant, DebugInfo, Instruction, Operand,
     };
 
-    use crate::translator::loop_analysis::{InductionVar, LoopInfo};
+    use crate::loop_analysis::{InductionVar, LoopInfo};
 
     fn make_instr(opcode: OpCode, operand: Option<Operand>) -> Instruction {
         Instruction { opcode, operand }

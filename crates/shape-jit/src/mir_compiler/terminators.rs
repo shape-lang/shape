@@ -374,26 +374,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             TerminatorKind::Return => {
-                // MIR's Return is preceded by Drop statements for all live locals
-                // (the MIR lowering pass already inserts these). We just need to
-                // emit the actual return instruction.
-                //
-                // The return value is in the dedicated return slot (slot 0 by convention).
-                // Write it to ctx.stack[0] for the JIT calling convention.
-                // ctx.stack stores NaN-boxed I64 values, so box if native-typed.
+                // Write return value to ctx.stack[0] and set return_type_tag
+                // for native type preservation (avoids NaN-boxing on return path).
                 let return_slot = SlotId(0);
                 if let Some(&var) = self.locals.get(&return_slot) {
                     let ret_val = self.builder.use_var(var);
-                    // Ensure the return value is NaN-boxed I64 for ctx.stack.
-                    let boxed = self.ensure_nanboxed(ret_val);
-                    // Store to ctx.stack[0]
+                    let val_type = self.builder.func.dfg.value_type(ret_val);
                     let stack_offset = crate::context::STACK_OFFSET as i32;
-                    self.builder.ins().store(
-                        MemFlags::new(),
-                        boxed,
-                        self.ctx_ptr,
-                        stack_offset,
-                    );
+
+                    if val_type == types::F64 {
+                        // Native f64: store raw bits, set tag=1
+                        let as_bits = self.builder.ins().bitcast(types::I64, MemFlags::new(), ret_val);
+                        self.builder.ins().store(MemFlags::new(), as_bits, self.ctx_ptr, stack_offset);
+                        let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_F64 as i64);
+                        let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
+                        self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                    } else if val_type == types::I8 {
+                        // Native bool: zero-extend to I64, set tag=4
+                        let extended = self.builder.ins().uextend(types::I64, ret_val);
+                        self.builder.ins().store(MemFlags::new(), extended, self.ctx_ptr, stack_offset);
+                        let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_BOOL as i64);
+                        let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
+                        self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                    } else {
+                        // I64 (NaN-boxed or native int): store directly, set tag=0 (NaN-boxed default)
+                        self.builder.ins().store(MemFlags::new(), ret_val, self.ctx_ptr, stack_offset);
+                        let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_NANBOXED as i64);
+                        let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
+                        self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                    }
+
                     // Set stack_ptr to 1
                     let one = self.builder.ins().iconst(types::I64, 1);
                     let sp_offset = crate::context::STACK_PTR_OFFSET as i32;

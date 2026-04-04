@@ -20,7 +20,6 @@ use super::setup::JITCompiler;
 use crate::context::{
     CorrelatedKernelFn, JittedStrategyFn, SimulationKernelConfig, SimulationKernelFn,
 };
-use crate::translator::BytecodeToIR;
 use shape_vm::bytecode::BytecodeProgram;
 
 impl JITCompiler {
@@ -350,29 +349,14 @@ impl JITCompiler {
     /// - All locals as Cranelift variables
     fn build_kernel_ir(
         &mut self,
-        builder: &mut FunctionBuilder,
-        program: &BytecodeProgram,
-        config: &SimulationKernelConfig,
-        cursor_index: Value,
-        series_ptrs: Value,
-        state_ptr: Value,
+        _builder: &mut FunctionBuilder,
+        _program: &BytecodeProgram,
+        _config: &SimulationKernelConfig,
+        _cursor_index: Value,
+        _series_ptrs: Value,
+        _state_ptr: Value,
     ) -> Result<Value, String> {
-        // Build FFI refs (some may still be needed for complex operations)
-        let ffi = self.build_ffi_refs(builder);
-
-        // Create BytecodeToIR in kernel mode
-        let mut compiler = BytecodeToIR::new_kernel_mode(
-            builder,
-            program,
-            cursor_index,
-            series_ptrs,
-            state_ptr,
-            ffi,
-            config.clone(),
-        );
-
-        // Compile bytecode to kernel IR
-        compiler.compile_kernel()
+        Err("Simulation kernel compilation requires v2 runtime migration".to_string())
     }
 
     // ========================================================================
@@ -512,25 +496,6 @@ impl JITCompiler {
         series_ptrs: Value,
         state_ptr: Value,
     ) -> Result<Value, String> {
-        // Build FFI refs
-        let ffi = self.build_ffi_refs(builder);
-
-        // Create BytecodeToIR in correlated kernel mode
-        // The translator will use config.table_map to resolve series names to indices
-        let mut compiler = BytecodeToIR::new_kernel_mode(
-            builder,
-            program,
-            cursor_index,
-            series_ptrs,
-            state_ptr,
-            ffi,
-            config.clone(),
-        );
-
-        // Compile bytecode to correlated kernel IR
-        // The translator handles GetSeriesValue opcode by:
-        // 1. Looking up series name in config.table_map to get index
-        // 2. Generating: series_ptrs[index][cursor_index]
-        compiler.compile_kernel()
+        Err("Correlated kernel compilation requires v2 runtime migration".to_string())
     }
 }

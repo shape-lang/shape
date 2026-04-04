@@ -25,7 +25,7 @@ use cranelift_module::{Linkage, Module};
 use shape_vm::bytecode::{DeoptInfo, Instruction, OpCode, Operand, OsrEntryPoint};
 use shape_vm::type_tracking::{FrameDescriptor, SlotKind};
 
-use super::loop_analysis::LoopInfo;
+use crate::loop_analysis::LoopInfo;
 
 /// Result of compiling a loop body for OSR entry.
 #[derive(Debug)]
