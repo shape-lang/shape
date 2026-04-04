@@ -47,3 +47,5 @@ pub use typed_object::*;
 pub use window::*;
 
 pub mod v2_math;
+pub mod v2_struct;
+pub mod v2_string_ffi;

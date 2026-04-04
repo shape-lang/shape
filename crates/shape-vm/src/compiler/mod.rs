@@ -865,3 +865,4 @@ pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPas
 #[cfg(all(test, feature = "deep-tests"))]
 #[path = "compiler_tests.rs"]
 mod compiler_deep;
+pub(crate) mod v2_array_emission;
