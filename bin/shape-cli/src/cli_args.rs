@@ -59,10 +59,10 @@ pub enum ExecutionModeArg {
 
 impl Default for ExecutionModeArg {
     fn default() -> Self {
-        // JIT closures and simple programs work. Module function dispatch
-        // (millis, read_table) segfaults and int-to-number casts produce
-        // wrong results — keep VM as default until those are fixed.
-        Self::Vm
+        // JIT v2 (MirToIR) is the default execution mode.
+        // All standard Shape features compile via MirToIR with native types.
+        // Use --mode vm to fall back to the bytecode interpreter if needed.
+        Self::Jit
     }
 }
 

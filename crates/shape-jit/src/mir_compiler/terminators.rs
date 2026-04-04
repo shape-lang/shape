@@ -175,6 +175,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
+                // ── BUILTIN FUNCTION PATH ─────────────────────────────
+                // Known builtins like "print" that aren't user functions.
+                // Dispatch directly to the FFI implementation.
+                if let Operand::Constant(MirConstant::Function(name)) = func {
+                    if name == "print" && self.function_indices.get(name.as_str()).is_none() {
+                        // print(value) → jit_print(nanboxed_value)
+                        let val = if args.is_empty() {
+                            self.builder.ins().iconst(types::I64, crate::nan_boxing::TAG_NULL as i64)
+                        } else {
+                            let raw = self.compile_operand(&args[0])?;
+                            self.ensure_nanboxed(raw)
+                        };
+                        self.builder.ins().call(self.ffi.print, &[val]);
+
+                        // print returns None
+                        let none_val = self.builder.ins().iconst(types::I64, crate::nan_boxing::TAG_NULL as i64);
+                        self.release_old_value_if_heap(destination)?;
+                        self.write_place(destination, none_val)?;
+                        self.reload_referenced_locals();
+                        let next_block = self.block_map.get(next).ok_or_else(|| {
+                            format!("MirToIR: unknown call continuation block {}", next)
+                        })?;
+                        self.builder.ins().jump(*next_block, &[]);
+                        return Ok(());
+                    }
+                }
+
                 // ── ENUM CONSTRUCTOR PATH ─────────────────────────────
                 // Qualified function calls like "Shape::Circle" that don't
                 // exist in the function index are enum variant constructors.
@@ -272,41 +299,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.ctx_ptr,
                         stack_offset,
                     )
-                } else if func_id.is_some() {
-                    // ── FFI CALL PATH (known function, no FuncRef) ────────
-                    // Stage args to ctx.stack (NaN-boxed), then call jit_call_function.
-                    let fid = func_id.unwrap();
-                    let stack_base_offset = crate::context::STACK_OFFSET as i32;
-                    let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
-
-                    let old_sp = self.builder.ins().load(
-                        types::I64,
-                        MemFlags::new(),
-                        self.ctx_ptr,
-                        sp_offset,
-                    );
-
-                    for (i, arg) in args.iter().enumerate() {
-                        let val = self.compile_operand(arg)?;
-                        let boxed = self.ensure_nanboxed(val);
-                        let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
-                        let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
-                        let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
-                        let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
-                        self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
-                    }
-
-                    let new_sp = self.builder.ins().iadd_imm(old_sp, args.len() as i64);
-                    self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
-
-                    let func_id_val = self.builder.ins().iconst(types::I16, fid as i64);
-                    let null_ptr = self.builder.ins().iconst(types::I64, 0);
-                    let argc = self.builder.ins().iconst(types::I64, args.len() as i64);
-                    let inst = self.builder.ins().call(
-                        self.ffi.call_function,
-                        &[self.ctx_ptr, func_id_val, null_ptr, argc],
-                    );
-                    self.builder.inst_results(inst)[0]
                 } else {
                     // ── INDIRECT CALL (closures/first-class functions) ────
                     let stack_base_offset = crate::context::STACK_OFFSET as i32;
