@@ -20,6 +20,8 @@ mod core;
 pub mod error;
 pub mod executor;
 pub mod ffi;
+pub mod loop_analysis;
+pub(crate) mod ffi_refs;
 mod ffi_symbols;
 mod foreign_bridge;
 pub mod jit_array;

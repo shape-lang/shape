@@ -175,11 +175,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             BinOp::Mul => Ok(self.builder.ins().fmul(lhs, rhs)),
             BinOp::Div => Ok(self.builder.ins().fdiv(lhs, rhs)),
             BinOp::Mod => {
-                // f64 fmod not a single instruction — use FFI
-                let l = self.box_to_nanboxed(lhs, shape_vm::type_tracking::SlotKind::Float64);
-                let r = self.box_to_nanboxed(rhs, shape_vm::type_tracking::SlotKind::Float64);
-                let inst = self.builder.ins().call(self.ffi.generic_mod, &[l, r]);
-                Ok(self.builder.inst_results(inst)[0])
+                // f64 mod: a % b = a - trunc(a/b) * b (pure Cranelift, no FFI)
+                let div = self.builder.ins().fdiv(lhs, rhs);
+                let truncated = self.builder.ins().trunc(div);
+                let product = self.builder.ins().fmul(truncated, rhs);
+                Ok(self.builder.ins().fsub(lhs, product))
             }
             BinOp::Eq => {
                 let cmp = self.builder.ins().fcmp(FloatCC::Equal, lhs, rhs);
