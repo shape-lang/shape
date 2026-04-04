@@ -30,6 +30,24 @@ pub const STACK_PTR_OFFSET: i32 = 6208; // 2112 + (512 * 8)
 pub const GC_SAFEPOINT_FLAG_PTR_OFFSET: i32 = 6328;
 
 // ============================================================================
+// Return Type Tags for stack[0]
+// ============================================================================
+//
+// Used by `return_type_tag` field in JITContext to tell the executor how to
+// interpret the raw bits in stack[0] without NaN-box decoding.
+
+/// Legacy NaN-boxed value (default). Executor uses existing unboxing path.
+pub const RETURN_TAG_NANBOXED: u8 = 0;
+/// Raw f64 bits. Executor reads as `f64::from_bits(stack[0])`.
+pub const RETURN_TAG_F64: u8 = 1;
+/// Raw i64 bits. Executor reads as `stack[0] as i64`.
+pub const RETURN_TAG_I64: u8 = 2;
+/// Raw i32 bits (zero-extended to u64). Executor reads as `stack[0] as i32`.
+pub const RETURN_TAG_I32: u8 = 3;
+/// Raw bool (0 or 1). Executor reads as `stack[0] != 0`.
+pub const RETURN_TAG_BOOL: u8 = 4;
+
+// ============================================================================
 // Compile-time layout verification for JITContext
 // ============================================================================
 //
@@ -349,11 +367,6 @@ impl JITClosure {
     pub unsafe fn drop_captures(&mut self) {
         if !self.captures_ptr.is_null() && self.captures_count > 0 {
             let count = self.captures_count as usize;
-            // Release each captured value's refcount before freeing the array.
-            for i in 0..count {
-                let bits = unsafe { *self.captures_ptr.add(i) };
-                drop(unsafe { std::mem::transmute::<u64, shape_value::ValueWord>(bits) });
-            }
             let _ = unsafe {
                 Box::from_raw(std::slice::from_raw_parts_mut(
                     self.captures_ptr as *mut u64,
@@ -386,8 +399,8 @@ impl JITDuration {
     }
 
     pub fn box_duration(duration: Box<JITDuration>) -> u64 {
-        use crate::nan_boxing::HK_DURATION;
-        unified_box(HK_DURATION, *duration)
+        use crate::nan_boxing::{HK_DURATION, jit_box};
+        jit_box(HK_DURATION, *duration)
     }
 }
 
@@ -405,8 +418,8 @@ impl JITRange {
     }
 
     pub fn box_range(range: Box<JITRange>) -> u64 {
-        use crate::nan_boxing::HK_RANGE;
-        unified_box(HK_RANGE, *range)
+        use crate::nan_boxing::{HK_RANGE, jit_box};
+        jit_box(HK_RANGE, *range)
     }
 }
 
@@ -446,8 +459,8 @@ impl JITSignalBuilder {
     }
 
     pub fn box_builder(builder: Box<JITSignalBuilder>) -> u64 {
-        use crate::nan_boxing::HK_JIT_SIGNAL_BUILDER;
-        unified_box(HK_JIT_SIGNAL_BUILDER, *builder)
+        use crate::nan_boxing::{HK_JIT_SIGNAL_BUILDER, jit_box};
+        jit_box(HK_JIT_SIGNAL_BUILDER, *builder)
     }
 }
 
@@ -465,8 +478,8 @@ pub struct JITDataReference {
 
 impl JITDataReference {
     pub fn box_data_ref(data_ref: Box<JITDataReference>) -> u64 {
-        use crate::nan_boxing::HK_DATA_REFERENCE;
-        unified_box(HK_DATA_REFERENCE, *data_ref)
+        use crate::nan_boxing::{HK_DATA_REFERENCE, jit_box};
+        jit_box(HK_DATA_REFERENCE, *data_ref)
     }
 }
 
@@ -566,6 +579,10 @@ pub struct JITContext {
     /// Opaque pointer to JIT foreign-call bridge state.
     /// Null when no foreign functions are linked for this execution.
     pub foreign_bridge_ptr: *const std::ffi::c_void,
+
+    /// v2: type tag for the return value in stack[0].
+    /// 0 = NaN-boxed (legacy), 1 = raw f64, 2 = raw i64, 3 = raw i32, 4 = raw bool
+    pub return_type_tag: u8,
 }
 
 impl Default for JITContext {
@@ -606,6 +623,7 @@ impl Default for JITContext {
             gc_safepoint_flag_ptr: std::ptr::null(),
             gc_heap_ptr: std::ptr::null_mut(),
             foreign_bridge_ptr: std::ptr::null(),
+            return_type_tag: 0,
         }
     }
 }
@@ -883,64 +901,6 @@ impl Default for JITConfig {
     }
 }
 
-/// Tracks ownership of values pre-populated in JITContext.locals[].
-pub struct OwnedLocals {
-    owned: Vec<OwnedSlot>,
-}
-
-struct OwnedSlot {
-    index: usize,
-    original_bits: u64,
-}
-
-impl OwnedLocals {
-    pub fn new() -> Self {
-        Self { owned: Vec::new() }
-    }
-
-    pub fn transfer_binding(
-        &mut self,
-        ctx: &mut JITContext,
-        idx: usize,
-        vw: shape_value::ValueWord,
-    ) {
-        assert!(idx < ctx.locals.len());
-        let bits = vw.raw_bits();
-        let _ = std::mem::ManuallyDrop::new(vw);
-        ctx.locals[idx] = bits;
-        self.owned.push(OwnedSlot { index: idx, original_bits: bits });
-    }
-
-    pub fn cleanup(&mut self, ctx: &mut JITContext) {
-        for slot in self.owned.drain(..) {
-            let current = ctx.locals[slot.index];
-            if current == slot.original_bits {
-                // Slot unchanged — reconstruct ValueWord and drop it
-                // to release the clone's refcount
-                drop(unsafe { std::mem::transmute::<u64, shape_value::ValueWord>(slot.original_bits) });
-            } else {
-                // Slot overwritten by JIT — drop the new value
-                drop(unsafe { std::mem::transmute::<u64, shape_value::ValueWord>(current) });
-            }
-            ctx.locals[slot.index] = crate::nan_boxing::TAG_NULL;
-        }
-    }
-
-    pub fn count(&self) -> usize {
-        self.owned.len()
-    }
-}
-
-impl Drop for OwnedLocals {
-    fn drop(&mut self) {
-        if !self.owned.is_empty() {
-            for slot in self.owned.drain(..) {
-                drop(unsafe { std::mem::transmute::<u64, shape_value::ValueWord>(slot.original_bits) });
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,14 +988,14 @@ mod tests {
 
     #[test]
     fn test_closure_jit_box_roundtrip() {
-        // Verify JITClosure survives unified_box/unified_unbox roundtrip
+        // Verify JITClosure survives jit_box/jit_unbox roundtrip
         let captures = [box_number(42.0), TAG_BOOL_FALSE];
         let closure = JITClosure::new(10, &captures);
-        let bits = unified_box(HK_CLOSURE, *closure);
+        let bits = jit_box(HK_CLOSURE, *closure);
 
         assert!(is_heap_kind(bits, HK_CLOSURE));
 
-        let recovered = unsafe { unified_unbox::<JITClosure>(bits) };
+        let recovered = unsafe { jit_unbox::<JITClosure>(bits) };
         assert_eq!(recovered.function_id, 10);
         assert_eq!(recovered.captures_count, 2);
         unsafe {
@@ -1047,22 +1007,22 @@ mod tests {
     #[test]
     fn test_closure_drop_impl_frees_captures_via_jit_drop() {
         // Verify the Drop impl on JITClosure frees the captures array
-        // when the owning UnifiedValue is freed via heap_drop.
+        // when the owning JitAlloc is freed via jit_drop.
         // Under Miri/ASAN this would catch a leak if Drop didn't work.
         let captures: Vec<u64> = (0..24).map(|i| box_number(i as f64)).collect();
         let closure = JITClosure::new(3, &captures);
-        let bits = unified_box(HK_CLOSURE, *closure);
+        let bits = jit_box(HK_CLOSURE, *closure);
 
         // Read captures to confirm they're valid
-        let recovered = unsafe { unified_unbox::<JITClosure>(bits) };
+        let recovered = unsafe { jit_unbox::<JITClosure>(bits) };
         assert_eq!(recovered.captures_count, 24);
         unsafe {
             assert_eq!(unbox_number(recovered.get_capture(23)), 23.0);
         }
 
-        // UnifiedValue::heap_drop frees UnifiedValue<JITClosure>, which calls
-        // Drop::drop on JITClosure, which frees the captures array.
-        unsafe { UnifiedValue::<JITClosure>::heap_drop(bits) };
+        // jit_drop frees JitAlloc<JITClosure>, which calls Drop::drop on
+        // JITClosure, which frees the captures array.
+        unsafe { jit_drop::<JITClosure>(bits) };
     }
 
     #[test]

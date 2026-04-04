@@ -33,6 +33,9 @@ mod optimizer;
 mod translator;
 pub mod worker;
 
+#[cfg(test)]
+mod v2_regression_tests;
+
 // Re-export commonly used items at module level
 pub use context::*;
 pub use error::JitError;

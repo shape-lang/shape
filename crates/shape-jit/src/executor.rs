@@ -11,21 +11,7 @@ use std::time::Instant;
 /// JIT-compatible functions are compiled to native code; incompatible functions
 /// (e.g. those using async, pattern matching, or unsupported builtins) are left
 /// as `Interpreted` entries in the mixed function table for VM fallback.
-///
-/// Wraps a `BytecodeExecutor` so that compilation (including module resolution,
-/// extension capability modules, and module loading) is delegated to the same
-/// pipeline used by the VM path.
-pub struct JITExecutor {
-    pub bytecode_executor: shape_vm::BytecodeExecutor,
-}
-
-impl JITExecutor {
-    pub fn new() -> Self {
-        Self {
-            bytecode_executor: shape_vm::BytecodeExecutor::new(),
-        }
-    }
-}
+pub struct JITExecutor;
 
 impl ProgramExecutor for JITExecutor {
     fn execute_program(
@@ -33,12 +19,53 @@ impl ProgramExecutor for JITExecutor {
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
+        use shape_vm::BytecodeCompiler;
         let emit_phase_metrics = std::env::var_os("SHAPE_JIT_PHASE_METRICS").is_some();
 
+        // Capture source text before getting runtime reference (for error messages)
+        let source_for_compilation = engine.current_source().map(|s| s.to_string());
+
+        // Compile to bytecode first to check JIT compatibility
+        let runtime = engine.get_runtime_mut();
+
+        // Get known module bindings — prefer persistent context, fallback to precompiled names
+        let known_bindings: Vec<String> = if let Some(ctx) = runtime.persistent_context() {
+            let names = ctx.root_scope_binding_names();
+            if names.is_empty() {
+                shape_vm::stdlib::core_binding_names()
+            } else {
+                names
+            }
+        } else {
+            shape_vm::stdlib::core_binding_names()
+        };
+
+        // Build module graph and compile via graph pipeline
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        let (graph, stdlib_names, prelude_imports) =
+            shape_vm::module_resolution::build_graph_and_stdlib_names(
+                program,
+                &mut loader,
+                &[],
+            )
+            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
+                message: format!("Module graph construction failed: {}", e),
+                location: None,
+            })?;
+
         let bytecode_compile_start = Instant::now();
-        let bytecode = self
-            .bytecode_executor
-            .compile_program_for_inspection(engine, program)?;
+        let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
+        compiler.register_known_bindings(&known_bindings);
+        if let Some(source) = &source_for_compilation {
+            compiler.set_source(source);
+        }
+        let bytecode = compiler
+            .compile_with_graph_and_prelude(program, graph, &prelude_imports)
+            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
+                message: format!("Bytecode compilation failed: {}", e),
+                location: None,
+            })?;
         let bytecode_compile_ms = bytecode_compile_start.elapsed().as_millis();
 
         self.execute_with_jit(engine, &bytecode, bytecode_compile_ms, emit_phase_metrics)
@@ -121,14 +148,8 @@ impl JITExecutor {
             })?
         };
 
-        // Create JIT context and set function table for CallValue dispatch
+        // Create JIT context and execute
         let mut jit_ctx = JITContext::default();
-        let func_table = jit.get_function_table();
-        if !func_table.is_empty() {
-            jit_ctx.function_table =
-                func_table.as_ptr() as *const crate::context::JittedStrategyFn;
-            jit_ctx.function_table_len = func_table.len();
-        }
         if let Some(state) = foreign_bridge.as_ref() {
             jit_ctx.foreign_bridge_ptr = state.as_ref() as *const _ as *const std::ffi::c_void;
         }
@@ -141,64 +162,6 @@ impl JITExecutor {
             }
         }
 
-        // Register the generic builtin dispatch trampoline so builtins
-        // without dedicated JIT lowering can fall back to the VM interpreter.
-        unsafe {
-            crate::ffi::generic_builtin::register_generic_builtin_fn(
-                crate::ffi::generic_builtin::builtin_dispatch_trampoline,
-            );
-        }
-
-        // Create a trampoline VM for executing functions that weren't
-        // JIT-compiled (demoted due to block depth errors, unsupported opcodes,
-        // etc.). The VM is loaded with the full bytecode program and extensions
-        // so it can execute any function by ID.
-        let mut trampoline_vm = shape_vm::VirtualMachine::new(shape_vm::VMConfig::default());
-        trampoline_vm.load_program(bytecode.clone());
-        for ext in self.bytecode_executor.extensions() {
-            trampoline_vm.register_extension(ext.clone());
-        }
-        trampoline_vm.populate_module_objects();
-
-        // Pre-run the program on the VM to populate module bindings (stdlib
-        // prelude creates module namespace objects, registers extension functions,
-        // etc.). The JIT can't reliably do this because many stdlib functions
-        // are demoted. After VM execution, copy the populated module bindings
-        // to the JIT context so the JIT-compiled user code sees them.
-        // Output is captured (not printed) to avoid double output.
-        trampoline_vm.enable_output_capture();
-        let vm_exec_ok = trampoline_vm.execute(None).is_ok();
-        // Copy VM module bindings to JIT context locals regardless of
-        // execution success — partial initialization is better than none.
-        let vm_bindings = trampoline_vm.module_bindings_snapshot();
-        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
-        if debug {
-            let non_null = vm_bindings.iter().filter(|vw| !vw.is_none()).count();
-            eprintln!(
-                "[jit-init] VM pre-run {}: {} module bindings ({} non-null)",
-                if vm_exec_ok { "OK" } else { "FAILED" },
-                vm_bindings.len(),
-                non_null
-            );
-        }
-        let mut owned_locals = crate::context::OwnedLocals::new();
-        for (idx, vw) in vm_bindings.into_iter().enumerate() {
-            if idx < jit_ctx.locals.len() && !vw.is_none() {
-                owned_locals.transfer_binding(&mut jit_ctx, idx, vw);
-            }
-        }
-
-        // Reset VM state for trampoline use (clear stack/IP but keep program + bindings).
-        // Disable output capture so print() works normally during JIT execution.
-        trampoline_vm.reset_for_trampoline();
-        trampoline_vm.disable_output_capture();
-
-        unsafe {
-            crate::ffi::control::set_trampoline_vm(
-                &mut trampoline_vm as *mut shape_vm::VirtualMachine,
-            );
-        }
-
         // Execute the JIT-compiled function
         if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
             eprintln!("[jit-debug] compilation OK, about to execute...");
@@ -206,17 +169,6 @@ impl JITExecutor {
         let jit_exec_start = Instant::now();
         let signal = unsafe { jit_fn(&mut jit_ctx) };
         let jit_exec_ms = jit_exec_start.elapsed().as_millis();
-
-        // Drain unified heap refs whose refcounts were bumped during VM→JIT
-        // conversion (nanboxed_to_jit_bits). This balances the refcounts so
-        // unified heap values aren't permanently leaked.
-        crate::ffi::object::conversion::drain_unified_heap_refs();
-
-        // Clear the trampoline VM pointer (VM is about to be dropped)
-        crate::ffi::control::unset_trampoline_vm();
-
-        // Release ownership of pre-populated module binding slots.
-        owned_locals.cleanup(&mut jit_ctx);
 
         // Get result from JIT context stack via TypedScalar boundary
         let raw_result = if jit_ctx.stack_ptr > 0 {
@@ -233,37 +185,37 @@ impl JITExecutor {
             });
         }
 
-        // Check if the result is an Err value from `?` propagation at the top level.
-        // In the interpreter, uncaught `?` on Err raises a runtime error.
-        // Match that behavior: extract the Err inner value and return a RuntimeError.
-        if crate::nan_boxing::is_err_tag(raw_result) {
-            let inner = unsafe { crate::nan_boxing::unbox_result_inner(raw_result) };
-            let err_msg = if crate::nan_boxing::is_heap_kind(inner, crate::nan_boxing::HK_STRING) {
-                let s = unsafe { crate::nan_boxing::unbox_string(inner) };
-                s.to_string()
-            } else {
-                format!("Error (uncaught)")
-            };
-            return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: err_msg,
-                location: None,
-            });
-        }
-
-        // Use FrameDescriptor hint to preserve integer type identity.
-        // Prefer return_kind when populated; fall back to last slot.
-        let return_hint = bytecode.top_level_frame.as_ref().and_then(|fd| {
-            if fd.return_kind != shape_vm::type_tracking::SlotKind::Unknown {
-                Some(fd.return_kind)
-            } else {
-                fd.slots.last().copied()
+        // v2: check return_type_tag for native-typed return values.
+        // Non-zero tags bypass NaN-box decoding entirely.
+        let wire_value = match jit_ctx.return_type_tag {
+            crate::context::RETURN_TAG_F64 => {
+                WireValue::Number(f64::from_bits(raw_result))
             }
-        });
-        let result_scalar =
-            crate::ffi::object::conversion::jit_bits_to_typed_scalar(raw_result, return_hint);
-
-        // Convert TypedScalar to WireValue
-        let wire_value = self.typed_scalar_to_wire(&result_scalar, raw_result);
+            crate::context::RETURN_TAG_I64 => {
+                WireValue::Integer(raw_result as i64)
+            }
+            crate::context::RETURN_TAG_I32 => {
+                WireValue::Integer((raw_result as i32) as i64)
+            }
+            crate::context::RETURN_TAG_BOOL => {
+                WireValue::Bool(raw_result != 0)
+            }
+            _ => {
+                // tag=0 (RETURN_TAG_NANBOXED) or unknown: legacy NaN-boxed path
+                // Use FrameDescriptor hint to preserve integer type identity.
+                // Prefer return_kind when populated; fall back to last slot.
+                let return_hint = bytecode.top_level_frame.as_ref().and_then(|fd| {
+                    if fd.return_kind != shape_vm::type_tracking::SlotKind::Unknown {
+                        Some(fd.return_kind)
+                    } else {
+                        fd.slots.last().copied()
+                    }
+                });
+                let result_scalar =
+                    crate::ffi::object::conversion::jit_bits_to_typed_scalar(raw_result, return_hint);
+                self.typed_scalar_to_wire(&result_scalar, raw_result)
+            }
+        };
 
         if emit_phase_metrics {
             let total_ms = bytecode_compile_ms + jit_compile_ms + jit_exec_ms;
@@ -317,8 +269,8 @@ impl JITExecutor {
 
     fn nan_boxed_to_wire(&self, bits: u64) -> WireValue {
         use crate::nan_boxing::{
-            HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number,
-            unbox_number, unbox_string, is_ok_tag, is_err_tag,
+            HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number, jit_unbox,
+            unbox_number,
         };
         use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
@@ -335,31 +287,11 @@ impl JITExecutor {
             let int_val = sign_extend_i48(get_payload(bits));
             WireValue::Integer(int_val)
         } else if is_heap_kind(bits, HK_STRING) {
-            let s = unsafe { unbox_string(bits) };
-            WireValue::String(s.to_string())
-        } else if is_ok_tag(bits) {
-            let inner = unsafe { crate::nan_boxing::unbox_result_inner(bits) };
-            let inner_wire = self.nan_boxed_to_wire(inner);
-            WireValue::String(format!("Ok({})", wire_value_display(&inner_wire)))
-        } else if is_err_tag(bits) {
-            let inner = unsafe { crate::nan_boxing::unbox_result_inner(bits) };
-            let inner_wire = self.nan_boxed_to_wire(inner);
-            WireValue::String(format!("Err({})", wire_value_display(&inner_wire)))
+            let s = unsafe { jit_unbox::<String>(bits) };
+            WireValue::String(s.clone())
         } else {
             // Default to interpreting as a number for unknown tags
             WireValue::Number(f64::from_bits(bits))
         }
-    }
-}
-
-/// Simple display for WireValue (used in Ok/Err formatting).
-fn wire_value_display(v: &WireValue) -> String {
-    match v {
-        WireValue::String(s) => s.clone(),
-        WireValue::Number(n) => format!("{}", n),
-        WireValue::Integer(n) => format!("{}", n),
-        WireValue::Bool(b) => format!("{}", b),
-        WireValue::Null => "null".to_string(),
-        _ => format!("{:?}", v),
     }
 }
