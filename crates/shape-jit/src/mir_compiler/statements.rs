@@ -45,7 +45,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 );
                 let mut arr = self.builder.inst_results(inst)[0];
 
-                // jit_array_push_elem expects NaN-boxed I64 elements.
+                // v2-boundary: jit_array_push_elem FFI expects NaN-boxed I64 elements
                 for op in operands {
                     let raw = self.compile_operand(op)?;
                     let val = self.ensure_nanboxed(raw);
@@ -97,7 +97,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
-                // Use compile_operand_raw; box for FFI.
+                // v2-boundary: typed_object_set_field FFI expects NaN-boxed I64 values
                 for (i, op) in operands.iter().enumerate() {
                     let raw = self.compile_operand_raw(op)?;
                     let val = self.ensure_nanboxed(raw);
@@ -145,7 +145,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     );
                     let mut arr = self.builder.inst_results(inst)[0];
 
-                    // jit_array_push_elem expects NaN-boxed I64 elements.
+                    // v2-boundary: jit_array_push_elem FFI expects NaN-boxed I64 elements
                     for op in operands {
                         let raw = self.compile_operand(op)?;
                         let val = self.ensure_nanboxed(raw);
@@ -191,6 +191,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     sp_offset,
                 );
 
+                // v2-boundary: closure captures pushed as NaN-boxed to ctx.stack
                 for (i, op) in operands.iter().enumerate() {
                     let raw = self.compile_operand(op)?;
                     let val = self.ensure_nanboxed(raw);

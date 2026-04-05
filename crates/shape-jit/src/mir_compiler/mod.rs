@@ -286,7 +286,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         for (slot_id, stack_slot) in refs {
             let reloaded = self.builder.ins().stack_load(cranelift::prelude::types::I64, stack_slot, 0);
             if let Some(&var) = self.locals.get(&slot_id) {
-                // Stack slots store NaN-boxed I64; convert to native if needed.
+                // v2-boundary: borrow stack slots store NaN-boxed I64; convert to native if needed
                 let kind = types::slot_kind_for_local(&self.slot_kinds, slot_id.0);
                 let converted = self.unbox_from_nanboxed(reloaded, kind);
                 self.builder.def_var(var, converted);

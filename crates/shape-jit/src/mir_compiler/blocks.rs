@@ -75,7 +75,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             SlotKind::Int16 | SlotKind::UInt16 => {
                 self.builder.ins().iconst(types::I16, 0)
             }
-            // I64 NaN-boxed: use TAG_NULL
+            // v2-boundary: I64 NaN-boxed slots use TAG_NULL as default
             _ => self
                 .builder
                 .ins()

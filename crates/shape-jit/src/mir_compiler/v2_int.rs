@@ -14,6 +14,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///
     /// Input values are i64 (from NaN-boxed stack slots), narrowed to i32 via
     /// `ireduce`, operated on natively, then sign-extended back to i64.
+    /// v2-boundary: input/output are NaN-boxed I64; operates on extracted i32 payload
     pub(crate) fn compile_binop_i32(
         &mut self,
         op: &BinOp,
@@ -58,6 +59,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///
     /// Narrows both operands to i32, performs signed integer comparison,
     /// and returns TAG_BOOL_TRUE or TAG_BOOL_FALSE.
+    /// v2-boundary: returns NaN-boxed bool because callers expect I64 result
     pub(crate) fn compile_cmp_i32(
         &mut self,
         op: &BinOp,

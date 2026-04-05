@@ -54,7 +54,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let zero = self.builder.ins().iconst(types::I32, 0);
                     self.builder.ins().icmp(IntCC::NotEqual, cond_val, zero)
                 } else {
-                    // I64 (NaN-boxed): falsy if TAG_NULL, TAG_NONE, TAG_BOOL_FALSE, or 0
+                    // v2-boundary: I64 (NaN-boxed) truthiness check uses NaN-box tags
                     let tag_null = self
                         .builder
                         .ins()
@@ -119,7 +119,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     );
 
                     // args[0] = receiver, args[1..] = actual method arguments
-                    // Push all args (receiver first, then method args) NaN-boxed
+                    // v2-boundary: method dispatch via trampoline VM needs NaN-boxed stack
                     for (i, arg) in args.iter().enumerate() {
                         let val = self.compile_operand(arg)?;
                         let boxed = self.ensure_nanboxed(val);
@@ -130,7 +130,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
                     }
 
-                    // Push method_name as NaN-boxed string
+                    // v2-boundary: method name pushed as NaN-boxed string to ctx.stack
                     let method_str_bits = crate::nan_boxing::box_string(method_name.clone());
                     let method_val = self.builder.ins().iconst(types::I64, method_str_bits as i64);
                     let method_slot_idx = self.builder.ins().iadd_imm(old_sp, args.len() as i64);
@@ -139,7 +139,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let method_addr = self.builder.ins().iadd(self.ctx_ptr, method_abs_off);
                     self.builder.ins().store(MemFlags::new(), method_val, method_addr, 0);
 
-                    // Push arg_count as NaN-boxed number (count of actual args, NOT receiver)
+                    // v2-boundary: arg_count pushed as NaN-boxed number to ctx.stack
                     let actual_arg_count = if args.is_empty() { 0 } else { args.len() - 1 };
                     let argc_bits = crate::nan_boxing::box_number(actual_arg_count as f64);
                     let argc_val = self.builder.ins().iconst(types::I64, argc_bits as i64);
@@ -185,7 +185,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Dispatch directly to the FFI implementation.
                 if let Operand::Constant(MirConstant::Function(name)) = func {
                     if name == "print" && self.function_indices.get(name.as_str()).is_none() {
-                        // print(value) → jit_print(nanboxed_value)
+                        // v2-boundary: jit_print FFI takes NaN-boxed I64
                         let val = if args.is_empty() {
                             self.builder.ins().iconst(types::I64, crate::nan_boxing::TAG_NULL as i64)
                         } else {
@@ -194,7 +194,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         };
                         self.builder.ins().call(self.ffi.print, &[val]);
 
-                        // print returns None
+                        // v2-boundary: None represented as TAG_NULL in NaN-boxed ABI
                         let none_val = self.builder.ins().iconst(types::I64, crate::nan_boxing::TAG_NULL as i64);
                         self.release_old_value_if_heap(destination)?;
                         self.write_place(destination, none_val)?;
@@ -222,6 +222,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         );
                         let mut arr = self.builder.inst_results(inst)[0];
 
+                        // v2-boundary: enum args pushed via NaN-boxed array_push_elem FFI
                         for arg in args.iter() {
                             let raw = self.compile_operand(arg)?;
                             let val = self.ensure_nanboxed(raw);
@@ -264,7 +265,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // Compile args as SSA values and pass as native Cranelift params.
                     // ABI: fn(ctx_ptr, arg0, arg1, ..., argN) -> i32
                     // The callee stores its return value to ctx.stack[0].
-                    // Args are NaN-boxed since the callee ABI uses I64 params.
+                    // v2-boundary: callee ABI uses uniform I64 params (NaN-boxed)
                     let mut arg_vals = Vec::with_capacity(args.len() + 1);
                     arg_vals.push(self.ctx_ptr);
                     for arg in args.iter() {
@@ -316,7 +317,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         sp_offset,
                     );
 
-                    // Push callee onto stack first (NaN-boxed)
+                    // v2-boundary: indirect call pushes NaN-boxed callee to ctx.stack
                     let callee_val = self.compile_operand(func)?;
                     let callee_boxed = self.ensure_nanboxed(callee_val);
                     let callee_slot_idx = old_sp;
@@ -325,7 +326,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let callee_addr = self.builder.ins().iadd(self.ctx_ptr, callee_abs_off);
                     self.builder.ins().store(MemFlags::new(), callee_boxed, callee_addr, 0);
 
-                    // Push args after callee (NaN-boxed)
+                    // v2-boundary: indirect call args pushed as NaN-boxed to ctx.stack
                     for (i, arg) in args.iter().enumerate() {
                         let val = self.compile_operand(arg)?;
                         let boxed = self.ensure_nanboxed(val);
@@ -336,7 +337,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
                     }
 
-                    // Push arg_count as NaN-boxed number
+                    // v2-boundary: arg_count as NaN-boxed number on ctx.stack
                     let total_items = 1 + args.len() + 1; // callee + args + arg_count
                     let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (1 + args.len()) as i64);
                     let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);

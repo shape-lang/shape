@@ -67,7 +67,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Rvalue::Clone(operand) => {
                 // Explicit clone: get the value and retain.
                 let val = self.compile_operand_raw(operand)?;
-                // arc_retain expects NaN-boxed I64
+                // v2-boundary: arc_retain FFI still takes NaN-boxed I64
                 let boxed = self.ensure_nanboxed(val);
                 self.builder.ins().call(self.ffi.arc_retain, &[boxed]);
                 Ok(boxed)
@@ -77,6 +77,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // StackSlot-based references (ported from BytecodeToIR):
                 // 1. Read the current value from the place (box for stack slot)
                 let raw_val = self.read_place(place)?;
+                // v2-boundary: borrow stack slots store NaN-boxed I64
                 let val = self.ensure_nanboxed(raw_val);
                 // 2. Allocate an 8-byte stack slot to hold the referenced value
                 let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
@@ -102,7 +103,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 );
                 let mut arr = self.builder.inst_results(inst)[0];
 
-                // jit_array_push_elem expects NaN-boxed I64 elements.
+                // v2-boundary: jit_array_push_elem FFI still expects NaN-boxed I64 elements
                 for operand in operands {
                     let raw = self.compile_operand_raw(operand)?;
                     let elem = self.ensure_nanboxed(raw);
@@ -365,7 +366,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         lhs: Value,
         rhs: Value,
     ) -> Result<Value, String> {
-        // FFI generic_* functions expect NaN-boxed I64 arguments.
+        // v2-boundary: generic_* FFI functions expect NaN-boxed I64 arguments
         let l = self.ensure_nanboxed(lhs);
         let r = self.ensure_nanboxed(rhs);
         match op {
@@ -381,7 +382,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             BinOp::Gt => { let inst = self.builder.ins().call(self.ffi.generic_gt, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
             BinOp::Ge => { let inst = self.builder.ins().call(self.ffi.generic_ge, &[l, r]); Ok(self.builder.inst_results(inst)[0]) }
 
-            // Logical: check truthiness
+            // v2-boundary: logical ops on NaN-boxed values use TAG_BOOL_TRUE/FALSE
             BinOp::And => {
                 let tag_true = self.builder.ins().iconst(
                     types::I64,
@@ -434,7 +435,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let one = self.builder.ins().iconst(types::I8, 1);
                     Ok(self.builder.ins().bxor(val, one))
                 } else {
-                    // NaN-boxed: compare against TAG_BOOL_TRUE
+                    // v2-boundary: NaN-boxed bool uses TAG_BOOL_TRUE/FALSE tags
                     let tag_true = self.builder.ins().iconst(
                         types::I64,
                         crate::nan_boxing::TAG_BOOL_TRUE as i64,

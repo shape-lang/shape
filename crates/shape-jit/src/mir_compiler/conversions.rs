@@ -1,8 +1,10 @@
 //! Type conversion helpers: box/unbox between native and NaN-boxed values.
 //!
-//! At FFI boundaries, function calls, and returns, values must be in
-//! NaN-boxed I64 format. Inside native-typed locals, values use their
-//! natural Cranelift representation (F64, I32, I8, etc.).
+//! v2-boundary: This entire module exists because FFI boundaries, function
+//! calls, and returns still use NaN-boxed I64 format. Once all FFI functions
+//! accept native types and the callee ABI is typed, these conversions can be
+//! deleted. Inside native-typed locals, values already use their natural
+//! Cranelift representation (F64, I32, I8, etc.).
 
 use cranelift::prelude::*;
 

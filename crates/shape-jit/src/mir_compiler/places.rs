@@ -8,6 +8,7 @@
 use cranelift::prelude::*;
 
 use super::MirToIR;
+// v2-boundary: inline array access still uses NaN-boxed heap pointer layout
 use crate::nan_boxing::{UNIFIED_PTR_MASK, JIT_ALLOC_DATA_OFFSET};
 use shape_vm::mir::types::*;
 
@@ -136,6 +137,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.field_byte_offsets.get(name).copied()
     }
 
+    // v2-boundary: get_prop/set_prop FFI uses NaN-boxed string keys
     fn field_idx_to_boxed_key(&self, field_idx: &FieldIdx) -> Option<u64> {
         let name = self.mir.field_name_table.get(field_idx)?;
         Some(crate::nan_boxing::box_string(name.clone()))
@@ -154,7 +156,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             Place::Field(base, field_idx) => {
                 let raw_base = self.read_place(base)?;
-                // FFI field access expects NaN-boxed I64
+                // v2-boundary: get_prop/typed_object_get_field FFI expects NaN-boxed I64
                 let base_val = self.ensure_nanboxed(raw_base);
                 if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
                     let offset = self.builder.ins().iconst(types::I64, byte_off as i64);
@@ -172,7 +174,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             Place::Index(base, operand) => {
                 let raw_base = self.read_place(base)?;
-                // Array base must be NaN-boxed (heap pointer)
+                // v2-boundary: inline_array_get uses NaN-boxed heap pointer layout
                 let base_val = self.ensure_nanboxed(raw_base);
                 // Index can stay native — index_to_i64 handles all types
                 let index_val = self.compile_operand_raw(operand)?;
@@ -204,6 +206,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             Place::Field(base, field_idx) => {
                 let raw_base = self.read_place(base)?;
+                // v2-boundary: set_prop/typed_object_set_field FFI expects NaN-boxed I64
                 let base_val = self.ensure_nanboxed(raw_base);
                 let boxed_val = self.ensure_nanboxed(val);
                 if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
@@ -220,14 +223,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             Place::Index(base, operand) => {
                 let raw_base = self.read_place(base)?;
+                // v2-boundary: inline_array_set uses NaN-boxed heap pointer layout
                 let base_val = self.ensure_nanboxed(raw_base);
                 let index_val = self.compile_operand_raw(operand)?;
+                // v2-boundary: array elements stored as NaN-boxed I64
                 let boxed_val = self.ensure_nanboxed(val);
                 self.inline_array_set(base_val, index_val, boxed_val);
                 Ok(())
             }
             Place::Deref(inner) => {
                 let ref_addr = self.read_place(inner)?;
+                // v2-boundary: borrow stack slots store NaN-boxed I64
                 let boxed_val = self.ensure_nanboxed(val);
                 self.builder.ins().store(MemFlags::new(), boxed_val, ref_addr, 0);
                 Ok(())
@@ -264,6 +270,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 | shape_vm::type_tracking::SlotKind::UInt16 => {
                     self.builder.ins().iconst(types::I16, 0)
                 }
+                // v2-boundary: I64 (NaN-boxed) slots use TAG_NULL as zero value
                 _ => self
                     .builder
                     .ins()

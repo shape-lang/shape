@@ -61,6 +61,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///
     /// Returns native types when possible (F64 for floats, I64 for ints, I8 for bools).
     /// Consumers that need NaN-boxed I64 (FFI calls) use `ensure_nanboxed()`.
+    /// v2-boundary: Int, None, StringId, Str, Function, Method, ClosurePlaceholder
+    /// all produce NaN-boxed I64 because the VM stack and FFI boundaries expect it.
     pub(crate) fn compile_constant(&mut self, constant: &MirConstant) -> Result<Value, String> {
         match constant {
             MirConstant::Int(n) => {
