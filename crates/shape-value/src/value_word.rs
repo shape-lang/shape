@@ -2436,6 +2436,15 @@ impl ValueWord {
         Self(bits)
     }
 
+    /// Consume this ValueWord and return its raw u64 bits WITHOUT running Drop.
+    /// Transfers ownership — the caller is responsible for the refcount.
+    #[inline(always)]
+    pub fn into_raw_bits(self) -> u64 {
+        let bits = self.0;
+        std::mem::forget(self);
+        bits
+    }
+
     /// Get the type name of this value.
     #[inline]
     pub fn type_name(&self) -> &'static str {
