@@ -198,7 +198,7 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
-            std::mem::replace(&mut self.stack[self.sp], ValueWord::none())
+            self.stack_take_vw(self.sp)
         } else {
             ValueWord::none()
         }))
@@ -306,7 +306,7 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
-            std::mem::replace(&mut self.stack[self.sp], ValueWord::none())
+            self.stack_take_vw(self.sp)
         } else {
             ValueWord::none()
         }))
@@ -360,7 +360,7 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(if self.sp > tl {
             self.sp -= 1;
-            std::mem::replace(&mut self.stack[self.sp], ValueWord::none())
+            self.stack_take_vw(self.sp)
         } else {
             ValueWord::none()
         })

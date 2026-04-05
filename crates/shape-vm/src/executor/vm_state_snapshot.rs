@@ -56,7 +56,7 @@ impl VirtualMachine {
             let locals: Vec<ValueWord> = if frame.locals_count > 0 {
                 let start = frame.base_pointer;
                 let end = (start + frame.locals_count).min(self.sp);
-                self.stack[start..end].to_vec()
+                (start..end).map(|i| self.stack_read_vw(i)).collect()
             } else {
                 Vec::new()
             };
@@ -79,7 +79,7 @@ impl VirtualMachine {
                         .saturating_add(arity)
                         .min(frame.base_pointer + frame.locals_count)
                         .min(self.sp);
-                    self.stack[start..end].to_vec()
+                    (start..end).map(|i| self.stack_read_vw(i)).collect()
                 })
                 .unwrap_or_default();
 
@@ -119,7 +119,9 @@ impl VirtualMachine {
             current_args,
             current_locals,
             module_binding_names: self.program.module_binding_names.clone(),
-            module_binding_values: self.module_bindings.clone(),
+            module_binding_values: (0..self.module_bindings.len())
+                .map(|i| self.binding_read_vw(i))
+                .collect(),
             instruction_count: self.instruction_count,
         }
     }

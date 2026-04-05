@@ -5,7 +5,7 @@
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::VirtualMachine;
-use crate::memory::{record_heap_write, write_barrier_vw};
+use crate::memory::{record_heap_write, write_barrier_slot, write_barrier_vw};
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use shape_value::NanTag;
 use shape_value::{HeapValue, VMError, ValueWord, heap_value::NativeScalar};
@@ -1021,11 +1021,11 @@ impl VirtualMachine {
             )));
         }
 
-        let mut object_nb = std::mem::replace(&mut self.stack[slot], ValueWord::none());
+        let mut object_nb = self.stack_take_vw(slot);
         let result = Self::set_array_index_on_object(&mut object_nb, &key_nb, value_nb);
         record_heap_write();
-        write_barrier_vw(&ValueWord::none(), &object_nb);
-        self.stack[slot] = object_nb;
+        write_barrier_slot(Self::NONE_BITS, object_nb.raw_bits());
+        self.stack_write_vw(slot, object_nb);
         result
     }
 
@@ -1041,15 +1041,14 @@ impl VirtualMachine {
         };
         if binding_idx >= self.module_bindings.len() {
             self.module_bindings
-                .resize_with(binding_idx + 1, ValueWord::none);
+                .resize_with(binding_idx + 1, || Self::NONE_BITS);
         }
 
-        let mut object_nb =
-            std::mem::replace(&mut self.module_bindings[binding_idx], ValueWord::none());
+        let mut object_nb = self.binding_take_vw(binding_idx);
         let result = Self::set_array_index_on_object(&mut object_nb, &key_nb, value_nb);
         record_heap_write();
-        write_barrier_vw(&ValueWord::none(), &object_nb);
-        self.module_bindings[binding_idx] = object_nb;
+        write_barrier_slot(Self::NONE_BITS, object_nb.raw_bits());
+        self.binding_write_vw(binding_idx, object_nb);
         result
     }
 

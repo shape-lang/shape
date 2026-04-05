@@ -286,10 +286,10 @@ impl VirtualMachine {
                     heap_mask,
                 });
                 if idx >= self.module_bindings.len() {
-                    self.module_bindings.resize_with(idx + 1, ValueWord::none);
+                    self.module_bindings.resize_with(idx + 1, || Self::NONE_BITS);
                 }
                 // BARRIER: heap write site — overwrites module binding during typed object initialization
-                self.module_bindings[idx] = typed_nb;
+                self.binding_write_vw(idx, typed_nb);
             }
         }
     }

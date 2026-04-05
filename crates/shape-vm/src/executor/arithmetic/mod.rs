@@ -1138,8 +1138,9 @@ impl VirtualMachine {
 
         let hint = arithmetic_ic_check(self, self.ip);
         if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {
-            let b = &self.stack[self.sp - 1];
-            let a = &self.stack[self.sp - 2];
+            let slice = self.stack_slice_vw((self.sp - 2)..self.sp);
+            let a = &slice[0];
+            let b = &slice[1];
             if a.is_i64() && b.is_i64() {
                 let result = unsafe { i48_op(a, b) };
                 self.sp -= 2;
@@ -1151,8 +1152,9 @@ impl VirtualMachine {
                 return Ok(Some(()));
             }
         } else if hint == ArithmeticIcHint::BothF64 && self.sp >= 2 {
-            let b = &self.stack[self.sp - 1];
-            let a = &self.stack[self.sp - 2];
+            let slice = self.stack_slice_vw((self.sp - 2)..self.sp);
+            let a = &slice[0];
+            let b = &slice[1];
             if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
                 self.sp -= 2;
                 let ip = self.ip;
@@ -2185,8 +2187,9 @@ impl VirtualMachine {
                     use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
                     let hint = arithmetic_ic_check(self, self.ip);
                     if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {
-                        let b = &self.stack[self.sp - 1];
-                        let a = &self.stack[self.sp - 2];
+                        let slice = self.stack_slice_vw((self.sp - 2)..self.sp);
+                        let a = &slice[0];
+                        let b = &slice[1];
                         if let (Some(ai), Some(bi)) = (Self::int_operand(a), Self::int_operand(b)) {
                             if bi == 0 {
                                 return Err(VMError::DivisionByZero);
@@ -2199,8 +2202,9 @@ impl VirtualMachine {
                             return self.push_vw(ValueWord::from_i64(ai / bi));
                         }
                     } else if hint == ArithmeticIcHint::BothF64 && self.sp >= 2 {
-                        let b = &self.stack[self.sp - 1];
-                        let a = &self.stack[self.sp - 2];
+                        let slice = self.stack_slice_vw((self.sp - 2)..self.sp);
+                        let a = &slice[0];
+                        let b = &slice[1];
                         if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
                             if bf == 0.0 {
                                 return Err(VMError::DivisionByZero);

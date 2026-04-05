@@ -185,8 +185,9 @@ impl VirtualMachine {
                     let mut jit_locals = [0u64; 256];
                     let args_base = self.sp.saturating_sub(arg_count);
                     for i in 0..copy_count {
+                        let vw_slice = self.stack_slice_vw((args_base + i)..(args_base + i + 1));
                         jit_locals[i] =
-                            jit_abi::marshal_arg_to_jit(&self.stack[args_base + i], param_kinds[i]);
+                            jit_abi::marshal_arg_to_jit(&vw_slice[0], param_kinds[i]);
                     }
 
                     // Build a JIT context on the stack matching the JITContext
@@ -252,11 +253,11 @@ impl VirtualMachine {
                                 let locals_count = func.locals_count as usize;
                                 let needed = bp + locals_count + info.stack_depth as usize;
                                 if needed > self.stack.len() {
-                                    self.stack.resize_with(needed * 2 + 1, ValueWord::none);
+                                    self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
                                 }
                                 // Zero-init local slots (deopt_with_info overwrites the live ones)
                                 for i in 0..locals_count {
-                                    self.stack[bp + i] = ValueWord::none();
+                                    self.stack_write_vw(bp + i, ValueWord::none());
                                 }
 
                                 let blob_hash = self.blob_hash_for_function(func_id_u16);
@@ -305,7 +306,8 @@ impl VirtualMachine {
 
                     // Drop call arguments from the VM stack now that native call succeeded.
                     for i in args_base..self.sp {
-                        self.stack[i] = ValueWord::none();
+                        drop(ValueWord::from_raw_bits(self.stack[i]));
+                        self.stack[i] = Self::NONE_BITS;
                     }
                     self.sp = args_base;
 
@@ -360,32 +362,36 @@ impl VirtualMachine {
             .sp
             .checked_sub(arg_count + 1)
             .ok_or(VMError::StackUnderflow)?;
-        let callee_nb = self.stack[callee_idx].clone();
+        let callee_nb = self.stack_read_vw(callee_idx);
 
         // NanTag dispatch (no ValueWord materialization)
         use shape_value::NanTag;
         match callee_nb.tag() {
             NanTag::Function => {
                 let func_id = callee_nb.as_function().ok_or(VMError::InvalidCall)?;
-                // Swap-down: shift args down by one to overwrite the callee slot
+                drop(callee_nb);
+                // Swap-down: shift args down by one to overwrite the callee slot.
+                // Drop the callee slot first, then move each arg down.
+                drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
                 for i in callee_idx..callee_idx + arg_count {
-                    self.stack[i] = self.stack[i + 1].clone();
+                    self.stack[i] = self.stack[i + 1];
+                    // The source slot is now duplicated; clear it so we don't double-own.
+                    self.stack[i + 1] = Self::NONE_BITS;
                 }
                 self.sp -= 1;
-                self.stack[self.sp] = ValueWord::none();
                 self.call_function_from_stack(func_id, arg_count)
             }
             NanTag::ModuleFunction => {
                 let func_id = callee_nb.as_module_function().ok_or(VMError::InvalidCall)?;
+                drop(callee_nb);
                 let args_base = callee_idx + 1;
                 let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
                 for i in 0..arg_count {
-                    args_nb.push(std::mem::replace(
-                        &mut self.stack[args_base + i],
-                        ValueWord::none(),
-                    ));
+                    args_nb.push(self.stack_take_vw(args_base + i));
                 }
-                self.stack[callee_idx] = ValueWord::none();
+                // Clear the callee slot.
+                drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                self.stack[callee_idx] = Self::NONE_BITS;
                 self.sp = callee_idx;
                 let module_fn = self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
                     VMError::RuntimeError(format!(
@@ -406,30 +412,28 @@ impl VirtualMachine {
                     }) => {
                         let function_id = *function_id;
                         let upvalues = upvalues.clone();
+                        drop(callee_nb);
                         // Collect args as ValueWord, then remove callee
                         let args_base = callee_idx + 1;
                         let mut args_nb = Vec::with_capacity(arg_count);
                         for i in 0..arg_count {
-                            args_nb.push(std::mem::replace(
-                                &mut self.stack[args_base + i],
-                                ValueWord::none(),
-                            ));
+                            args_nb.push(self.stack_take_vw(args_base + i));
                         }
-                        self.stack[callee_idx] = ValueWord::none();
+                        drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                        self.stack[callee_idx] = Self::NONE_BITS;
                         self.sp = callee_idx;
                         self.call_closure_with_nb_args(function_id, upvalues, &args_nb)
                     }
                     Some(HeapValue::HostClosure(callable)) => {
                         let callable = callable.clone();
+                        drop(callee_nb);
                         let args_base = callee_idx + 1;
                         let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
                         for i in 0..arg_count {
-                            args_nb.push(std::mem::replace(
-                                &mut self.stack[args_base + i],
-                                ValueWord::none(),
-                            ));
+                            args_nb.push(self.stack_take_vw(args_base + i));
                         }
-                        self.stack[callee_idx] = ValueWord::none();
+                        drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                        self.stack[callee_idx] = Self::NONE_BITS;
                         self.sp = callee_idx;
                         let result_nb = callable.call(&args_nb).map_err(VMError::RuntimeError)?;
                         self.push_vw(result_nb)?;
@@ -651,11 +655,19 @@ impl VirtualMachine {
                     invoke: vm_callable_invoker,
                 };
                 let live_stack_len = self.sp;
+                // SAFETY: ValueWord is #[repr(transparent)] over u64, so
+                // &mut [u64] and &mut [ValueWord] have identical layout.
+                let vw_slice: &mut [ValueWord] = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        self.stack[..live_stack_len].as_mut_ptr() as *mut ValueWord,
+                        live_stack_len,
+                    )
+                };
                 let result = native_abi::invoke_linked_function(
                     &linked,
                     &args,
                     Some(raw_invoker),
-                    Some(&mut self.stack[..live_stack_len]),
+                    Some(vw_slice),
                 )
                 .map_err(|e| {
                     VMError::RuntimeError(format!("Native function '{}' error: {}", name, e))
@@ -677,7 +689,8 @@ impl VirtualMachine {
             // Clean up register window: clear slots and restore sp to base_pointer
             let bp = frame.base_pointer;
             for i in bp..self.sp {
-                self.stack[i] = ValueWord::none();
+                drop(ValueWord::from_raw_bits(self.stack[i]));
+                self.stack[i] = Self::NONE_BITS;
             }
             self.sp = bp;
         } else {
@@ -697,7 +710,8 @@ impl VirtualMachine {
             // Clean up register window: clear slots and restore sp to base_pointer
             let bp = frame.base_pointer;
             for i in bp..self.sp {
-                self.stack[i] = ValueWord::none();
+                drop(ValueWord::from_raw_bits(self.stack[i]));
+                self.stack[i] = Self::NONE_BITS;
             }
             self.sp = bp;
 

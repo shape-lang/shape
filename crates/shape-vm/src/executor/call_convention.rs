@@ -221,7 +221,9 @@ impl VirtualMachine {
                 self.ip = saved_ip;
                 // Restore stack pointer (clear anything left above saved_sp)
                 for i in saved_sp..self.sp {
-                    self.stack[i] = ValueWord::none();
+                    // Drop the old occupant, then write the none sentinel.
+                    drop(ValueWord::from_raw_bits(self.stack[i]));
+                    self.stack[i] = Self::NONE_BITS;
                 }
                 self.sp = saved_sp;
 
@@ -239,7 +241,8 @@ impl VirtualMachine {
 
                     self.ip = saved_ip;
                     for i in saved_sp..self.sp {
-                        self.stack[i] = ValueWord::none();
+                        drop(ValueWord::from_raw_bits(self.stack[i]));
+                        self.stack[i] = Self::NONE_BITS;
                     }
                     self.sp = saved_sp;
 
@@ -293,12 +296,13 @@ impl VirtualMachine {
         let total_slots = locals_count + ref_shadow_count;
         let needed = bp + total_slots;
         if needed > self.stack.len() {
-            self.stack.resize_with(needed * 2 + 1, ValueWord::none);
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
         }
 
         for i in 0..param_count {
             if i < locals_count {
-                self.stack[bp + i] = args.get(i).cloned().unwrap_or_else(ValueWord::none);
+                let vw = args.get(i).cloned().unwrap_or_else(ValueWord::none);
+                self.stack_write_vw(bp + i, vw);
             }
         }
 
@@ -310,8 +314,9 @@ impl VirtualMachine {
         for (i, &is_ref) in ref_params.iter().enumerate() {
             if is_ref && i < param_count && i < locals_count {
                 let shadow_slot = bp + locals_count + shadow_idx;
-                self.stack[shadow_slot] = self.stack[bp + i].clone();
-                self.stack[bp + i] = ValueWord::from_ref(shadow_slot);
+                let cloned = self.stack_read_vw(bp + i);
+                self.stack_write_vw(shadow_slot, cloned);
+                self.stack_write_vw(bp + i, ValueWord::from_ref(shadow_slot));
                 shadow_idx += 1;
             }
         }
@@ -357,13 +362,13 @@ impl VirtualMachine {
         let bp = self.sp;
         let needed = bp + locals_count;
         if needed > self.stack.len() {
-            self.stack.resize_with(needed * 2 + 1, ValueWord::none);
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
         }
 
         // Bind upvalue values as the first N locals
         for (i, upvalue) in upvalues.iter().enumerate() {
             if i < locals_count {
-                self.stack[bp + i] = upvalue.get();
+                self.stack_write_vw(bp + i, upvalue.get());
             }
         }
 
@@ -371,13 +376,13 @@ impl VirtualMachine {
         for (i, arg) in args.iter().enumerate() {
             let local_idx = captures_count + i;
             if local_idx < locals_count {
-                self.stack[bp + local_idx] = arg.clone();
+                self.stack_write_vw(bp + local_idx, arg.clone());
             }
         }
 
         // Fill remaining parameters with None
         for i in (captures_count + args.len())..arity.min(locals_count) {
-            self.stack[bp + i] = ValueWord::none();
+            self.stack_write_vw(bp + i, ValueWord::none());
         }
 
         self.sp = needed;
@@ -479,14 +484,14 @@ impl VirtualMachine {
         // Ensure stack has room for all locals (some may be beyond the args)
         let needed = bp + locals_count;
         if needed > self.stack.len() {
-            self.stack.resize_with(needed * 2 + 1, ValueWord::none);
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
         }
 
         // Zero remaining local slots (including omitted args that the compiler
         // may intentionally represent as null sentinels for default params).
         let copy_count = arg_count.min(arity).min(locals_count);
         for i in copy_count..locals_count {
-            self.stack[bp + i] = ValueWord::none();
+            self.stack_write_vw(bp + i, ValueWord::none());
         }
 
         // Advance sp past all locals

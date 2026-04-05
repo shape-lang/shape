@@ -22,9 +22,7 @@ impl VirtualMachine {
             config,
             program,
             ip: 0,
-            stack: (0..crate::constants::DEFAULT_STACK_CAPACITY)
-                .map(|_| ValueWord::none())
-                .collect(),
+            stack: vec![ValueWord::none().into_raw_bits(); crate::constants::DEFAULT_STACK_CAPACITY],
             sp: 0,
             module_bindings: Vec::new(),
             call_stack: Vec::with_capacity(crate::constants::DEFAULT_CALL_STACK_CAPACITY),

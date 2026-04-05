@@ -208,16 +208,20 @@ pub struct VirtualMachine {
     /// Instruction pointer
     ip: usize,
 
-    /// Unified value stack (pre-allocated, NaN-boxed: 8 bytes per slot).
+    /// Unified value stack (pre-allocated, raw u64: 8 bytes per slot).
     /// Locals live in register windows on this stack.
-    stack: Vec<ValueWord>,
+    /// Each slot stores the raw bit pattern of a `ValueWord` (which is
+    /// `#[repr(transparent)]` over `u64`).  Ownership of any embedded
+    /// Arc refcounts is managed manually via `push_vw`/`pop_vw`/
+    /// `stack_read_vw`/`stack_write_vw` helpers.
+    stack: Vec<u64>,
 
     /// Stack pointer — logical top of the value stack.
     /// `stack[0..sp]` are live values; `stack[sp..]` is pre-allocated dead space.
     pub(crate) sp: usize,
 
-    /// ModuleBinding variables (NaN-boxed for compact storage)
-    pub(crate) module_bindings: Vec<ValueWord>,
+    /// ModuleBinding variables (raw u64 bit patterns; see `stack` comment).
+    pub(crate) module_bindings: Vec<u64>,
 
     /// Call stack
     call_stack: Vec<CallFrame>,
@@ -425,6 +429,30 @@ pub struct DebugVMState {
 }
 
 mod vm_impl;
+
+/// Drop implementation for VirtualMachine.
+///
+/// Since `stack` and `module_bindings` are `Vec<u64>` (raw bits), the
+/// default Vec drop would just free memory without decrementing Arc
+/// refcounts for heap-tagged ValueWords. We must manually drop each
+/// live value to prevent refcount leaks.
+impl Drop for VirtualMachine {
+    fn drop(&mut self) {
+        // Drop all live stack values [0..sp].
+        // Slots above sp are NONE_BITS sentinels (no-op to drop).
+        for i in 0..self.sp {
+            let bits = self.stack[i];
+            self.stack[i] = Self::NONE_BITS;
+            drop(ValueWord::from_raw_bits(bits));
+        }
+        // Drop all module binding values.
+        for i in 0..self.module_bindings.len() {
+            let bits = self.module_bindings[i];
+            self.module_bindings[i] = Self::NONE_BITS;
+            drop(ValueWord::from_raw_bits(bits));
+        }
+    }
+}
 
 /// Replace the active wire transport provider used by VM transport builtins.
 pub fn set_transport_provider(

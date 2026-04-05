@@ -91,7 +91,8 @@ impl VirtualMachine {
             self.clear_last_uncaught_exception();
             // Unwind stack to handler's saved state (sp-based)
             for i in handler.stack_size..self.sp {
-                self.stack[i] = ValueWord::none();
+                drop(ValueWord::from_raw_bits(self.stack[i]));
+                self.stack[i] = Self::NONE_BITS;
             }
             self.sp = handler.stack_size;
             self.call_stack.truncate(handler.call_depth);

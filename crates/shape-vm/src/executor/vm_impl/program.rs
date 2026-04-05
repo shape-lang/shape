@@ -427,7 +427,9 @@ impl VirtualMachine {
     /// Reset VM state
     /// Get a snapshot of all module binding values.
     pub fn module_bindings_snapshot(&self) -> Vec<ValueWord> {
-        self.module_bindings.iter().map(|vw| vw.clone()).collect()
+        (0..self.module_bindings.len())
+            .map(|i| self.binding_read_vw(i))
+            .collect()
     }
 
     /// Reset VM execution state for trampoline use.
@@ -436,7 +438,8 @@ impl VirtualMachine {
     /// and registered extensions.
     pub fn reset_for_trampoline(&mut self) {
         for i in 0..self.sp {
-            self.stack[i] = ValueWord::none();
+            drop(ValueWord::from_raw_bits(self.stack[i]));
+            self.stack[i] = Self::NONE_BITS;
         }
         self.sp = 0;
         self.ip = 0;
@@ -454,7 +457,8 @@ impl VirtualMachine {
     pub fn reset(&mut self) {
         self.ip = self.program_entry_ip;
         for i in 0..self.sp {
-            self.stack[i] = ValueWord::none();
+            drop(ValueWord::from_raw_bits(self.stack[i]));
+            self.stack[i] = Self::NONE_BITS;
         }
         // Advance sp past top-level locals so expression evaluation
         // doesn't overlap with local variable storage in register windows.
@@ -475,7 +479,8 @@ impl VirtualMachine {
     pub fn reset_stack(&mut self) {
         self.ip = self.program_entry_ip;
         for i in 0..self.sp {
-            self.stack[i] = ValueWord::none();
+            drop(ValueWord::from_raw_bits(self.stack[i]));
+            self.stack[i] = Self::NONE_BITS;
         }
         let tl = self.program.top_level_locals_count as usize;
         self.sp = tl;
@@ -494,7 +499,8 @@ impl VirtualMachine {
     pub fn reset_minimal(&mut self) {
         self.ip = self.program_entry_ip;
         for i in 0..self.sp {
-            self.stack[i] = ValueWord::none();
+            drop(ValueWord::from_raw_bits(self.stack[i]));
+            self.stack[i] = Self::NONE_BITS;
         }
         let tl = self.program.top_level_locals_count as usize;
         self.sp = tl;
@@ -507,9 +513,9 @@ impl VirtualMachine {
     /// Push a value onto the stack (public, for testing and host integration)
     pub fn push_value(&mut self, value: ValueWord) {
         if self.sp >= self.stack.len() {
-            self.stack.resize_with(self.sp * 2 + 1, ValueWord::none);
+            self.stack.resize_with(self.sp * 2 + 1, || Self::NONE_BITS);
         }
-        self.stack[self.sp] = value;
+        self.stack_write_vw(self.sp, value);
         self.sp += 1;
     }
 }

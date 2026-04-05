@@ -96,9 +96,13 @@ impl VirtualMachine {
             Some(Operand::Local(idx)) => {
                 let bp = self.current_locals_base();
                 let slot = bp + idx as usize;
-                match self.stack[slot].as_ref_target() {
+                let ref_target = self.stack_peek_vw(slot, |vw| vw.as_ref_target());
+                match ref_target {
                     Some(RefTarget::Stack(target)) => {
-                        Self::push_to_array_slot(&mut self.stack[target], value_nb)
+                        let mut arr = self.stack_take_vw(target);
+                        let r = Self::push_to_array_slot(&mut arr, value_nb);
+                        self.stack_write_vw(target, arr);
+                        r
                     }
                     Some(RefTarget::ModuleBinding(target)) => {
                         if target >= self.module_bindings.len() {
@@ -107,14 +111,22 @@ impl VirtualMachine {
                                 target
                             )));
                         }
-                        Self::push_to_array_slot(&mut self.module_bindings[target], value_nb)
+                        let mut arr = self.binding_take_vw(target);
+                        let r = Self::push_to_array_slot(&mut arr, value_nb);
+                        self.binding_write_vw(target, arr);
+                        r
                     }
                     Some(target) => {
                         let mut array_nb = self.read_ref_target(&target)?;
                         Self::push_to_array_slot(&mut array_nb, value_nb)?;
                         self.write_ref_target(&target, array_nb)
                     }
-                    None => Self::push_to_array_slot(&mut self.stack[slot], value_nb),
+                    None => {
+                        let mut arr = self.stack_take_vw(slot);
+                        let r = Self::push_to_array_slot(&mut arr, value_nb);
+                        self.stack_write_vw(slot, arr);
+                        r
+                    }
                 }
             }
             Some(Operand::ModuleBinding(idx)) => {
@@ -125,9 +137,19 @@ impl VirtualMachine {
                         slot
                     )));
                 }
-                match self.module_bindings[slot].as_ref_target() {
+                let ref_target = {
+                    let bits = self.module_bindings[slot];
+                    let tmp = ValueWord::from_raw_bits(bits);
+                    let r = tmp.as_ref_target();
+                    std::mem::forget(tmp);
+                    r
+                };
+                match ref_target {
                     Some(RefTarget::Stack(target)) => {
-                        Self::push_to_array_slot(&mut self.stack[target], value_nb)
+                        let mut arr = self.stack_take_vw(target);
+                        let r = Self::push_to_array_slot(&mut arr, value_nb);
+                        self.stack_write_vw(target, arr);
+                        r
                     }
                     Some(RefTarget::ModuleBinding(target)) => {
                         if target >= self.module_bindings.len() {
@@ -136,14 +158,22 @@ impl VirtualMachine {
                                 target
                             )));
                         }
-                        Self::push_to_array_slot(&mut self.module_bindings[target], value_nb)
+                        let mut arr = self.binding_take_vw(target);
+                        let r = Self::push_to_array_slot(&mut arr, value_nb);
+                        self.binding_write_vw(target, arr);
+                        r
                     }
                     Some(target) => {
                         let mut array_nb = self.read_ref_target(&target)?;
                         Self::push_to_array_slot(&mut array_nb, value_nb)?;
                         self.write_ref_target(&target, array_nb)
                     }
-                    None => Self::push_to_array_slot(&mut self.module_bindings[slot], value_nb),
+                    None => {
+                        let mut arr = self.binding_take_vw(slot);
+                        let r = Self::push_to_array_slot(&mut arr, value_nb);
+                        self.binding_write_vw(slot, arr);
+                        r
+                    }
                 }
             }
             _ => Err(VMError::RuntimeError(

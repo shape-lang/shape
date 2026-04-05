@@ -25,11 +25,10 @@ impl VirtualMachine {
             Dup => {
                 // Clone the ValueWord directly from the stack, avoiding ValueWord round-trip
                 let index = self.sp.checked_sub(1).ok_or(VMError::StackUnderflow)?;
-                let val = self
-                    .stack
-                    .get(index)
-                    .ok_or(VMError::StackUnderflow)?
-                    .clone();
+                if index >= self.stack.len() {
+                    return Err(VMError::StackUnderflow);
+                }
+                let val = self.stack_read_vw(index);
                 self.push_vw(val)?;
             }
             Swap => {

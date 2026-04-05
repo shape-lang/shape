@@ -73,18 +73,32 @@ impl VirtualMachine {
         }))
     }
 
-    // --- ValueWord-direct stack ops for hot paths ---
+    // === Raw u64 stack constants ===
 
-    /// Push a ValueWord value directly (no ValueWord conversion).
+    /// The raw u64 bit pattern for `ValueWord::none()`.
+    /// This is `TAG_BASE | (TAG_NONE << 48) = 0xFFFB_0000_0000_0000`.
+    pub(crate) const NONE_BITS: u64 = 0xFFFB_0000_0000_0000u64;
+
+    // --- ValueWord-direct stack ops (compatibility shims over Vec<u64>) ---
+
+    /// Push a ValueWord onto the `Vec<u64>` stack.
+    ///
+    /// Transfers ownership of any embedded Arc refcount into the stack slot
+    /// by using `into_raw_bits()` (which `mem::forget`s the ValueWord).
     ///
     /// Hot path: single bounds check + write.  The stack growth and overflow
     /// checks are split into a cold `push_vw_slow` to keep the hot path tight.
     #[inline(always)]
-    pub(crate) fn push_vw(&mut self, value: ValueWord) -> Result<(), VMError> {
+    pub fn push_vw(&mut self, value: ValueWord) -> Result<(), VMError> {
+        let bits = value.into_raw_bits();
         if self.sp >= self.stack.len() {
-            return self.push_vw_slow(value);
+            return self.push_vw_slow(bits);
         }
-        self.stack[self.sp] = value;
+        // The old slot is a u64; overwriting it does NOT run any Drop.
+        // We must manually drop the old ValueWord if it was heap-tagged.
+        // However, stack slots above `sp` are always dead (NONE_BITS sentinel)
+        // so there is nothing to drop.
+        self.stack[self.sp] = bits;
         self.sp += 1;
         Ok(())
     }
@@ -92,57 +106,157 @@ impl VirtualMachine {
     /// Cold path for push_vw: grow the stack or return StackOverflow.
     #[cold]
     #[inline(never)]
-    pub(crate) fn push_vw_slow(&mut self, value: ValueWord) -> Result<(), VMError> {
+    pub fn push_vw_slow(&mut self, bits: u64) -> Result<(), VMError> {
         if self.sp >= self.config.max_stack_size {
+            // Reconstruct ValueWord so its Drop runs (releases any heap ref).
+            drop(ValueWord::from_raw_bits(bits));
             return Err(VMError::StackOverflow);
         }
         let new_len = self.sp * 2 + 1;
         self.stack.reserve(new_len - self.stack.len());
         while self.stack.len() < new_len {
-            self.stack.push(ValueWord::none());
+            self.stack.push(Self::NONE_BITS);
         }
-        self.stack[self.sp] = value;
+        self.stack[self.sp] = bits;
         self.sp += 1;
         Ok(())
     }
 
-    /// Pop a ValueWord value directly (no ValueWord conversion).
+    /// Pop a ValueWord from the `Vec<u64>` stack.
     ///
-    /// Uses `ptr::read` to take ownership of the value, then writes a
-    /// ValueWord::none() sentinel via raw pointer to prevent double-free on
-    /// Vec drop — avoiding bounds checks and the full `mem::replace` protocol.
-    ///
-    /// The underflow check is retained for safety but marked cold so the
-    /// branch predictor always predicts the fast path (sp > 0).
+    /// Reads the raw u64 bits and reconstructs a `ValueWord` that owns the
+    /// embedded refcount.  The slot is overwritten with `NONE_BITS` so a
+    /// subsequent `drop_stack_range` / VM teardown doesn't double-free.
     #[inline(always)]
-    pub(crate) fn pop_vw(&mut self) -> Result<ValueWord, VMError> {
+    pub fn pop_vw(&mut self) -> Result<ValueWord, VMError> {
         if self.sp == 0 {
             return Self::pop_vw_underflow();
         }
         self.sp -= 1;
-        // SAFETY: sp was > 0 before decrement, so self.sp is a valid index
-        // into self.stack (which is pre-allocated to at least DEFAULT_STACK_CAPACITY).
-        // We take ownership via ptr::read and immediately overwrite the slot with
-        // a None sentinel so the Vec destructor won't double-free any heap ValueWord.
-        unsafe {
-            let ptr = self.stack.as_mut_ptr().add(self.sp);
-            let val = std::ptr::read(ptr);
-            // Write ValueWord::none() bit pattern directly. This is TAG_BASE | (TAG_NONE << 48)
-            // = 0xFFFB_0000_0000_0000. It's a non-heap tagged value so Drop is a no-op.
-            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
-            Ok(val)
-        }
+        let bits = self.stack[self.sp];
+        self.stack[self.sp] = Self::NONE_BITS;
+        // SAFETY: The bits were produced by `into_raw_bits()` in `push_vw`
+        // (or by one of the `stack_write_vw` helpers) and represent a valid
+        // ValueWord with exactly one outstanding refcount.
+        Ok(ValueWord::from_raw_bits(bits))
     }
 
     #[cold]
     #[inline(never)]
-    pub(crate) fn pop_vw_underflow() -> Result<ValueWord, VMError> {
+    pub fn pop_vw_underflow() -> Result<ValueWord, VMError> {
         Err(VMError::StackUnderflow)
     }
 
     /// Pop and materialize a ValueWord from the stack (convenience for tests and legacy callers).
     pub fn pop(&mut self) -> Result<ValueWord, VMError> {
-        Ok(self.pop_vw()?.clone())
+        self.pop_vw()
+    }
+
+    // === Indexed stack access helpers (ValueWord ↔ u64) ===
+
+    /// Read a clone of the `ValueWord` at `stack[idx]` **without** removing it.
+    ///
+    /// This bumps the Arc refcount for heap-tagged values (clone semantics).
+    #[inline(always)]
+    pub(crate) fn stack_read_vw(&self, idx: usize) -> ValueWord {
+        let bits = self.stack[idx];
+        // Construct a temporary to call `.clone()`, which bumps the refcount,
+        // then forget the temporary so its Drop doesn't decrement.
+        let tmp = ValueWord::from_raw_bits(bits);
+        let c = tmp.clone();
+        std::mem::forget(tmp);
+        c
+    }
+
+    /// Write a `ValueWord` into `stack[idx]`, dropping the previous occupant
+    /// and transferring ownership of `value` into the slot.
+    #[inline(always)]
+    pub(crate) fn stack_write_vw(&mut self, idx: usize, value: ValueWord) {
+        // Drop the old occupant (may decrement Arc refcount).
+        let old_bits = self.stack[idx];
+        drop(ValueWord::from_raw_bits(old_bits));
+        self.stack[idx] = value.into_raw_bits();
+    }
+
+    /// Take ownership of the `ValueWord` at `stack[idx]`, replacing the slot
+    /// with `NONE_BITS`.  Does NOT drop the old value — the caller owns it.
+    #[inline(always)]
+    pub(crate) fn stack_take_vw(&mut self, idx: usize) -> ValueWord {
+        let bits = self.stack[idx];
+        self.stack[idx] = Self::NONE_BITS;
+        ValueWord::from_raw_bits(bits)
+    }
+
+    /// Peek at the raw u64 bits in `stack[idx]` and call a method on a
+    /// *temporary* `ValueWord` reference.  The temporary is forgotten
+    /// afterwards so no refcount change occurs.
+    ///
+    /// This is useful for read-only inspection (e.g. `.tag()`, `.is_i64()`,
+    /// `.as_heap_ref()`) without paying a clone cost.
+    ///
+    /// # Safety
+    /// The closure must NOT store the `&ValueWord` reference beyond the call.
+    #[inline(always)]
+    pub(crate) fn stack_peek_vw<F, R>(&self, idx: usize, f: F) -> R
+    where
+        F: FnOnce(&ValueWord) -> R,
+    {
+        let bits = self.stack[idx];
+        // SAFETY: from_raw_bits just wraps the u64; the temporary lives for
+        // the duration of the closure and is then forgotten.
+        let tmp = ValueWord::from_raw_bits(bits);
+        let result = f(&tmp);
+        std::mem::forget(tmp);
+        result
+    }
+
+    /// Get a read-only `&[ValueWord]` view of a stack range.
+    ///
+    /// # Safety
+    /// ValueWord is `#[repr(transparent)]` over `u64`, so this transmute is safe.
+    /// The returned slice must NOT be used to take ownership or drop ValueWords —
+    /// it is a borrow-only view.
+    #[inline(always)]
+    pub(crate) fn stack_slice_vw(&self, range: std::ops::Range<usize>) -> &[ValueWord] {
+        let slice = &self.stack[range];
+        // SAFETY: ValueWord is #[repr(transparent)] over u64.
+        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const ValueWord, slice.len()) }
+    }
+
+    /// Get a read-only `&[ValueWord]` view of the module_bindings.
+    #[inline(always)]
+    pub(crate) fn bindings_slice_vw(&self) -> &[ValueWord] {
+        let slice = &self.module_bindings;
+        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const ValueWord, slice.len()) }
+    }
+
+    // === Module binding helpers (same pattern as stack) ===
+
+    /// Read a clone of the `ValueWord` at `module_bindings[idx]`.
+    #[inline(always)]
+    pub(crate) fn binding_read_vw(&self, idx: usize) -> ValueWord {
+        let bits = self.module_bindings[idx];
+        let tmp = ValueWord::from_raw_bits(bits);
+        let c = tmp.clone();
+        std::mem::forget(tmp);
+        c
+    }
+
+    /// Write a `ValueWord` into `module_bindings[idx]`, dropping the old value.
+    #[inline(always)]
+    pub(crate) fn binding_write_vw(&mut self, idx: usize, value: ValueWord) {
+        let old_bits = self.module_bindings[idx];
+        drop(ValueWord::from_raw_bits(old_bits));
+        self.module_bindings[idx] = value.into_raw_bits();
+    }
+
+    /// Take ownership of the `ValueWord` at `module_bindings[idx]`, replacing
+    /// the slot with `NONE_BITS`.
+    #[inline(always)]
+    pub(crate) fn binding_take_vw(&mut self, idx: usize) -> ValueWord {
+        let bits = self.module_bindings[idx];
+        self.module_bindings[idx] = Self::NONE_BITS;
+        ValueWord::from_raw_bits(bits)
     }
 
     // --- Raw typed stack tag checks (peek without popping) ---
@@ -285,7 +399,6 @@ impl VirtualMachine {
     ///
     /// Writes the raw f64 bits into the stack slot.  NaN canonicalization
     /// is applied to prevent collisions with the tagged range.
-    #[inline(always)]
     #[inline(always)]
     pub(crate) fn push_raw_bool(&mut self, value: bool) -> Result<(), VMError> {
         self.push_vw(ValueWord::from_bool(value))

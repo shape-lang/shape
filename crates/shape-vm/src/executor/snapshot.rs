@@ -81,18 +81,20 @@ impl VirtualMachine {
     /// Create a serializable snapshot of VM state.
     pub fn snapshot(&self, store: &SnapshotStore) -> Result<VmSnapshot, VMError> {
         let mut stack = Vec::with_capacity(self.sp);
-        for nb in self.stack[..self.sp].iter() {
+        for i in 0..self.sp {
+            let nb = self.stack_read_vw(i);
             stack.push(
-                nanboxed_to_serializable(nb, store)
+                nanboxed_to_serializable(&nb, store)
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?,
             );
         }
         // Locals are now part of the unified stack; serialize empty vec for backward compat
         let locals = Vec::new();
         let mut module_bindings = Vec::with_capacity(self.module_bindings.len());
-        for nb in self.module_bindings.iter() {
+        for i in 0..self.module_bindings.len() {
+            let nb = self.binding_read_vw(i);
             module_bindings.push(
-                nanboxed_to_serializable(nb, store)
+                nanboxed_to_serializable(&nb, store)
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?,
             );
         }
@@ -239,11 +241,9 @@ impl VirtualMachine {
             .collect::<Result<Vec<_>, _>>()?;
         let restored_sp = restored_stack.len();
         // Pre-allocate and copy into the unified stack
-        vm.stack = (0..restored_sp.max(crate::constants::DEFAULT_STACK_CAPACITY))
-            .map(|_| ValueWord::none())
-            .collect();
+        vm.stack = vec![Self::NONE_BITS; restored_sp.max(crate::constants::DEFAULT_STACK_CAPACITY)];
         for (i, nb) in restored_stack.into_iter().enumerate() {
-            vm.stack[i] = nb;
+            vm.stack[i] = nb.into_raw_bits();
         }
         vm.sp = restored_sp;
         // Locals snapshot is ignored — locals now live on the unified stack
@@ -251,7 +251,9 @@ impl VirtualMachine {
             .module_bindings
             .iter()
             .map(|v| {
-                serializable_to_nanboxed(v, store).map_err(|e| VMError::RuntimeError(e.to_string()))
+                serializable_to_nanboxed(v, store)
+                    .map(|vw| vw.into_raw_bits())
+                    .map_err(|e| VMError::RuntimeError(e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 

@@ -177,10 +177,10 @@ impl VirtualMachine {
                 let locals_count = locals.len();
                 let needed = bp + locals_count + 1;
                 if self.stack.len() < needed {
-                    self.stack.resize_with(needed * 2 + 1, ValueWord::none);
+                    self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
                 }
                 for (i, local) in locals.iter().enumerate() {
-                    self.stack[bp + i] = local.clone();
+                    self.stack_write_vw(bp + i, local.clone());
                 }
                 self.sp = bp + locals_count;
 
@@ -217,7 +217,7 @@ impl VirtualMachine {
                                 {
                                     if idx < self.module_bindings.len() {
                                         // BARRIER: heap write site — restores module binding from snapshot
-                                        self.module_bindings[idx] = pair[1].clone();
+                                        self.binding_write_vw(idx, pair[1].clone());
                                     }
                                 }
                             }
@@ -262,10 +262,10 @@ impl VirtualMachine {
         // Restore locals from the captured state
         let needed = bp + resume_data.locals.len();
         if self.stack.len() < needed {
-            self.stack.resize_with(needed * 2 + 1, ValueWord::none);
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
         }
         for (i, local) in resume_data.locals.iter().enumerate() {
-            self.stack[bp + i] = local.clone();
+            self.stack_write_vw(bp + i, local.clone());
         }
 
         Ok(())

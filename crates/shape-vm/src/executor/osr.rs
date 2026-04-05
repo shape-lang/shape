@@ -119,8 +119,9 @@ impl VirtualMachine {
                 .unwrap_or(SlotKind::Unknown);
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
+                let vw_slice = self.stack_slice_vw(slot_idx..(slot_idx + 1));
                 ctx_buf[LOCALS_U64_OFFSET + local_idx as usize] =
-                    jit_abi::marshal_arg_to_jit(&self.stack[slot_idx], kind);
+                    jit_abi::marshal_arg_to_jit(&vw_slice[0], kind);
             }
         }
 
@@ -153,10 +154,10 @@ impl VirtualMachine {
                 .unwrap_or(SlotKind::Unknown);
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
-                self.stack[slot_idx] = jit_abi::unmarshal_jit_result(
+                self.stack_write_vw(slot_idx, jit_abi::unmarshal_jit_result(
                     ctx_buf[LOCALS_U64_OFFSET + local_idx as usize],
                     kind,
-                );
+                ));
             }
         }
 
@@ -193,10 +194,10 @@ impl VirtualMachine {
                 .unwrap_or(SlotKind::Unknown);
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
-                self.stack[slot_idx] = jit_abi::unmarshal_jit_result(
+                self.stack_write_vw(slot_idx, jit_abi::unmarshal_jit_result(
                     ctx_buf[LOCALS_U64_OFFSET + local_idx as usize],
                     kind,
-                );
+                ));
             }
         }
     }
@@ -241,7 +242,7 @@ impl VirtualMachine {
             let src_idx = LOCALS_U64_OFFSET + jit_idx as usize;
             let dst_idx = base + bc_idx as usize;
             if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
-                self.stack[dst_idx] = jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind);
+                self.stack_write_vw(dst_idx, jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind));
             }
         }
 
@@ -298,11 +299,11 @@ impl VirtualMachine {
             let locals_count = func.locals_count as usize;
             let needed = current_bp + locals_count + iframe.stack_depth as usize;
             if needed > self.stack.len() {
-                self.stack.resize_with(needed * 2 + 1, ValueWord::none);
+                self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
             }
             // Zero-init local slots
             for j in 0..locals_count {
-                self.stack[current_bp + j] = ValueWord::none();
+                self.stack_write_vw(current_bp + j, ValueWord::none());
             }
 
             // Restore locals from ctx_buf using the frame's mapping
@@ -315,7 +316,7 @@ impl VirtualMachine {
                 let src_idx = LOCALS_U64_OFFSET + ctx_pos as usize;
                 let dst_idx = current_bp + bc_idx as usize;
                 if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
-                    self.stack[dst_idx] = jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind);
+                    self.stack_write_vw(dst_idx, jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind));
                 }
             }
 
@@ -361,10 +362,10 @@ impl VirtualMachine {
         let innermost_locals = innermost_func.locals_count as usize;
         let needed = current_bp + innermost_locals + deopt_info.stack_depth as usize;
         if needed > self.stack.len() {
-            self.stack.resize_with(needed * 2 + 1, ValueWord::none);
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
         }
         for i in 0..innermost_locals {
-            self.stack[current_bp + i] = ValueWord::none();
+            self.stack_write_vw(current_bp + i, ValueWord::none());
         }
 
         // return_ip for innermost: instruction after the last inline frame's call
