@@ -3,7 +3,6 @@
 //! External C functions that are called from JIT-compiled code to perform
 //! operations that cannot be done inline (heap allocation, complex logic, etc.)
 
-pub mod arc;
 pub mod array;
 pub mod data;
 pub mod object;
@@ -22,7 +21,7 @@ pub mod references;
 pub mod result;
 pub mod simd;
 pub mod typed_object;
-pub mod v2;
+pub mod v2_typed;
 pub mod window;
 
 // Re-export all FFI functions for easy access
@@ -44,8 +43,5 @@ pub use references::*;
 pub use result::*;
 pub use simd::*;
 pub use typed_object::*;
+pub use v2_typed::*;
 pub use window::*;
-
-pub mod v2_math;
-pub mod v2_struct;
-pub mod v2_string_ffi;

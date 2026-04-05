@@ -42,7 +42,7 @@ pub extern "C" fn jit_typeof(value_bits: u64) -> u64 {
             _ => "unknown",
         }
     };
-    box_str(type_str)
+    jit_box(HK_STRING, type_str.to_string())
 }
 
 // ============================================================================
@@ -61,13 +61,16 @@ pub extern "C" fn jit_to_string(value_bits: u64) -> u64 {
         "false".to_string()
     } else {
         match heap_kind(value_bits) {
-            Some(HK_STRING) => unsafe { unbox_string(value_bits) }.to_string(),
+            Some(HK_STRING) => {
+                let s = unsafe { jit_unbox::<String>(value_bits) };
+                s.clone()
+            }
             Some(HK_ARRAY) => "[array]".to_string(),
             Some(HK_JIT_OBJECT) | Some(HK_TYPED_OBJECT) => "[object]".to_string(),
             _ => "[unknown]".to_string(),
         }
     };
-    box_string(s)
+    jit_box(HK_STRING, s)
 }
 
 /// Check if a value matches a type (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
@@ -78,7 +81,7 @@ pub extern "C" fn jit_type_check(value_bits: u64, type_name_bits: u64) -> u64 {
         if !is_heap_kind(type_name_bits, HK_STRING) {
             return TAG_BOOL_FALSE;
         }
-        unbox_string(type_name_bits).to_string()
+        jit_unbox::<String>(type_name_bits).clone()
     };
 
     let matches = check_type_recursive(value_bits, &type_name);
@@ -105,7 +108,7 @@ fn check_type_recursive(value_bits: u64, type_spec: &str) -> bool {
                 if !is_heap_kind(value_bits, HK_ARRAY) {
                     return false;
                 }
-                let arr = unsafe { JitArray::from_heap_bits(value_bits) };
+                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
                 arr.iter().all(|elem| check_type_recursive(*elem, rest))
             }
             "tuple" => {
@@ -114,7 +117,7 @@ fn check_type_recursive(value_bits: u64, type_spec: &str) -> bool {
                     return false;
                 }
                 let types: Vec<&str> = rest.split(',').collect();
-                let arr = unsafe { JitArray::from_heap_bits(value_bits) };
+                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
                 if arr.len() != types.len() {
                     return false;
                 }
@@ -195,7 +198,7 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
 }
 
 /// Format a NaN-boxed value as a string for display
-fn format_nan_boxed(value_bits: u64) -> String {
+pub(crate) fn format_nan_boxed(value_bits: u64) -> String {
     use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
     if is_number(value_bits) {
@@ -216,22 +219,25 @@ fn format_nan_boxed(value_bits: u64) -> String {
         format!("{}", int_val)
     } else {
         match heap_kind(value_bits) {
-            Some(HK_STRING) => unsafe { unbox_string(value_bits) }.to_string(),
+            Some(HK_STRING) => {
+                let s = unsafe { jit_unbox::<String>(value_bits) };
+                s.clone()
+            }
             Some(HK_ARRAY) => {
-                let arr = unsafe { JitArray::from_heap_bits(value_bits) };
+                let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
                 let elems: Vec<String> = arr.iter().map(|&bits| format_nan_boxed(bits)).collect();
                 format!("[{}]", elems.join(", "))
             }
             Some(HK_OK) => {
-                let inner = unsafe { unbox_result_inner(value_bits) };
+                let inner = unsafe { *jit_unbox::<u64>(value_bits) };
                 format!("Ok({})", format_nan_boxed(inner))
             }
             Some(HK_ERR) => {
-                let inner = unsafe { unbox_result_inner(value_bits) };
+                let inner = unsafe { *jit_unbox::<u64>(value_bits) };
                 format!("Err({})", format_nan_boxed(inner))
             }
             Some(HK_SOME) => {
-                let inner = unsafe { unbox_some_inner(value_bits) };
+                let inner = unsafe { *jit_unbox::<u64>(value_bits) };
                 format!("Some({})", format_nan_boxed(inner))
             }
             _ => "[object]".to_string(),
@@ -262,7 +268,7 @@ pub extern "C" fn jit_to_number(value_bits: u64) -> u64 {
 
     let num = match heap_kind(value_bits) {
         Some(HK_STRING) => {
-            let s = unsafe { unbox_string(value_bits) };
+            let s = unsafe { jit_unbox::<String>(value_bits) };
             s.parse::<f64>().unwrap_or(f64::NAN)
         }
         _ => f64::NAN,
