@@ -58,15 +58,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let tag_null = self
                         .builder
                         .ins()
-                        .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64);
+                        .iconst(types::I64, 0i64);
                     let tag_none = self
                         .builder
                         .ins()
-                        .iconst(types::I64, crate::nan_boxing::TAG_NONE as i64);
+                        .iconst(types::I64, 0i64);
                     let tag_false = self
                         .builder
                         .ins()
-                        .iconst(types::I64, crate::nan_boxing::TAG_BOOL_FALSE as i64);
+                        .iconst(types::I64, 0i64);
                     let zero = self.builder.ins().iconst(types::I64, 0i64);
                     let not_null = self
                         .builder
@@ -141,7 +141,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                     // v2-boundary: arg_count pushed as NaN-boxed number to ctx.stack
                     let actual_arg_count = if args.is_empty() { 0 } else { args.len() - 1 };
-                    let argc_bits = crate::nan_boxing::box_number(actual_arg_count as f64);
+                    let argc_bits = actual_arg_count as i64;
                     let argc_val = self.builder.ins().iconst(types::I64, argc_bits as i64);
                     let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (args.len() + 1) as i64);
                     let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
@@ -187,7 +187,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     if name == "print" && self.function_indices.get(name.as_str()).is_none() {
                         // v2-boundary: jit_print FFI takes NaN-boxed I64
                         let val = if args.is_empty() {
-                            self.builder.ins().iconst(types::I64, crate::nan_boxing::TAG_NULL as i64)
+                            self.builder.ins().iconst(types::I64, 0i64)
                         } else {
                             let raw = self.compile_operand(&args[0])?;
                             self.ensure_nanboxed(raw)
@@ -195,7 +195,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.builder.ins().call(self.ffi.print, &[val]);
 
                         // v2-boundary: None represented as TAG_NULL in NaN-boxed ABI
-                        let none_val = self.builder.ins().iconst(types::I64, crate::nan_boxing::TAG_NULL as i64);
+                        let none_val = self.builder.ins().iconst(types::I64, 0i64);
                         self.release_old_value_if_heap(destination)?;
                         self.write_place(destination, none_val)?;
                         self.reload_referenced_locals();
@@ -344,7 +344,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let argc_abs_off = self.builder.ins().iadd_imm(argc_byte_off, stack_base_offset as i64);
                     let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
                     let argc_val = self.builder.ins().iconst(types::I64,
-                        crate::nan_boxing::box_number(args.len() as f64) as i64);
+                        args.len() as i64);
                     self.builder.ins().store(MemFlags::new(), argc_val, argc_addr, 0);
 
                     // Update stack_ptr

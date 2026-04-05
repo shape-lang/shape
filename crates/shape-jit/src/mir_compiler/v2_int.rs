@@ -84,11 +84,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let true_val = self
             .builder
             .ins()
-            .iconst(types::I64, crate::nan_boxing::TAG_BOOL_TRUE as i64);
+            .iconst(types::I64, 1i64);
         let false_val = self
             .builder
             .ins()
-            .iconst(types::I64, crate::nan_boxing::TAG_BOOL_FALSE as i64);
+            .iconst(types::I64, 0i64);
         Ok(self.builder.ins().select(cmp_result, true_val, false_val))
     }
 }
@@ -211,10 +211,10 @@ mod tests {
         let cmp_result = builder.ins().icmp(cc, l, r);
         let true_val = builder
             .ins()
-            .iconst(types::I64, crate::nan_boxing::TAG_BOOL_TRUE as i64);
+            .iconst(types::I64, 1i64);
         let false_val = builder
             .ins()
-            .iconst(types::I64, crate::nan_boxing::TAG_BOOL_FALSE as i64);
+            .iconst(types::I64, 0i64);
         let result = builder.ins().select(cmp_result, true_val, false_val);
         builder.ins().return_(&[result]);
         builder.finalize();
@@ -271,7 +271,7 @@ mod tests {
     fn test_i32_cmp_eq_true() {
         assert_eq!(
             jit_i32_cmp("eq", 42, 42),
-            crate::nan_boxing::TAG_BOOL_TRUE
+            1u64
         );
     }
 
@@ -279,7 +279,7 @@ mod tests {
     fn test_i32_cmp_eq_false() {
         assert_eq!(
             jit_i32_cmp("eq", 42, 43),
-            crate::nan_boxing::TAG_BOOL_FALSE
+            0u64
         );
     }
 
@@ -287,11 +287,11 @@ mod tests {
     fn test_i32_cmp_lt() {
         assert_eq!(
             jit_i32_cmp("lt", 10, 20),
-            crate::nan_boxing::TAG_BOOL_TRUE
+            1u64
         );
         assert_eq!(
             jit_i32_cmp("lt", 20, 10),
-            crate::nan_boxing::TAG_BOOL_FALSE
+            0u64
         );
     }
 
@@ -299,11 +299,11 @@ mod tests {
     fn test_i32_cmp_gt() {
         assert_eq!(
             jit_i32_cmp("gt", 20, 10),
-            crate::nan_boxing::TAG_BOOL_TRUE
+            1u64
         );
         assert_eq!(
             jit_i32_cmp("gt", 10, 20),
-            crate::nan_boxing::TAG_BOOL_FALSE
+            0u64
         );
     }
 
@@ -314,7 +314,7 @@ mod tests {
         // -10 < 5 should be true
         assert_eq!(
             jit_i32_cmp("lt", -10, 5),
-            crate::nan_boxing::TAG_BOOL_TRUE
+            1u64
         );
     }
 }

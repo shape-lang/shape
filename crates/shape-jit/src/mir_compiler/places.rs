@@ -274,7 +274,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 _ => self
                     .builder
                     .ins()
-                    .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64),
+                    .iconst(types::I64, 0i64),
             };
             self.builder.def_var(*var, null);
         }

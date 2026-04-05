@@ -386,28 +386,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             BinOp::And => {
                 let tag_true = self.builder.ins().iconst(
                     types::I64,
-                    crate::nan_boxing::TAG_BOOL_TRUE as i64,
+                    1i64,
                 );
                 let l_is_true = self.builder.ins().icmp(IntCC::Equal, l, tag_true);
                 let r_is_true = self.builder.ins().icmp(IntCC::Equal, r, tag_true);
                 let both = self.builder.ins().band(l_is_true, r_is_true);
                 let false_val = self.builder.ins().iconst(
                     types::I64,
-                    crate::nan_boxing::TAG_BOOL_FALSE as i64,
+                    0i64,
                 );
                 Ok(self.builder.ins().select(both, tag_true, false_val))
             }
             BinOp::Or => {
                 let tag_true = self.builder.ins().iconst(
                     types::I64,
-                    crate::nan_boxing::TAG_BOOL_TRUE as i64,
+                    1i64,
                 );
                 let l_is_true = self.builder.ins().icmp(IntCC::Equal, l, tag_true);
                 let r_is_true = self.builder.ins().icmp(IntCC::Equal, r, tag_true);
                 let either = self.builder.ins().bor(l_is_true, r_is_true);
                 let false_val = self.builder.ins().iconst(
                     types::I64,
-                    crate::nan_boxing::TAG_BOOL_FALSE as i64,
+                    0i64,
                 );
                 Ok(self.builder.ins().select(either, tag_true, false_val))
             }
@@ -438,11 +438,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // v2-boundary: NaN-boxed bool uses TAG_BOOL_TRUE/FALSE tags
                     let tag_true = self.builder.ins().iconst(
                         types::I64,
-                        crate::nan_boxing::TAG_BOOL_TRUE as i64,
+                        1i64,
                     );
                     let false_val = self.builder.ins().iconst(
                         types::I64,
-                        crate::nan_boxing::TAG_BOOL_FALSE as i64,
+                        0i64,
                     );
                     let is_true = self.builder.ins().icmp(IntCC::Equal, val, tag_true);
                     Ok(self.builder.ins().select(is_true, false_val, tag_true))

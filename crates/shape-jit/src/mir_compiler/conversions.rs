@@ -16,70 +16,39 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///
     /// - F64 → I64: bitcast (raw f64 bits are valid NaN-boxed floats)
     /// - I32 → I64: sign-extend + apply INT tag
-    /// - I8 (bool) → I64: select TAG_BOOL_TRUE/FALSE
-    /// - I64 (already NaN-boxed) → I64: no-op
+    /// Convert native value to raw I64 bits (v2: NO NaN-boxing tags).
+    /// - F64 → bitcast to I64 (raw IEEE 754 bits)
+    /// - I32 → sign-extend to I64
+    /// - I8 (bool) → zero-extend to I64 (0 or 1)
+    /// - I16 → sign-extend to I64
+    /// - I64 → no-op
     pub(crate) fn box_to_nanboxed(&mut self, val: Value, kind: SlotKind) -> Value {
         match kind {
             SlotKind::Float64 => {
-                // f64 bits are already valid NaN-boxed (values < TAG_BASE)
                 self.builder
                     .ins()
                     .bitcast(types::I64, MemFlags::new(), val)
             }
             SlotKind::Int32 | SlotKind::UInt32 => {
-                // i32 → sign-extend to i64, then apply INT NaN-box tag
-                let extended = self.builder.ins().sextend(types::I64, val);
-                let payload_mask = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, shape_value::tags::PAYLOAD_MASK as i64);
-                let payload = self.builder.ins().band(extended, payload_mask);
-                let int_tag = self.builder.ins().iconst(
-                    types::I64,
-                    (shape_value::tags::TAG_BASE
-                        | (shape_value::tags::TAG_INT << shape_value::tags::TAG_SHIFT))
-                        as i64,
-                );
-                self.builder.ins().bor(int_tag, payload)
+                self.builder.ins().sextend(types::I64, val)
             }
             SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => {
-                // i8 → select TAG_BOOL_TRUE or TAG_BOOL_FALSE
-                let true_val = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, crate::nan_boxing::TAG_BOOL_TRUE as i64);
-                let false_val = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, crate::nan_boxing::TAG_BOOL_FALSE as i64);
-                self.builder.ins().select(val, true_val, false_val)
+                self.builder.ins().uextend(types::I64, val)
             }
             SlotKind::Int16 | SlotKind::UInt16 => {
-                // i16 → sign-extend to i64, then INT NaN-box tag
-                let extended = self.builder.ins().sextend(types::I64, val);
-                let payload_mask = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, shape_value::tags::PAYLOAD_MASK as i64);
-                let payload = self.builder.ins().band(extended, payload_mask);
-                let int_tag = self.builder.ins().iconst(
-                    types::I64,
-                    (shape_value::tags::TAG_BASE
-                        | (shape_value::tags::TAG_INT << shape_value::tags::TAG_SHIFT))
-                        as i64,
-                );
-                self.builder.ins().bor(int_tag, payload)
+                self.builder.ins().sextend(types::I64, val)
             }
-            // Already I64 NaN-boxed
+            // Already I64
             _ => val,
         }
     }
 
     /// Convert a NaN-boxed I64 to a native type for storing into a typed local.
     ///
+    /// Convert raw I64 bits to native type (v2: NO NaN-boxing tag extraction).
     /// - I64 → F64: bitcast (raw bits → f64)
-    /// - I64 → I32: extract INT payload, ireduce
-    /// - I64 → I8 (bool): compare against TAG_BOOL_TRUE
+    /// - I64 → I32: ireduce (truncate to 32 bits)
+    /// - I64 → I8 (bool): ireduce (truncate to 8 bits)
     /// - I64 → I64: no-op
     pub(crate) fn unbox_from_nanboxed(&mut self, val: Value, kind: SlotKind) -> Value {
         match kind {
@@ -89,25 +58,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     .bitcast(types::F64, MemFlags::new(), val)
             }
             SlotKind::Int32 | SlotKind::UInt32 => {
-                // Extract 48-bit payload, sign-extend, ireduce to i32
-                let shifted = self.builder.ins().ishl_imm(val, 16);
-                let sign_ext = self.builder.ins().sshr_imm(shifted, 16);
-                self.builder.ins().ireduce(types::I32, sign_ext)
+                self.builder.ins().ireduce(types::I32, val)
             }
             SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => {
-                let tag_true = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, crate::nan_boxing::TAG_BOOL_TRUE as i64);
-                // icmp returns I8 (0 or 1)
-                self.builder.ins().icmp(IntCC::Equal, val, tag_true)
+                self.builder.ins().ireduce(types::I8, val)
             }
             SlotKind::Int16 | SlotKind::UInt16 => {
-                let shifted = self.builder.ins().ishl_imm(val, 16);
-                let sign_ext = self.builder.ins().sshr_imm(shifted, 16);
-                self.builder.ins().ireduce(types::I16, sign_ext)
+                self.builder.ins().ireduce(types::I16, val)
             }
-            // Already I64
             _ => val,
         }
     }
@@ -139,11 +97,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
-    /// Ensure a value is NaN-boxed I64. If it's already I64, no-op.
-    /// If it's a native type (F64, I32, I8), box it.
+    /// Convert any native value to raw I64 bits WITHOUT NaN-boxing tags (v2).
+    /// - F64 → bitcast to I64 (raw IEEE 754 bits)
+    /// - I32 → sign-extend to I64
+    /// - I8 (bool) → zero-extend to I64 (0 or 1)
+    /// - I64 → no-op
     pub(crate) fn ensure_nanboxed(&mut self, val: Value) -> Value {
-        let kind = self.infer_kind_from_value(val);
-        self.box_to_nanboxed(val, kind)
+        let val_type = self.builder.func.dfg.value_type(val);
+        if val_type == types::I64 {
+            val
+        } else if val_type == types::F64 {
+            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+        } else if val_type == types::I32 {
+            self.builder.ins().sextend(types::I64, val)
+        } else if val_type == types::I8 {
+            self.builder.ins().uextend(types::I64, val)
+        } else if val_type == types::I16 {
+            self.builder.ins().sextend(types::I64, val)
+        } else {
+            val
+        }
     }
 
     /// Ensure a value matches a target SlotKind's Cranelift type.

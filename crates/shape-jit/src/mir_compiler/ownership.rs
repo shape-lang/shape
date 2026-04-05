@@ -82,7 +82,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self
                     .builder
                     .ins()
-                    .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64))
+                    .iconst(types::I64, 0i64))
             }
             MirConstant::StringId(id) => {
                 // Look up the string from the string table and NaN-box it at compile time.
@@ -95,7 +95,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     Ok(self
                         .builder
                         .ins()
-                        .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64))
+                        .iconst(types::I64, 0i64))
                 }
             }
             MirConstant::Str(s) => {
@@ -109,7 +109,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let boxed = shape_value::ValueWord::from_function(idx).raw_bits();
                     Ok(self.builder.ins().iconst(types::I64, boxed as i64))
                 } else {
-                    Ok(self.builder.ins().iconst(types::I64, crate::nan_boxing::TAG_NULL as i64))
+                    Ok(self.builder.ins().iconst(types::I64, 0i64))
                 }
             }
             MirConstant::Method(name) => {
@@ -120,7 +120,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             MirConstant::ClosurePlaceholder => {
                 // Should have been patched to Function(name) during bytecode compilation.
                 // If we reach here, it means the patching didn't happen — return TAG_NULL.
-                Ok(self.builder.ins().iconst(types::I64, crate::nan_boxing::TAG_NULL as i64))
+                Ok(self.builder.ins().iconst(types::I64, 0i64))
             }
         }
     }
