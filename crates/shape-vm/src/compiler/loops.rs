@@ -15,8 +15,6 @@ pub(super) struct RangeCounterLoopState {
     pub loop_start: usize,
     /// Bytecode index of the exit JumpIfFalse (to be patched).
     pub exit_jump: usize,
-    /// Whether both endpoints were proven int (typed opcodes) or not (generic).
-    pub use_typed: bool,
 }
 
 impl BytecodeCompiler {
@@ -83,11 +81,6 @@ impl BytecodeCompiler {
             Some(Operand::Local(end_local)),
         ));
 
-        // Use typed opcodes when both endpoints are proven numeric
-        // (Int directly, or Number after NumberToInt conversion → both are int)
-        let use_typed = matches!(start_nt, Some(NumericType::Int) | Some(NumericType::Number))
-            && matches!(end_nt, Some(NumericType::Int) | Some(NumericType::Number));
-
         // LoopStart
         let loop_start = self.program.current_offset();
         self.emit(Instruction::simple(OpCode::LoopStart));
@@ -101,19 +94,13 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(end_local)),
         ));
-        if use_typed {
-            self.emit(Instruction::simple(if inclusive {
-                OpCode::LteInt
-            } else {
-                OpCode::LtInt
-            }));
+        // Both endpoints are always int at this point (Int directly, or
+        // Number after NumberToInt conversion in the prologue).
+        self.emit(Instruction::simple(if inclusive {
+            OpCode::LteInt
         } else {
-            self.emit(Instruction::simple(if inclusive {
-                OpCode::Lte
-            } else {
-                OpCode::Lt
-            }));
-        }
+            OpCode::LtInt
+        }));
 
         // JumpIfFalse(exit)
         let exit_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
@@ -122,7 +109,6 @@ impl BytecodeCompiler {
             counter_local,
             loop_start,
             exit_jump,
-            use_typed,
         }))
     }
 
@@ -142,21 +128,13 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(state.counter_local)),
         ));
-        if state.use_typed {
-            let one_const = self.program.add_constant(Constant::Int(1));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(one_const)),
-            ));
-            self.emit(Instruction::simple(OpCode::AddInt));
-        } else {
-            let one_const = self.program.add_constant(Constant::Int(1));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(one_const)),
-            ));
-            self.emit(Instruction::simple(OpCode::Add));
-        }
+        // Counter is always int (range endpoints coerced to int in prologue)
+        let one_const = self.program.add_constant(Constant::Int(1));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(one_const)),
+        ));
+        self.emit(Instruction::simple(OpCode::AddInt));
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(state.counter_local)),
@@ -389,8 +367,8 @@ impl BytecodeCompiler {
                 // Reserve local for index counter
                 let idx_local = self.declare_local("__idx")?;
 
-                // Initialize index to 0
-                let zero_const = self.program.add_constant(Constant::Number(0.0));
+                // Initialize index to 0 (int — internal counter, always integer)
+                let zero_const = self.program.add_constant(Constant::Int(0));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(zero_const)),
@@ -452,12 +430,12 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(idx_local)),
                 ));
-                let one_const = self.program.add_constant(Constant::Number(1.0));
+                let one_const = self.program.add_constant(Constant::Int(1));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(one_const)),
                 ));
-                self.emit(Instruction::simple(OpCode::Add));
+                self.emit(Instruction::simple(OpCode::AddInt));
                 self.emit(Instruction::new(
                     OpCode::StoreLocal,
                     Some(Operand::Local(idx_local)),
@@ -694,7 +672,7 @@ impl BytecodeCompiler {
         self.compile_expr(&for_expr.iterable)?;
 
         let idx_local = self.declare_local("__idx")?;
-        let zero_const = self.program.add_constant(Constant::Number(0.0));
+        let zero_const = self.program.add_constant(Constant::Int(0));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(zero_const)),
@@ -832,12 +810,12 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(idx_local)),
         ));
-        let one_const = self.program.add_constant(Constant::Number(1.0));
+        let one_const = self.program.add_constant(Constant::Int(1));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(one_const)),
         ));
-        self.emit(Instruction::simple(OpCode::Add));
+        self.emit(Instruction::simple(OpCode::AddInt));
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(idx_local)),
@@ -1031,7 +1009,7 @@ impl BytecodeCompiler {
         ));
 
         let idx_local = self.declare_local(&format!("__comp_idx_{depth}"))?;
-        let zero_const = self.program.add_constant(Constant::Number(0.0));
+        let zero_const = self.program.add_constant(Constant::Int(0));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(zero_const)),
@@ -1083,12 +1061,12 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(idx_local)),
         ));
-        let one_const = self.program.add_constant(Constant::Number(1.0));
+        let one_const = self.program.add_constant(Constant::Int(1));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(one_const)),
         ));
-        self.emit(Instruction::simple(OpCode::Add));
+        self.emit(Instruction::simple(OpCode::AddInt));
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(idx_local)),
@@ -1154,17 +1132,9 @@ impl BytecodeCompiler {
                             Some(Operand::Local(end_local)),
                         ));
 
-                        let use_typed = matches!(
-                            start_nt,
-                            Some(NumericType::Int) | Some(NumericType::Number)
-                        ) && matches!(
-                            end_nt,
-                            Some(NumericType::Int) | Some(NumericType::Number)
-                        );
-
                         let loop_start = self.program.current_offset();
 
-                        // counter < end (or <=)
+                        // counter < end (or <=) — always int after NumberToInt coercion
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
                             Some(Operand::Local(counter_local)),
@@ -1173,19 +1143,11 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(end_local)),
                         ));
-                        if use_typed {
-                            self.emit(Instruction::simple(if inclusive {
-                                OpCode::LteInt
-                            } else {
-                                OpCode::LtInt
-                            }));
+                        self.emit(Instruction::simple(if inclusive {
+                            OpCode::LteInt
                         } else {
-                            self.emit(Instruction::simple(if inclusive {
-                                OpCode::Lte
-                            } else {
-                                OpCode::Lt
-                            }));
-                        }
+                            OpCode::LtInt
+                        }));
                         let exit_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
 
                         // Push counter value to result array
@@ -1208,21 +1170,13 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(counter_local)),
                         ));
-                        if use_typed {
-                            let one_const = self.program.add_constant(Constant::Int(1));
-                            self.emit(Instruction::new(
-                                OpCode::PushConst,
-                                Some(Operand::Const(one_const)),
-                            ));
-                            self.emit(Instruction::simple(OpCode::AddInt));
-                        } else {
-                            let one_const = self.program.add_constant(Constant::Int(1));
-                            self.emit(Instruction::new(
-                                OpCode::PushConst,
-                                Some(Operand::Const(one_const)),
-                            ));
-                            self.emit(Instruction::simple(OpCode::Add));
-                        }
+                        // Counter is always int (range endpoints coerced to int)
+                        let one_const = self.program.add_constant(Constant::Int(1));
+                        self.emit(Instruction::new(
+                            OpCode::PushConst,
+                            Some(Operand::Const(one_const)),
+                        ));
+                        self.emit(Instruction::simple(OpCode::AddInt));
                         self.emit(Instruction::new(
                             OpCode::StoreLocal,
                             Some(Operand::Local(counter_local)),
@@ -1249,7 +1203,7 @@ impl BytecodeCompiler {
 
                         let idx_local =
                             self.declare_local(&format!("__spread_idx_{idx}"))?;
-                        let zero_const = self.program.add_constant(Constant::Number(0.0));
+                        let zero_const = self.program.add_constant(Constant::Int(0));
                         self.emit(Instruction::new(
                             OpCode::PushConst,
                             Some(Operand::Const(zero_const)),
@@ -1295,12 +1249,12 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(idx_local)),
                         ));
-                        let one_const = self.program.add_constant(Constant::Number(1.0));
+                        let one_const = self.program.add_constant(Constant::Int(1));
                         self.emit(Instruction::new(
                             OpCode::PushConst,
                             Some(Operand::Const(one_const)),
                         ));
-                        self.emit(Instruction::simple(OpCode::Add));
+                        self.emit(Instruction::simple(OpCode::AddInt));
                         self.emit(Instruction::new(
                             OpCode::StoreLocal,
                             Some(Operand::Local(idx_local)),

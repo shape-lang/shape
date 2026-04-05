@@ -239,18 +239,12 @@ impl BytecodeCompiler {
 
         let result_type = apply_coercion(self, plan);
         if let Some(opcode) = typed_opcode_for(op, result_type) {
-            // Compact typed opcodes (AddTyped, etc.) need Width operand.
-            // Direct v2 opcodes (AddI32, etc.) are self-describing — no operand needed.
+            // Compact typed opcodes (AddTyped, etc.) need Width operand
             if let NumericType::IntWidth(w) = result_type {
-                if w == shape_ast::IntWidth::I32 {
-                    // Direct i32 opcodes — no Width operand
-                    self.emit(Instruction::simple(opcode));
-                } else {
-                    self.emit(Instruction::new(
-                        opcode,
-                        Some(Operand::Width(NumericWidth::from_int_width(w))),
-                    ));
-                }
+                self.emit(Instruction::new(
+                    opcode,
+                    Some(Operand::Width(NumericWidth::from_int_width(w))),
+                ));
             } else {
                 self.emit(Instruction::simple(opcode));
             }
@@ -731,8 +725,8 @@ impl BytecodeCompiler {
             Some(Operand::Local(temp_b)),
         ));
 
-        // Helper: emit abs(a - b) → load a, load b, Sub, Dup, push 0, Lt, JumpIfFalse(skip), Neg, skip:
-        // This computes abs(top-of-stack) inline
+        // Helper: emit abs(a - b) → load a, load b, SubNumber, Dup, push 0, LtNumber, JumpIfFalse(skip), NegNumber, skip:
+        // This computes abs(top-of-stack) inline.  All fuzzy comparison operands are f64.
         let emit_abs_diff = |compiler: &mut BytecodeCompiler| {
             compiler.emit(Instruction::new(
                 OpCode::LoadLocal,
@@ -742,17 +736,17 @@ impl BytecodeCompiler {
                 OpCode::LoadLocal,
                 Some(Operand::Local(temp_b)),
             ));
-            compiler.emit(Instruction::simple(OpCode::Sub));
-            // abs: dup, push 0, Lt, JumpIfFalse(skip), Neg
+            compiler.emit(Instruction::simple(OpCode::SubNumber));
+            // abs: dup, push 0, LtNumber, JumpIfFalse(skip), NegNumber
             compiler.emit(Instruction::simple(OpCode::Dup));
             let zero_idx = compiler.program.add_constant(Constant::Number(0.0));
             compiler.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(zero_idx)),
             ));
-            compiler.emit(Instruction::simple(OpCode::Lt));
+            compiler.emit(Instruction::simple(OpCode::LtNumber));
             let skip = compiler.emit_jump(OpCode::JumpIfFalse, 0);
-            compiler.emit(Instruction::simple(OpCode::Neg));
+            compiler.emit(Instruction::simple(OpCode::NegNumber));
             compiler.patch_jump(skip);
         };
 
@@ -765,7 +759,7 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(tol_idx)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lte));
+                self.emit(Instruction::simple(OpCode::LteNumber));
             }
             (FuzzyOp::Equal, FuzzyTolerance::Percentage(tol)) => {
                 // abs(a - b) / ((abs(a) + abs(b)) / 2) <= tol
@@ -783,9 +777,9 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(zero_idx2)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtNumber));
                 let skip_a = self.emit_jump(OpCode::JumpIfFalse, 0);
-                self.emit(Instruction::simple(OpCode::Neg));
+                self.emit(Instruction::simple(OpCode::NegNumber));
                 self.patch_jump(skip_a);
                 // abs(b)
                 self.emit(Instruction::new(
@@ -798,26 +792,26 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(zero_idx3)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtNumber));
                 let skip_b = self.emit_jump(OpCode::JumpIfFalse, 0);
-                self.emit(Instruction::simple(OpCode::Neg));
+                self.emit(Instruction::simple(OpCode::NegNumber));
                 self.patch_jump(skip_b);
                 // (abs(a) + abs(b)) / 2
-                self.emit(Instruction::simple(OpCode::Add));
+                self.emit(Instruction::simple(OpCode::AddNumber));
                 let two_idx = self.program.add_constant(Constant::Number(2.0));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(two_idx)),
                 ));
-                self.emit(Instruction::simple(OpCode::Div));
+                self.emit(Instruction::simple(OpCode::DivNumber));
                 // numerator / denominator <= tol
-                self.emit(Instruction::simple(OpCode::Div));
+                self.emit(Instruction::simple(OpCode::DivNumber));
                 let tol_idx = self.program.add_constant(Constant::Number(*tol));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(tol_idx)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lte));
+                self.emit(Instruction::simple(OpCode::LteNumber));
             }
             (FuzzyOp::Greater, FuzzyTolerance::Absolute(tol)) => {
                 // a > b || abs(a - b) <= tol
@@ -829,7 +823,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(temp_b)),
                 ));
-                self.emit(Instruction::simple(OpCode::Gt));
+                self.emit(Instruction::simple(OpCode::GtNumber));
                 let end = self.emit_jump(OpCode::JumpIfTrue, 0);
                 emit_abs_diff(self);
                 let tol_idx = self.program.add_constant(Constant::Number(*tol));
@@ -837,7 +831,7 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(tol_idx)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lte));
+                self.emit(Instruction::simple(OpCode::LteNumber));
                 let end2 = self.emit_jump(OpCode::Jump, 0);
                 self.patch_jump(end);
                 self.emit_bool(true);
@@ -853,7 +847,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(temp_b)),
                 ));
-                self.emit(Instruction::simple(OpCode::Gt));
+                self.emit(Instruction::simple(OpCode::GtNumber));
                 let end = self.emit_jump(OpCode::JumpIfTrue, 0);
                 // Reuse percentage tolerance check
                 emit_abs_diff(self);
@@ -867,9 +861,9 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(z1)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtNumber));
                 let sa = self.emit_jump(OpCode::JumpIfFalse, 0);
-                self.emit(Instruction::simple(OpCode::Neg));
+                self.emit(Instruction::simple(OpCode::NegNumber));
                 self.patch_jump(sa);
                 self.emit(Instruction::new(
                     OpCode::LoadLocal,
@@ -881,24 +875,24 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(z2)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtNumber));
                 let sb = self.emit_jump(OpCode::JumpIfFalse, 0);
-                self.emit(Instruction::simple(OpCode::Neg));
+                self.emit(Instruction::simple(OpCode::NegNumber));
                 self.patch_jump(sb);
-                self.emit(Instruction::simple(OpCode::Add));
+                self.emit(Instruction::simple(OpCode::AddNumber));
                 let two = self.program.add_constant(Constant::Number(2.0));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(two)),
                 ));
-                self.emit(Instruction::simple(OpCode::Div));
-                self.emit(Instruction::simple(OpCode::Div));
+                self.emit(Instruction::simple(OpCode::DivNumber));
+                self.emit(Instruction::simple(OpCode::DivNumber));
                 let tol_idx = self.program.add_constant(Constant::Number(*tol));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(tol_idx)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lte));
+                self.emit(Instruction::simple(OpCode::LteNumber));
                 let end2 = self.emit_jump(OpCode::Jump, 0);
                 self.patch_jump(end);
                 self.emit_bool(true);
@@ -914,7 +908,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(temp_b)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtNumber));
                 let end = self.emit_jump(OpCode::JumpIfTrue, 0);
                 emit_abs_diff(self);
                 let tol_idx = self.program.add_constant(Constant::Number(*tol));
@@ -922,7 +916,7 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(tol_idx)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lte));
+                self.emit(Instruction::simple(OpCode::LteNumber));
                 let end2 = self.emit_jump(OpCode::Jump, 0);
                 self.patch_jump(end);
                 self.emit_bool(true);
@@ -938,7 +932,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(temp_b)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtNumber));
                 let end = self.emit_jump(OpCode::JumpIfTrue, 0);
                 emit_abs_diff(self);
                 self.emit(Instruction::new(
@@ -951,9 +945,9 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(z1)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtNumber));
                 let sa = self.emit_jump(OpCode::JumpIfFalse, 0);
-                self.emit(Instruction::simple(OpCode::Neg));
+                self.emit(Instruction::simple(OpCode::NegNumber));
                 self.patch_jump(sa);
                 self.emit(Instruction::new(
                     OpCode::LoadLocal,
@@ -965,24 +959,24 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(z2)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtNumber));
                 let sb = self.emit_jump(OpCode::JumpIfFalse, 0);
-                self.emit(Instruction::simple(OpCode::Neg));
+                self.emit(Instruction::simple(OpCode::NegNumber));
                 self.patch_jump(sb);
-                self.emit(Instruction::simple(OpCode::Add));
+                self.emit(Instruction::simple(OpCode::AddNumber));
                 let two = self.program.add_constant(Constant::Number(2.0));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(two)),
                 ));
-                self.emit(Instruction::simple(OpCode::Div));
-                self.emit(Instruction::simple(OpCode::Div));
+                self.emit(Instruction::simple(OpCode::DivNumber));
+                self.emit(Instruction::simple(OpCode::DivNumber));
                 let tol_idx = self.program.add_constant(Constant::Number(*tol));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(tol_idx)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lte));
+                self.emit(Instruction::simple(OpCode::LteNumber));
                 let end2 = self.emit_jump(OpCode::Jump, 0);
                 self.patch_jump(end);
                 self.emit_bool(true);

@@ -336,6 +336,13 @@ define_opcodes! {
     /// Power (decimal × decimal → decimal)
     PowDecimal = 0x97, Arithmetic, pops: 2, pushes: 1;
 
+    /// Negate int (i64 → i64)
+    NegInt = 0xCA, Arithmetic, pops: 1, pushes: 1;
+    /// Negate number (f64 → f64)
+    NegNumber = 0xCB, Arithmetic, pops: 1, pushes: 1;
+    /// Negate decimal
+    NegDecimal = 0xCC, Arithmetic, pops: 1, pushes: 1;
+
     // ===== Typed Comparison (continued from 0x2F) =====
     /// Less than or equal (f64 × f64 → bool)
     LteNumber = 0x98, Comparison, pops: 2, pushes: 1;

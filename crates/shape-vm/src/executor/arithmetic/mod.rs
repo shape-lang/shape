@@ -2558,6 +2558,22 @@ impl VirtualMachine {
                     b_nb.type_name()
                 )));
             }
+            NegInt => {
+                let val = self.pop_raw_i64()?;
+                return self.push_raw_i64(-val);
+            }
+            NegNumber => {
+                let val = self.pop_raw_f64()?;
+                return self.push_raw_f64(-val);
+            }
+            NegDecimal => {
+                // Decimal is heap-backed, use ValueWord path
+                let val = self.pop_vw()?;
+                if let Some(d) = val.as_decimal() {
+                    return self.push_vw(ValueWord::from_decimal(-d));
+                }
+                return self.push_vw(val);
+            }
             Neg => {
                 use shape_value::NanTag;
                 let val_nb = unwrap_annotated(self.pop_vw()?);
