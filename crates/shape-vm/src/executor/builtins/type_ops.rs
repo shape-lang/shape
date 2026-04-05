@@ -40,6 +40,80 @@ fn ptr_arg_as_usize(arg: &ValueWord, function: &str, arg_name: &str) -> Result<u
 }
 
 impl VirtualMachine {
+    /// Extract an i64 from any value (raw native result, no ValueWord boxing).
+    fn convert_to_i64(value: &ValueWord) -> Result<i64, String> {
+        if let Some(i) = value.as_i64() {
+            return Ok(i);
+        }
+        if let Some(n) = value.as_f64() {
+            if !n.is_finite() {
+                return Err("cannot convert non-finite number to int".to_string());
+            }
+            let i = n as i64;
+            if (i as f64 - n).abs() > f64::EPSILON {
+                return Err(format!("cannot convert non-integer number '{n}' to int"));
+            }
+            return Ok(i);
+        }
+        if let Some(s) = value.as_str() {
+            let parsed = s
+                .parse::<i64>()
+                .map_err(|_| format!("cannot convert string '{s}' to int"))?;
+            return Ok(parsed);
+        }
+        if let Some(b) = value.as_bool() {
+            return Ok(if b { 1 } else { 0 });
+        }
+        if let Some(d) = value.as_decimal() {
+            if let Some(i) = d.to_i64() {
+                return Ok(i);
+            }
+            return Err(format!("cannot convert decimal '{d}' to int"));
+        }
+        if let Some(c) = value.as_char() {
+            return Ok(c as i64);
+        }
+        Err(format!("cannot convert {} to int", value.type_name()))
+    }
+
+    /// Extract an f64 from any value (raw native result, no ValueWord boxing).
+    fn convert_to_f64(value: &ValueWord) -> Result<f64, String> {
+        if let Some(n) = value.as_number_coerce() {
+            return Ok(n);
+        }
+        if let Some(s) = value.as_str() {
+            let parsed = s
+                .parse::<f64>()
+                .map_err(|_| format!("cannot convert string '{s}' to number"))?;
+            return Ok(parsed);
+        }
+        if let Some(b) = value.as_bool() {
+            return Ok(if b { 1.0 } else { 0.0 });
+        }
+        Err(format!("cannot convert {} to number", value.type_name()))
+    }
+
+    /// Extract a bool from any value (raw native result, no ValueWord boxing).
+    fn convert_to_bool_native(value: &ValueWord) -> Result<bool, String> {
+        if let Some(b) = value.as_bool() {
+            return Ok(b);
+        }
+        if let Some(i) = value.as_i64() {
+            return Ok(i != 0);
+        }
+        if let Some(n) = value.as_f64() {
+            return Ok(n != 0.0);
+        }
+        if let Some(s) = value.as_str() {
+            return match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Ok(true),
+                "false" | "0" => Ok(false),
+                _ => Err(format!("cannot convert string '{s}' to bool")),
+            };
+        }
+        Err(format!("cannot convert {} to bool", value.type_name()))
+    }
+
     fn convert_to_int_no_checks(value: &ValueWord) -> Result<ValueWord, String> {
         if let Some(i) = value.as_i64() {
             return Ok(ValueWord::from_i64(i));
@@ -434,25 +508,28 @@ impl VirtualMachine {
 
     // ===== Typed Conversion Opcodes (zero-dispatch, no operand) =====
 
-    /// ConvertToInt: pop value, convert to int, push result. Panics on failure.
+    /// ConvertToInt: pop any value, convert to i64, push raw i64. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_int(&mut self) -> Result<(), VMError> {
         let value = self.pop_vw()?;
-        let result = Self::convert_to_int_no_checks(&value)
+        let i = Self::convert_to_i64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_vw(result)
+        self.push_raw_i64(i)
     }
 
-    /// ConvertToNumber: pop value, convert to number, push result. Panics on failure.
+    /// ConvertToNumber: pop any value, convert to f64, push raw f64. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_number(&mut self) -> Result<(), VMError> {
         let value = self.pop_vw()?;
-        let result = Self::convert_to_number_no_checks(&value)
+        let n = Self::convert_to_f64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_vw(result)
+        self.push_raw_f64(n)
     }
 
-    /// ConvertToString: pop value, convert to string, push result. Always succeeds.
+    /// ConvertToString: pop any value, convert to string, push result. Always succeeds.
+    ///
+    /// String output remains NaN-boxed (heap-allocated Arc<String>), so this
+    /// still uses push_vw.
     #[inline]
     pub(in crate::executor) fn op_convert_to_string(&mut self) -> Result<(), VMError> {
         let value = self.pop_vw()?;
@@ -460,13 +537,13 @@ impl VirtualMachine {
         self.push_vw(result)
     }
 
-    /// ConvertToBool: pop value, convert to bool, push result. Panics on failure.
+    /// ConvertToBool: pop any value, convert to bool, push raw bool. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_bool(&mut self) -> Result<(), VMError> {
         let value = self.pop_vw()?;
-        let result = Self::convert_to_bool_no_checks(&value)
+        let b = Self::convert_to_bool_native(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_vw(result)
+        self.push_raw_bool(b)
     }
 
     /// ConvertToDecimal: pop value, convert to decimal, push result. Panics on failure.
@@ -1032,5 +1109,281 @@ impl VirtualMachine {
     ) -> Result<ValueWord, VMError> {
         check_arity("Err", &args, 1)?;
         Ok(ValueWord::from_err(args[0].clone()))
+    }
+}
+
+#[cfg(test)]
+mod type_ops_tests {
+    use crate::compiler::BytecodeCompiler;
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::ValueWord;
+
+    fn eval(source: &str) -> ValueWord {
+        let program = shape_ast::parser::parse_program(source).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.execute(None).expect("execution failed").clone()
+    }
+
+    // ---- IntToNumber (emitted for int + number mixed arithmetic) ----
+
+    #[test]
+    fn test_type_ops_int_to_number_via_mixed_add() {
+        // `let x: int = 3` is an int; `2.5` is a number.
+        // The compiler emits IntToNumber to coerce before AddNumber.
+        let val = eval("let x: int = 3\nx + 2.5");
+        assert_eq!(val.as_f64(), Some(5.5));
+    }
+
+    #[test]
+    fn test_type_ops_int_to_number_negative() {
+        let val = eval("let x: int = -10\nx + 0.5");
+        assert_eq!(val.as_f64(), Some(-9.5));
+    }
+
+    #[test]
+    fn test_type_ops_int_to_number_zero() {
+        let val = eval("let x: int = 0\nx + 1.0");
+        assert_eq!(val.as_f64(), Some(1.0));
+    }
+
+    // ---- NumberToInt (emitted for range bounds from number) ----
+
+    #[test]
+    fn test_type_ops_number_to_int_via_range() {
+        // Range start/end emit NumberToInt when the endpoint is a number.
+        // The loop counter uses int arithmetic.
+        let val = eval(
+            r#"
+            let mut sum: int = 0
+            let n: number = 5.0
+            for i in 0..n {
+                sum = sum + i
+            }
+            sum
+            "#,
+        );
+        assert_eq!(val.as_i64(), Some(10)); // 0+1+2+3+4 = 10
+    }
+
+    // ---- ConvertToInt (emitted for `x as int`) ----
+
+    #[test]
+    fn test_type_ops_convert_number_to_int() {
+        let val = eval("let x: number = 42.0\nx as int");
+        assert_eq!(val.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_type_ops_convert_string_to_int() {
+        let val = eval("let s = \"123\"\ns as int");
+        assert_eq!(val.as_i64(), Some(123));
+    }
+
+    #[test]
+    fn test_type_ops_convert_bool_true_to_int() {
+        let val = eval("let b = true\nb as int");
+        assert_eq!(val.as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_type_ops_convert_bool_false_to_int() {
+        let val = eval("let b = false\nb as int");
+        assert_eq!(val.as_i64(), Some(0));
+    }
+
+    #[test]
+    fn test_type_ops_convert_int_to_int_identity() {
+        let val = eval("let x: int = 99\nx as int");
+        assert_eq!(val.as_i64(), Some(99));
+    }
+
+    #[test]
+    fn test_type_ops_convert_negative_number_to_int() {
+        let val = eval("let x: number = -7.0\nx as int");
+        assert_eq!(val.as_i64(), Some(-7));
+    }
+
+    // ---- ConvertToNumber (emitted for `x as number`) ----
+
+    #[test]
+    fn test_type_ops_convert_int_to_number() {
+        let val = eval("let x: int = 10\nx as number");
+        assert_eq!(val.as_f64(), Some(10.0));
+    }
+
+    #[test]
+    fn test_type_ops_convert_string_to_number() {
+        let val = eval("let s = \"3.14\"\ns as number");
+        let f = val.as_f64().expect("expected f64");
+        assert!((f - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_type_ops_convert_bool_true_to_number() {
+        let val = eval("let b = true\nb as number");
+        assert_eq!(val.as_f64(), Some(1.0));
+    }
+
+    #[test]
+    fn test_type_ops_convert_bool_false_to_number() {
+        let val = eval("let b = false\nb as number");
+        assert_eq!(val.as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn test_type_ops_convert_number_to_number_identity() {
+        let val = eval("let x: number = 2.718\nx as number");
+        let f = val.as_f64().expect("expected f64");
+        assert!((f - 2.718).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_type_ops_convert_negative_int_to_number() {
+        let val = eval("let x: int = -42\nx as number");
+        assert_eq!(val.as_f64(), Some(-42.0));
+    }
+
+    // ---- ConvertToBool (emitted for `x as bool`) ----
+
+    #[test]
+    fn test_type_ops_convert_int_nonzero_to_bool() {
+        let val = eval("let x: int = 1\nx as bool");
+        assert_eq!(val.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_type_ops_convert_int_zero_to_bool() {
+        let val = eval("let x: int = 0\nx as bool");
+        assert_eq!(val.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_type_ops_convert_number_nonzero_to_bool() {
+        let val = eval("let x: number = 3.14\nx as bool");
+        assert_eq!(val.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_type_ops_convert_number_zero_to_bool() {
+        let val = eval("let x: number = 0.0\nx as bool");
+        assert_eq!(val.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_type_ops_convert_string_true_to_bool() {
+        let val = eval("let s = \"true\"\ns as bool");
+        assert_eq!(val.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_type_ops_convert_string_false_to_bool() {
+        let val = eval("let s = \"false\"\ns as bool");
+        assert_eq!(val.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_type_ops_convert_bool_identity() {
+        let val = eval("let b = true\nb as bool");
+        assert_eq!(val.as_bool(), Some(true));
+    }
+
+    // ---- ConvertToString (emitted for `x as string`) ----
+
+    #[test]
+    fn test_type_ops_convert_int_to_string() {
+        let val = eval("let x: int = 42\nx as string");
+        assert_eq!(val.as_str().map(|s| s.to_string()), Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_type_ops_convert_number_to_string() {
+        let val = eval("let x: number = 3.14\nx as string");
+        let s = val.as_str().expect("expected string");
+        assert!(s.starts_with("3.14"), "got: {s}");
+    }
+
+    #[test]
+    fn test_type_ops_convert_bool_to_string() {
+        let val = eval("let b = true\nb as string");
+        assert_eq!(
+            val.as_str().map(|s| s.to_string()),
+            Some("true".to_string())
+        );
+    }
+
+    #[test]
+    fn test_type_ops_convert_string_identity() {
+        let val = eval("let s = \"hello\"\ns as string");
+        assert_eq!(
+            val.as_str().map(|s| s.to_string()),
+            Some("hello".to_string())
+        );
+    }
+
+    // ---- Raw stack pop/push round-trip via VM ----
+
+    #[test]
+    fn test_type_ops_int_to_number_large_value() {
+        // Test with a larger integer to verify i48 encoding round-trips
+        let val = eval("let x: int = 100000\nx + 0.5");
+        assert_eq!(val.as_f64(), Some(100000.5));
+    }
+
+    #[test]
+    fn test_type_ops_chained_conversions() {
+        // int → number (via mixed arithmetic) → back to int (via as int)
+        let val = eval(
+            r#"
+            let x: int = 7
+            let y: number = x + 0.0
+            y as int
+            "#,
+        );
+        assert_eq!(val.as_i64(), Some(7));
+    }
+
+    #[test]
+    fn test_type_ops_convert_result_usable_in_arithmetic() {
+        // The output of ConvertToNumber should be usable as a normal f64
+        // in subsequent typed arithmetic.
+        let val = eval(
+            r#"
+            let x: int = 5
+            let y: number = x as number
+            y * 2.0
+            "#,
+        );
+        assert_eq!(val.as_f64(), Some(10.0));
+    }
+
+    #[test]
+    fn test_type_ops_convert_to_int_result_usable_in_arithmetic() {
+        // The output of ConvertToInt should be usable as a normal i64
+        // in subsequent typed arithmetic.
+        let val = eval(
+            r#"
+            let x: number = 10.0
+            let y: int = x as int
+            y + 5
+            "#,
+        );
+        assert_eq!(val.as_i64(), Some(15));
+    }
+
+    #[test]
+    fn test_type_ops_convert_to_bool_result_usable_in_conditional() {
+        // The output of ConvertToBool should be a proper bool usable in if-then-else.
+        let val = eval(
+            r#"
+            let x: int = 1
+            let b: bool = x as bool
+            if b { 100 } else { 0 }
+            "#,
+        );
+        assert_eq!(val.as_i64(), Some(100));
     }
 }

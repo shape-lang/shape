@@ -495,3 +495,6 @@ fn remap_operand(operand: &mut Option<Operand>, const_offset: usize, string_offs
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod v2_stack_tests;

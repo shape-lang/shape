@@ -441,43 +441,52 @@ impl VirtualMachine {
         }
         use OpCode::*;
         match instruction.opcode {
-            // ===== Typed Add (ValueWord fast path for Int/Number) =====
+            // ===== Typed Add (raw typed stack API with fallback) =====
             AddInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                if a.is_i64() && b.is_i64() {
-                    self.push_vw(unsafe { ValueWord::add_i64(&a, &b) })?;
-                } else if let (Some(ai), Some(bi)) = (Self::int_operand(&a), Self::int_operand(&b))
-                {
+                if self.stack_top_both_i48() {
+                    // Fast path: both operands are inline i48
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
                     match ai.checked_add(bi) {
-                        Some(result) if fits_i48(result) => {
-                            self.push_vw(ValueWord::from_i64(result))?
-                        }
-                        _ => self.push_vw(ValueWord::from_f64(ai as f64 + bi as f64))?,
+                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        _ => self.push_raw_f64(ai as f64 + bi as f64)?,
                     }
                 } else {
-                    return Err(VMError::TypeError {
+                    // Slow path: BigInt or coercible values
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "int",
-                        got: if Self::int_operand(&a).is_none() {
-                            a.type_name()
-                        } else {
-                            b.type_name()
-                        },
-                    });
+                        got: a.type_name(),
+                    })?;
+                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: b.type_name(),
+                    })?;
+                    match ai.checked_add(bi) {
+                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        _ => self.push_raw_f64(ai as f64 + bi as f64)?,
+                    }
                 }
             }
             AddNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: a.type_name(),
-                })?;
-                let rhs = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: b.type_name(),
-                })?;
-                self.push_vw(ValueWord::from_f64(lhs + rhs))?;
+                if self.stack_top_both_f64() {
+                    let rhs = self.pop_raw_f64()?;
+                    let lhs = self.pop_raw_f64()?;
+                    self.push_raw_f64(lhs + rhs)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: a.type_name(),
+                    })?;
+                    let rhs = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: b.type_name(),
+                    })?;
+                    self.push_raw_f64(lhs + rhs)?;
+                }
             }
             AddDecimal => {
                 let b = self.pop_vw()?;
@@ -486,43 +495,50 @@ impl VirtualMachine {
                     a.as_decimal_unchecked() + b.as_decimal_unchecked()
                 }))?;
             }
-            // ===== Typed Sub =====
+            // ===== Typed Sub (raw typed stack API with fallback) =====
             SubInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                if a.is_i64() && b.is_i64() {
-                    self.push_vw(unsafe { ValueWord::sub_i64(&a, &b) })?;
-                } else if let (Some(ai), Some(bi)) = (Self::int_operand(&a), Self::int_operand(&b))
-                {
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
                     match ai.checked_sub(bi) {
-                        Some(result) if fits_i48(result) => {
-                            self.push_vw(ValueWord::from_i64(result))?
-                        }
-                        _ => self.push_vw(ValueWord::from_f64(ai as f64 - bi as f64))?,
+                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        _ => self.push_raw_f64(ai as f64 - bi as f64)?,
                     }
                 } else {
-                    return Err(VMError::TypeError {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "int",
-                        got: if Self::int_operand(&a).is_none() {
-                            a.type_name()
-                        } else {
-                            b.type_name()
-                        },
-                    });
+                        got: a.type_name(),
+                    })?;
+                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: b.type_name(),
+                    })?;
+                    match ai.checked_sub(bi) {
+                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        _ => self.push_raw_f64(ai as f64 - bi as f64)?,
+                    }
                 }
             }
             SubNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: a.type_name(),
-                })?;
-                let rhs = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: b.type_name(),
-                })?;
-                self.push_vw(ValueWord::from_f64(lhs - rhs))?;
+                if self.stack_top_both_f64() {
+                    let rhs = self.pop_raw_f64()?;
+                    let lhs = self.pop_raw_f64()?;
+                    self.push_raw_f64(lhs - rhs)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: a.type_name(),
+                    })?;
+                    let rhs = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: b.type_name(),
+                    })?;
+                    self.push_raw_f64(lhs - rhs)?;
+                }
             }
             SubDecimal => {
                 let b = self.pop_vw()?;
@@ -531,43 +547,50 @@ impl VirtualMachine {
                     a.as_decimal_unchecked() - b.as_decimal_unchecked()
                 }))?;
             }
-            // ===== Typed Mul =====
+            // ===== Typed Mul (raw typed stack API with fallback) =====
             MulInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                if a.is_i64() && b.is_i64() {
-                    self.push_vw(unsafe { ValueWord::mul_i64(&a, &b) })?;
-                } else if let (Some(ai), Some(bi)) = (Self::int_operand(&a), Self::int_operand(&b))
-                {
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
                     match ai.checked_mul(bi) {
-                        Some(result) if fits_i48(result) => {
-                            self.push_vw(ValueWord::from_i64(result))?
-                        }
-                        _ => self.push_vw(ValueWord::from_f64(ai as f64 * bi as f64))?,
+                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        _ => self.push_raw_f64(ai as f64 * bi as f64)?,
                     }
                 } else {
-                    return Err(VMError::TypeError {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "int",
-                        got: if Self::int_operand(&a).is_none() {
-                            a.type_name()
-                        } else {
-                            b.type_name()
-                        },
-                    });
+                        got: a.type_name(),
+                    })?;
+                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: b.type_name(),
+                    })?;
+                    match ai.checked_mul(bi) {
+                        Some(result) if fits_i48(result) => self.push_raw_i64(result)?,
+                        _ => self.push_raw_f64(ai as f64 * bi as f64)?,
+                    }
                 }
             }
             MulNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: a.type_name(),
-                })?;
-                let rhs = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: b.type_name(),
-                })?;
-                self.push_vw(ValueWord::from_f64(lhs * rhs))?;
+                if self.stack_top_both_f64() {
+                    let rhs = self.pop_raw_f64()?;
+                    let lhs = self.pop_raw_f64()?;
+                    self.push_raw_f64(lhs * rhs)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: a.type_name(),
+                    })?;
+                    let rhs = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: b.type_name(),
+                    })?;
+                    self.push_raw_f64(lhs * rhs)?;
+                }
             }
             MulDecimal => {
                 let b = self.pop_vw()?;
@@ -576,38 +599,56 @@ impl VirtualMachine {
                     a.as_decimal_unchecked() * b.as_decimal_unchecked()
                 }))?;
             }
-            // ===== Typed Div (with zero-check) =====
+            // ===== Typed Div (raw typed stack API, with zero-check) =====
             DivInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "int",
-                    got: b.type_name(),
-                })?;
-                if bi == 0 {
-                    return Err(VMError::DivisionByZero);
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
+                    if bi == 0 {
+                        return Err(VMError::DivisionByZero);
+                    }
+                    self.push_raw_i64(ai / bi)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: b.type_name(),
+                    })?;
+                    if bi == 0 {
+                        return Err(VMError::DivisionByZero);
+                    }
+                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: a.type_name(),
+                    })?;
+                    self.push_vw(ValueWord::from_i64(ai / bi))?;
                 }
-                let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "int",
-                    got: a.type_name(),
-                })?;
-                self.push_vw(ValueWord::from_i64(ai / bi))?;
             }
             DivNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let divisor = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: b.type_name(),
-                })?;
-                if divisor == 0.0 {
-                    return Err(VMError::DivisionByZero);
+                if self.stack_top_both_f64() {
+                    let divisor = self.pop_raw_f64()?;
+                    let lhs = self.pop_raw_f64()?;
+                    if divisor == 0.0 {
+                        return Err(VMError::DivisionByZero);
+                    }
+                    self.push_raw_f64(lhs / divisor)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let divisor = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: b.type_name(),
+                    })?;
+                    if divisor == 0.0 {
+                        return Err(VMError::DivisionByZero);
+                    }
+                    let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: a.type_name(),
+                    })?;
+                    self.push_raw_f64(lhs / divisor)?;
                 }
-                let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: a.type_name(),
-                })?;
-                self.push_vw(ValueWord::from_f64(lhs / divisor))?;
             }
             DivDecimal => {
                 let b = self.pop_vw()?;
@@ -620,38 +661,56 @@ impl VirtualMachine {
                     unsafe { a.as_decimal_unchecked() } / divisor,
                 ))?;
             }
-            // ===== Typed Mod (with zero-check) =====
+            // ===== Typed Mod (raw typed stack API, with zero-check) =====
             ModInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "int",
-                    got: b.type_name(),
-                })?;
-                if bi == 0 {
-                    return Err(VMError::DivisionByZero);
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
+                    if bi == 0 {
+                        return Err(VMError::DivisionByZero);
+                    }
+                    self.push_raw_i64(ai % bi)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: b.type_name(),
+                    })?;
+                    if bi == 0 {
+                        return Err(VMError::DivisionByZero);
+                    }
+                    let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: a.type_name(),
+                    })?;
+                    self.push_vw(ValueWord::from_i64(ai % bi))?;
                 }
-                let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "int",
-                    got: a.type_name(),
-                })?;
-                self.push_vw(ValueWord::from_i64(ai % bi))?;
             }
             ModNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let divisor = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: b.type_name(),
-                })?;
-                if divisor == 0.0 {
-                    return Err(VMError::DivisionByZero);
+                if self.stack_top_both_f64() {
+                    let divisor = self.pop_raw_f64()?;
+                    let lhs = self.pop_raw_f64()?;
+                    if divisor == 0.0 {
+                        return Err(VMError::DivisionByZero);
+                    }
+                    self.push_raw_f64(lhs % divisor)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let divisor = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: b.type_name(),
+                    })?;
+                    if divisor == 0.0 {
+                        return Err(VMError::DivisionByZero);
+                    }
+                    let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: a.type_name(),
+                    })?;
+                    self.push_raw_f64(lhs % divisor)?;
                 }
-                let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: a.type_name(),
-                })?;
-                self.push_vw(ValueWord::from_f64(lhs % divisor))?;
             }
             ModDecimal => {
                 let b = self.pop_vw()?;
@@ -664,36 +723,57 @@ impl VirtualMachine {
                     unsafe { a.as_decimal_unchecked() } % divisor,
                 ))?;
             }
-            // ===== Typed Pow =====
+            // ===== Typed Pow (raw typed stack API with fallback) =====
             PowInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let base = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "int",
-                    got: a.type_name(),
-                })?;
-                let exp = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "int",
-                    got: b.type_name(),
-                })?;
-                if exp >= 0 && exp < u32::MAX as i64 {
-                    self.push_vw(ValueWord::from_i64(base.pow(exp as u32)))?;
+                if self.stack_top_both_i48() {
+                    let exp = self.pop_raw_i64()?;
+                    let base = self.pop_raw_i64()?;
+                    if exp >= 0 && exp < u32::MAX as i64 {
+                        let result = base.pow(exp as u32);
+                        if fits_i48(result) {
+                            self.push_raw_i64(result)?;
+                        } else {
+                            self.push_raw_f64(result as f64)?;
+                        }
+                    } else {
+                        self.push_raw_f64((base as f64).powf(exp as f64))?;
+                    }
                 } else {
-                    self.push_vw(ValueWord::from_f64((base as f64).powf(exp as f64)))?;
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let base = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: a.type_name(),
+                    })?;
+                    let exp = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "int",
+                        got: b.type_name(),
+                    })?;
+                    if exp >= 0 && exp < u32::MAX as i64 {
+                        self.push_vw(ValueWord::from_i64(base.pow(exp as u32)))?;
+                    } else {
+                        self.push_vw(ValueWord::from_f64((base as f64).powf(exp as f64)))?;
+                    }
                 }
             }
             PowNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                let base = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: a.type_name(),
-                })?;
-                let exp = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
-                    expected: "number",
-                    got: b.type_name(),
-                })?;
-                self.push_vw(ValueWord::from_f64(base.powf(exp)))?;
+                if self.stack_top_both_f64() {
+                    let exp = self.pop_raw_f64()?;
+                    let base = self.pop_raw_f64()?;
+                    self.push_raw_f64(base.powf(exp))?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    let base = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: a.type_name(),
+                    })?;
+                    let exp = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
+                        expected: "number",
+                        got: b.type_name(),
+                    })?;
+                    self.push_raw_f64(base.powf(exp))?;
+                }
             }
             PowDecimal => {
                 let b = self.pop_vw()?;
@@ -710,14 +790,24 @@ impl VirtualMachine {
                     rust_decimal::Decimal::from_f64(result).unwrap_or_default(),
                 ))?;
             }
-            // ===== Numeric Coercion =====
+            // ===== Numeric Coercion (raw typed stack API with fallback) =====
             IntToNumber => {
-                let val = self.pop_vw()?;
-                self.push_vw(ValueWord::from_f64(unsafe { val.as_i64_unchecked() } as f64))?;
+                if self.stack_top_is_i48() {
+                    let v = self.pop_raw_i64()?;
+                    self.push_raw_f64(v as f64)?;
+                } else {
+                    let val = self.pop_vw()?;
+                    self.push_vw(ValueWord::from_f64(unsafe { val.as_i64_unchecked() } as f64))?;
+                }
             }
             NumberToInt => {
-                let val = self.pop_vw()?;
-                self.push_vw(ValueWord::from_i64(unsafe { val.as_f64_unchecked() } as i64))?;
+                if self.stack_top_is_f64() {
+                    let v = self.pop_raw_f64()?;
+                    self.push_raw_i64(v as i64)?;
+                } else {
+                    let val = self.pop_vw()?;
+                    self.push_vw(ValueWord::from_i64(unsafe { val.as_f64_unchecked() } as i64))?;
+                }
             }
             _ => unreachable!(
                 "exec_typed_arithmetic called with non-typed-arithmetic opcode: {:?}",
@@ -1136,32 +1226,7 @@ impl VirtualMachine {
                     }
                     // Both heap: string concat, decimal, bigint, array concat, typed object merge
                     (NanTag::Heap, NanTag::Heap) => {
-                        let a_unified = shape_value::tags::is_unified_heap(a_nb.raw_bits());
-                        let b_unified = shape_value::tags::is_unified_heap(b_nb.raw_bits());
-                        // Handle cases where at least one side is unified.
-                        if a_unified || b_unified {
-                            // Both arrays → concat
-                            if let (Some(a_view), Some(b_view)) = (a_nb.as_any_array(), b_nb.as_any_array()) {
-                                let a_generic = a_view.to_generic();
-                                let b_generic = b_view.to_generic();
-                                let mut result_arr = Vec::with_capacity(a_generic.len() + b_generic.len());
-                                result_arr.extend_from_slice(&a_generic);
-                                result_arr.extend_from_slice(&b_generic);
-                                return self.push_vw(ValueWord::from_array(Arc::new(result_arr)));
-                            }
-                            return Err(VMError::RuntimeError(format!(
-                                "Cannot apply '+' to {} and {}",
-                                a_nb.type_name(),
-                                b_nb.type_name()
-                            )));
-                        }
-                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
-                            return Err(VMError::RuntimeError(format!(
-                                "Cannot apply operator to {} and {}",
-                                a_nb.type_name(), b_nb.type_name()
-                            )));
-                        };
-                        match (a_hv, b_hv) {
+                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_vw(ValueWord::from_i64(
                                     a_big.checked_add(*b_big).ok_or_else(|| {
@@ -1649,13 +1714,7 @@ impl VirtualMachine {
                         }
                     }
                     (NanTag::Heap, NanTag::Heap) => {
-                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
-                            return Err(VMError::RuntimeError(format!(
-                                "Cannot apply operator to {} and {}",
-                                a_nb.type_name(), b_nb.type_name()
-                            )));
-                        };
-                        match (a_hv, b_hv) {
+                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_vw(ValueWord::from_i64(
                                     a_big.checked_sub(*b_big).ok_or_else(|| {
@@ -1895,13 +1954,7 @@ impl VirtualMachine {
                         }
                     }
                     (NanTag::Heap, NanTag::Heap) => {
-                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
-                            return Err(VMError::RuntimeError(format!(
-                                "Cannot apply operator to {} and {}",
-                                a_nb.type_name(), b_nb.type_name()
-                            )));
-                        };
-                        match (a_hv, b_hv) {
+                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_vw(ValueWord::from_i64(
                                     a_big.checked_mul(*b_big).ok_or_else(|| {
@@ -2194,13 +2247,7 @@ impl VirtualMachine {
                         }
                     }
                     (NanTag::Heap, NanTag::Heap) => {
-                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
-                            return Err(VMError::RuntimeError(format!(
-                                "Cannot apply operator to {} and {}",
-                                a_nb.type_name(), b_nb.type_name()
-                            )));
-                        };
-                        match (a_hv, b_hv) {
+                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 if *b_big == 0 {
                                     return Err(VMError::DivisionByZero);
@@ -2415,13 +2462,7 @@ impl VirtualMachine {
                         }
                     }
                     (NanTag::Heap, NanTag::Heap) => {
-                        let (Some(a_hv), Some(b_hv)) = (a_nb.as_heap_ref(), b_nb.as_heap_ref()) else {
-                            return Err(VMError::RuntimeError(format!(
-                                "Cannot apply operator to {} and {}",
-                                a_nb.type_name(), b_nb.type_name()
-                            )));
-                        };
-                        match (a_hv, b_hv) {
+                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 if *b_big == 0 {
                                     return Err(VMError::DivisionByZero);
@@ -2814,7 +2855,7 @@ mod tests {
     use crate::VMConfig;
     use crate::bytecode::*;
     use crate::executor::VirtualMachine;
-    use shape_value::ValueWord;
+    use shape_value::{VMError, ValueWord};
 
     #[test]
     fn test_string_concatenation() {
@@ -3596,5 +3637,294 @@ mod tests {
             Some(255),
             "u64::MAX truncated to u8 should be 255"
         );
+    }
+
+    // ===== Raw typed stack API tests =====
+
+    /// Helper: create a VM with a dummy program loaded so the stack is usable.
+    fn make_raw_vm() -> VirtualMachine {
+        let program = BytecodeProgram::default();
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        vm
+    }
+
+    /// Helper: push two i64 values, execute a typed arithmetic instruction, pop the result.
+    fn exec_typed_int_binop(a: i64, b: i64, opcode: OpCode) -> i64 {
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(a).unwrap();
+        vm.push_raw_i64(b).unwrap();
+        let instr = Instruction::simple(opcode);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        vm.pop_raw_i64().unwrap()
+    }
+
+    /// Helper: push two f64 values, execute a typed arithmetic instruction, pop the result.
+    fn exec_typed_f64_binop(a: f64, b: f64, opcode: OpCode) -> f64 {
+        let mut vm = make_raw_vm();
+        vm.push_raw_f64(a).unwrap();
+        vm.push_raw_f64(b).unwrap();
+        let instr = Instruction::simple(opcode);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        vm.pop_raw_f64().unwrap()
+    }
+
+    #[test]
+    fn test_raw_i64_roundtrip() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(42).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_raw_i64_negative_roundtrip() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(-123).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), -123);
+    }
+
+    #[test]
+    fn test_raw_f64_roundtrip() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_f64(3.14).unwrap();
+        assert!((vm.pop_raw_f64().unwrap() - 3.14).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_raw_f64_negative_roundtrip() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_f64(-2.5).unwrap();
+        assert!((vm.pop_raw_f64().unwrap() - (-2.5)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_raw_stack_underflow_i64() {
+        let mut vm = make_raw_vm();
+        assert!(vm.pop_raw_i64().is_err());
+    }
+
+    #[test]
+    fn test_raw_stack_underflow_f64() {
+        let mut vm = make_raw_vm();
+        assert!(vm.pop_raw_f64().is_err());
+    }
+
+    // --- Typed AddInt via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_add_int() {
+        assert_eq!(exec_typed_int_binop(5, 3, OpCode::AddInt), 8);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_add_int_negative() {
+        assert_eq!(exec_typed_int_binop(-10, 7, OpCode::AddInt), -3);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_add_int_zero() {
+        assert_eq!(exec_typed_int_binop(0, 0, OpCode::AddInt), 0);
+    }
+
+    // --- Typed SubInt via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_sub_int() {
+        assert_eq!(exec_typed_int_binop(10, 4, OpCode::SubInt), 6);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_sub_int_negative_result() {
+        assert_eq!(exec_typed_int_binop(3, 8, OpCode::SubInt), -5);
+    }
+
+    // --- Typed MulInt via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_mul_int() {
+        assert_eq!(exec_typed_int_binop(6, 7, OpCode::MulInt), 42);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_mul_int_negative() {
+        assert_eq!(exec_typed_int_binop(-3, 4, OpCode::MulInt), -12);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_mul_int_zero() {
+        assert_eq!(exec_typed_int_binop(12345, 0, OpCode::MulInt), 0);
+    }
+
+    // --- Typed DivInt via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_div_int() {
+        assert_eq!(exec_typed_int_binop(20, 4, OpCode::DivInt), 5);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_div_int_truncation() {
+        assert_eq!(exec_typed_int_binop(7, 2, OpCode::DivInt), 3);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_div_int_by_zero() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(10).unwrap();
+        vm.push_raw_i64(0).unwrap();
+        let instr = Instruction::simple(OpCode::DivInt);
+        let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
+        assert!(matches!(err, VMError::DivisionByZero));
+    }
+
+    // --- Typed ModInt via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_mod_int() {
+        assert_eq!(exec_typed_int_binop(17, 5, OpCode::ModInt), 2);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_mod_int_by_zero() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(10).unwrap();
+        vm.push_raw_i64(0).unwrap();
+        let instr = Instruction::simple(OpCode::ModInt);
+        let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
+        assert!(matches!(err, VMError::DivisionByZero));
+    }
+
+    // --- Typed PowInt via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_pow_int() {
+        assert_eq!(exec_typed_int_binop(2, 10, OpCode::PowInt), 1024);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_pow_int_zero_exponent() {
+        assert_eq!(exec_typed_int_binop(99, 0, OpCode::PowInt), 1);
+    }
+
+    // --- Typed AddNumber via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_add_number() {
+        let result = exec_typed_f64_binop(2.5, 3.5, OpCode::AddNumber);
+        assert!((result - 6.0).abs() < 1e-15);
+    }
+
+    // --- Typed SubNumber via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_sub_number() {
+        let result = exec_typed_f64_binop(10.0, 3.5, OpCode::SubNumber);
+        assert!((result - 6.5).abs() < 1e-15);
+    }
+
+    // --- Typed MulNumber via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_mul_number() {
+        let result = exec_typed_f64_binop(3.0, 4.0, OpCode::MulNumber);
+        assert!((result - 12.0).abs() < 1e-15);
+    }
+
+    // --- Typed DivNumber via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_div_number() {
+        let result = exec_typed_f64_binop(10.0, 4.0, OpCode::DivNumber);
+        assert!((result - 2.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_div_number_by_zero() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_f64(10.0).unwrap();
+        vm.push_raw_f64(0.0).unwrap();
+        let instr = Instruction::simple(OpCode::DivNumber);
+        let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
+        assert!(matches!(err, VMError::DivisionByZero));
+    }
+
+    // --- Typed ModNumber via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_mod_number() {
+        let result = exec_typed_f64_binop(10.0, 3.0, OpCode::ModNumber);
+        assert!((result - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_mod_number_by_zero() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_f64(10.0).unwrap();
+        vm.push_raw_f64(0.0).unwrap();
+        let instr = Instruction::simple(OpCode::ModNumber);
+        let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
+        assert!(matches!(err, VMError::DivisionByZero));
+    }
+
+    // --- Typed PowNumber via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_pow_number() {
+        let result = exec_typed_f64_binop(2.0, 10.0, OpCode::PowNumber);
+        assert!((result - 1024.0).abs() < 1e-10);
+    }
+
+    // --- Coercion opcodes via raw API ---
+
+    #[test]
+    fn test_typed_arithmetic_int_to_number() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(42).unwrap();
+        let instr = Instruction::simple(OpCode::IntToNumber);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        let result = vm.pop_raw_f64().unwrap();
+        assert!((result - 42.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_typed_arithmetic_number_to_int() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_f64(7.9).unwrap();
+        let instr = Instruction::simple(OpCode::NumberToInt);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        let result = vm.pop_raw_i64().unwrap();
+        assert_eq!(result, 7);
+    }
+
+    // --- ValueWord compatibility: raw push produces valid ValueWord on pop ---
+
+    #[test]
+    fn test_raw_push_i64_pop_as_value_word() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_i64(99).unwrap();
+        let vw = vm.pop_vw().unwrap();
+        assert_eq!(vw.as_i64(), Some(99));
+    }
+
+    #[test]
+    fn test_raw_push_f64_pop_as_value_word() {
+        let mut vm = make_raw_vm();
+        vm.push_raw_f64(1.5).unwrap();
+        let vw = vm.pop_vw().unwrap();
+        assert!((vw.as_f64().unwrap() - 1.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_value_word_push_pop_raw_i64() {
+        let mut vm = make_raw_vm();
+        vm.push_vw(ValueWord::from_i64(77)).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), 77);
+    }
+
+    #[test]
+    fn test_value_word_push_pop_raw_f64() {
+        let mut vm = make_raw_vm();
+        vm.push_vw(ValueWord::from_f64(2.718)).unwrap();
+        assert!((vm.pop_raw_f64().unwrap() - 2.718).abs() < 1e-15);
     }
 }
