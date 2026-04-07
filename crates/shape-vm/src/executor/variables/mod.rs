@@ -449,12 +449,24 @@ impl VirtualMachine {
     /// the common case), constructs a ValueWord by bit-copying without going
     /// through clone dispatch. Only heap-tagged values take the clone path.
     ///
+    /// **Stage 2.1**: When the FrameDescriptor proves the slot kind is a
+    /// scalar (Float64/Int64/Bool) AND the slot bits are not heap-tagged
+    /// (i.e. not wrapped in a SharedCell for closure capture), the handler
+    /// pushes raw bits directly without constructing a ValueWord. This gives
+    /// downstream typed handlers raw values they can `pop_raw_*` without
+    /// unwrapping. The TAG_HEAP runtime check is necessary because mutable
+    /// captured locals can be wrapped in SharedCell after the frame layout
+    /// is fixed — the FrameDescriptor doesn't track that wrapping.
+    ///
     /// If the slot contains a SharedCell (boxed local for mutable closure capture),
     /// the inner value is read through the Arc transparently.
     pub(in crate::executor) fn op_load_local(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
+        use crate::type_tracking::SlotKind;
+        use shape_value::tags::{get_tag, is_tagged, TAG_BOOL, TAG_INT};
+
         if let Some(Operand::Local(idx)) = instruction.operand {
             let bp = self.current_locals_base();
             let slot = bp + idx as usize;
@@ -465,12 +477,48 @@ impl VirtualMachine {
                 self.stack.len()
             );
             // SAFETY: The compiler ensures local slots are within the frame's register
-            // window which is pre-allocated on the stack. We read the raw bits and
-            // only call clone for heap-tagged values (which own a Box<HeapValue>).
-            let nb = unsafe {
-                let bits = *(self.stack.as_ptr().add(slot) as *const u64);
-                ValueWord::clone_from_bits(bits)
-            };
+            // window which is pre-allocated on the stack.
+            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+
+            // Stage 2.1 smart fast path. Skip ValueWord construction entirely
+            // when the FrameDescriptor proves the slot kind is a scalar AND
+            // the runtime bits actually carry that encoding. The runtime tag
+            // check is intentionally strict because op_load_local is the
+            // untrusted variant: the compiler is sometimes optimistic about
+            // slot kinds and the actual bits may be a different encoding
+            // (e.g. TAG_INT in a Float64 slot, or a SharedCell wrap that
+            // happens at closure construction). Mismatches fall through to
+            // the legacy clone_from_bits path which preserves correctness.
+            let kind = self
+                .current_frame_descriptor()
+                .map(|fd| fd.slot(idx as usize))
+                .unwrap_or(SlotKind::Unknown);
+            match kind {
+                SlotKind::Float64 if !is_tagged(bits) => {
+                    // Plain f64 bits (NaN canonicalized to a non-tagged
+                    // pattern). Push raw without ValueWord wrapping.
+                    return self.push_raw_f64(f64::from_bits(bits));
+                }
+                SlotKind::Int64 | SlotKind::IntSize
+                    if is_tagged(bits) && get_tag(bits) == TAG_INT =>
+                {
+                    // Slot holds i48-tagged bits; push_raw_u64 preserves
+                    // the encoding so downstream pop_raw_i64 can decode.
+                    return self.push_raw_u64(bits);
+                }
+                SlotKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
+                    // Slot holds TAG_BOOL bits; push_raw_u64 preserves
+                    // the encoding so downstream pop_raw_bool can decode.
+                    return self.push_raw_u64(bits);
+                }
+                _ => {
+                    // Tag/kind mismatch, non-scalar slot, or Unknown — fall
+                    // through to the legacy clone_from_bits + SharedCell path.
+                }
+            }
+
+            // Legacy path: clone_from_bits + SharedCell auto-deref.
+            let nb = unsafe { ValueWord::clone_from_bits(bits) };
             // Auto-deref SharedCell: read the inner value through the Arc
             if let Some(HeapValue::SharedCell(arc)) = nb.as_heap_ref() {
                 let inner = arc.read().unwrap().clone();
@@ -557,14 +605,24 @@ impl VirtualMachine {
 
     /// Store value to a local variable slot (register window on the unified stack).
     ///
+    /// **Stage 2.1**: When the FrameDescriptor proves the slot kind is a
+    /// scalar (Float64/Int64/Bool), the old slot bits are not heap-tagged
+    /// (so no SharedCell), and the new top-of-stack bits are also not
+    /// heap-tagged, the handler writes raw bits directly without going
+    /// through ValueWord pop/construction. The SharedCell check via slot
+    /// bits is necessary because mutable captured locals can be wrapped
+    /// after the FrameDescriptor is fixed.
+    ///
     /// If the slot contains a SharedCell (boxed local for mutable closure capture),
     /// the value is written through the Arc so all holders see the update.
     pub(in crate::executor) fn op_store_local(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
+        use crate::type_tracking::SlotKind;
+        use shape_value::tags::{get_tag, is_tagged, TAG_BOOL, TAG_HEAP, TAG_INT};
+
         if let Some(Operand::Local(idx)) = instruction.operand {
-            let nb = self.pop_vw()?;
             let bp = self.current_locals_base();
             let slot = bp + idx as usize;
 
@@ -572,6 +630,43 @@ impl VirtualMachine {
             if slot >= self.stack.len() {
                 self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             }
+
+            // Stage 2.1 smart fast path: skip ValueWord pop/construction when
+            // the FrameDescriptor proves the slot kind is a scalar, the old
+            // slot bits are not heap-tagged (so no SharedCell to write
+            // through), AND the new top-of-stack bits actually carry the
+            // declared scalar encoding. The runtime tag check on the new
+            // value mirrors op_load_local: the compiler is sometimes
+            // optimistic about slot kinds.
+            let old_bits = self.stack[slot];
+            let old_is_heap = is_tagged(old_bits) && get_tag(old_bits) == TAG_HEAP;
+            if !old_is_heap && self.sp > 0 {
+                let kind = self
+                    .current_frame_descriptor()
+                    .map(|fd| fd.slot(idx as usize))
+                    .unwrap_or(SlotKind::Unknown);
+                let new_bits = self.stack[self.sp - 1];
+                let new_matches_kind = match kind {
+                    SlotKind::Float64 => !is_tagged(new_bits),
+                    SlotKind::Int64 | SlotKind::IntSize => {
+                        is_tagged(new_bits) && get_tag(new_bits) == TAG_INT
+                    }
+                    SlotKind::Bool => is_tagged(new_bits) && get_tag(new_bits) == TAG_BOOL,
+                    _ => false,
+                };
+                if new_matches_kind {
+                    // Pop top of stack without constructing a ValueWord.
+                    self.stack[self.sp - 1] = Self::NONE_BITS;
+                    self.sp -= 1;
+                    // Direct raw write — both old and new are scalar.
+                    record_heap_write();
+                    self.stack[slot] = new_bits;
+                    return Ok(());
+                }
+            }
+
+            // Legacy path: pop ValueWord and handle SharedCell auto-deref.
+            let nb = self.pop_vw()?;
 
             // Auto-deref SharedCell: write through the Arc
             let is_shared_cell = self.stack_peek_vw(slot, |vw| {
