@@ -245,6 +245,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(())
             }
             Place::Index(base, operand) => {
+                // v2 fast path: same logic as `read_place`. The slot is a raw
+                // `*mut TypedArray<T>`, the index becomes an i32, and the
+                // value is coerced to the element's native type.
+                if let Some(elem_kind) = self.v2_typed_array_elem_kind(base) {
+                    let arr_ptr = self.read_place(base)?;
+                    let raw_idx = self.compile_operand_raw(operand)?;
+                    let idx_i32 = self.coerce_index_to_i32(raw_idx);
+                    let elem_val = self.coerce_to_v2_elem(val, elem_kind);
+                    self.v2_array_set(arr_ptr, idx_i32, elem_val, elem_kind);
+                    return Ok(());
+                }
+
                 let raw_base = self.read_place(base)?;
                 // v2-boundary: inline_array_set uses NaN-boxed heap pointer layout
                 let base_val = self.ensure_nanboxed(raw_base);

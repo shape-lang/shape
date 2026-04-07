@@ -71,18 +71,20 @@ impl JITCompiler {
                     .as_ref()
                     .map(|fd| fd.slots.clone())
                     .unwrap_or_default();
+                let concrete_types = program.top_level_local_concrete_types.clone();
                 let function_indices: std::collections::HashMap<String, u16> = program
                     .functions
                     .iter()
                     .enumerate()
                     .map(|(i, f)| (f.name.clone(), i as u16))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new(
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_concrete_types(
                     &mut builder,
                     ctx_ptr,
                     ffi,
                     mir_data,
                     slot_kinds,
+                    concrete_types,
                     &program.strings,
                     entry_block,
                     &function_indices,
@@ -168,18 +170,20 @@ impl JITCompiler {
                     .as_ref()
                     .map(|fd| fd.slots.clone())
                     .unwrap_or_default();
+                let concrete_types = program.top_level_local_concrete_types.clone();
                 let function_indices: std::collections::HashMap<String, u16> = program
                     .functions
                     .iter()
                     .enumerate()
                     .map(|(i, f)| (f.name.clone(), i as u16))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new(
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_concrete_types(
                     &mut builder,
                     ctx_ptr,
                     ffi,
                     mir_data,
                     slot_kinds,
+                    concrete_types,
                     &program.strings,
                     entry_block,
                     &function_indices,

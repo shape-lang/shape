@@ -127,6 +127,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Emit Drop for a local: release refcount if it's a heap type.
     pub(crate) fn emit_drop(&mut self, place: &Place) -> Result<(), String> {
+        // v2 fast path: typed-array slots hold raw `*mut TypedArray<T>`
+        // pointers (with their own HeapHeader refcount). The legacy
+        // `arc_release` FFI expects a NaN-boxed value and would either
+        // crash or no-op on a raw pointer. Skip the release for now —
+        // a follow-up will plumb v2_release through to call `jit_v2_release`.
+        if self.v2_typed_array_elem_kind(place).is_some() {
+            self.null_place(place)?;
+            return Ok(());
+        }
+
         let slot = place.root_local();
         let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
 
@@ -157,6 +167,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         place: &Place,
     ) -> Result<(), String> {
+        // v2 fast path: same reasoning as `emit_drop` — skip the legacy
+        // arc_release for slots whose ConcreteType is a v2 typed array.
+        if matches!(place, Place::Local(_))
+            && self.v2_typed_array_elem_kind(place).is_some()
+        {
+            return Ok(());
+        }
+
         let slot = place.root_local();
         if matches!(place, Place::Local(_)) {
             let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);

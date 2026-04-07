@@ -334,6 +334,13 @@ impl JITCompiler {
                     .as_ref()
                     .map(|fd| fd.slots.clone())
                     .unwrap_or_default();
+                // v2: pull per-slot ConcreteTypes for this function from the
+                // bytecode compiler's parallel side-table.
+                let concrete_types = program
+                    .function_local_concrete_types
+                    .get(func_idx)
+                    .cloned()
+                    .unwrap_or_default();
                 // Build function name → index map for Call terminator resolution.
                 // Use the original program's functions (sub_program has empty functions list).
                 let function_indices: std::collections::HashMap<String, u16> = program
@@ -342,12 +349,13 @@ impl JITCompiler {
                     .enumerate()
                     .map(|(i, f)| (f.name.clone(), i as u16))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new(
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_concrete_types(
                     &mut builder,
                     ctx_ptr,
                     ffi,
                     mir_data,
                     slot_kinds,
+                    concrete_types,
                     &sub_program.strings,
                     entry_block,
                     &function_indices,

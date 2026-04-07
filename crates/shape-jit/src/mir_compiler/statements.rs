@@ -17,6 +17,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ) -> Result<(), String> {
         match &stmt.kind {
             StatementKind::Assign(place, rvalue) => {
+                // v2 fast path: when the destination is `Place::Local(s)` whose
+                // ConcreteType is `Array<scalar>`, allocate a real v2 typed
+                // array via FFI and bypass the legacy NaN-boxed Aggregate path.
+                if let (Rvalue::Aggregate(operands), Some(elem_kind)) = (
+                    rvalue,
+                    self.v2_typed_array_elem_kind(place),
+                ) {
+                    if let Some(arr_val) =
+                        self.emit_v2_array_aggregate(operands, elem_kind)?
+                    {
+                        self.release_old_value_if_heap(place)?;
+                        self.write_place(place, arr_val)?;
+                        return Ok(());
+                    }
+                }
+
                 // Release old value if overwriting a heap local.
                 self.release_old_value_if_heap(place)?;
                 // Compile the rvalue.
