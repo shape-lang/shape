@@ -5,6 +5,7 @@
 //! when the bytecode compiler doesn't provide them.
 
 use cranelift::prelude::types;
+use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::SlotKind;
 
@@ -64,6 +65,39 @@ pub(crate) fn cranelift_type_for_slot(kind: SlotKind) -> cranelift::prelude::Typ
 pub(crate) fn is_v2_heap_slot(kind: SlotKind) -> bool {
     let _ = kind;
     false
+}
+
+/// Map a `ConcreteType` element type to the matching `SlotKind` for the v2
+/// typed-array codegen helpers (`v2_array_get`/`v2_array_set`).
+pub(crate) fn elem_slot_kind_for_concrete(elem: &ConcreteType) -> Option<SlotKind> {
+    match elem {
+        ConcreteType::F64 => Some(SlotKind::Float64),
+        ConcreteType::I64 => Some(SlotKind::Int64),
+        ConcreteType::I32 => Some(SlotKind::Int32),
+        ConcreteType::I16 => Some(SlotKind::Int16),
+        ConcreteType::I8 => Some(SlotKind::Int8),
+        ConcreteType::U64 => Some(SlotKind::UInt64),
+        ConcreteType::U32 => Some(SlotKind::UInt32),
+        ConcreteType::U16 => Some(SlotKind::UInt16),
+        ConcreteType::U8 => Some(SlotKind::UInt8),
+        ConcreteType::Bool => Some(SlotKind::Bool),
+        _ => None,
+    }
+}
+
+/// Inspect a slot's `ConcreteType` and report the v2 typed-array element kind
+/// when the slot is known to hold an `Array<T>` whose element type maps to a
+/// scalar Cranelift load/store. Returns `None` for unknown / non-array /
+/// non-scalar slots — caller falls back to legacy NaN-boxed path.
+pub(crate) fn is_v2_typed_array_slot(
+    concrete_types: &[ConcreteType],
+    slot_idx: u16,
+) -> Option<SlotKind> {
+    let ct = concrete_types.get(slot_idx as usize)?;
+    match ct {
+        ConcreteType::Array(elem) => elem_slot_kind_for_concrete(elem),
+        _ => None,
+    }
 }
 
 // ── MIR-level type inference ────────────────────────────────────────────

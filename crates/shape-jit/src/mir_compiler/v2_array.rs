@@ -26,9 +26,12 @@
 //! | Int8/Bool | I8            | 1            |
 
 use cranelift::prelude::*;
+use shape_value::v2::ConcreteType;
+use shape_vm::mir::types::{Operand, Place, SlotId};
 use shape_vm::type_tracking::SlotKind;
 
 use super::MirToIR;
+use super::types::{elem_slot_kind_for_concrete, is_v2_typed_array_slot};
 
 // ── TypedArrayHeader field offsets ───────────────────────────────────────────
 
@@ -86,6 +89,205 @@ fn emit_default(builder: &mut FunctionBuilder, kind: SlotKind) -> Value {
 // ── Implementation ──────────────────────────────────────────────────────────
 
 impl<'a, 'b> MirToIR<'a, 'b> {
+    /// Look up the `ConcreteType` (if any) the bytecode compiler recorded for
+    /// a local slot.
+    pub(crate) fn concrete_type_for_slot(&self, slot: SlotId) -> Option<&ConcreteType> {
+        let ct = self.concrete_types.get(slot.0 as usize)?;
+        if matches!(ct, ConcreteType::Void) {
+            None
+        } else {
+            Some(ct)
+        }
+    }
+
+    /// If the place's root local is known to hold a v2 `Array<T>` whose
+    /// element type is a scalar primitive, return the matching element
+    /// `SlotKind`. Returns `None` for non-array slots, arrays of non-scalar
+    /// elements, or unresolved types — caller falls back to legacy path.
+    pub(crate) fn v2_typed_array_elem_kind(&self, place: &Place) -> Option<SlotKind> {
+        let slot = match place {
+            Place::Local(s) => *s,
+            _ => return None,
+        };
+        if let Some(kind) = is_v2_typed_array_slot(&self.concrete_types, slot.0) {
+            return Some(kind);
+        }
+        if let Some(ConcreteType::Array(elem)) = self.mir.concrete_type_for(slot) {
+            return elem_slot_kind_for_concrete(elem);
+        }
+        None
+    }
+
+    /// Return the FFI `FuncRef` for `jit_v2_array_new_<elem>`.
+    pub(crate) fn v2_array_new_func(&self, elem: SlotKind) -> Option<cranelift::codegen::ir::FuncRef> {
+        match elem {
+            SlotKind::Float64 => Some(self.ffi.v2_array_new_f64),
+            SlotKind::Int64 | SlotKind::UInt64 => Some(self.ffi.v2_array_new_i64),
+            SlotKind::Int32 | SlotKind::UInt32 => Some(self.ffi.v2_array_new_i32),
+            _ => None,
+        }
+    }
+
+    /// Return the FFI `FuncRef` for `jit_v2_array_push_<elem>`.
+    pub(crate) fn v2_array_push_func(&self, elem: SlotKind) -> Option<cranelift::codegen::ir::FuncRef> {
+        match elem {
+            SlotKind::Float64 => Some(self.ffi.v2_array_push_f64),
+            SlotKind::Int64 | SlotKind::UInt64 => Some(self.ffi.v2_array_push_i64),
+            SlotKind::Int32 | SlotKind::UInt32 => Some(self.ffi.v2_array_push_i32),
+            _ => None,
+        }
+    }
+
+    /// Convert a Cranelift value into the native type expected by the v2
+    /// element store/push helpers for `elem`.
+    pub(crate) fn coerce_to_v2_elem(&mut self, val: Value, elem: SlotKind) -> Value {
+        let val_type = self.builder.func.dfg.value_type(val);
+        match elem {
+            SlotKind::Float64 => {
+                if val_type == types::F64 {
+                    val
+                } else if val_type == types::I64 {
+                    self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                } else {
+                    let i64_val = if val_type == types::I32 {
+                        self.builder.ins().sextend(types::I64, val)
+                    } else if val_type == types::I8 {
+                        self.builder.ins().uextend(types::I64, val)
+                    } else {
+                        val
+                    };
+                    self.builder.ins().fcvt_from_sint(types::F64, i64_val)
+                }
+            }
+            SlotKind::Int64 | SlotKind::UInt64 => {
+                if val_type == types::I64 {
+                    let shifted = self.builder.ins().ishl_imm(val, 16);
+                    self.builder.ins().sshr_imm(shifted, 16)
+                } else if val_type == types::I32 {
+                    self.builder.ins().sextend(types::I64, val)
+                } else if val_type == types::I8 {
+                    self.builder.ins().uextend(types::I64, val)
+                } else {
+                    val
+                }
+            }
+            SlotKind::Int32 | SlotKind::UInt32 => {
+                if val_type == types::I32 {
+                    val
+                } else if val_type == types::I64 {
+                    let shifted = self.builder.ins().ishl_imm(val, 16);
+                    let i64_val = self.builder.ins().sshr_imm(shifted, 16);
+                    self.builder.ins().ireduce(types::I32, i64_val)
+                } else if val_type == types::I8 {
+                    self.builder.ins().uextend(types::I32, val)
+                } else {
+                    val
+                }
+            }
+            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => {
+                if val_type == types::I8 {
+                    val
+                } else if val_type == types::I64 {
+                    self.builder.ins().ireduce(types::I8, val)
+                } else if val_type == types::I32 {
+                    self.builder.ins().ireduce(types::I8, val)
+                } else {
+                    val
+                }
+            }
+            _ => val,
+        }
+    }
+
+    /// Coerce an arbitrary index Cranelift value into an `i32`.
+    pub(crate) fn coerce_index_to_i32(&mut self, index_val: Value) -> Value {
+        let idx_type = self.builder.func.dfg.value_type(index_val);
+        if idx_type == types::I32 {
+            index_val
+        } else if idx_type == types::F64 {
+            let i64_val = self
+                .builder
+                .ins()
+                .fcvt_to_sint_sat(types::I64, index_val);
+            self.builder.ins().ireduce(types::I32, i64_val)
+        } else if idx_type == types::I8 {
+            self.builder.ins().uextend(types::I32, index_val)
+        } else {
+            let shifted = self.builder.ins().ishl_imm(index_val, 16);
+            let payload = self.builder.ins().sshr_imm(shifted, 16);
+            self.builder.ins().ireduce(types::I32, payload)
+        }
+    }
+
+    /// Allocate a v2 typed array of the given element kind via FFI, then push
+    /// each operand value into it. Returns the raw `*mut TypedArray<T>` as an
+    /// `i64` Cranelift value, or `None` when no v2 helper exists.
+    pub(crate) fn emit_v2_array_aggregate(
+        &mut self,
+        operands: &[Operand],
+        elem: SlotKind,
+    ) -> Result<Option<Value>, String> {
+        let alloc_func = match self.v2_array_new_func(elem) {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+        let push_func = match self.v2_array_push_func(elem) {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+
+        let cap = self.builder.ins().iconst(types::I32, operands.len() as i64);
+        let inst = self.builder.ins().call(alloc_func, &[cap]);
+        let arr_ptr = self.builder.inst_results(inst)[0];
+
+        for op in operands {
+            let raw = self.compile_operand_raw(op)?;
+            let val = self.coerce_to_v2_elem(raw, elem);
+            self.builder.ins().call(push_func, &[arr_ptr, val]);
+        }
+
+        Ok(Some(arr_ptr))
+    }
+
+    /// Try to emit an inline v2 typed-array method call.
+    pub(crate) fn try_emit_v2_array_method(
+        &mut self,
+        method_name: &str,
+        receiver: &Place,
+        rest_args: &[Operand],
+        destination: &Place,
+        elem: SlotKind,
+    ) -> Result<Option<()>, String> {
+        match method_name {
+            "length" | "len" => {
+                let arr_ptr = self.read_place(receiver)?;
+                let len_i32 = self.v2_array_len(arr_ptr);
+                let len_i64 = self.builder.ins().sextend(types::I64, len_i32);
+                self.release_old_value_if_heap(destination)?;
+                self.write_place(destination, len_i64)?;
+                Ok(Some(()))
+            }
+            "push" => {
+                if rest_args.len() != 1 {
+                    return Ok(None);
+                }
+                let push_func = match self.v2_array_push_func(elem) {
+                    Some(f) => f,
+                    None => return Ok(None),
+                };
+                let arr_ptr = self.read_place(receiver)?;
+                let raw_arg = self.compile_operand_raw(&rest_args[0])?;
+                let val = self.coerce_to_v2_elem(raw_arg, elem);
+                self.builder.ins().call(push_func, &[arr_ptr, val]);
+                let none_val = self.builder.ins().iconst(types::I64, 0i64);
+                self.release_old_value_if_heap(destination)?;
+                self.write_place(destination, none_val)?;
+                Ok(Some(()))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Inline typed array element read.
     ///
     /// Emits:

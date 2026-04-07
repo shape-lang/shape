@@ -155,6 +155,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.use_var(*var))
             }
             Place::Field(base, field_idx) => {
+                // v2 fast path: `arr.length` on a typed-array slot — emit a
+                // single inline `v2_array_len` load and sign-extend to i64.
+                if self.v2_typed_array_elem_kind(base).is_some() {
+                    if let Some(name) = self.mir.field_name_table.get(field_idx) {
+                        if name == "length" {
+                            let arr_ptr = self.read_place(base)?;
+                            let len_i32 = self.v2_array_len(arr_ptr);
+                            let len_i64 = self.builder.ins().sextend(types::I64, len_i32);
+                            return Ok(len_i64);
+                        }
+                    }
+                }
+
                 let raw_base = self.read_place(base)?;
                 // v2-boundary: get_prop/typed_object_get_field FFI expects NaN-boxed I64
                 let base_val = self.ensure_nanboxed(raw_base);
@@ -173,6 +186,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
             }
             Place::Index(base, operand) => {
+                // v2 fast path: when the base local holds a v2 `Array<scalar>`
+                // pointer, use the inline `v2_array_get` helper.
+                if let Some(elem_kind) = self.v2_typed_array_elem_kind(base) {
+                    let arr_ptr = self.read_place(base)?;
+                    let raw_idx = self.compile_operand_raw(operand)?;
+                    let idx_i32 = self.coerce_index_to_i32(raw_idx);
+                    let elem_val = self.v2_array_get(arr_ptr, idx_i32, elem_kind);
+                    return Ok(elem_val);
+                }
+
                 let raw_base = self.read_place(base)?;
                 // v2-boundary: inline_array_get uses NaN-boxed heap pointer layout
                 let base_val = self.ensure_nanboxed(raw_base);

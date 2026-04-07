@@ -35,11 +35,15 @@ pub(crate) mod v2_string;
 #[cfg(test)]
 mod integration_tests;
 
+#[cfg(test)]
+mod v2_array_tests;
+
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::HashMap;
 
 use crate::ffi_refs::FFIFuncRefs;
+use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::SlotKind;
@@ -71,6 +75,12 @@ pub struct MirToIR<'a, 'b> {
     /// Frame descriptor slot kinds (from bytecode Function.frame_descriptor),
     /// enriched by MIR-level type inference.
     pub(crate) slot_kinds: Vec<SlotKind>,
+    /// v2: Per-slot fully-resolved `ConcreteType` from the bytecode compiler's
+    /// `function_local_concrete_types` / `top_level_local_concrete_types`
+    /// side-tables. Used by the v2 typed-array codegen path. Empty when the
+    /// bytecode compiler did not populate the side-table — callers fall back
+    /// to the legacy NaN-boxed path.
+    pub(crate) concrete_types: Vec<ConcreteType>,
     /// Next Cranelift variable index.
     pub(crate) next_var: usize,
 
@@ -191,6 +201,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         user_func_refs: HashMap<u16, FuncRef>,
         user_func_arities: HashMap<u16, u16>,
     ) -> Self {
+        Self::new_with_concrete_types(
+            builder,
+            ctx_ptr,
+            ffi,
+            mir_data,
+            slot_kinds,
+            Vec::new(),
+            strings,
+            entry_block,
+            function_indices,
+            user_func_refs,
+            user_func_arities,
+        )
+    }
+
+    /// Same as `new` but also accepts a per-slot `ConcreteType` vector for
+    /// the v2 typed-array fast path. Empty vec → legacy NaN-boxed behaviour.
+    pub fn new_with_concrete_types(
+        builder: &'a mut FunctionBuilder<'b>,
+        ctx_ptr: Value,
+        ffi: FFIFuncRefs,
+        mir_data: &'a MirFunctionData,
+        slot_kinds: Vec<SlotKind>,
+        concrete_types: Vec<ConcreteType>,
+        strings: &'a [String],
+        entry_block: Block,
+        function_indices: &'a HashMap<String, u16>,
+        user_func_refs: HashMap<u16, FuncRef>,
+        user_func_arities: HashMap<u16, u16>,
+    ) -> Self {
         let local_types = mir_data.mir.local_types.clone();
         // Enrich slot_kinds with MIR-level type inference when the bytecode
         // compiler didn't provide them.
@@ -204,6 +244,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             locals: HashMap::new(),
             local_types,
             slot_kinds,
+            concrete_types,
             next_var: 0,
             mir: &mir_data.mir,
             mir_data,
