@@ -97,10 +97,7 @@ impl TypedArrayKind {
 /// `NewArray` opcode in that case.
 ///
 /// **Important**: this function is the *single source of truth* for the
-/// "do we have a typed-array opcode for this element type?" question used
-/// by `compile_expr_array` and array method dispatch. Adding a new typed
-/// element type (say `TypedArrayKind::U8`) is a one-line change here plus
-/// new opcodes — call sites pick it up automatically.
+/// "do we have a typed-array opcode for this element type?"
 #[inline]
 pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind> {
     match elem_type {
@@ -112,7 +109,7 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
     }
 }
 
-/// `SlotKind` analogue of [`should_use_typed_array`].
+/// `SlotKind` analogue.
 ///
 /// Provided as a bridge for compiler call sites that haven't yet been
 /// converted to use `ConcreteType`. The current Phase 1.2 element-type
@@ -139,47 +136,22 @@ pub fn should_use_typed_array_from_slot_kind(
     }
 }
 
-/// Map a scalar element type name (the inner `T` of `Vec<T>`/`Array<T>`)
-/// to a [`TypedArrayKind`], if a typed-array fast path exists for that name.
-///
-/// Recognises the four scalar element types backed by typed array opcodes
-/// today: `number`/`f64` → F64, `int`/`i64` → I64, `i32` → I32, `bool` → Bool.
-/// Anything else (including sized ints we don't have opcodes for, and heap
-/// types like `string`) returns `None`, which leaves the call site on the
-/// legacy NaN-boxed array path.
-///
-/// This mirrors [`should_use_typed_array`] / [`should_use_typed_array_from_slot_kind`]
-/// but operates on the textual element name carried by `VariableTypeInfo::type_name`
-/// (`"Vec<int>"` etc). It's the bridge layer used by `compile_expr_method_call`,
-/// `compile_expr_index_access`, and `compile_expr_assign` (Phase 3.1 Agent 3) to
-/// resolve a tracked array receiver to a typed-array opcode kind.
+/// Map a tracked type name like `"Vec<int>"` / `"Array<number>"` to a [`TypedArrayKind`].
 #[inline]
-pub fn typed_array_kind_for_element_name(name: &str) -> Option<TypedArrayKind> {
-    match name.trim() {
-        "number" | "f64" => Some(TypedArrayKind::F64),
-        "int" | "i64" => Some(TypedArrayKind::I64),
-        "i32" => Some(TypedArrayKind::I32),
-        "bool" => Some(TypedArrayKind::Bool),
-        _ => None,
-    }
-}
-
-/// Map a tracked type name like `"Vec<int>"` / `"Array<number>"` to a
-/// [`TypedArrayKind`], if the element type has a typed-array fast path.
-///
-/// Used by Phase 3.1 method-dispatch / index-access call sites to recognise
-/// homogeneous typed arrays whose element type was inferred from a `let` annotation
-/// or array literal. Returns `None` for any non-array shape, for element types
-/// without a typed opcode kind, and for `Option<...>` wrappers (caller can choose
-/// to peel `Option` first if needed).
-#[inline]
+#[allow(dead_code)]
 pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind> {
     let trimmed = type_name.trim();
     let inner = trimmed
         .strip_prefix("Vec<")
         .or_else(|| trimmed.strip_prefix("Array<"))?
         .strip_suffix('>')?;
-    typed_array_kind_for_element_name(inner)
+    match inner.trim() {
+        "number" | "f64" => Some(TypedArrayKind::F64),
+        "int" | "i64" => Some(TypedArrayKind::I64),
+        "i32" => Some(TypedArrayKind::I32),
+        "bool" => Some(TypedArrayKind::Bool),
+        _ => None,
+    }
 }
 
 impl super::BytecodeCompiler {
