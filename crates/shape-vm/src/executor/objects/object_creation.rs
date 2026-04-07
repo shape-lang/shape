@@ -45,7 +45,7 @@ impl VirtualMachine {
         // Pop field values from stack (in reverse order since stack is LIFO)
         let mut nb_fields: Vec<ValueWord> = Vec::with_capacity(field_count as usize);
         for _ in 0..field_count {
-            nb_fields.push(self.pop_vw()?);
+            nb_fields.push(ValueWord::from_raw_bits(self.pop_raw_u64()?));
         }
         nb_fields.reverse();
 
@@ -86,8 +86,8 @@ impl VirtualMachine {
 
             // Pop key-value pairs
             for _ in 0..count {
-                let value_nb = self.pop_vw()?;
-                let key_nb = self.pop_vw()?;
+                let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+                let key_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
                 let key_str = key_nb
                     .as_str()
                     .ok_or_else(|| VMError::TypeError {
@@ -130,7 +130,7 @@ impl VirtualMachine {
         // Pop values from stack in reverse order (LIFO), then reverse
         let mut values = Vec::with_capacity(total);
         for _ in 0..total {
-            let nb = self.pop_vw()?;
+            let nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
             let val = nb.as_number_coerce().ok_or_else(|| VMError::TypeError {
                 expected: "number",
                 got: nb.type_name(),
@@ -156,7 +156,7 @@ impl VirtualMachine {
 
             // Pop elements in reverse order
             for _ in 0..count {
-                elements.push(self.pop_vw()?);
+                elements.push(ValueWord::from_raw_bits(self.pop_raw_u64()?));
             }
             elements.reverse();
 
@@ -183,7 +183,7 @@ impl VirtualMachine {
         // Pop elements in reverse order
         let mut elements: Vec<ValueWord> = Vec::with_capacity(count);
         for _ in 0..count {
-            elements.push(self.pop_vw()?);
+            elements.push(ValueWord::from_raw_bits(self.pop_raw_u64()?));
         }
         elements.reverse();
 

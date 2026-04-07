@@ -136,7 +136,7 @@ impl VirtualMachine {
             })?
             .clone();
 
-        let value_nb = self.pop_vw()?;
+        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         self.push_vw(ValueWord::from_type_annotated_value(type_name, value_nb))?;
 
@@ -185,11 +185,11 @@ impl VirtualMachine {
             }
             _ => {
                 // Legacy stack-based calling convention
-                let arg_count_nb = self.pop_vw()?;
+                let arg_count_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
                 arg_count = arg_count_nb.as_number_coerce().ok_or_else(|| {
                     VMError::RuntimeError("Expected number for arg count".to_string())
                 })? as usize;
-                let method_name_nb = self.pop_vw()?;
+                let method_name_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
                 method_name = match method_name_nb.as_str() {
                     Some(s) => s.to_string(),
                     std::option::Option::None => {
@@ -206,12 +206,12 @@ impl VirtualMachine {
         // Pop arguments in reverse order (they were pushed in order on stack)
         let mut args_nb = Vec::with_capacity(arg_count + 1); // +1 for receiver
         for _ in 0..arg_count {
-            args_nb.push(self.pop_vw()?);
+            args_nb.push(ValueWord::from_raw_bits(self.pop_raw_u64()?));
         }
         args_nb.reverse();
 
         // Pop receiver (the object/series/array the method is called on)
-        let receiver_nb = self.pop_vw()?;
+        let receiver_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
         let receiver_nb = if receiver_nb.is_ref() {
             self.resolve_ref_value(&receiver_nb).unwrap_or(receiver_nb)
         } else {
@@ -1349,9 +1349,9 @@ impl VirtualMachine {
     // op_array_push and op_array_pop moved to array_operations.rs
 
     pub(in crate::executor) fn op_make_range(&mut self) -> Result<(), VMError> {
-        let inclusive_nb = self.pop_vw()?;
-        let end_nb = self.pop_vw()?;
-        let start_nb = self.pop_vw()?;
+        let inclusive_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let end_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let start_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         let inclusive = inclusive_nb.as_bool().unwrap_or(false);
         let start_opt = if start_nb.is_none() {

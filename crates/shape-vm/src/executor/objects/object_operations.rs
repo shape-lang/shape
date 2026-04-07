@@ -29,8 +29,8 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
-        let right_nb = self.pop_vw()?;
-        let left_nb = self.pop_vw()?;
+        let right_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let left_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         // Extract slots/heap_mask from both TypedObjects via HeapValue (no ValueWord materialization)
         let (left_slots, left_heap_mask, right_slots, right_heap_mask) =
@@ -90,8 +90,8 @@ impl VirtualMachine {
     /// Merge two objects: pops source_obj, then target_obj from stack
     /// Creates a new object with all fields from target, then all fields from source (overwriting)
     pub(in crate::executor) fn op_merge_object(&mut self) -> Result<(), VMError> {
-        let source_nb = self.pop_vw()?;
-        let target_nb = self.pop_vw()?;
+        let source_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let target_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         // TypedObject + TypedObject: schema-driven merge (HeapValue fast path)
         if let (

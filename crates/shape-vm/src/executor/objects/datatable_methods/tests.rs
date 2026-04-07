@@ -876,7 +876,7 @@ fn test_build_datatable_from_scalar_rows() {
     let rows = vec![ValueWord::from_i64(42), ValueWord::from_i64(99)];
     let result = common::build_datatable_from_objects_nb(&mut vm, &rows);
     assert!(result.is_ok(), "scalar rows should produce a table");
-    let top = vm.pop_vw().unwrap();
+    let top = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
     let dt = top.as_datatable().expect("result should be a datatable");
     assert_eq!(dt.row_count(), 2);
     assert_eq!(dt.column_names(), vec!["value"]);

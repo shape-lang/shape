@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 impl VirtualMachine {
     pub(in crate::executor) fn op_array_push(&mut self) -> Result<(), VMError> {
-        let value_nb = self.pop_vw()?;
-        let mut array_nb = self.pop_vw()?;
+        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let mut array_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         // v2 typed array fast path: mutate the typed buffer in place via the
         // stamped header. Push the (unchanged) array pointer back as the
@@ -102,7 +102,7 @@ impl VirtualMachine {
         instruction: &crate::bytecode::Instruction,
     ) -> Result<(), VMError> {
         use crate::bytecode::Operand;
-        let value_nb = self.pop_vw()?;
+        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         match instruction.operand {
             Some(Operand::Local(idx)) => {
@@ -296,7 +296,7 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_array_pop(&mut self) -> Result<(), VMError> {
-        let array_nb = self.pop_vw()?;
+        let array_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         // v2 typed array fast path: pop directly from the typed buffer.
         if let Some(view) =
@@ -319,9 +319,9 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_slice_access(&mut self) -> Result<(), VMError> {
-        let end_nb = self.pop_vw()?;
-        let start_nb = self.pop_vw()?;
-        let array_nb = self.pop_vw()?;
+        let end_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let start_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let array_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         let end = end_nb.as_number_coerce().ok_or(VMError::TypeError {
             expected: "number",

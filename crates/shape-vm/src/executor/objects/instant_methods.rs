@@ -111,7 +111,7 @@ mod tests {
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
         handle_elapsed(&mut vm, args, None).unwrap();
-        let result = vm.pop_vw().unwrap();
+        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
         let secs = result.as_f64().unwrap();
         assert!(secs >= 0.0);
         assert!(secs < 1.0); // Should be very fast
@@ -123,7 +123,7 @@ mod tests {
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
         handle_elapsed_ms(&mut vm, args, None).unwrap();
-        let result = vm.pop_vw().unwrap();
+        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
         let ms = result.as_f64().unwrap();
         assert!(ms >= 0.0);
         assert!(ms < 1000.0);
@@ -135,7 +135,7 @@ mod tests {
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
         handle_elapsed_us(&mut vm, args, None).unwrap();
-        let result = vm.pop_vw().unwrap();
+        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
         let us = result.as_f64().unwrap();
         assert!(us >= 0.0);
         assert!(us < 1_000_000.0);
@@ -147,7 +147,7 @@ mod tests {
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
         handle_elapsed_ns(&mut vm, args, None).unwrap();
-        let result = vm.pop_vw().unwrap();
+        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
         // Should be a number (i48 stored as f64)
         let ns = result.as_number_coerce().unwrap();
         assert!(ns >= 0.0);
@@ -159,7 +159,7 @@ mod tests {
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
         handle_to_string(&mut vm, args, None).unwrap();
-        let result = vm.pop_vw().unwrap();
+        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
         let s = result.as_str().unwrap();
         assert!(s.starts_with("Instant(elapsed:"));
         assert!(s.ends_with("s)"));
@@ -177,7 +177,7 @@ mod tests {
             ValueWord::from_instant(earlier),
         ];
         handle_duration_since(&mut vm, args, None).unwrap();
-        let result = vm.pop_vw().unwrap();
+        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
         let ms = result.as_f64().unwrap();
         assert!(ms >= 0.0);
     }

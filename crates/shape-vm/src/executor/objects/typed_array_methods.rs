@@ -51,12 +51,9 @@ fn callable_arity(vm: &VirtualMachine, callee: &ValueWord) -> Option<u16> {
 
 // ===== Aggregations =====
 
-pub fn handle_float_sum(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
-    let arr = extract_float_array(&args)?;
+/// Compute the sum of a float array. Shared by `handle_float_sum` and other
+/// handlers (avg, etc.) that need the sum without going through the stack.
+fn float_array_sum(arr: &Arc<AlignedTypedBuffer>) -> f64 {
     let mut sum = 0.0f64;
     let len = arr.len();
     if len >= SIMD_THRESHOLD {
@@ -77,6 +74,16 @@ pub fn handle_float_sum(
             sum += v;
         }
     }
+    sum
+}
+
+pub fn handle_float_sum(
+    vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<(), VMError> {
+    let arr = extract_float_array(&args)?;
+    let sum = float_array_sum(arr);
     vm.push_vw(ValueWord::from_f64(sum))
 }
 
@@ -98,16 +105,14 @@ pub fn handle_int_sum(
 pub fn handle_float_avg(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    let len = args[0].as_float_array().map(|a| a.len()).unwrap_or(0);
-    if len == 0 {
+    let arr = extract_float_array(&args)?;
+    if arr.is_empty() {
         return vm.push_vw(ValueWord::from_f64(f64::NAN));
     }
-    handle_float_sum(vm, args, ctx)?;
-    let sum_nb = vm.pop_vw()?;
-    let sum = sum_nb.as_f64().unwrap_or(0.0);
-    vm.push_vw(ValueWord::from_f64(sum / len as f64))
+    let sum = float_array_sum(arr);
+    vm.push_vw(ValueWord::from_f64(sum / arr.len() as f64))
 }
 
 pub fn handle_int_avg(
@@ -187,30 +192,35 @@ pub fn handle_int_max(
 
 // ===== Statistics =====
 
+/// Compute the sample variance of a float array. Returns NaN for arrays with
+/// fewer than 2 elements.
+fn float_array_variance(arr: &Arc<AlignedTypedBuffer>) -> f64 {
+    if arr.len() < 2 {
+        return f64::NAN;
+    }
+    let n = arr.len() as f64;
+    let mean: f64 = arr.iter().sum::<f64>() / n;
+    arr.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0)
+}
+
 pub fn handle_float_variance(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
     let arr = extract_float_array(&args)?;
-    if arr.len() < 2 {
-        return vm.push_vw(ValueWord::from_f64(f64::NAN));
-    }
-    let n = arr.len() as f64;
-    let mean: f64 = arr.iter().sum::<f64>() / n;
-    let variance: f64 = arr.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let variance = float_array_variance(arr);
     vm.push_vw(ValueWord::from_f64(variance))
 }
 
 pub fn handle_float_std(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
-    handle_float_variance(vm, args, ctx)?;
-    let var_nb = vm.pop_vw()?;
-    let var = var_nb.as_f64().unwrap_or(f64::NAN);
-    vm.push_vw(ValueWord::from_f64(var.sqrt()))
+    let arr = extract_float_array(&args)?;
+    let variance = float_array_variance(arr);
+    vm.push_vw(ValueWord::from_f64(variance.sqrt()))
 }
 
 // ===== Numeric transforms =====

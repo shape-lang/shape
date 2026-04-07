@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub(crate) fn handle_inner_join(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<(), VMError> {
     // Validate argument count
     if args.len() != 5 {
@@ -40,41 +40,37 @@ pub(crate) fn handle_inner_join(
         })?
         .to_generic();
 
-    // Keep closure ValueWord values for push_vw
-    let left_key_fn = &args[2];
-    let right_key_fn = &args[3];
-    let result_selector = &args[4];
+    let left_key_fn = args[2].clone();
+    let right_key_fn = args[3].clone();
+    let result_selector = args[4].clone();
 
     let mut results: Vec<ValueWord> = Vec::new();
 
     // Nested loop join
     for (l_idx, left_nb) in left.iter().enumerate() {
         // Compute left key
-        vm.push_vw(left_key_fn.clone())?;
-        vm.push_vw(left_nb.clone())?;
-        vm.push_vw(ValueWord::from_f64(l_idx as f64))?;
-        vm.push_vw(ValueWord::from_f64(2.0))?;
-        vm.op_call_value()?;
-        let left_key = vm.pop_vw()?;
+        let left_key = vm.call_value_immediate_nb(
+            &left_key_fn,
+            &[left_nb.clone(), ValueWord::from_f64(l_idx as f64)],
+            ctx.as_deref_mut(),
+        )?;
 
         for (r_idx, right_nb) in right.iter().enumerate() {
             // Compute right key
-            vm.push_vw(right_key_fn.clone())?;
-            vm.push_vw(right_nb.clone())?;
-            vm.push_vw(ValueWord::from_f64(r_idx as f64))?;
-            vm.push_vw(ValueWord::from_f64(2.0))?;
-            vm.op_call_value()?;
-            let right_key = vm.pop_vw()?;
+            let right_key = vm.call_value_immediate_nb(
+                &right_key_fn,
+                &[right_nb.clone(), ValueWord::from_f64(r_idx as f64)],
+                ctx.as_deref_mut(),
+            )?;
 
             // Check if keys match
             if left_key.vw_equals(&right_key) {
                 // Call result selector with (left, right)
-                vm.push_vw(result_selector.clone())?;
-                vm.push_vw(left_nb.clone())?;
-                vm.push_vw(right_nb.clone())?;
-                vm.push_vw(ValueWord::from_f64(2.0))?;
-                vm.op_call_value()?;
-                let result = vm.pop_vw()?;
+                let result = vm.call_value_immediate_nb(
+                    &result_selector,
+                    &[left_nb.clone(), right_nb.clone()],
+                    ctx.as_deref_mut(),
+                )?;
                 results.push(result);
             }
         }
@@ -90,7 +86,7 @@ pub(crate) fn handle_inner_join(
 pub(crate) fn handle_left_join(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<(), VMError> {
     // Validate argument count
     if args.len() != 5 {
@@ -118,43 +114,39 @@ pub(crate) fn handle_left_join(
         })?
         .to_generic();
 
-    // Keep closure ValueWord values for push_vw
-    let left_key_fn = &args[2];
-    let right_key_fn = &args[3];
-    let result_selector = &args[4];
+    let left_key_fn = args[2].clone();
+    let right_key_fn = args[3].clone();
+    let result_selector = args[4].clone();
 
     let mut results: Vec<ValueWord> = Vec::new();
 
     // Nested loop join with left outer semantics
     for (l_idx, left_nb) in left.iter().enumerate() {
         // Compute left key
-        vm.push_vw(left_key_fn.clone())?;
-        vm.push_vw(left_nb.clone())?;
-        vm.push_vw(ValueWord::from_f64(l_idx as f64))?;
-        vm.push_vw(ValueWord::from_f64(2.0))?;
-        vm.op_call_value()?;
-        let left_key = vm.pop_vw()?;
+        let left_key = vm.call_value_immediate_nb(
+            &left_key_fn,
+            &[left_nb.clone(), ValueWord::from_f64(l_idx as f64)],
+            ctx.as_deref_mut(),
+        )?;
 
         let mut found_match = false;
 
         for (r_idx, right_nb) in right.iter().enumerate() {
             // Compute right key
-            vm.push_vw(right_key_fn.clone())?;
-            vm.push_vw(right_nb.clone())?;
-            vm.push_vw(ValueWord::from_f64(r_idx as f64))?;
-            vm.push_vw(ValueWord::from_f64(2.0))?;
-            vm.op_call_value()?;
-            let right_key = vm.pop_vw()?;
+            let right_key = vm.call_value_immediate_nb(
+                &right_key_fn,
+                &[right_nb.clone(), ValueWord::from_f64(r_idx as f64)],
+                ctx.as_deref_mut(),
+            )?;
 
             // Check if keys match
             if left_key.vw_equals(&right_key) {
                 // Call result selector with (left, right)
-                vm.push_vw(result_selector.clone())?;
-                vm.push_vw(left_nb.clone())?;
-                vm.push_vw(right_nb.clone())?;
-                vm.push_vw(ValueWord::from_f64(2.0))?;
-                vm.op_call_value()?;
-                let result = vm.pop_vw()?;
+                let result = vm.call_value_immediate_nb(
+                    &result_selector,
+                    &[left_nb.clone(), right_nb.clone()],
+                    ctx.as_deref_mut(),
+                )?;
                 results.push(result);
                 found_match = true;
             }
@@ -162,12 +154,11 @@ pub(crate) fn handle_left_join(
 
         // If no match found, call result selector with (left, None)
         if !found_match {
-            vm.push_vw(result_selector.clone())?;
-            vm.push_vw(left_nb.clone())?;
-            vm.push_vw(ValueWord::none())?;
-            vm.push_vw(ValueWord::from_f64(2.0))?;
-            vm.op_call_value()?;
-            let result = vm.pop_vw()?;
+            let result = vm.call_value_immediate_nb(
+                &result_selector,
+                &[left_nb.clone(), ValueWord::none()],
+                ctx.as_deref_mut(),
+            )?;
             results.push(result);
         }
     }
@@ -182,7 +173,7 @@ pub(crate) fn handle_left_join(
 pub(crate) fn handle_cross_join(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<(), VMError> {
     // Validate argument count
     if args.len() != 3 {
@@ -209,8 +200,7 @@ pub(crate) fn handle_cross_join(
         })?
         .to_generic();
 
-    // Keep closure ValueWord value for push_vw
-    let result_selector = &args[2];
+    let result_selector = args[2].clone();
 
     let mut results: Vec<ValueWord> = Vec::new();
 
@@ -218,12 +208,11 @@ pub(crate) fn handle_cross_join(
     for left_nb in left.iter() {
         for right_nb in right.iter() {
             // Call result selector with (left, right)
-            vm.push_vw(result_selector.clone())?;
-            vm.push_vw(left_nb.clone())?;
-            vm.push_vw(right_nb.clone())?;
-            vm.push_vw(ValueWord::from_f64(2.0))?;
-            vm.op_call_value()?;
-            let result = vm.pop_vw()?;
+            let result = vm.call_value_immediate_nb(
+                &result_selector,
+                &[left_nb.clone(), right_nb.clone()],
+                ctx.as_deref_mut(),
+            )?;
             results.push(result);
         }
     }

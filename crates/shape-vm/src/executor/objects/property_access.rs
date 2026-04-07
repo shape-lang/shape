@@ -325,8 +325,8 @@ impl VirtualMachine {
         &mut self,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        let key_nb = self.pop_vw()?;
-        let obj_nb = self.pop_vw()?;
+        let key_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let obj_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         // v2 typed array fast path. The compiler emits typed array opcodes
         // for `Array<number>` / `Array<int>` / `Array<i32>` / `Array<bool>`
@@ -1064,9 +1064,9 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_set_prop(&mut self) -> Result<(), VMError> {
-        let value_nb = self.pop_vw()?;
-        let key_nb = self.pop_vw()?;
-        let mut object_nb = self.pop_vw()?;
+        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let key_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let mut object_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         Self::set_array_index_on_object(&mut object_nb, &key_nb, value_nb)?;
         self.push_vw(object_nb)
@@ -1076,8 +1076,8 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let value_nb = self.pop_vw()?;
-        let key_nb = self.pop_vw()?;
+        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let key_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
         let local_idx = match instruction.operand {
             Some(Operand::Local(idx)) => idx as usize,
             _ => return Err(VMError::InvalidOperand),
@@ -1102,8 +1102,8 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let value_nb = self.pop_vw()?;
-        let key_nb = self.pop_vw()?;
+        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let key_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
         let binding_idx = match instruction.operand {
             Some(Operand::ModuleBinding(idx)) => idx as usize,
             _ => return Err(VMError::InvalidOperand),
@@ -1122,7 +1122,7 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_length(&mut self) -> Result<(), VMError> {
-        let nb = self.pop_vw()?;
+        let nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
         // v2 typed array fast path: read len directly from the header.
         if let Some(view) =
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&nb)

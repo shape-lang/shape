@@ -207,7 +207,7 @@ pub fn handle_atomic_compare_exchange(
 pub fn handle_lazy_get(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<(), VMError> {
     let receiver = &args[0];
     let heap = receiver
@@ -237,10 +237,7 @@ pub fn handle_lazy_get(
             };
 
             // Call the initializer closure with 0 args
-            vm.push_vw(initializer)?;
-            vm.push_vw(ValueWord::from_i64(0))?; // arg count
-            vm.op_call_value()?;
-            let result = vm.pop_vw()?;
+            let result = vm.call_value_immediate_nb(&initializer, &[], ctx.as_deref_mut())?;
 
             // Store the result
             let mut val_guard = data
