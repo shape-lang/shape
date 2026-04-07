@@ -6,7 +6,7 @@
 
 use crate::bytecode::{Instruction, OpCode};
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::VMError;
 
 impl VirtualMachine {
     /// Execute a v2 typed field opcode (FieldLoad/FieldStore/NewTypedStruct).
@@ -49,12 +49,11 @@ impl VirtualMachine {
                 let offset = instruction.operand_field_offset() as usize;
                 let struct_bits = self.pop_raw_u64()?;
                 let struct_ptr = struct_bits as *const u8;
-                // Load a raw pointer-sized value — treat as NaN-boxed bits
+                // Load a raw pointer-sized value and push as raw bits.
+                // Downstream consumers handle the bit pattern (NaN-boxed
+                // ValueWord or raw v2 pointer, depending on field type).
                 let val: u64 = unsafe { *(struct_ptr.add(offset) as *const u64) };
-                // Safety: the stored bits are a valid NaN-boxed ValueWord
-                // (written by FieldStorePtr or struct initialization)
-                let vw = unsafe { ValueWord::clone_from_bits(val) };
-                self.push_vw(vw)
+                self.push_raw_u64(val)
             }
             OpCode::FieldStoreF64 => {
                 let offset = instruction.operand_field_offset() as usize;
