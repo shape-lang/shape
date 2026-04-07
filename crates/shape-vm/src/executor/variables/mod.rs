@@ -495,13 +495,19 @@ impl VirtualMachine {
     ///     case — numbers, ints, bools) this is a pure register-width copy
     ///     with no Arc refcount bump.
     ///
-    /// For heap-tagged values the `clone_from_bits` path still does the
-    /// Arc::increment_strong_count, but trusted slots are almost never heap.
+    /// **Wave C Phase C1**: When the FrameDescriptor proves the slot is a
+    /// scalar (Float64/Int64/Bool), the handler skips ValueWord wrapping
+    /// entirely and uses `push_raw_*` directly. This is the foundation that
+    /// enables downstream typed handlers (e.g. `exec_typed_arithmetic`) to
+    /// avoid `pop_vw`/`pop_vw().as_*_unchecked()` patterns. For Heap-typed
+    /// slots the legacy `clone_from_bits` + `push_vw` path is preserved
+    /// (Arc refcount bump is required).
     #[inline(always)]
     pub(in crate::executor) fn op_load_local_trusted(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
+        use crate::type_tracking::SlotKind;
         if let Some(Operand::Local(idx)) = instruction.operand {
             let bp = self.current_locals_base();
             let slot = bp + idx as usize;
@@ -513,11 +519,36 @@ impl VirtualMachine {
             );
             // SAFETY: Compiler proved the slot has a known type. Skip SharedCell
             // check and read the raw bits directly.
-            let nb = unsafe {
-                let bits = *(self.stack.as_ptr().add(slot) as *const u64);
-                ValueWord::clone_from_bits(bits)
-            };
-            self.push_vw(nb)?;
+            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
+
+            // Wave C Phase C1: smart raw push when FrameDescriptor proves the
+            // slot kind is a scalar. Avoids ValueWord wrapping for the hot path.
+            let kind = self
+                .current_frame_descriptor()
+                .map(|fd| fd.slot(idx as usize))
+                .unwrap_or(SlotKind::Unknown);
+            match kind {
+                SlotKind::Float64 => {
+                    self.push_raw_f64(f64::from_bits(bits))?;
+                }
+                SlotKind::Int64 | SlotKind::IntSize => {
+                    // The slot holds an i48-tagged NaN-boxed integer.
+                    // pop_raw_i64 expects the same encoding, so push_raw_u64
+                    // (which writes raw bits without canonicalization) is the
+                    // correct symmetric op.
+                    self.push_raw_u64(bits)?;
+                }
+                SlotKind::Bool => {
+                    // The slot holds a NaN-boxed bool. push_raw_u64 preserves
+                    // the encoding so downstream pop_raw_bool can decode.
+                    self.push_raw_u64(bits)?;
+                }
+                _ => {
+                    // Heap or unknown slot — preserve legacy refcount-aware path.
+                    let nb = unsafe { ValueWord::clone_from_bits(bits) };
+                    self.push_vw(nb)?;
+                }
+            }
         } else {
             return Err(VMError::InvalidOperand);
         }

@@ -76,7 +76,7 @@ unsafe fn value_word_to_raw_u64(vw: &ValueWord) -> u64 {
 pub fn op_typed_array_alloc_f64(vm: &mut VirtualMachine, capacity: u32) -> Result<(), VMError> {
     let ptr = typed_array_alloc(ElemTag::F64, capacity);
     let bits = ptr_to_u64(ptr);
-    unsafe { vm.push_vw(value_word_from_raw_u64(bits)) }
+    vm.push_raw_u64(bits)
 }
 
 /// Handle TypedArrayAllocI64: push a new i64 typed array pointer onto the stack.
@@ -85,7 +85,7 @@ pub fn op_typed_array_alloc_f64(vm: &mut VirtualMachine, capacity: u32) -> Resul
 pub fn op_typed_array_alloc_i64(vm: &mut VirtualMachine, capacity: u32) -> Result<(), VMError> {
     let ptr = typed_array_alloc(ElemTag::I64, capacity);
     let bits = ptr_to_u64(ptr);
-    unsafe { vm.push_vw(value_word_from_raw_u64(bits)) }
+    vm.push_raw_u64(bits)
 }
 
 /// Handle TypedArrayAllocI32: push a new i32 typed array pointer onto the stack.
@@ -94,19 +94,16 @@ pub fn op_typed_array_alloc_i64(vm: &mut VirtualMachine, capacity: u32) -> Resul
 pub fn op_typed_array_alloc_i32(vm: &mut VirtualMachine, capacity: u32) -> Result<(), VMError> {
     let ptr = typed_array_alloc(ElemTag::I32, capacity);
     let bits = ptr_to_u64(ptr);
-    unsafe { vm.push_vw(value_word_from_raw_u64(bits)) }
+    vm.push_raw_u64(bits)
 }
 
 /// Handle TypedArrayFree: pop array pointer and deallocate.
 ///
 /// Stack: [..., array_ptr:u64] -> [...]
 pub fn op_typed_array_free(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let vw = vm.pop_vw()?;
-    let bits = unsafe { value_word_to_raw_u64(&vw) };
+    let bits = vm.pop_raw_u64()?;
     let ptr = u64_to_ptr(bits);
     unsafe { typed_array_free(ptr) };
-    // Prevent ValueWord from running Drop on whatever bits we stored
-    std::mem::forget(vw);
     Ok(())
 }
 
@@ -118,12 +115,8 @@ pub fn op_typed_array_free(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:f64]
 pub fn op_typed_array_get_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let index = index_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArrayGetF64: index is not an integer".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let index = vm.pop_raw_i64()?;
+    let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
     if index < 0 || index as u32 >= len {
@@ -134,20 +127,15 @@ pub fn op_typed_array_get_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
     }
     let val = unsafe { typed_array_get_f64(arr_ptr, index as u32) };
     // Prevent Drop on the raw-bits ValueWords
-    std::mem::forget(arr_vw);
-    vm.push_vw(ValueWord::from_f64(val))
+    vm.push_raw_f64(val)
 }
 
 /// Handle TypedArrayGetI64: pop index (i64), pop array_ptr (u64), push i64.
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:i64]
 pub fn op_typed_array_get_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let index = index_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArrayGetI64: index is not an integer".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let index = vm.pop_raw_i64()?;
+    let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
     if index < 0 || index as u32 >= len {
@@ -157,20 +145,15 @@ pub fn op_typed_array_get_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
         )));
     }
     let val = unsafe { typed_array_get_i64(arr_ptr, index as u32) };
-    std::mem::forget(arr_vw);
-    vm.push_vw(ValueWord::from_i64(val))
+    vm.push_raw_i64(val)
 }
 
 /// Handle TypedArrayGetI32: pop index (i64), pop array_ptr (u64), push i32 (as i64).
 ///
 /// Stack: [..., array_ptr:u64, index:i64] -> [..., value:i64]
 pub fn op_typed_array_get_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let index_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let index = index_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArrayGetI32: index is not an integer".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let index = vm.pop_raw_i64()?;
+    let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
     if index < 0 || index as u32 >= len {
@@ -180,9 +163,8 @@ pub fn op_typed_array_get_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
         )));
     }
     let val = unsafe { typed_array_get_i32(arr_ptr, index as u32) };
-    std::mem::forget(arr_vw);
     // i32 is widened to i64 on the stack
-    vm.push_vw(ValueWord::from_i64(val as i64))
+    vm.push_raw_i64(val as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -193,16 +175,9 @@ pub fn op_typed_array_get_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64, value:f64] -> [...]
 pub fn op_typed_array_set_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val_vw = vm.pop_vw()?;
-    let index_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let val = val_vw.as_f64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArraySetF64: value is not a number".into(),
-    ))?;
-    let index = index_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArraySetF64: index is not an integer".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let val = vm.pop_raw_f64()?;
+    let index = vm.pop_raw_i64()?;
+    let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
     if index < 0 || index as u32 >= len {
@@ -212,7 +187,6 @@ pub fn op_typed_array_set_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
         )));
     }
     unsafe { typed_array_set_f64(arr_ptr, index as u32, val) };
-    std::mem::forget(arr_vw);
     Ok(())
 }
 
@@ -220,16 +194,9 @@ pub fn op_typed_array_set_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64, value:i64] -> [...]
 pub fn op_typed_array_set_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val_vw = vm.pop_vw()?;
-    let index_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let val = val_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArraySetI64: value is not an integer".into(),
-    ))?;
-    let index = index_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArraySetI64: index is not an integer".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let val = vm.pop_raw_i64()?;
+    let index = vm.pop_raw_i64()?;
+    let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
     if index < 0 || index as u32 >= len {
@@ -239,7 +206,6 @@ pub fn op_typed_array_set_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
         )));
     }
     unsafe { typed_array_set_i64(arr_ptr, index as u32, val) };
-    std::mem::forget(arr_vw);
     Ok(())
 }
 
@@ -247,16 +213,9 @@ pub fn op_typed_array_set_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, index:i64, value:i64] -> [...]
 pub fn op_typed_array_set_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val_vw = vm.pop_vw()?;
-    let index_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let val = val_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArraySetI32: value is not an integer".into(),
-    ))?;
-    let index = index_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArraySetI32: index is not an integer".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let val = vm.pop_raw_i64()? as i32;
+    let index = vm.pop_raw_i64()?;
+    let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
     if index < 0 || index as u32 >= len {
@@ -265,8 +224,7 @@ pub fn op_typed_array_set_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
             index, len
         )));
     }
-    unsafe { typed_array_set_i32(arr_ptr, index as u32, val as i32) };
-    std::mem::forget(arr_vw);
+    unsafe { typed_array_set_i32(arr_ptr, index as u32, val) };
     Ok(())
 }
 
@@ -280,51 +238,36 @@ pub fn op_typed_array_set_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64, value:f64] -> [..., array_ptr:u64]
 pub fn op_typed_array_push_f64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let val = val_vw.as_f64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArrayPushF64: value is not a number".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let val = vm.pop_raw_f64()?;
+    let arr_bits = vm.pop_raw_u64()?;
     let mut arr_ptr = u64_to_ptr(arr_bits);
     unsafe { typed_array_push_f64(&mut arr_ptr, val) };
-    std::mem::forget(arr_vw);
     let new_bits = ptr_to_u64(arr_ptr);
-    unsafe { vm.push_vw(value_word_from_raw_u64(new_bits)) }
+    vm.push_raw_u64(new_bits)
 }
 
 /// Handle TypedArrayPushI64: pop value (i64), pop array_ptr (u64), push updated array_ptr.
 ///
 /// Stack: [..., array_ptr:u64, value:i64] -> [..., array_ptr:u64]
 pub fn op_typed_array_push_i64(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let val = val_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArrayPushI64: value is not an integer".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let val = vm.pop_raw_i64()?;
+    let arr_bits = vm.pop_raw_u64()?;
     let mut arr_ptr = u64_to_ptr(arr_bits);
     unsafe { typed_array_push_i64(&mut arr_ptr, val) };
-    std::mem::forget(arr_vw);
     let new_bits = ptr_to_u64(arr_ptr);
-    unsafe { vm.push_vw(value_word_from_raw_u64(new_bits)) }
+    vm.push_raw_u64(new_bits)
 }
 
 /// Handle TypedArrayPushI32: pop value (i64->i32), pop array_ptr (u64), push updated array_ptr.
 ///
 /// Stack: [..., array_ptr:u64, value:i64] -> [..., array_ptr:u64]
 pub fn op_typed_array_push_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let val_vw = vm.pop_vw()?;
-    let arr_vw = vm.pop_vw()?;
-    let val = val_vw.as_i64().ok_or_else(|| VMError::RuntimeError(
-        "TypedArrayPushI32: value is not an integer".into(),
-    ))?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let val = vm.pop_raw_i64()? as i32;
+    let arr_bits = vm.pop_raw_u64()?;
     let mut arr_ptr = u64_to_ptr(arr_bits);
-    unsafe { typed_array_push_i32(&mut arr_ptr, val as i32) };
-    std::mem::forget(arr_vw);
+    unsafe { typed_array_push_i32(&mut arr_ptr, val) };
     let new_bits = ptr_to_u64(arr_ptr);
-    unsafe { vm.push_vw(value_word_from_raw_u64(new_bits)) }
+    vm.push_raw_u64(new_bits)
 }
 
 // ---------------------------------------------------------------------------
@@ -335,12 +278,10 @@ pub fn op_typed_array_push_i32(vm: &mut VirtualMachine) -> Result<(), VMError> {
 ///
 /// Stack: [..., array_ptr:u64] -> [..., len:i64]
 pub fn op_typed_array_len(vm: &mut VirtualMachine) -> Result<(), VMError> {
-    let arr_vw = vm.pop_vw()?;
-    let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
+    let arr_bits = vm.pop_raw_u64()?;
     let arr_ptr = u64_to_ptr(arr_bits);
     let len = unsafe { typed_array_len(arr_ptr) };
-    std::mem::forget(arr_vw);
-    vm.push_vw(ValueWord::from_i64(len as i64))
+    vm.push_raw_i64(len as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +313,6 @@ mod tests {
         assert_eq!(unsafe { typed_array_len(ptr) }, 0);
         // Clean up
         unsafe { typed_array_free(ptr) };
-        std::mem::forget(arr_vw);
     }
 
     #[test]
@@ -411,7 +351,6 @@ mod tests {
         // We need the pointer for both len and get, so let's peek
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Push arr back for len
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
@@ -476,7 +415,6 @@ mod tests {
 
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Len
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
@@ -522,7 +460,6 @@ mod tests {
 
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Len
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
@@ -560,7 +497,6 @@ mod tests {
 
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Set index 0 to 42.0
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
@@ -602,7 +538,6 @@ mod tests {
 
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Set index 0
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
@@ -642,7 +577,6 @@ mod tests {
 
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Set index 0 to 777
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
@@ -690,7 +624,6 @@ mod tests {
         // Check length
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
         op_typed_array_len(&mut vm).unwrap();
@@ -729,7 +662,6 @@ mod tests {
 
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Try to set index 1 (len is 1, so out of bounds)
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
@@ -761,7 +693,6 @@ mod tests {
         // Stash the pointer
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Check len == 4
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
@@ -803,7 +734,6 @@ mod tests {
 
         let arr_vw = vm.pop_vw().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
-        std::mem::forget(arr_vw);
 
         // Set index 1: 20 -> -200
         unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };

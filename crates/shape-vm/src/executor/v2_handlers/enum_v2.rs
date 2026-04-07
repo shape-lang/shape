@@ -22,9 +22,9 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         match instruction.opcode {
             OpCode::EnumTagLoad => {
-                // Pop the typed enum heap pointer.
-                let enum_bits = self.pop_vw()?;
-                let enum_ptr = enum_bits.raw_bits() as *const u8;
+                // Pop the typed enum heap pointer (raw u64 bits).
+                let enum_bits = self.pop_raw_u64()?;
+                let enum_ptr = enum_bits as *const u8;
                 if enum_ptr.is_null() {
                     return Err(VMError::RuntimeError(
                         "EnumTagLoad: null typed enum pointer".into(),
@@ -40,8 +40,8 @@ impl VirtualMachine {
             OpCode::EnumPayloadField => {
                 // Operand encodes the byte offset within the payload area.
                 let payload_offset = instruction.operand_field_offset() as usize;
-                let enum_bits = self.pop_vw()?;
-                let enum_ptr = enum_bits.raw_bits() as *const u8;
+                let enum_bits = self.pop_raw_u64()?;
+                let enum_ptr = enum_bits as *const u8;
                 if enum_ptr.is_null() {
                     return Err(VMError::RuntimeError(
                         "EnumPayloadField: null typed enum pointer".into(),
@@ -51,17 +51,10 @@ impl VirtualMachine {
                 // tag check that established which variant is live, and the
                 // payload offset was looked up from that variant's layout.
                 let field_ptr = unsafe { enum_ptr.add(ENUM_PAYLOAD_OFFSET + payload_offset) };
-                // Read 8 bytes — the widest payload slot. Narrower fields will
-                // be widened by Phase 4 typed-load variants if needed.
+                // Read 8 bytes — the widest payload slot. Push as raw u64 bits;
+                // downstream typed opcodes will reinterpret as needed.
                 let raw: u64 = unsafe { std::ptr::read_unaligned(field_ptr as *const u64) };
-                // Reinterpret as a NaN-boxed ValueWord. The bits were either
-                // written by an Enum*Store opcode or by typed enum allocation,
-                // both of which produce valid ValueWord encodings.
-                // Safety: the originating writer used a ValueWord-compatible bit
-                // pattern (or a raw scalar that the compiler will interpret
-                // typed-side via subsequent opcodes).
-                let vw = unsafe { ValueWord::clone_from_bits(raw) };
-                self.push_vw(vw)
+                self.push_raw_u64(raw)
             }
             _ => Err(VMError::RuntimeError(format!(
                 "unhandled v2 enum opcode: {:?}",
