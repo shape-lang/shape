@@ -265,8 +265,6 @@ mod tests {
             local_types: vec![],
             span: shape_ast::Span::default(),
             field_name_table: Default::default(),
-            slot_concrete_types: Default::default(),
-            return_concrete_type: None,
         }
     }
 

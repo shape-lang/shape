@@ -334,13 +334,14 @@ impl JITCompiler {
                     .as_ref()
                     .map(|fd| fd.slots.clone())
                     .unwrap_or_default();
-                // v2: pull per-slot ConcreteTypes for this function from the
-                // bytecode compiler's parallel side-table.
-                let concrete_types = program
-                    .function_local_concrete_types
-                    .get(func_idx)
-                    .cloned()
-                    .unwrap_or_default();
+                // v2: per-slot ConcreteTypes for the v2 typed-array fast path.
+                // The bytecode-program-level side-table is in flux upstream
+                // (other Phase 3.1 agents are refactoring it), so we pass an
+                // empty vec for now — MirToIR's v2 fast path falls through to
+                // the legacy NaN-boxed path on `None`. Wire-up will happen
+                // once Agent 1 lands the BytecodeProgram concrete-types vec.
+                let concrete_types: Vec<shape_value::v2::ConcreteType> = Vec::new();
+                let _ = func_idx; // silence dead-binding warning until wire-up.
                 // Build function name → index map for Call terminator resolution.
                 // Use the original program's functions (sub_program has empty functions list).
                 let function_indices: std::collections::HashMap<String, u16> = program

@@ -31,7 +31,7 @@ use shape_vm::mir::types::{Operand, Place, SlotId};
 use shape_vm::type_tracking::SlotKind;
 
 use super::MirToIR;
-use super::types::{elem_slot_kind_for_concrete, is_v2_typed_array_slot};
+use super::types::is_v2_typed_array_slot;
 
 // ── TypedArrayHeader field offsets ───────────────────────────────────────────
 
@@ -91,6 +91,7 @@ fn emit_default(builder: &mut FunctionBuilder, kind: SlotKind) -> Value {
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Look up the `ConcreteType` (if any) the bytecode compiler recorded for
     /// a local slot.
+    #[allow(dead_code)]
     pub(crate) fn concrete_type_for_slot(&self, slot: SlotId) -> Option<&ConcreteType> {
         let ct = self.concrete_types.get(slot.0 as usize)?;
         if matches!(ct, ConcreteType::Void) {
@@ -104,18 +105,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// element type is a scalar primitive, return the matching element
     /// `SlotKind`. Returns `None` for non-array slots, arrays of non-scalar
     /// elements, or unresolved types — caller falls back to legacy path.
+    ///
+    /// Note: today only the per-MirToIR `concrete_types` vector is consulted.
+    /// The bytecode compiler / MIR-level slot concrete types are still in
+    /// flux upstream (other Phase 3.1 agents are refactoring them), so the
+    /// MirFunction-side fallback is intentionally not used here.
     pub(crate) fn v2_typed_array_elem_kind(&self, place: &Place) -> Option<SlotKind> {
         let slot = match place {
             Place::Local(s) => *s,
             _ => return None,
         };
-        if let Some(kind) = is_v2_typed_array_slot(&self.concrete_types, slot.0) {
-            return Some(kind);
-        }
-        if let Some(ConcreteType::Array(elem)) = self.mir.concrete_type_for(slot) {
-            return elem_slot_kind_for_concrete(elem);
-        }
-        None
+        is_v2_typed_array_slot(&self.concrete_types, slot.0)
     }
 
     /// Return the FFI `FuncRef` for `jit_v2_array_new_<elem>`.
