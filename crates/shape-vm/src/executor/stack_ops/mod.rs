@@ -56,13 +56,30 @@ impl VirtualMachine {
                 .get(idx as usize)
                 .ok_or(VMError::InvalidOperand)?;
 
-            // For simple types, construct ValueWord directly to avoid ValueWord intermediary
+            // Stage 2.2: For typed scalar constants (Number/Int/Bool), push the
+            // raw bits directly via push_raw_* — skips the ValueWord wrapper
+            // construction so downstream typed handlers (e.g. exec_typed_arithmetic)
+            // can pop_raw_* without unwrapping. Encoding is identical to what
+            // ValueWord::from_*() would produce, so legacy pop_vw consumers
+            // (which transmute the raw bits back into a ValueWord) keep working.
             match constant {
                 crate::bytecode::Constant::Number(n) => {
-                    return self.push_vw(ValueWord::from_f64(*n));
+                    return self.push_raw_f64(*n);
                 }
-                crate::bytecode::Constant::Int(i) => return self.push_vw(ValueWord::from_i64(*i)),
+                crate::bytecode::Constant::Int(i) => {
+                    // In-range i48: push raw tagged bits. Out-of-range falls
+                    // back to ValueWord::from_i64 which heap-boxes as BigInt.
+                    if *i >= shape_value::tags::I48_MIN && *i <= shape_value::tags::I48_MAX {
+                        return self.push_raw_i64(*i);
+                    }
+                    return self.push_vw(ValueWord::from_i64(*i));
+                }
                 crate::bytecode::Constant::UInt(u) => {
+                    // In-range i48 (u <= I48_MAX): push raw tagged bits.
+                    // Otherwise fall back to ValueWord constructors.
+                    if *u <= shape_value::tags::I48_MAX as u64 {
+                        return self.push_raw_i64(*u as i64);
+                    }
                     return if *u <= i64::MAX as u64 {
                         self.push_vw(ValueWord::from_i64(*u as i64))
                     } else {
@@ -70,7 +87,7 @@ impl VirtualMachine {
                     };
                 }
                 crate::bytecode::Constant::Bool(b) => {
-                    return self.push_vw(ValueWord::from_bool(*b));
+                    return self.push_raw_bool(*b);
                 }
                 crate::bytecode::Constant::Null => return self.push_vw(ValueWord::none()),
                 crate::bytecode::Constant::Unit => return self.push_vw(ValueWord::unit()),
