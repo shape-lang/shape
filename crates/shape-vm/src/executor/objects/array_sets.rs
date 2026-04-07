@@ -8,10 +8,10 @@ use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
 
 pub(crate) fn handle_union(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args[0] = receiver (first array)
     // args[1] = other array
     if args.len() != 2 {
@@ -37,15 +37,14 @@ pub(crate) fn handle_union(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 pub(crate) fn handle_intersect(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args[0] = receiver (first array)
     // args[1] = other array
     if args.len() != 2 {
@@ -72,15 +71,14 @@ pub(crate) fn handle_intersect(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 pub(crate) fn handle_except(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args[0] = receiver (first array)
     // args[1] = other array
     if args.len() != 2 {
@@ -107,15 +105,14 @@ pub(crate) fn handle_except(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 pub(crate) fn handle_unique(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args[0] = receiver (array)
     if args.len() != 1 {
         return Err(VMError::RuntimeError(
@@ -136,15 +133,14 @@ pub(crate) fn handle_unique(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 pub(crate) fn handle_distinct(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // distinct is an alias for unique
     handle_unique(vm, args, ctx)
 }
@@ -153,7 +149,7 @@ pub(crate) fn handle_distinct_by(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args[0] = receiver (array)
     // args[1] = key function (closure)
     if args.len() != 2 {
@@ -174,6 +170,5 @@ pub(crate) fn handle_distinct_by(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }

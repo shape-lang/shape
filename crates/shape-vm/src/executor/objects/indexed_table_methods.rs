@@ -20,10 +20,10 @@ use std::sync::Arc;
 
 /// `indexed.between(start, end)` — filter rows where index is in [start, end].
 pub(crate) fn handle_between(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let (schema_id, table, index_col) = extract_indexed_table_nb(&args[0])?;
     let start_nb = args.get(1).ok_or_else(|| {
         VMError::RuntimeError("between() requires start value as first argument".to_string())
@@ -38,7 +38,7 @@ pub(crate) fn handle_between(
     let filtered = filter_record_batch(table.inner(), &mask)
         .map_err(|e| VMError::RuntimeError(format!("between() filter failed: {}", e)))?;
 
-    vm.push_vw(ValueWord::from_indexed_table(
+    Ok(ValueWord::from_indexed_table(
         schema_id,
         Arc::new(DataTable::new(filtered)),
         index_col,
@@ -101,7 +101,7 @@ pub(crate) fn handle_resample(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let (schema_id, table, index_col) = extract_indexed_table_nb(&args[0])?;
 
     // Parse interval (bucket size as number)
@@ -163,7 +163,7 @@ pub(crate) fn handle_resample(
     let index_values = column_to_f64(col.as_ref())?;
 
     if index_values.is_empty() {
-        return vm.push_vw(ValueWord::from_indexed_table(
+        return Ok(ValueWord::from_indexed_table(
             schema_id,
             table.clone(),
             index_col,
@@ -249,7 +249,7 @@ pub(crate) fn handle_resample(
         .map_err(|e| VMError::RuntimeError(format!("resample() result build failed: {}", e)))?;
 
     // Result is an IndexedTable with index column at position 0
-    vm.push_vw(ValueWord::from_indexed_table(
+    Ok(ValueWord::from_indexed_table(
         schema_id,
         Arc::new(DataTable::new(batch)),
         0,
@@ -365,8 +365,7 @@ mod tests {
         let mut vm = make_vm();
         let indexed = sample_indexed_table();
         let args = vec![indexed, ValueWord::from_f64(2.0), ValueWord::from_f64(4.0)];
-        handle_between(&mut vm, to_nb_args(args), None).unwrap();
-        let result = vm.pop().unwrap();
+        let result = handle_between(&mut vm, to_nb_args(args), None).unwrap();
         let (_, table, index_col) = result.as_indexed_table().expect("Expected IndexedTable");
         assert_eq!(table.row_count(), 3);
         assert_eq!(index_col, 0);
@@ -385,8 +384,7 @@ mod tests {
             ValueWord::from_f64(100.0),
             ValueWord::from_f64(200.0),
         ];
-        handle_between(&mut vm, to_nb_args(args), None).unwrap();
-        let result = vm.pop().unwrap();
+        let result = handle_between(&mut vm, to_nb_args(args), None).unwrap();
         let (_, table, _) = result.as_indexed_table().expect("Expected IndexedTable");
         assert_eq!(table.row_count(), 0);
     }
@@ -407,8 +405,7 @@ mod tests {
             ),
         ]);
         let args = vec![indexed, ValueWord::from_f64(3.0), spec];
-        handle_resample(&mut vm, to_nb_args(args), None).unwrap();
-        let result = vm.pop().unwrap();
+        let result = handle_resample(&mut vm, to_nb_args(args), None).unwrap();
         let (_, table, index_col) = result.as_indexed_table().expect("Expected IndexedTable");
         assert_eq!(index_col, 0);
         // Three buckets: [0,3) has ts 1,2; [3,6) has ts 3,4,5; [6,9) has ts 6

@@ -305,8 +305,8 @@ mod tests {
             _vm: &mut VirtualMachine,
             _args: Vec<ValueWord>,
             _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-        ) -> Result<(), shape_value::VMError> {
-            Ok(())
+        ) -> Result<ValueWord, shape_value::VMError> {
+            Ok(ValueWord::none())
         }
         let ptr = dummy_handler as MethodFn as usize;
         assert_ne!(ptr, 0);

@@ -78,20 +78,20 @@ fn float_array_sum(arr: &Arc<AlignedTypedBuffer>) -> f64 {
 }
 
 pub fn handle_float_sum(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let sum = float_array_sum(arr);
-    vm.push_vw(ValueWord::from_f64(sum))
+    Ok(ValueWord::from_f64(sum))
 }
 
 pub fn handle_int_sum(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
     let mut sum = 0i64;
     for &v in arr.iter() {
@@ -99,43 +99,43 @@ pub fn handle_int_sum(
             .checked_add(v)
             .ok_or_else(|| VMError::RuntimeError("Integer overflow in Vec<int>.sum()".into()))?;
     }
-    vm.push_vw(ValueWord::from_i64(sum))
+    Ok(ValueWord::from_i64(sum))
 }
 
 pub fn handle_float_avg(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     if arr.is_empty() {
-        return vm.push_vw(ValueWord::from_f64(f64::NAN));
+        return Ok(ValueWord::from_f64(f64::NAN));
     }
     let sum = float_array_sum(arr);
-    vm.push_vw(ValueWord::from_f64(sum / arr.len() as f64))
+    Ok(ValueWord::from_f64(sum / arr.len() as f64))
 }
 
 pub fn handle_int_avg(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
     if arr.is_empty() {
-        return vm.push_vw(ValueWord::from_f64(f64::NAN));
+        return Ok(ValueWord::from_f64(f64::NAN));
     }
     let sum: f64 = arr.iter().map(|&v| v as f64).sum();
-    vm.push_vw(ValueWord::from_f64(sum / arr.len() as f64))
+    Ok(ValueWord::from_f64(sum / arr.len() as f64))
 }
 
 pub fn handle_float_min(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     if arr.is_empty() {
-        return vm.push_vw(ValueWord::from_f64(f64::NAN));
+        return Ok(ValueWord::from_f64(f64::NAN));
     }
     let mut min = f64::INFINITY;
     for &v in arr.iter() {
@@ -143,30 +143,30 @@ pub fn handle_float_min(
             min = v;
         }
     }
-    vm.push_vw(ValueWord::from_f64(min))
+    Ok(ValueWord::from_f64(min))
 }
 
 pub fn handle_int_min(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
     if arr.is_empty() {
-        return vm.push_vw(ValueWord::none());
+        return Ok(ValueWord::none());
     }
     let min = *arr.iter().min().unwrap();
-    vm.push_vw(ValueWord::from_i64(min))
+    Ok(ValueWord::from_i64(min))
 }
 
 pub fn handle_float_max(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     if arr.is_empty() {
-        return vm.push_vw(ValueWord::from_f64(f64::NAN));
+        return Ok(ValueWord::from_f64(f64::NAN));
     }
     let mut max = f64::NEG_INFINITY;
     for &v in arr.iter() {
@@ -174,20 +174,20 @@ pub fn handle_float_max(
             max = v;
         }
     }
-    vm.push_vw(ValueWord::from_f64(max))
+    Ok(ValueWord::from_f64(max))
 }
 
 pub fn handle_int_max(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
     if arr.is_empty() {
-        return vm.push_vw(ValueWord::none());
+        return Ok(ValueWord::none());
     }
     let max = *arr.iter().max().unwrap();
-    vm.push_vw(ValueWord::from_i64(max))
+    Ok(ValueWord::from_i64(max))
 }
 
 // ===== Statistics =====
@@ -204,32 +204,32 @@ fn float_array_variance(arr: &Arc<AlignedTypedBuffer>) -> f64 {
 }
 
 pub fn handle_float_variance(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let variance = float_array_variance(arr);
-    vm.push_vw(ValueWord::from_f64(variance))
+    Ok(ValueWord::from_f64(variance))
 }
 
 pub fn handle_float_std(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let variance = float_array_variance(arr);
-    vm.push_vw(ValueWord::from_f64(variance.sqrt()))
+    Ok(ValueWord::from_f64(variance.sqrt()))
 }
 
 // ===== Numeric transforms =====
 
 pub fn handle_float_dot(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let a = extract_float_array(&args)?;
     let b = args
         .get(1)
@@ -263,42 +263,42 @@ pub fn handle_float_dot(
             sum += a[i] * b[i];
         }
     }
-    vm.push_vw(ValueWord::from_f64(sum))
+    Ok(ValueWord::from_f64(sum))
 }
 
 pub fn handle_float_norm(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let sum_sq: f64 = arr.iter().map(|&v| v * v).sum();
-    vm.push_vw(ValueWord::from_f64(sum_sq.sqrt()))
+    Ok(ValueWord::from_f64(sum_sq.sqrt()))
 }
 
 pub fn handle_float_normalize(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let sum_sq: f64 = arr.iter().map(|&v| v * v).sum();
     let norm = sum_sq.sqrt();
     if norm == 0.0 {
-        return vm.push_vw(ValueWord::from_float_array(Arc::clone(arr)));
+        return Ok(ValueWord::from_float_array(Arc::clone(arr)));
     }
     let inv_norm = 1.0 / norm;
     let result = shape_runtime::intrinsics::vector::simd_vec_scale_f64(arr.as_slice(), inv_norm);
-    vm.push_vw(ValueWord::from_float_array(Arc::new(
+    Ok(ValueWord::from_float_array(Arc::new(
         AlignedTypedBuffer::from(result),
     )))
 }
 
 pub fn handle_float_cumsum(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let mut result = AlignedVec::with_capacity(arr.len());
     let mut acc = 0.0f64;
@@ -306,17 +306,17 @@ pub fn handle_float_cumsum(
         acc += v;
         result.push(acc);
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(result.into())))
+    Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
 pub fn handle_float_diff(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     if arr.len() < 2 {
-        return vm.push_vw(ValueWord::from_float_array(Arc::new(
+        return Ok(ValueWord::from_float_array(Arc::new(
             AlignedTypedBuffer::new(),
         )));
     }
@@ -324,118 +324,118 @@ pub fn handle_float_diff(
     for i in 1..arr.len() {
         result.push(arr[i] - arr[i - 1]);
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(result.into())))
+    Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
 pub fn handle_float_abs(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let mut result = AlignedVec::with_capacity(arr.len());
     for &v in arr.iter() {
         result.push(v.abs());
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(result.into())))
+    Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
 pub fn handle_int_abs(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
     let result: Vec<i64> = arr.iter().map(|&v| v.abs()).collect();
-    vm.push_vw(ValueWord::from_int_array(Arc::new(result.into())))
+    Ok(ValueWord::from_int_array(Arc::new(result.into())))
 }
 
 pub fn handle_float_sqrt(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let mut result = AlignedVec::with_capacity(arr.len());
     for &v in arr.iter() {
         result.push(v.sqrt());
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(result.into())))
+    Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
 pub fn handle_float_ln(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let mut result = AlignedVec::with_capacity(arr.len());
     for &v in arr.iter() {
         result.push(v.ln());
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(result.into())))
+    Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
 pub fn handle_float_exp(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let mut result = AlignedVec::with_capacity(arr.len());
     for &v in arr.iter() {
         result.push(v.exp());
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(result.into())))
+    Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
 // ===== Standard collection methods =====
 
 pub fn handle_float_len(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let len = args[0].typed_array_len().unwrap_or(0);
-    vm.push_vw(ValueWord::from_i64(len as i64))
+    Ok(ValueWord::from_i64(len as i64))
 }
 
 pub fn handle_int_len(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let len = args[0].typed_array_len().unwrap_or(0);
-    vm.push_vw(ValueWord::from_i64(len as i64))
+    Ok(ValueWord::from_i64(len as i64))
 }
 
 pub fn handle_float_to_array(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let generic = args[0]
         .to_generic_array()
         .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    vm.push_vw(ValueWord::from_array(generic))
+    Ok(ValueWord::from_array(generic))
 }
 
 pub fn handle_int_to_array(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let generic = args[0]
         .to_generic_array()
         .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    vm.push_vw(ValueWord::from_array(generic))
+    Ok(ValueWord::from_array(generic))
 }
 
 pub fn handle_float_map(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let callback = args
         .get(1)
@@ -459,9 +459,9 @@ pub fn handle_float_map(
         for nb in &result {
             typed.push(nb.as_f64().unwrap());
         }
-        vm.push_vw(ValueWord::from_float_array(Arc::new(typed.into())))
+        Ok(ValueWord::from_float_array(Arc::new(typed.into())))
     } else {
-        vm.push_vw(ValueWord::from_array(Arc::new(result)))
+        Ok(ValueWord::from_array(Arc::new(result)))
     }
 }
 
@@ -469,7 +469,7 @@ pub fn handle_int_map(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
     let callback = args
         .get(1)
@@ -490,9 +490,9 @@ pub fn handle_int_map(
     let all_int = result.iter().all(|nb| nb.as_i64().is_some());
     if all_int {
         let typed: Vec<i64> = result.iter().map(|nb| nb.as_i64().unwrap()).collect();
-        vm.push_vw(ValueWord::from_int_array(Arc::new(typed.into())))
+        Ok(ValueWord::from_int_array(Arc::new(typed.into())))
     } else {
-        vm.push_vw(ValueWord::from_array(Arc::new(result)))
+        Ok(ValueWord::from_array(Arc::new(result)))
     }
 }
 
@@ -500,7 +500,7 @@ pub fn handle_float_filter(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let callback = args
         .get(1)
@@ -519,14 +519,14 @@ pub fn handle_float_filter(
             result.push(v);
         }
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(result.into())))
+    Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
 pub fn handle_int_filter(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
     let callback = args
         .get(1)
@@ -545,14 +545,14 @@ pub fn handle_int_filter(
             result.push(v);
         }
     }
-    vm.push_vw(ValueWord::from_int_array(Arc::new(result.into())))
+    Ok(ValueWord::from_int_array(Arc::new(result.into())))
 }
 
 pub fn handle_float_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_float_array(&args)?;
     let callback = args
         .get(1)
@@ -562,14 +562,14 @@ pub fn handle_float_for_each(
         let elem_nb = ValueWord::from_f64(v);
         let _ = vm.call_value_immediate_nb(&callback, &[elem_nb], ctx.as_deref_mut())?;
     }
-    vm.push_vw(ValueWord::none())
+    Ok(ValueWord::none())
 }
 
 pub fn handle_int_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = extract_int_array(&args)?;
     let callback = args
         .get(1)
@@ -579,64 +579,64 @@ pub fn handle_int_for_each(
         let elem_nb = ValueWord::from_i64(v);
         let _ = vm.call_value_immediate_nb(&callback, &[elem_nb], ctx.as_deref_mut())?;
     }
-    vm.push_vw(ValueWord::none())
+    Ok(ValueWord::none())
 }
 
 // ===== BoolArray methods =====
 
 pub fn handle_bool_len(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let len = args[0].typed_array_len().unwrap_or(0);
-    vm.push_vw(ValueWord::from_i64(len as i64))
+    Ok(ValueWord::from_i64(len as i64))
 }
 
 pub fn handle_bool_to_array(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let generic = args[0]
         .to_generic_array()
         .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    vm.push_vw(ValueWord::from_array(generic))
+    Ok(ValueWord::from_array(generic))
 }
 
 pub fn handle_bool_count_true(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
         expected: "Vec<bool>",
         got: args[0].type_name(),
     })?;
     let count = arr.iter().filter(|&&v| v != 0).count();
-    vm.push_vw(ValueWord::from_i64(count as i64))
+    Ok(ValueWord::from_i64(count as i64))
 }
 
 pub fn handle_bool_any(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
         expected: "Vec<bool>",
         got: args[0].type_name(),
     })?;
-    vm.push_vw(ValueWord::from_bool(arr.iter().any(|&v| v != 0)))
+    Ok(ValueWord::from_bool(arr.iter().any(|&v| v != 0)))
 }
 
 pub fn handle_bool_all(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = args[0].as_bool_array().ok_or_else(|| VMError::TypeError {
         expected: "Vec<bool>",
         got: args[0].type_name(),
     })?;
-    vm.push_vw(ValueWord::from_bool(arr.iter().all(|&v| v != 0)))
+    Ok(ValueWord::from_bool(arr.iter().all(|&v| v != 0)))
 }

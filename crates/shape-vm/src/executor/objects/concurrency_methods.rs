@@ -16,10 +16,10 @@ use std::sync::atomic::Ordering;
 
 /// `mutex.lock()` — acquire the mutex, returns the inner value.
 pub fn handle_mutex_lock(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
@@ -30,8 +30,7 @@ pub fn handle_mutex_lock(
                 .inner
                 .lock()
                 .map_err(|e| VMError::RuntimeError(format!("Mutex poisoned: {}", e)))?;
-            vm.push_vw(guard.clone())?;
-            Ok(())
+            Ok(guard.clone())
         }
         _ => Err(type_mismatch_error("lock()", "mutex")),
     }
@@ -40,32 +39,29 @@ pub fn handle_mutex_lock(
 /// `mutex.try_lock()` — attempt to acquire without blocking.
 /// Returns the value on success, None if already locked.
 pub fn handle_mutex_try_lock(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
         .ok_or_else(|| type_mismatch_error("try_lock()", "mutex"))?;
     match heap {
-        HeapValue::Mutex(data) => {
-            match data.inner.try_lock() {
-                Ok(guard) => vm.push_vw(guard.clone())?,
-                Err(_) => vm.push_vw(ValueWord::none())?,
-            }
-            Ok(())
-        }
+        HeapValue::Mutex(data) => match data.inner.try_lock() {
+            Ok(guard) => Ok(guard.clone()),
+            Err(_) => Ok(ValueWord::none()),
+        },
         _ => Err(type_mismatch_error("try_lock()", "mutex")),
     }
 }
 
 /// `mutex.set(value)` — acquire lock and replace the inner value.
 pub fn handle_mutex_set(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let new_value = args.get(1).cloned().unwrap_or_else(ValueWord::none);
     let heap = receiver
@@ -78,8 +74,7 @@ pub fn handle_mutex_set(
                 .lock()
                 .map_err(|e| VMError::RuntimeError(format!("Mutex poisoned: {}", e)))?;
             *guard = new_value;
-            vm.push_vw(ValueWord::none())?;
-            Ok(())
+            Ok(ValueWord::none())
         }
         _ => Err(type_mismatch_error("set()", "mutex")),
     }
@@ -91,10 +86,10 @@ pub fn handle_mutex_set(
 
 /// `atomic.load()` — read the current value atomically.
 pub fn handle_atomic_load(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
@@ -102,8 +97,7 @@ pub fn handle_atomic_load(
     match heap {
         HeapValue::Atomic(data) => {
             let val = data.inner.load(Ordering::SeqCst);
-            vm.push_vw(ValueWord::from_i64(val))?;
-            Ok(())
+            Ok(ValueWord::from_i64(val))
         }
         _ => Err(type_mismatch_error("load()", "atomic")),
     }
@@ -111,10 +105,10 @@ pub fn handle_atomic_load(
 
 /// `atomic.store(value)` — write a new value atomically.
 pub fn handle_atomic_store(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let new_val = args.get(1).and_then(|nb| nb.as_i64()).unwrap_or(0);
     let heap = receiver
@@ -123,8 +117,7 @@ pub fn handle_atomic_store(
     match heap {
         HeapValue::Atomic(data) => {
             data.inner.store(new_val, Ordering::SeqCst);
-            vm.push_vw(ValueWord::none())?;
-            Ok(())
+            Ok(ValueWord::none())
         }
         _ => Err(type_mismatch_error("store()", "atomic")),
     }
@@ -132,10 +125,10 @@ pub fn handle_atomic_store(
 
 /// `atomic.fetch_add(delta)` — atomically add and return the previous value.
 pub fn handle_atomic_fetch_add(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let delta = args.get(1).and_then(|nb| nb.as_i64()).unwrap_or(0);
     let heap = receiver
@@ -144,8 +137,7 @@ pub fn handle_atomic_fetch_add(
     match heap {
         HeapValue::Atomic(data) => {
             let prev = data.inner.fetch_add(delta, Ordering::SeqCst);
-            vm.push_vw(ValueWord::from_i64(prev))?;
-            Ok(())
+            Ok(ValueWord::from_i64(prev))
         }
         _ => Err(type_mismatch_error("fetch_add()", "atomic")),
     }
@@ -153,10 +145,10 @@ pub fn handle_atomic_fetch_add(
 
 /// `atomic.fetch_sub(delta)` — atomically subtract and return the previous value.
 pub fn handle_atomic_fetch_sub(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let delta = args.get(1).and_then(|nb| nb.as_i64()).unwrap_or(0);
     let heap = receiver
@@ -165,8 +157,7 @@ pub fn handle_atomic_fetch_sub(
     match heap {
         HeapValue::Atomic(data) => {
             let prev = data.inner.fetch_sub(delta, Ordering::SeqCst);
-            vm.push_vw(ValueWord::from_i64(prev))?;
-            Ok(())
+            Ok(ValueWord::from_i64(prev))
         }
         _ => Err(type_mismatch_error("fetch_sub()", "atomic")),
     }
@@ -175,10 +166,10 @@ pub fn handle_atomic_fetch_sub(
 /// `atomic.compare_exchange(expected, new)` — CAS: if current == expected, set to new.
 /// Returns the previous value.
 pub fn handle_atomic_compare_exchange(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let expected = args.get(1).and_then(|nb| nb.as_i64()).unwrap_or(0);
     let new_val = args.get(2).and_then(|nb| nb.as_i64()).unwrap_or(0);
@@ -191,9 +182,8 @@ pub fn handle_atomic_compare_exchange(
                 .inner
                 .compare_exchange(expected, new_val, Ordering::SeqCst, Ordering::SeqCst)
             {
-                Ok(prev) | Err(prev) => vm.push_vw(ValueWord::from_i64(prev))?,
+                Ok(prev) | Err(prev) => Ok(ValueWord::from_i64(prev)),
             }
-            Ok(())
         }
         _ => Err(type_mismatch_error("compare_exchange()", "atomic")),
     }
@@ -208,7 +198,7 @@ pub fn handle_lazy_get(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
@@ -221,8 +211,7 @@ pub fn handle_lazy_get(
                 .lock()
                 .map_err(|e| VMError::RuntimeError(format!("Lazy value poisoned: {}", e)))?;
             if let Some(val) = existing.as_ref() {
-                vm.push_vw(val.clone())?;
-                return Ok(());
+                return Ok(val.clone());
             }
             drop(existing);
 
@@ -251,8 +240,7 @@ pub fn handle_lazy_get(
                 *init_guard = None;
             }
 
-            vm.push_vw(result)?;
-            Ok(())
+            Ok(result)
         }
         _ => Err(type_mismatch_error("get()", "lazy")),
     }
@@ -260,10 +248,10 @@ pub fn handle_lazy_get(
 
 /// `lazy.is_initialized()` — check if the value has been computed.
 pub fn handle_lazy_is_initialized(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
@@ -271,8 +259,7 @@ pub fn handle_lazy_is_initialized(
     match heap {
         HeapValue::Lazy(data) => {
             let initialized = data.is_initialized();
-            vm.push_vw(ValueWord::from_bool(initialized))?;
-            Ok(())
+            Ok(ValueWord::from_bool(initialized))
         }
         _ => Err(type_mismatch_error("is_initialized()", "lazy")),
     }

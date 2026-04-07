@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 /// Handle split(separator) - Split string into array
 pub(crate) fn handle_split(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let string_val = args
         .get(0)
         .ok_or(VMError::StackUnderflow)?
@@ -37,17 +37,16 @@ pub(crate) fn handle_split(
         .map(|s| ValueWord::from_string(Arc::new(s.to_string())))
         .collect();
 
-    vm.push_vw(ValueWord::from_array(Arc::new(parts)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(parts)))
 }
 
 /// Handle join(array, separator) - Join array into string
 /// Note: This is implemented as a string method but takes an array as the receiver
 pub(crate) fn handle_join(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = args.get(0).ok_or(VMError::StackUnderflow)?;
     let arr = receiver
         .as_any_array()
@@ -90,16 +89,15 @@ pub(crate) fn handle_join(
         .collect();
 
     let result = strings?.join(sep);
-    vm.push_vw(ValueWord::from_string(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_string(Arc::new(result)))
 }
 
 /// Handle contains(substring) - Check if string contains substring
 pub(crate) fn handle_contains(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let string_val = args
         .get(0)
         .ok_or(VMError::StackUnderflow)?
@@ -121,16 +119,15 @@ pub(crate) fn handle_contains(
         })?;
 
     let result = string_val.contains(substr);
-    vm.push_vw(ValueWord::from_bool(result))?;
-    Ok(())
+    Ok(ValueWord::from_bool(result))
 }
 
 /// Handle substring(start, end) - Extract substring
 pub(crate) fn handle_substring(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let string_val = args
         .get(0)
         .ok_or(VMError::StackUnderflow)?
@@ -169,16 +166,15 @@ pub(crate) fn handle_substring(
         chars[start..].iter().collect::<String>()
     };
 
-    vm.push_vw(ValueWord::from_string(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_string(Arc::new(result)))
 }
 
 /// Handle replace(old, new) - Replace all occurrences of substring
 pub(crate) fn handle_replace(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let string_val = args
         .get(0)
         .ok_or(VMError::StackUnderflow)?
@@ -211,6 +207,5 @@ pub(crate) fn handle_replace(
         })?;
 
     let result = string_val.replace(old, new);
-    vm.push_vw(ValueWord::from_string(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_string(Arc::new(result)))
 }

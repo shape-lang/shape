@@ -11,18 +11,17 @@ use std::sync::Arc;
 
 /// Set.add(item) -> Set (returns Set with item added)
 pub fn handle_add(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.add", "an argument")?;
     let item = args[1].clone();
 
     // Mutable fast-path
     if let Some(data) = args[0].as_set_mut() {
         data.insert(item);
-        vm.push_vw(args[0].clone())?;
-        return Ok(());
+        return Ok(args[0].clone());
     }
 
     // Slow path: clone
@@ -30,8 +29,7 @@ pub fn handle_add(
         let mut new_data = set_data.clone();
         new_data.insert(item);
         let items = new_data.items;
-        vm.push_vw(ValueWord::from_set(items))?;
-        Ok(())
+        Ok(ValueWord::from_set(items))
     } else {
         Err(type_mismatch_error("add", "Set"))
     }
@@ -39,14 +37,13 @@ pub fn handle_add(
 
 /// Set.has(item) -> bool
 pub fn handle_has(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.has", "an argument")?;
     if let Some(data) = args[0].as_set() {
-        vm.push_vw(ValueWord::from_bool(data.contains(&args[1])))?;
-        Ok(())
+        Ok(ValueWord::from_bool(data.contains(&args[1])))
     } else {
         Err(type_mismatch_error("has", "Set"))
     }
@@ -54,25 +51,23 @@ pub fn handle_has(
 
 /// Set.delete(item) -> Set (returns Set with item removed)
 pub fn handle_delete(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.delete", "an argument")?;
     let item = args[1].clone();
 
     if let Some(data) = args[0].as_set_mut() {
         data.remove(&item);
-        vm.push_vw(args[0].clone())?;
-        return Ok(());
+        return Ok(args[0].clone());
     }
 
     if let Some(set_data) = args[0].as_set() {
         let mut new_data = set_data.clone();
         new_data.remove(&item);
         let items = new_data.items;
-        vm.push_vw(ValueWord::from_set(items))?;
-        Ok(())
+        Ok(ValueWord::from_set(items))
     } else {
         Err(type_mismatch_error("delete", "Set"))
     }
@@ -80,13 +75,12 @@ pub fn handle_delete(
 
 /// Set.size() / Set.len() / Set.length -> int
 pub fn handle_size(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_set() {
-        vm.push_vw(ValueWord::from_i64(data.items.len() as i64))?;
-        Ok(())
+        Ok(ValueWord::from_i64(data.items.len() as i64))
     } else {
         Err(type_mismatch_error("size", "Set"))
     }
@@ -94,13 +88,12 @@ pub fn handle_size(
 
 /// Set.isEmpty() -> bool
 pub fn handle_is_empty(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_set() {
-        vm.push_vw(ValueWord::from_bool(data.items.is_empty()))?;
-        Ok(())
+        Ok(ValueWord::from_bool(data.items.is_empty()))
     } else {
         Err(type_mismatch_error("isEmpty", "Set"))
     }
@@ -108,14 +101,13 @@ pub fn handle_is_empty(
 
 /// Set.toArray() -> array
 pub fn handle_to_array(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_set() {
         let arr: Vec<ValueWord> = data.items.clone();
-        vm.push_vw(ValueWord::from_array(Arc::new(arr)))?;
-        Ok(())
+        Ok(ValueWord::from_array(Arc::new(arr)))
     } else {
         Err(type_mismatch_error("toArray", "Set"))
     }
@@ -126,7 +118,7 @@ pub fn handle_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.forEach", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
@@ -136,8 +128,7 @@ pub fn handle_for_each(
         for item in &items {
             vm.call_value_immediate_nb(&callback, &[item.clone()], ctx.as_deref_mut())?;
         }
-        vm.push_vw(ValueWord::unit())?;
-        Ok(())
+        Ok(ValueWord::unit())
     } else {
         Err(type_mismatch_error("forEach", "Set"))
     }
@@ -148,7 +139,7 @@ pub fn handle_map(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.map", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
@@ -161,8 +152,7 @@ pub fn handle_map(
                 vm.call_value_immediate_nb(&callback, &[item.clone()], ctx.as_deref_mut())?;
             new_items.push(result);
         }
-        vm.push_vw(ValueWord::from_set(new_items))?;
-        Ok(())
+        Ok(ValueWord::from_set(new_items))
     } else {
         Err(type_mismatch_error("map", "Set"))
     }
@@ -173,7 +163,7 @@ pub fn handle_filter(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.filter", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
@@ -188,8 +178,7 @@ pub fn handle_filter(
                 new_items.push(item.clone());
             }
         }
-        vm.push_vw(ValueWord::from_set(new_items))?;
-        Ok(())
+        Ok(ValueWord::from_set(new_items))
     } else {
         Err(type_mismatch_error("filter", "Set"))
     }
@@ -197,10 +186,10 @@ pub fn handle_filter(
 
 /// Set.union(other: Set) -> Set
 pub fn handle_union(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.union", "a Set argument")?;
     let a = args[0]
         .as_set()
@@ -213,16 +202,15 @@ pub fn handle_union(
     for item in &b.items {
         result.insert(item.clone());
     }
-    vm.push_vw(ValueWord::from_set(result.items))?;
-    Ok(())
+    Ok(ValueWord::from_set(result.items))
 }
 
 /// Set.intersection(other: Set) -> Set
 pub fn handle_intersection(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.intersection", "a Set argument")?;
     let a = args[0]
         .as_set()
@@ -237,16 +225,15 @@ pub fn handle_intersection(
         .filter(|item| b.contains(item))
         .cloned()
         .collect();
-    vm.push_vw(ValueWord::from_set(items))?;
-    Ok(())
+    Ok(ValueWord::from_set(items))
 }
 
 /// Set.difference(other: Set) -> Set
 pub fn handle_difference(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Set.difference", "a Set argument")?;
     let a = args[0]
         .as_set()
@@ -261,6 +248,5 @@ pub fn handle_difference(
         .filter(|item| !b.contains(item))
         .cloned()
         .collect();
-    vm.push_vw(ValueWord::from_set(items))?;
-    Ok(())
+    Ok(ValueWord::from_set(items))
 }

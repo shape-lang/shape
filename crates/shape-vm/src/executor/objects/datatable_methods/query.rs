@@ -22,7 +22,7 @@ pub(crate) fn handle_filter(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
 
     // Closure path: dt.filter(row => row.price > 100)
@@ -48,7 +48,7 @@ pub(crate) fn handle_filter(
             if let Some(idx_name) = dt_arc.index_col() {
                 new_dt = new_dt.with_index_col(idx_name.to_string());
             }
-            return vm.push_vw(wrap_result_table_nb(&args[0], new_dt));
+            return Ok(wrap_result_table_nb(&args[0], new_dt));
         }
     }
 
@@ -83,7 +83,7 @@ pub(crate) fn handle_filter(
     if let Some(idx_name) = dt.index_col() {
         new_dt = new_dt.with_index_col(idx_name.to_string());
     }
-    vm.push_vw(wrap_result_table_nb(&args[0], new_dt))
+    Ok(wrap_result_table_nb(&args[0], new_dt))
 }
 
 /// `dt.orderBy("col", "asc"|"desc")` — sort by column with direction (string path).
@@ -92,7 +92,7 @@ pub(crate) fn handle_order_by(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
 
     // Closure path: dt.orderBy(row => row.price, "desc")
@@ -137,7 +137,7 @@ pub(crate) fn handle_order_by(
             if let Some(idx_name) = dt_arc.index_col() {
                 new_dt = new_dt.with_index_col(idx_name.to_string());
             }
-            return vm.push_vw(wrap_result_table_nb(&args[0], new_dt));
+            return Ok(wrap_result_table_nb(&args[0], new_dt));
         }
     }
 
@@ -181,7 +181,7 @@ pub(crate) fn handle_order_by(
     if let Some(idx_name) = dt.index_col() {
         new_dt = new_dt.with_index_col(idx_name.to_string());
     }
-    vm.push_vw(wrap_result_table_nb(&args[0], new_dt))
+    Ok(wrap_result_table_nb(&args[0], new_dt))
 }
 
 /// `dt.group_by("col")` — group rows by column value (string path).
@@ -192,7 +192,7 @@ pub(crate) fn handle_group_by(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
 
     // Closure path: dt.group_by(row => row.symbol)
@@ -204,7 +204,7 @@ pub(crate) fn handle_group_by(
             let row_count = dt_arc.row_count();
 
             if row_count == 0 {
-                return vm.push_vw(ValueWord::from_array(Arc::new(Vec::<ValueWord>::new())));
+                return Ok(ValueWord::from_array(Arc::new(Vec::<ValueWord>::new())));
             }
 
             let mut key_row_pairs: Vec<(ValueWord, usize)> = Vec::with_capacity(row_count);
@@ -270,7 +270,7 @@ pub(crate) fn handle_group_by(
                 }
             }
 
-            return vm.push_vw(ValueWord::from_array(Arc::new(groups)));
+            return Ok(ValueWord::from_array(Arc::new(groups)));
         }
     }
 
@@ -304,7 +304,7 @@ pub(crate) fn handle_group_by(
 
     let row_count = sorted_dt.row_count();
     if row_count == 0 {
-        return vm.push_vw(ValueWord::from_array(Arc::new(Vec::new())));
+        return Ok(ValueWord::from_array(Arc::new(Vec::new())));
     }
 
     let mut groups: Vec<ValueWord> = Vec::new();
@@ -342,7 +342,7 @@ pub(crate) fn handle_group_by(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(groups)))
+    Ok(ValueWord::from_array(Arc::new(groups)))
 }
 
 /// `dt.forEach(fn)` — iterate rows as RowView values, calling closure for each.
@@ -350,7 +350,7 @@ pub(crate) fn handle_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?.clone();
     let func_nb = args.get(1).ok_or_else(|| {
         VMError::RuntimeError("forEach() requires a function argument".to_string())
@@ -370,8 +370,7 @@ pub(crate) fn handle_for_each(
         vm.call_value_immediate_nb(func_nb, &[row_view], ctx.as_deref_mut())?;
     }
 
-    vm.push_vw(ValueWord::none())?;
-    Ok(())
+    Ok(ValueWord::none())
 }
 
 /// `dt.map(fn)` — transform each row via closure, producing a new DataTable.
@@ -379,7 +378,7 @@ pub(crate) fn handle_map(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?.clone();
     let func_nb = args
         .get(1)
@@ -396,7 +395,7 @@ pub(crate) fn handle_map(
     let row_count = dt_arc.row_count();
 
     if row_count == 0 {
-        return vm.push_vw(ValueWord::from_datatable(Arc::new(DataTable::new(
+        return Ok(ValueWord::from_datatable(Arc::new(DataTable::new(
             arrow_array::RecordBatch::new_empty(dt_arc.inner().schema()),
         ))));
     }

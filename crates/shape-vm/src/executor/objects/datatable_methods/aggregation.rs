@@ -43,7 +43,7 @@ pub(crate) fn handle_sum(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
 
     // Closure path: dt.sum(row => row.close)
@@ -52,7 +52,7 @@ pub(crate) fn handle_sum(
             let dt_arc = Arc::new(dt.as_ref().clone());
             let values = collect_closure_numbers_nb(vm, &dt_arc, func_nb, &mut ctx)?;
             let sum: f64 = values.iter().sum();
-            return vm.push_vw(ValueWord::from_f64(sum));
+            return Ok(ValueWord::from_f64(sum));
         }
     }
 
@@ -65,10 +65,10 @@ pub(crate) fn handle_sum(
         } else {
             col.iter().flatten().sum()
         };
-        vm.push_vw(ValueWord::from_f64(sum))
+        Ok(ValueWord::from_f64(sum))
     } else if let Some(col) = dt.get_i64_column(&col_name) {
         let sum: i64 = col.iter().flatten().sum();
-        vm.push_vw(ValueWord::from_i64(sum))
+        Ok(ValueWord::from_i64(sum))
     } else {
         Err(VMError::RuntimeError(format!(
             "sum() requires a numeric column, '{}' is not numeric",
@@ -82,7 +82,7 @@ pub(crate) fn handle_mean(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
 
     // Closure path: dt.mean(row => row.close)
@@ -91,10 +91,10 @@ pub(crate) fn handle_mean(
             let dt_arc = Arc::new(dt.as_ref().clone());
             let values = collect_closure_numbers_nb(vm, &dt_arc, func_nb, &mut ctx)?;
             if values.is_empty() {
-                return vm.push_vw(ValueWord::none());
+                return Ok(ValueWord::none());
             }
             let sum: f64 = values.iter().sum();
-            return vm.push_vw(ValueWord::from_f64(sum / values.len() as f64));
+            return Ok(ValueWord::from_f64(sum / values.len() as f64));
         }
     }
 
@@ -104,7 +104,7 @@ pub(crate) fn handle_mean(
     if let Some(col) = dt.get_f64_column(&col_name) {
         let count = col.len() - col.null_count();
         if count == 0 {
-            return vm.push_vw(ValueWord::none());
+            return Ok(ValueWord::none());
         }
         let mean = if col.null_count() == 0 {
             shape_runtime::columnar_aggregations::mean_f64_slice(col.values())
@@ -112,14 +112,14 @@ pub(crate) fn handle_mean(
             let sum: f64 = col.iter().flatten().sum();
             sum / count as f64
         };
-        vm.push_vw(ValueWord::from_f64(mean))
+        Ok(ValueWord::from_f64(mean))
     } else if let Some(col) = dt.get_i64_column(&col_name) {
         let count = col.len() - col.null_count();
         if count == 0 {
-            return vm.push_vw(ValueWord::none());
+            return Ok(ValueWord::none());
         }
         let sum: i64 = col.iter().flatten().sum();
-        vm.push_vw(ValueWord::from_f64(sum as f64 / count as f64))
+        Ok(ValueWord::from_f64(sum as f64 / count as f64))
     } else {
         Err(VMError::RuntimeError(format!(
             "mean() requires a numeric column, '{}' is not numeric",
@@ -133,7 +133,7 @@ pub(crate) fn handle_min(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
 
     // Closure path: dt.min(row => row.low)
@@ -142,10 +142,10 @@ pub(crate) fn handle_min(
             let dt_arc = Arc::new(dt.as_ref().clone());
             let values = collect_closure_numbers_nb(vm, &dt_arc, func_nb, &mut ctx)?;
             if values.is_empty() {
-                return vm.push_vw(ValueWord::none());
+                return Ok(ValueWord::none());
             }
             let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-            return vm.push_vw(ValueWord::from_f64(min));
+            return Ok(ValueWord::from_f64(min));
         }
     }
 
@@ -159,14 +159,14 @@ pub(crate) fn handle_min(
             col.iter().flatten().fold(f64::INFINITY, f64::min)
         };
         if min.is_infinite() {
-            vm.push_vw(ValueWord::none())
+            Ok(ValueWord::none())
         } else {
-            vm.push_vw(ValueWord::from_f64(min))
+            Ok(ValueWord::from_f64(min))
         }
     } else if let Some(col) = dt.get_i64_column(&col_name) {
         match col.iter().flatten().min() {
-            Some(min) => vm.push_vw(ValueWord::from_i64(min)),
-            None => vm.push_vw(ValueWord::none()),
+            Some(min) => Ok(ValueWord::from_i64(min)),
+            None => Ok(ValueWord::none()),
         }
     } else {
         Err(VMError::RuntimeError(format!(
@@ -181,7 +181,7 @@ pub(crate) fn handle_max(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
 
     // Closure path: dt.max(row => row.high)
@@ -190,10 +190,10 @@ pub(crate) fn handle_max(
             let dt_arc = Arc::new(dt.as_ref().clone());
             let values = collect_closure_numbers_nb(vm, &dt_arc, func_nb, &mut ctx)?;
             if values.is_empty() {
-                return vm.push_vw(ValueWord::none());
+                return Ok(ValueWord::none());
             }
             let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            return vm.push_vw(ValueWord::from_f64(max));
+            return Ok(ValueWord::from_f64(max));
         }
     }
 
@@ -207,14 +207,14 @@ pub(crate) fn handle_max(
             col.iter().flatten().fold(f64::NEG_INFINITY, f64::max)
         };
         if max.is_infinite() {
-            vm.push_vw(ValueWord::none())
+            Ok(ValueWord::none())
         } else {
-            vm.push_vw(ValueWord::from_f64(max))
+            Ok(ValueWord::from_f64(max))
         }
     } else if let Some(col) = dt.get_i64_column(&col_name) {
         match col.iter().flatten().max() {
-            Some(max) => vm.push_vw(ValueWord::from_i64(max)),
-            None => vm.push_vw(ValueWord::none()),
+            Some(max) => Ok(ValueWord::from_i64(max)),
+            None => Ok(ValueWord::none()),
         }
     } else {
         Err(VMError::RuntimeError(format!(
@@ -226,10 +226,10 @@ pub(crate) fn handle_max(
 
 /// `dt.sort(col)` — sort by a column (ascending).
 pub(crate) fn handle_sort(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
     let col_name = require_string_nb(&args, 1, "sort")?;
     let batch = dt.inner();
@@ -257,17 +257,17 @@ pub(crate) fn handle_sort(
     if let Some(idx_name) = dt.index_col() {
         new_dt = new_dt.with_index_col(idx_name.to_string());
     }
-    vm.push_vw(wrap_result_table_nb(&args[0], new_dt))
+    Ok(wrap_result_table_nb(&args[0], new_dt))
 }
 
 /// `dt.count()` — row count as Int.
 pub(crate) fn handle_count(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
-    vm.push_vw(ValueWord::from_i64(dt.row_count() as i64))
+    Ok(ValueWord::from_i64(dt.row_count() as i64))
 }
 
 /// `dt.describe()` — summary statistics for numeric columns.
@@ -275,10 +275,10 @@ pub(crate) fn handle_count(
 /// Returns a DataTable with columns [stat, col1, col2, ...] and
 /// rows [count, mean, min, max, sum].
 pub(crate) fn handle_describe(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     use arrow_schema::{DataType, Field, Schema};
 
     let dt = extract_dt_nb(&args[0])?;
@@ -321,7 +321,7 @@ pub(crate) fn handle_describe(
     let result_batch = arrow_array::RecordBatch::try_new(Arc::new(result_schema), columns)
         .map_err(|e| VMError::RuntimeError(format!("describe() failed: {}", e)))?;
 
-    vm.push_vw(ValueWord::from_datatable(Arc::new(DataTable::new(
+    Ok(ValueWord::from_datatable(Arc::new(DataTable::new(
         result_batch,
     ))))
 }
@@ -333,7 +333,7 @@ pub(crate) fn handle_aggregate(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
     let arg1 = args.get(1).ok_or_else(|| {
         VMError::RuntimeError(
@@ -352,7 +352,7 @@ pub(crate) fn handle_aggregate(
 
     // Build a single-row DataTable from the results
     let result_dt = build_aggregation_result(&result_map)?;
-    vm.push_vw(ValueWord::from_datatable(Arc::new(result_dt)))
+    Ok(ValueWord::from_datatable(Arc::new(result_dt)))
 }
 
 /// Parse an aggregation spec entry.

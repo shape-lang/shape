@@ -18,58 +18,54 @@ fn recv_instant(args: &[ValueWord]) -> Result<&std::time::Instant, VMError> {
 
 /// .elapsed() -> number (seconds as f64)
 pub fn handle_elapsed(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let instant = recv_instant(&args)?;
     let secs = instant.elapsed().as_secs_f64();
-    vm.push_vw(ValueWord::from_f64(secs))?;
-    Ok(())
+    Ok(ValueWord::from_f64(secs))
 }
 
 /// .elapsed_ms() -> number (milliseconds as f64)
 pub fn handle_elapsed_ms(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let instant = recv_instant(&args)?;
     let ms = instant.elapsed().as_secs_f64() * 1000.0;
-    vm.push_vw(ValueWord::from_f64(ms))?;
-    Ok(())
+    Ok(ValueWord::from_f64(ms))
 }
 
 /// .elapsed_us() -> number (microseconds as f64)
 pub fn handle_elapsed_us(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let instant = recv_instant(&args)?;
     let us = instant.elapsed().as_secs_f64() * 1_000_000.0;
-    vm.push_vw(ValueWord::from_f64(us))?;
-    Ok(())
+    Ok(ValueWord::from_f64(us))
 }
 
 /// .elapsed_ns() -> int (nanoseconds)
 pub fn handle_elapsed_ns(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let instant = recv_instant(&args)?;
     let ns = instant.elapsed().as_nanos() as i64;
-    vm.push_vw(ValueWord::from_i64(ns))?;
-    Ok(())
+    Ok(ValueWord::from_i64(ns))
 }
 
 /// .duration_since(other: Instant) -> number (milliseconds as f64)
 pub fn handle_duration_since(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let this = recv_instant(&args)?;
     let other = args
         .get(1)
@@ -79,21 +75,19 @@ pub fn handle_duration_since(
             got: args.get(1).map_or("missing", |a| a.type_name()),
         })?;
     let ms = this.duration_since(*other).as_secs_f64() * 1000.0;
-    vm.push_vw(ValueWord::from_f64(ms))?;
-    Ok(())
+    Ok(ValueWord::from_f64(ms))
 }
 
 /// .to_string() -> string representation
 pub fn handle_to_string(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let instant = recv_instant(&args)?;
     let elapsed = instant.elapsed();
     let s = format!("Instant(elapsed: {:.6}s)", elapsed.as_secs_f64());
-    vm.push_vw(ValueWord::from_string(std::sync::Arc::new(s)))?;
-    Ok(())
+    Ok(ValueWord::from_string(std::sync::Arc::new(s)))
 }
 
 #[cfg(test)]
@@ -110,8 +104,7 @@ mod tests {
         let mut vm = create_test_vm();
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
-        handle_elapsed(&mut vm, args, None).unwrap();
-        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
+        let result = handle_elapsed(&mut vm, args, None).unwrap();
         let secs = result.as_f64().unwrap();
         assert!(secs >= 0.0);
         assert!(secs < 1.0); // Should be very fast
@@ -122,8 +115,7 @@ mod tests {
         let mut vm = create_test_vm();
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
-        handle_elapsed_ms(&mut vm, args, None).unwrap();
-        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
+        let result = handle_elapsed_ms(&mut vm, args, None).unwrap();
         let ms = result.as_f64().unwrap();
         assert!(ms >= 0.0);
         assert!(ms < 1000.0);
@@ -134,8 +126,7 @@ mod tests {
         let mut vm = create_test_vm();
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
-        handle_elapsed_us(&mut vm, args, None).unwrap();
-        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
+        let result = handle_elapsed_us(&mut vm, args, None).unwrap();
         let us = result.as_f64().unwrap();
         assert!(us >= 0.0);
         assert!(us < 1_000_000.0);
@@ -146,8 +137,7 @@ mod tests {
         let mut vm = create_test_vm();
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
-        handle_elapsed_ns(&mut vm, args, None).unwrap();
-        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
+        let result = handle_elapsed_ns(&mut vm, args, None).unwrap();
         // Should be a number (i48 stored as f64)
         let ns = result.as_number_coerce().unwrap();
         assert!(ns >= 0.0);
@@ -158,8 +148,7 @@ mod tests {
         let mut vm = create_test_vm();
         let instant = std::time::Instant::now();
         let args = vec![ValueWord::from_instant(instant)];
-        handle_to_string(&mut vm, args, None).unwrap();
-        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
+        let result = handle_to_string(&mut vm, args, None).unwrap();
         let s = result.as_str().unwrap();
         assert!(s.starts_with("Instant(elapsed:"));
         assert!(s.ends_with("s)"));
@@ -176,8 +165,7 @@ mod tests {
             ValueWord::from_instant(later),
             ValueWord::from_instant(earlier),
         ];
-        handle_duration_since(&mut vm, args, None).unwrap();
-        let result = ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap());
+        let result = handle_duration_since(&mut vm, args, None).unwrap();
         let ms = result.as_f64().unwrap();
         assert!(ms >= 0.0);
     }

@@ -1,7 +1,7 @@
 //! Iterator method handlers for the PHF method registry.
 //!
 //! All methods follow the MethodFn signature:
-//! fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<(), VMError>
+//! fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<ValueWord, VMError>
 //!
 //! Iterator methods support lazy chaining: map/filter/take/skip append transforms
 //! and return a new Iterator. Terminal operations (collect/forEach/reduce/count/any/all/find)
@@ -388,10 +388,10 @@ fn collect_all(
 
 /// Iterator.map(fn) -> Iterator
 pub fn handle_map(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.map() requires a function argument".to_string(),
@@ -404,16 +404,15 @@ pub fn handle_map(
         ));
     }
     let result = with_transform(state, IteratorTransform::Map(args[1].clone()));
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }
 
 /// Iterator.filter(fn) -> Iterator
 pub fn handle_filter(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.filter() requires a predicate argument".to_string(),
@@ -426,16 +425,15 @@ pub fn handle_filter(
         ));
     }
     let result = with_transform(state, IteratorTransform::Filter(args[1].clone()));
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }
 
 /// Iterator.take(n) -> Iterator
 pub fn handle_take(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.take() requires a number argument".to_string(),
@@ -446,16 +444,15 @@ pub fn handle_take(
         VMError::RuntimeError("Iterator.take() argument must be a number".to_string())
     })? as usize;
     let result = with_transform(state, IteratorTransform::Take(n));
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }
 
 /// Iterator.skip(n) -> Iterator
 pub fn handle_skip(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.skip() requires a number argument".to_string(),
@@ -466,16 +463,15 @@ pub fn handle_skip(
         VMError::RuntimeError("Iterator.skip() argument must be a number".to_string())
     })? as usize;
     let result = with_transform(state, IteratorTransform::Skip(n));
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }
 
 /// Iterator.flatMap(fn) -> Iterator
 pub fn handle_flat_map(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.flatMap() requires a function argument".to_string(),
@@ -488,8 +484,7 @@ pub fn handle_flat_map(
         ));
     }
     let result = with_transform(state, IteratorTransform::FlatMap(args[1].clone()));
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }
 
 /// Iterator.enumerate() -> Iterator that yields [index, value] pairs
@@ -500,7 +495,7 @@ pub fn handle_enumerate(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let mut state = clone_iterator_state(&args)?;
     let elements = collect_all(vm, &mut state, &mut ctx)?;
     let pairs: Vec<ValueWord> = elements
@@ -514,8 +509,7 @@ pub fn handle_enumerate(
         transforms: vec![],
         done: false,
     };
-    vm.push_vw(ValueWord::from_iterator(Box::new(new_state)))?;
-    Ok(())
+    Ok(ValueWord::from_iterator(Box::new(new_state)))
 }
 
 /// Iterator.chain(other) -> Iterator that concatenates two iterators
@@ -523,7 +517,7 @@ pub fn handle_chain(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.chain() requires another iterator argument".to_string(),
@@ -555,8 +549,7 @@ pub fn handle_chain(
         transforms: vec![],
         done: false,
     };
-    vm.push_vw(ValueWord::from_iterator(Box::new(new_state)))?;
-    Ok(())
+    Ok(ValueWord::from_iterator(Box::new(new_state)))
 }
 
 // ── Terminal operations (consume the iterator) ─────────────────────────────
@@ -566,11 +559,10 @@ pub fn handle_collect(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let mut state = clone_iterator_state(&args)?;
     let results = collect_all(vm, &mut state, &mut ctx)?;
-    vm.push_vw(ValueWord::from_array(Arc::new(results)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(results)))
 }
 
 /// Iterator.forEach(fn) -> none
@@ -578,7 +570,7 @@ pub fn handle_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.forEach() requires a function argument".to_string(),
@@ -595,8 +587,7 @@ pub fn handle_for_each(
     for elem in elements {
         vm.call_value_immediate_nb(&func, &[elem], ctx.as_deref_mut())?;
     }
-    vm.push_vw(ValueWord::none())?;
-    Ok(())
+    Ok(ValueWord::none())
 }
 
 /// Iterator.reduce(fn, init) -> value
@@ -604,7 +595,7 @@ pub fn handle_reduce(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 3 {
         return Err(VMError::RuntimeError(
             "Iterator.reduce() requires a function and initial value".to_string(),
@@ -623,8 +614,7 @@ pub fn handle_reduce(
         accumulator =
             vm.call_value_immediate_nb(&func, &[accumulator, elem], ctx.as_deref_mut())?;
     }
-    vm.push_vw(accumulator)?;
-    Ok(())
+    Ok(accumulator)
 }
 
 /// Iterator.count() -> int
@@ -632,11 +622,10 @@ pub fn handle_count(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let mut state = clone_iterator_state(&args)?;
     let elements = collect_all(vm, &mut state, &mut ctx)?;
-    vm.push_vw(ValueWord::from_i64(elements.len() as i64))?;
-    Ok(())
+    Ok(ValueWord::from_i64(elements.len() as i64))
 }
 
 /// Iterator.any(fn) -> bool (short-circuits on first truthy)
@@ -644,7 +633,7 @@ pub fn handle_any(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.any() requires a predicate function".to_string(),
@@ -662,15 +651,13 @@ pub fn handle_any(
             Some(val) => {
                 let result = vm.call_value_immediate_nb(&predicate, &[val], ctx.as_deref_mut())?;
                 if result.is_truthy() {
-                    vm.push_vw(ValueWord::from_bool(true))?;
-                    return Ok(());
+                    return Ok(ValueWord::from_bool(true));
                 }
             }
             std::option::Option::None => break,
         }
     }
-    vm.push_vw(ValueWord::from_bool(false))?;
-    Ok(())
+    Ok(ValueWord::from_bool(false))
 }
 
 /// Iterator.all(fn) -> bool (short-circuits on first falsy)
@@ -678,7 +665,7 @@ pub fn handle_all(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.all() requires a predicate function".to_string(),
@@ -696,15 +683,13 @@ pub fn handle_all(
             Some(val) => {
                 let result = vm.call_value_immediate_nb(&predicate, &[val], ctx.as_deref_mut())?;
                 if !result.is_truthy() {
-                    vm.push_vw(ValueWord::from_bool(false))?;
-                    return Ok(());
+                    return Ok(ValueWord::from_bool(false));
                 }
             }
             std::option::Option::None => break,
         }
     }
-    vm.push_vw(ValueWord::from_bool(true))?;
-    Ok(())
+    Ok(ValueWord::from_bool(true))
 }
 
 /// Iterator.find(fn) -> value | none (short-circuits on first match)
@@ -712,7 +697,7 @@ pub fn handle_find(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Iterator.find() requires a predicate function".to_string(),
@@ -731,15 +716,13 @@ pub fn handle_find(
                 let result =
                     vm.call_value_immediate_nb(&predicate, &[val.clone()], ctx.as_deref_mut())?;
                 if result.is_truthy() {
-                    vm.push_vw(val)?;
-                    return Ok(());
+                    return Ok(val);
                 }
             }
             std::option::Option::None => break,
         }
     }
-    vm.push_vw(ValueWord::none())?;
-    Ok(())
+    Ok(ValueWord::none())
 }
 
 // ── .iter() builders for source types (I-Sprint 3) ─────────────────────────
@@ -756,26 +739,25 @@ pub fn make_array_iterator(source: ValueWord) -> ValueWord {
 
 /// Array.iter() -> Iterator
 pub fn handle_array_iter(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.is_empty() {
         return Err(VMError::RuntimeError(
             "iter() requires a receiver".to_string(),
         ));
     }
     let result = make_array_iterator(args[0].clone());
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }
 
 /// String.iter() -> Iterator over characters
 pub fn handle_string_iter(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.is_empty() {
         return Err(VMError::RuntimeError(
             "iter() requires a receiver".to_string(),
@@ -787,16 +769,15 @@ pub fn handle_string_iter(
         transforms: vec![],
         done: false,
     }));
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }
 
 /// Range.iter() -> Iterator over range values
 pub fn handle_range_iter(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.is_empty() {
         return Err(VMError::RuntimeError(
             "iter() requires a receiver".to_string(),
@@ -808,16 +789,15 @@ pub fn handle_range_iter(
         transforms: vec![],
         done: false,
     }));
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }
 
 /// HashMap.iter() -> Iterator over [key, value] pairs
 pub fn handle_hashmap_iter(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.is_empty() {
         return Err(VMError::RuntimeError(
             "iter() requires a receiver".to_string(),
@@ -829,6 +809,5 @@ pub fn handle_hashmap_iter(
         transforms: vec![],
         done: false,
     }));
-    vm.push_vw(result)?;
-    Ok(())
+    Ok(result)
 }

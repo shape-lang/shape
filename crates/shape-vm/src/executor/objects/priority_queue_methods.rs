@@ -10,24 +10,22 @@ use std::sync::Arc;
 
 /// PriorityQueue.push(item) -> PriorityQueue
 pub fn handle_push(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "PriorityQueue.push", "an argument")?;
     let item = args[1].clone();
 
     if let Some(data) = args[0].as_priority_queue_mut() {
         data.push(item);
-        vm.push_vw(args[0].clone())?;
-        return Ok(());
+        return Ok(args[0].clone());
     }
 
     if let Some(pq_data) = args[0].as_priority_queue() {
         let mut new_data = pq_data.clone();
         new_data.push(item);
-        vm.push_vw(ValueWord::from_priority_queue(new_data.items))?;
-        Ok(())
+        Ok(ValueWord::from_priority_queue(new_data.items))
     } else {
         Err(type_mismatch_error("push", "PriorityQueue"))
     }
@@ -35,25 +33,23 @@ pub fn handle_push(
 
 /// PriorityQueue.pop() -> value (removes and returns the minimum item, or None)
 pub fn handle_pop(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_priority_queue_mut() {
-        match data.pop() {
-            Some(item) => vm.push_vw(item)?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        return Ok(());
+        return Ok(match data.pop() {
+            Some(item) => item,
+            None => ValueWord::none(),
+        });
     }
 
     if let Some(pq_data) = args[0].as_priority_queue() {
         let mut new_data = pq_data.clone();
-        match new_data.pop() {
-            Some(item) => vm.push_vw(item)?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        Ok(())
+        Ok(match new_data.pop() {
+            Some(item) => item,
+            None => ValueWord::none(),
+        })
     } else {
         Err(type_mismatch_error("pop", "PriorityQueue"))
     }
@@ -61,16 +57,15 @@ pub fn handle_pop(
 
 /// PriorityQueue.peek() -> value (returns the minimum item without removing, or None)
 pub fn handle_peek(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_priority_queue() {
-        match data.peek() {
-            Some(item) => vm.push_vw(item.clone())?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        Ok(())
+        Ok(match data.peek() {
+            Some(item) => item.clone(),
+            None => ValueWord::none(),
+        })
     } else {
         Err(type_mismatch_error("peek", "PriorityQueue"))
     }
@@ -78,13 +73,12 @@ pub fn handle_peek(
 
 /// PriorityQueue.size() / .len() / .length -> int
 pub fn handle_size(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_priority_queue() {
-        vm.push_vw(ValueWord::from_i64(data.items.len() as i64))?;
-        Ok(())
+        Ok(ValueWord::from_i64(data.items.len() as i64))
     } else {
         Err(type_mismatch_error("size", "PriorityQueue"))
     }
@@ -92,13 +86,12 @@ pub fn handle_size(
 
 /// PriorityQueue.isEmpty() -> bool
 pub fn handle_is_empty(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_priority_queue() {
-        vm.push_vw(ValueWord::from_bool(data.items.is_empty()))?;
-        Ok(())
+        Ok(ValueWord::from_bool(data.items.is_empty()))
     } else {
         Err(type_mismatch_error("isEmpty", "PriorityQueue"))
     }
@@ -106,14 +99,13 @@ pub fn handle_is_empty(
 
 /// PriorityQueue.toArray() -> array (returns items in heap order, NOT sorted)
 pub fn handle_to_array(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_priority_queue() {
         let arr: Vec<ValueWord> = data.items.clone();
-        vm.push_vw(ValueWord::from_array(Arc::new(arr)))?;
-        Ok(())
+        Ok(ValueWord::from_array(Arc::new(arr)))
     } else {
         Err(type_mismatch_error("toArray", "PriorityQueue"))
     }
@@ -121,18 +113,17 @@ pub fn handle_to_array(
 
 /// PriorityQueue.toSortedArray() -> array (returns items in sorted order)
 pub fn handle_to_sorted_array(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_priority_queue() {
         let mut pq = data.clone();
         let mut sorted = Vec::with_capacity(pq.items.len());
         while let Some(item) = pq.pop() {
             sorted.push(item);
         }
-        vm.push_vw(ValueWord::from_array(Arc::new(sorted)))?;
-        Ok(())
+        Ok(ValueWord::from_array(Arc::new(sorted)))
     } else {
         Err(type_mismatch_error("toSortedArray", "PriorityQueue"))
     }

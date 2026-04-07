@@ -13,7 +13,7 @@ pub(crate) fn handle_inner_join(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // Validate argument count
     if args.len() != 5 {
         return Err(VMError::RuntimeError(
@@ -76,8 +76,7 @@ pub(crate) fn handle_inner_join(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(results)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(results)))
 }
 
 /// Execute `leftJoin` - left join two arrays with key functions
@@ -87,7 +86,7 @@ pub(crate) fn handle_left_join(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // Validate argument count
     if args.len() != 5 {
         return Err(VMError::RuntimeError(
@@ -163,8 +162,7 @@ pub(crate) fn handle_left_join(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(results)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(results)))
 }
 
 /// Execute `crossJoin` - cross join two arrays (Cartesian product)
@@ -174,7 +172,7 @@ pub(crate) fn handle_cross_join(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // Validate argument count
     if args.len() != 3 {
         return Err(VMError::RuntimeError(
@@ -217,6 +215,5 @@ pub(crate) fn handle_cross_join(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(results)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(results)))
 }

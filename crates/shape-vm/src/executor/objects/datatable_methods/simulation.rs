@@ -33,7 +33,7 @@ pub(crate) fn handle_simulate(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
     let schema_id = extract_schema_id_nb(&args[0]);
 
@@ -246,7 +246,7 @@ pub(crate) fn handle_simulate(
         }
     }
 
-    vm.push_vw(ValueWord::from_heap_value(
+    Ok(ValueWord::from_heap_value(
         shape_value::heap_value::HeapValue::TypedObject {
             schema_id: sim_schema as u64,
             slots: slots.into_boxed_slice(),

@@ -46,7 +46,7 @@ pub(crate) fn handle_inner_join(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() != 5 {
         return Err(VMError::RuntimeError(
             "innerJoin() requires 4 arguments (other, leftKey, rightKey, resultSelector)"
@@ -99,7 +99,7 @@ pub(crate) fn handle_left_join(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() != 5 {
         return Err(VMError::RuntimeError(
             "leftJoin() requires 4 arguments (other, leftKey, rightKey, resultSelector)"

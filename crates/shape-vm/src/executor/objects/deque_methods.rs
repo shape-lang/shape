@@ -11,24 +11,22 @@ use std::sync::Arc;
 
 /// Deque.pushBack(item) -> Deque
 pub fn handle_push_back(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Deque.pushBack", "an argument")?;
     let item = args[1].clone();
 
     if let Some(data) = args[0].as_deque_mut() {
         data.items.push_back(item);
-        vm.push_vw(args[0].clone())?;
-        return Ok(());
+        return Ok(args[0].clone());
     }
 
     if let Some(deque_data) = args[0].as_deque() {
         let mut new_data = deque_data.clone();
         new_data.items.push_back(item);
-        vm.push_vw(ValueWord::from_deque(new_data.items.into()))?;
-        Ok(())
+        Ok(ValueWord::from_deque(new_data.items.into()))
     } else {
         Err(type_mismatch_error("pushBack", "Deque"))
     }
@@ -36,24 +34,22 @@ pub fn handle_push_back(
 
 /// Deque.pushFront(item) -> Deque
 pub fn handle_push_front(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Deque.pushFront", "an argument")?;
     let item = args[1].clone();
 
     if let Some(data) = args[0].as_deque_mut() {
         data.items.push_front(item);
-        vm.push_vw(args[0].clone())?;
-        return Ok(());
+        return Ok(args[0].clone());
     }
 
     if let Some(deque_data) = args[0].as_deque() {
         let mut new_data = deque_data.clone();
         new_data.items.push_front(item);
-        vm.push_vw(ValueWord::from_deque(new_data.items.into()))?;
-        Ok(())
+        Ok(ValueWord::from_deque(new_data.items.into()))
     } else {
         Err(type_mismatch_error("pushFront", "Deque"))
     }
@@ -61,25 +57,23 @@ pub fn handle_push_front(
 
 /// Deque.popBack() -> value (returns the removed item, or None)
 pub fn handle_pop_back(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_deque_mut() {
-        match data.items.pop_back() {
-            Some(item) => vm.push_vw(item)?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        return Ok(());
+        return Ok(match data.items.pop_back() {
+            Some(item) => item,
+            None => ValueWord::none(),
+        });
     }
 
     if let Some(deque_data) = args[0].as_deque() {
         let mut new_data = deque_data.clone();
-        match new_data.items.pop_back() {
-            Some(item) => vm.push_vw(item)?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        Ok(())
+        Ok(match new_data.items.pop_back() {
+            Some(item) => item,
+            None => ValueWord::none(),
+        })
     } else {
         Err(type_mismatch_error("popBack", "Deque"))
     }
@@ -87,25 +81,23 @@ pub fn handle_pop_back(
 
 /// Deque.popFront() -> value (returns the removed item, or None)
 pub fn handle_pop_front(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_deque_mut() {
-        match data.items.pop_front() {
-            Some(item) => vm.push_vw(item)?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        return Ok(());
+        return Ok(match data.items.pop_front() {
+            Some(item) => item,
+            None => ValueWord::none(),
+        });
     }
 
     if let Some(deque_data) = args[0].as_deque() {
         let mut new_data = deque_data.clone();
-        match new_data.items.pop_front() {
-            Some(item) => vm.push_vw(item)?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        Ok(())
+        Ok(match new_data.items.pop_front() {
+            Some(item) => item,
+            None => ValueWord::none(),
+        })
     } else {
         Err(type_mismatch_error("popFront", "Deque"))
     }
@@ -113,16 +105,15 @@ pub fn handle_pop_front(
 
 /// Deque.peekBack() -> value (returns the last item without removing, or None)
 pub fn handle_peek_back(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_deque() {
-        match data.items.back() {
-            Some(item) => vm.push_vw(item.clone())?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        Ok(())
+        Ok(match data.items.back() {
+            Some(item) => item.clone(),
+            None => ValueWord::none(),
+        })
     } else {
         Err(type_mismatch_error("peekBack", "Deque"))
     }
@@ -130,16 +121,15 @@ pub fn handle_peek_back(
 
 /// Deque.peekFront() -> value (returns the first item without removing, or None)
 pub fn handle_peek_front(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_deque() {
-        match data.items.front() {
-            Some(item) => vm.push_vw(item.clone())?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        Ok(())
+        Ok(match data.items.front() {
+            Some(item) => item.clone(),
+            None => ValueWord::none(),
+        })
     } else {
         Err(type_mismatch_error("peekFront", "Deque"))
     }
@@ -147,13 +137,12 @@ pub fn handle_peek_front(
 
 /// Deque.size() / Deque.len() / Deque.length -> int
 pub fn handle_size(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_deque() {
-        vm.push_vw(ValueWord::from_i64(data.items.len() as i64))?;
-        Ok(())
+        Ok(ValueWord::from_i64(data.items.len() as i64))
     } else {
         Err(type_mismatch_error("size", "Deque"))
     }
@@ -161,13 +150,12 @@ pub fn handle_size(
 
 /// Deque.isEmpty() -> bool
 pub fn handle_is_empty(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_deque() {
-        vm.push_vw(ValueWord::from_bool(data.items.is_empty()))?;
-        Ok(())
+        Ok(ValueWord::from_bool(data.items.is_empty()))
     } else {
         Err(type_mismatch_error("isEmpty", "Deque"))
     }
@@ -175,14 +163,13 @@ pub fn handle_is_empty(
 
 /// Deque.toArray() -> array
 pub fn handle_to_array(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if let Some(data) = args[0].as_deque() {
         let arr: Vec<ValueWord> = data.items.iter().cloned().collect();
-        vm.push_vw(ValueWord::from_array(Arc::new(arr)))?;
-        Ok(())
+        Ok(ValueWord::from_array(Arc::new(arr)))
     } else {
         Err(type_mismatch_error("toArray", "Deque"))
     }
@@ -190,10 +177,10 @@ pub fn handle_to_array(
 
 /// Deque.get(index) -> value
 pub fn handle_get(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "Deque.get", "an index argument")?;
     if let Some(data) = args[0].as_deque() {
         let idx = args[1]
@@ -207,11 +194,10 @@ pub fn handle_get(
         } else {
             idx as usize
         };
-        match data.items.get(idx) {
-            Some(item) => vm.push_vw(item.clone())?,
-            None => vm.push_vw(ValueWord::none())?,
-        }
-        Ok(())
+        Ok(match data.items.get(idx) {
+            Some(item) => item.clone(),
+            None => ValueWord::none(),
+        })
     } else {
         Err(type_mismatch_error("get", "Deque"))
     }

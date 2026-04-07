@@ -1,7 +1,7 @@
 //! HashMap method handlers for the PHF method registry.
 //!
 //! All methods follow the MethodFn signature:
-//! fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<(), VMError>
+//! fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<ValueWord, VMError>
 //!
 //! ## Collision Safety
 //! All lookups scan the bucket `Vec<usize>` from `HashMapData.index` and check
@@ -36,10 +36,10 @@ fn bucket_find(keys: &[ValueWord], bucket: &[usize], needle: &ValueWord) -> Opti
 
 /// HashMap.get(key) -> value | none
 pub fn handle_get(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "HashMap.get", "a key argument")?;
     let receiver = &args[0];
     let key = &args[1];
@@ -48,8 +48,7 @@ pub fn handle_get(
         // Shape-guarded fast path for string keys
         if let Some(ks) = key.as_str() {
             if let Some(val) = data.shape_get(ks) {
-                vm.push_vw(val.clone())?;
-                return Ok(());
+                return Ok(val.clone());
             }
         }
         // Fallback: hash-based lookup
@@ -61,8 +60,7 @@ pub fn handle_get(
         } else {
             ValueWord::none()
         };
-        vm.push_vw(result)?;
-        Ok(())
+        Ok(result)
     } else {
         Err(type_mismatch_error("get", "HashMap"))
     }
@@ -70,10 +68,10 @@ pub fn handle_get(
 
 /// HashMap.set(key, value) -> HashMap (returns new or mutated HashMap)
 pub fn handle_set(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 3, "HashMap.set", "key and value arguments")?;
     let key = args[1].clone();
     let value = args[2].clone();
@@ -89,8 +87,7 @@ pub fn handle_set(
                 write_barrier_vw(&data.values[idx], &value);
                 data.keys[idx] = key;
                 data.values[idx] = value;
-                vm.push_vw(args[0].clone())?;
-                return Ok(());
+                return Ok(args[0].clone());
             }
         }
         // New key: transition shape if string key, else drop to dictionary mode
@@ -106,8 +103,7 @@ pub fn handle_set(
         data.keys.push(key);
         data.values.push(value);
         data.index.entry(hash).or_default().push(idx);
-        vm.push_vw(args[0].clone())?;
-        return Ok(());
+        return Ok(args[0].clone());
     }
 
     // Slow path: clone everything.
@@ -121,16 +117,14 @@ pub fn handle_set(
             if let Some(idx) = bucket_find(&keys, bucket, &key) {
                 keys[idx] = key;
                 values[idx] = value;
-                vm.push_vw(ValueWord::from_hashmap(keys, values, index))?;
-                return Ok(());
+                return Ok(ValueWord::from_hashmap(keys, values, index));
             }
         }
         let idx = keys.len();
         keys.push(key);
         values.push(value);
         index.entry(hash).or_default().push(idx);
-        vm.push_vw(ValueWord::from_hashmap(keys, values, index))?;
-        Ok(())
+        Ok(ValueWord::from_hashmap(keys, values, index))
     } else {
         Err(type_mismatch_error("set", "HashMap"))
     }
@@ -138,10 +132,10 @@ pub fn handle_set(
 
 /// HashMap.has(key) -> bool
 pub fn handle_has(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "HashMap.has", "a key argument")?;
     let receiver = &args[0];
     let key = &args[1];
@@ -152,8 +146,7 @@ pub fn handle_has(
             .get(&hash)
             .map(|bucket| bucket_find(keys, bucket, key).is_some())
             .unwrap_or(false);
-        vm.push_vw(ValueWord::from_bool(found))?;
-        Ok(())
+        Ok(ValueWord::from_bool(found))
     } else {
         Err(type_mismatch_error("has", "HashMap"))
     }
@@ -161,10 +154,10 @@ pub fn handle_has(
 
 /// HashMap.delete(key) -> HashMap (returns new or mutated HashMap)
 pub fn handle_delete(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     mut args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "HashMap.delete", "a key argument")?;
     let key = args[1].clone();
     let hash = key.vw_hash();
@@ -199,13 +192,11 @@ pub fn handle_delete(
                         data.index.remove(&hash);
                     }
                 }
-                vm.push_vw(args[0].clone())?;
-                return Ok(());
+                return Ok(args[0].clone());
             }
         }
         // Key not found
-        vm.push_vw(args[0].clone())?;
-        return Ok(());
+        return Ok(args[0].clone());
     }
 
     // Slow path: clone without the deleted key
@@ -225,14 +216,13 @@ pub fn handle_delete(
                     .map(|(_, v)| v.clone())
                     .collect();
                 let index = HashMapData::rebuild_index(&keys);
-                vm.push_vw(ValueWord::from_hashmap(keys, values, index))?;
+                Ok(ValueWord::from_hashmap(keys, values, index))
             } else {
-                vm.push_vw(args[0].clone())?;
+                Ok(args[0].clone())
             }
         } else {
-            vm.push_vw(args[0].clone())?;
+            Ok(args[0].clone())
         }
-        Ok(())
     } else {
         Err(type_mismatch_error("delete", "HashMap"))
     }
@@ -242,15 +232,14 @@ pub fn handle_delete(
 
 /// HashMap.keys() -> Array
 pub fn handle_keys(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     if let Some((keys, _, _)) = receiver.as_hashmap() {
         let arr = shape_value::vmarray_from_value_words(keys.clone());
-        vm.push_vw(ValueWord::from_array(arr))?;
-        Ok(())
+        Ok(ValueWord::from_array(arr))
     } else {
         Err(type_mismatch_error("keys", "HashMap"))
     }
@@ -258,15 +247,14 @@ pub fn handle_keys(
 
 /// HashMap.values() -> Array
 pub fn handle_values(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     if let Some((_, values, _)) = receiver.as_hashmap() {
         let arr = shape_value::vmarray_from_value_words(values.clone());
-        vm.push_vw(ValueWord::from_array(arr))?;
-        Ok(())
+        Ok(ValueWord::from_array(arr))
     } else {
         Err(type_mismatch_error("values", "HashMap"))
     }
@@ -274,10 +262,10 @@ pub fn handle_values(
 
 /// HashMap.entries() -> Array of [key, value] pairs
 pub fn handle_entries(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     if let Some((keys, values, _)) = receiver.as_hashmap() {
         let entries: Vec<ValueWord> = keys
@@ -289,8 +277,7 @@ pub fn handle_entries(
             })
             .collect();
         let arr = shape_value::vmarray_from_value_words(entries);
-        vm.push_vw(ValueWord::from_array(arr))?;
-        Ok(())
+        Ok(ValueWord::from_array(arr))
     } else {
         Err(type_mismatch_error("entries", "HashMap"))
     }
@@ -298,14 +285,13 @@ pub fn handle_entries(
 
 /// HashMap.len() -> int
 pub fn handle_len(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     if let Some((keys, _, _)) = receiver.as_hashmap() {
-        vm.push_vw(ValueWord::from_i64(keys.len() as i64))?;
-        Ok(())
+        Ok(ValueWord::from_i64(keys.len() as i64))
     } else {
         Err(type_mismatch_error("len", "HashMap"))
     }
@@ -313,14 +299,13 @@ pub fn handle_len(
 
 /// HashMap.isEmpty() -> bool
 pub fn handle_is_empty(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     if let Some((keys, _, _)) = receiver.as_hashmap() {
-        vm.push_vw(ValueWord::from_bool(keys.is_empty()))?;
-        Ok(())
+        Ok(ValueWord::from_bool(keys.is_empty()))
     } else {
         Err(type_mismatch_error("isEmpty", "HashMap"))
     }
@@ -333,7 +318,7 @@ pub fn handle_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "HashMap.forEach", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
@@ -344,8 +329,7 @@ pub fn handle_for_each(
         for (k, v) in keys.iter().zip(values.iter()) {
             vm.call_value_immediate_nb(&callback, &[k.clone(), v.clone()], ctx.as_deref_mut())?;
         }
-        vm.push_vw(ValueWord::unit())?;
-        Ok(())
+        Ok(ValueWord::unit())
     } else {
         Err(type_mismatch_error("forEach", "HashMap"))
     }
@@ -356,7 +340,7 @@ pub fn handle_filter(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "HashMap.filter", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
@@ -376,8 +360,7 @@ pub fn handle_filter(
             }
         }
 
-        vm.push_vw(ValueWord::from_hashmap_pairs(keys, values))?;
-        Ok(())
+        Ok(ValueWord::from_hashmap_pairs(keys, values))
     } else {
         Err(type_mismatch_error("filter", "HashMap"))
     }
@@ -388,7 +371,7 @@ pub fn handle_map(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "HashMap.map", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
@@ -405,12 +388,11 @@ pub fn handle_map(
             new_values.push(result);
         }
 
-        vm.push_vw(ValueWord::from_hashmap(
+        Ok(ValueWord::from_hashmap(
             old_keys.clone(),
             new_values,
             old_index,
-        ))?;
-        Ok(())
+        ))
     } else {
         Err(type_mismatch_error("map", "HashMap"))
     }
@@ -420,10 +402,10 @@ pub fn handle_map(
 
 /// HashMap.merge(other) -> HashMap (other wins on conflict)
 pub fn handle_merge(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "HashMap.merge", "a HashMap argument")?;
     let receiver = &args[0];
     let other = &args[1];
@@ -454,16 +436,15 @@ pub fn handle_merge(
         index.entry(hash).or_default().push(idx);
     }
 
-    vm.push_vw(ValueWord::from_hashmap(keys, values, index))?;
-    Ok(())
+    Ok(ValueWord::from_hashmap(keys, values, index))
 }
 
 /// HashMap.getOrDefault(key, default) -> value
 pub fn handle_get_or_default(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 3, "HashMap.getOrDefault", "key and default arguments")?;
     let receiver = &args[0];
     let key = &args[1];
@@ -478,8 +459,7 @@ pub fn handle_get_or_default(
         } else {
             default.clone()
         };
-        vm.push_vw(result)?;
-        Ok(())
+        Ok(result)
     } else {
         Err(type_mismatch_error("getOrDefault", "HashMap"))
     }
@@ -490,7 +470,7 @@ pub fn handle_reduce(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 3, "HashMap.reduce", "a function and initial value")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
@@ -507,8 +487,7 @@ pub fn handle_reduce(
                 ctx.as_deref_mut(),
             )?;
         }
-        vm.push_vw(acc)?;
-        Ok(())
+        Ok(acc)
     } else {
         Err(type_mismatch_error("reduce", "HashMap"))
     }
@@ -519,7 +498,7 @@ pub fn handle_to_array(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     handle_entries(vm, args, ctx)
 }
 
@@ -528,7 +507,7 @@ pub fn handle_group_by(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     check_arg_count(&args, 2, "HashMap.groupBy", "a function argument")?;
     let receiver = args[0].clone();
     let callback = args[1].clone();
@@ -573,8 +552,7 @@ pub fn handle_group_by(
             outer_values.push(ValueWord::from_hashmap_pairs(gkeys, gvalues));
         }
 
-        vm.push_vw(ValueWord::from_hashmap_pairs(outer_keys, outer_values))?;
-        Ok(())
+        Ok(ValueWord::from_hashmap_pairs(outer_keys, outer_values))
     } else {
         Err(type_mismatch_error("groupBy", "HashMap"))
     }

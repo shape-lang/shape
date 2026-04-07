@@ -24,7 +24,7 @@ pub(crate) fn handle_order_by(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.is_empty() || args.len() > 3 {
         return Err(VMError::RuntimeError(
             "order_by() requires 1-3 arguments (array, key_func, direction?)".to_string(),
@@ -96,8 +96,7 @@ pub(crate) fn handle_order_by(
     }
 
     let sorted: Vec<ValueWord> = keyed.into_iter().map(|(_, v)| v).collect();
-    vm.push_vw(ValueWord::from_array(Arc::new(sorted)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(sorted)))
 }
 
 /// Compare two ValueWord values for ordering
@@ -118,17 +117,17 @@ pub(crate) fn handle_then_by(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // then_by is essentially the same as order_by for now
     // Used for chaining multiple sorts
     handle_order_by(vm, args, ctx)
 }
 
 pub(crate) fn handle_join_str(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.is_empty() || args.len() > 2 {
         return Err(VMError::RuntimeError(
             "join_str() requires 1-2 arguments (array, separator?)".to_string(),
@@ -156,6 +155,5 @@ pub(crate) fn handle_join_str(
     let strings: Vec<String> = array.iter().map(|nb| nb_to_string_coerce(nb)).collect();
 
     let result = strings.join(separator);
-    vm.push_vw(ValueWord::from_string(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_string(Arc::new(result)))
 }

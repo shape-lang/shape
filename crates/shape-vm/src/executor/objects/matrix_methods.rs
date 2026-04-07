@@ -1,7 +1,7 @@
 //! Matrix method handlers for the PHF method registry.
 //!
 //! All methods follow the MethodFn signature:
-//! fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<(), VMError>
+//! fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<ValueWord, VMError>
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
@@ -21,69 +21,69 @@ fn extract_matrix(nb: &ValueWord) -> Result<&MatrixData, VMError> {
 
 /// mat.transpose() -> Matrix
 pub fn handle_transpose(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let result = matrix_kernels::matrix_transpose(m);
-    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)))
+    Ok(ValueWord::from_matrix(std::sync::Arc::new(result)))
 }
 
 /// mat.inverse() -> Matrix (errors if singular)
 pub fn handle_inverse(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let result = matrix_kernels::matrix_inverse(m).map_err(|e| VMError::RuntimeError(e))?;
-    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)))
+    Ok(ValueWord::from_matrix(std::sync::Arc::new(result)))
 }
 
 /// mat.det() or mat.determinant() -> number
 pub fn handle_determinant(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let result = matrix_kernels::matrix_determinant(m).map_err(|e| VMError::RuntimeError(e))?;
-    vm.push_vw(ValueWord::from_f64(result))
+    Ok(ValueWord::from_f64(result))
 }
 
 /// mat.trace() -> number
 pub fn handle_trace(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let result = matrix_kernels::matrix_trace(m).map_err(|e| VMError::RuntimeError(e))?;
-    vm.push_vw(ValueWord::from_f64(result))
+    Ok(ValueWord::from_f64(result))
 }
 
 /// mat.shape() -> [rows, cols]
 pub fn handle_shape(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let (rows, cols) = m.shape();
     let pair = vec![
         ValueWord::from_i64(rows as i64),
         ValueWord::from_i64(cols as i64),
     ];
-    vm.push_vw(ValueWord::from_array(Arc::new(pair)))
+    Ok(ValueWord::from_array(Arc::new(pair)))
 }
 
 /// mat.reshape(rows, cols) -> Matrix
 pub fn handle_reshape(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let new_rows = args
         .get(1)
@@ -113,17 +113,17 @@ pub fn handle_reshape(
     for v in m.data.iter() {
         data.push(*v);
     }
-    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(MatrixData::from_flat(
-        data, new_rows, new_cols,
-    ))))
+    Ok(ValueWord::from_matrix(std::sync::Arc::new(
+        MatrixData::from_flat(data, new_rows, new_cols),
+    )))
 }
 
 /// mat.row(i) -> FloatArraySlice (zero-copy view into matrix row)
 pub fn handle_row(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let i = args
         .get(1)
@@ -149,17 +149,21 @@ pub fn handle_row(
 
     let offset = actual as u32 * cols;
     let len = cols;
-    vm.push_vw(ValueWord::from_heap_value(
-        shape_value::heap_value::HeapValue::FloatArraySlice { parent: parent_arc, offset, len },
+    Ok(ValueWord::from_heap_value(
+        shape_value::heap_value::HeapValue::FloatArraySlice {
+            parent: parent_arc,
+            offset,
+            len,
+        },
     ))
 }
 
 /// mat.col(j) -> FloatArray
 pub fn handle_col(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let j = args
         .get(1)
@@ -182,17 +186,17 @@ pub fn handle_col(
     for i in 0..m.rows as usize {
         col_data.push(m.data[i * n_cols + col_idx]);
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(
+    Ok(ValueWord::from_float_array(Arc::new(
         AlignedTypedBuffer::from_aligned(col_data),
     )))
 }
 
 /// mat.diag() -> FloatArray (main diagonal)
 pub fn handle_diag(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let n = m.rows.min(m.cols) as usize;
     let cols = m.cols as usize;
@@ -200,23 +204,23 @@ pub fn handle_diag(
     for i in 0..n {
         diag.push(m.data[i * cols + i]);
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(
+    Ok(ValueWord::from_float_array(Arc::new(
         AlignedTypedBuffer::from_aligned(diag),
     )))
 }
 
 /// mat.flatten() -> FloatArray
 pub fn handle_flatten(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let mut flat = AlignedVec::with_capacity(m.data.len());
     for &v in m.data.iter() {
         flat.push(v);
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(
+    Ok(ValueWord::from_float_array(Arc::new(
         AlignedTypedBuffer::from_aligned(flat),
     )))
 }
@@ -226,7 +230,7 @@ pub fn handle_map(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "Matrix.map requires a function argument".to_string(),
@@ -244,87 +248,87 @@ pub fn handle_map(
         result.push(val);
     }
 
-    vm.push_vw(ValueWord::from_matrix(std::sync::Arc::new(MatrixData::from_flat(
-        result, m.rows, m.cols,
-    ))))
+    Ok(ValueWord::from_matrix(std::sync::Arc::new(
+        MatrixData::from_flat(result, m.rows, m.cols),
+    )))
 }
 
 /// mat.sum() -> number
 pub fn handle_sum(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let sum: f64 = m.data.iter().sum();
-    vm.push_vw(ValueWord::from_f64(sum))
+    Ok(ValueWord::from_f64(sum))
 }
 
 /// mat.min() -> number
 pub fn handle_min(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     if m.data.is_empty() {
-        return vm.push_vw(ValueWord::none());
+        return Ok(ValueWord::none());
     }
     let min = m.data.iter().copied().fold(f64::INFINITY, f64::min);
-    vm.push_vw(ValueWord::from_f64(min))
+    Ok(ValueWord::from_f64(min))
 }
 
 /// mat.max() -> number
 pub fn handle_max(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     if m.data.is_empty() {
-        return vm.push_vw(ValueWord::none());
+        return Ok(ValueWord::none());
     }
     let max = m.data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    vm.push_vw(ValueWord::from_f64(max))
+    Ok(ValueWord::from_f64(max))
 }
 
 /// mat.mean() -> number
 pub fn handle_mean(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     if m.data.is_empty() {
-        return vm.push_vw(ValueWord::none());
+        return Ok(ValueWord::none());
     }
     let sum: f64 = m.data.iter().sum();
-    vm.push_vw(ValueWord::from_f64(sum / m.data.len() as f64))
+    Ok(ValueWord::from_f64(sum / m.data.len() as f64))
 }
 
 /// mat.rowSum() -> FloatArray
 pub fn handle_row_sum(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let mut result = AlignedVec::with_capacity(m.rows as usize);
     for i in 0..m.rows as usize {
         let sum: f64 = m.row_slice(i as u32).iter().sum();
         result.push(sum);
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(
+    Ok(ValueWord::from_float_array(Arc::new(
         AlignedTypedBuffer::from_aligned(result),
     )))
 }
 
 /// mat.colSum() -> FloatArray
 pub fn handle_col_sum(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let m = extract_matrix(&args[0])?;
     let rows = m.rows as usize;
     let cols = m.cols as usize;
@@ -336,7 +340,7 @@ pub fn handle_col_sum(
         }
         result.push(sum);
     }
-    vm.push_vw(ValueWord::from_float_array(Arc::new(
+    Ok(ValueWord::from_float_array(Arc::new(
         AlignedTypedBuffer::from_aligned(result),
     )))
 }

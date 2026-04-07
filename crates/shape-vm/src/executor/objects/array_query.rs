@@ -60,7 +60,7 @@ pub(crate) fn handle_where(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "where() requires 2 arguments: receiver and predicate".to_string(),
@@ -93,8 +93,7 @@ pub(crate) fn handle_where(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(filtered)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(filtered)))
 }
 
 /// Map array with function (alias for map)
@@ -102,7 +101,7 @@ pub(crate) fn handle_select(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "select() requires 2 arguments: receiver and mapper".to_string(),
@@ -133,8 +132,7 @@ pub(crate) fn handle_select(
         results.push(mapped);
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(results)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(results)))
 }
 
 /// Find first element matching predicate
@@ -142,7 +140,7 @@ pub(crate) fn handle_find(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "find() requires 2 arguments: receiver and predicate".to_string(),
@@ -170,13 +168,11 @@ pub(crate) fn handle_find(
             vm.call_value_immediate_nb(&args[1], &[nb.clone()], ctx.as_deref_mut())?
         };
         if is_bool_true(&matches)? {
-            vm.push_vw(nb.clone())?;
-            return Ok(());
+            return Ok(nb.clone());
         }
     }
 
-    vm.push_vw(ValueWord::none())?;
-    Ok(())
+    Ok(ValueWord::none())
 }
 
 /// Find index of first element matching predicate
@@ -184,7 +180,7 @@ pub(crate) fn handle_find_index(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "find_index() requires 2 arguments: receiver and predicate".to_string(),
@@ -202,21 +198,19 @@ pub(crate) fn handle_find_index(
     for (index, nb) in array.iter().enumerate() {
         let matches = vm.call_value_immediate_nb(&args[1], &[nb.clone()], ctx.as_deref_mut())?;
         if is_bool_true(&matches)? {
-            vm.push_vw(ValueWord::from_f64(index as f64))?;
-            return Ok(());
+            return Ok(ValueWord::from_f64(index as f64));
         }
     }
 
-    vm.push_vw(ValueWord::from_f64(-1.0))?;
-    Ok(())
+    Ok(ValueWord::from_f64(-1.0))
 }
 
 /// Find index of value (returns -1 if not found)
 pub(crate) fn handle_index_of(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "index_of() requires 2 arguments: receiver and value".to_string(),
@@ -229,21 +223,19 @@ pub(crate) fn handle_index_of(
 
     for (index, nb) in array.iter().enumerate() {
         if nb_equal(nb, search_value) {
-            vm.push_vw(ValueWord::from_f64(index as f64))?;
-            return Ok(());
+            return Ok(ValueWord::from_f64(index as f64));
         }
     }
 
-    vm.push_vw(ValueWord::from_f64(-1.0))?;
-    Ok(())
+    Ok(ValueWord::from_f64(-1.0))
 }
 
 /// Check if array contains value
 pub(crate) fn handle_includes(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "includes() requires 2 arguments: receiver and value".to_string(),
@@ -256,13 +248,11 @@ pub(crate) fn handle_includes(
 
     for nb in array.iter() {
         if nb_equal(nb, search_value) {
-            vm.push_vw(ValueWord::from_bool(true))?;
-            return Ok(());
+            return Ok(ValueWord::from_bool(true));
         }
     }
 
-    vm.push_vw(ValueWord::from_bool(false))?;
-    Ok(())
+    Ok(ValueWord::from_bool(false))
 }
 
 /// Check if at least one element matches predicate
@@ -270,7 +260,7 @@ pub(crate) fn handle_some(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "some() requires 2 arguments: receiver and predicate".to_string(),
@@ -298,13 +288,11 @@ pub(crate) fn handle_some(
             vm.call_value_immediate_nb(&args[1], &[nb.clone()], ctx.as_deref_mut())?
         };
         if is_bool_true(&matches)? {
-            vm.push_vw(ValueWord::from_bool(true))?;
-            return Ok(());
+            return Ok(ValueWord::from_bool(true));
         }
     }
 
-    vm.push_vw(ValueWord::from_bool(false))?;
-    Ok(())
+    Ok(ValueWord::from_bool(false))
 }
 
 /// Check if all elements match predicate
@@ -312,7 +300,7 @@ pub(crate) fn handle_every(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "every() requires 2 arguments: receiver and predicate".to_string(),
@@ -340,13 +328,11 @@ pub(crate) fn handle_every(
             vm.call_value_immediate_nb(&args[1], &[nb.clone()], ctx.as_deref_mut())?
         };
         if !is_bool_true(&matches)? {
-            vm.push_vw(ValueWord::from_bool(false))?;
-            return Ok(());
+            return Ok(ValueWord::from_bool(false));
         }
     }
 
-    vm.push_vw(ValueWord::from_bool(true))?;
-    Ok(())
+    Ok(ValueWord::from_bool(true))
 }
 
 /// Alias for some - check if at least one element matches predicate
@@ -354,7 +340,7 @@ pub(crate) fn handle_any(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     handle_some(vm, args, ctx)
 }
 
@@ -363,7 +349,7 @@ pub(crate) fn handle_all(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     handle_every(vm, args, ctx)
 }
 
@@ -372,7 +358,7 @@ pub(crate) fn handle_single(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "single() requires 2 arguments: receiver and predicate".to_string(),
@@ -404,10 +390,7 @@ pub(crate) fn handle_single(
     }
 
     match found {
-        Some(value) => {
-            vm.push_vw(value)?;
-            Ok(())
-        }
+        Some(value) => Ok(value),
         None => Err(VMError::RuntimeError(
             "single() found no matching elements".to_string(),
         )),
@@ -419,7 +402,7 @@ pub(crate) fn handle_take_while(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "take_while() requires 2 arguments: receiver and predicate".to_string(),
@@ -445,8 +428,7 @@ pub(crate) fn handle_take_while(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 /// Skip elements while predicate is true
@@ -454,7 +436,7 @@ pub(crate) fn handle_skip_while(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "skip_while() requires 2 arguments: receiver and predicate".to_string(),
@@ -487,8 +469,7 @@ pub(crate) fn handle_skip_while(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 /// Iterate with side effects (returns None)
@@ -496,7 +477,7 @@ pub(crate) fn handle_for_each(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "for_each() requires 2 arguments: receiver and function".to_string(),
@@ -525,6 +506,5 @@ pub(crate) fn handle_for_each(
         }
     }
 
-    vm.push_vw(ValueWord::none())?;
-    Ok(())
+    Ok(ValueWord::none())
 }

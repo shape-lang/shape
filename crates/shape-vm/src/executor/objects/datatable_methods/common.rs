@@ -321,12 +321,12 @@ pub(crate) fn typed_object_to_hashmap_nb_vm(
 pub(crate) fn build_datatable_from_objects_nb(
     vm: &mut VirtualMachine,
     rows: &[ValueWord],
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if rows.is_empty() {
-        // Empty result — push empty DataTable with no columns
+        // Empty result — return empty DataTable with no columns
         let schema = Arc::new(arrow_schema::Schema::empty());
         let batch = arrow_array::RecordBatch::new_empty(schema);
-        return vm.push_vw(ValueWord::from_datatable(Arc::new(DataTable::new(batch))));
+        return Ok(ValueWord::from_datatable(Arc::new(DataTable::new(batch))));
     }
 
     // Scalar results: if the first row is not a typed object, build a single-column table
@@ -390,7 +390,7 @@ pub(crate) fn build_datatable_from_objects_nb(
         let schema = Arc::new(arrow_schema::Schema::new(vec![field]));
         let batch = arrow_array::RecordBatch::try_new(schema, vec![col])
             .map_err(|e| VMError::RuntimeError(format!("Failed to build scalar table: {}", e)))?;
-        return vm.push_vw(ValueWord::from_datatable(Arc::new(DataTable::new(batch))));
+        return Ok(ValueWord::from_datatable(Arc::new(DataTable::new(batch))));
     }
 
     let (schema_id, _slots, _heap_mask) = rows[0].as_typed_object().unwrap();
@@ -537,7 +537,7 @@ pub(crate) fn build_datatable_from_objects_nb(
     let batch = arrow_array::RecordBatch::try_new(schema, columns)
         .map_err(|e| VMError::RuntimeError(format!("join failed to build result: {}", e)))?;
 
-    vm.push_vw(ValueWord::from_datatable(Arc::new(DataTable::new(batch))))
+    Ok(ValueWord::from_datatable(Arc::new(DataTable::new(batch))))
 }
 
 /// Extract (table, col_id) from a ValueWord ColumnRef receiver.

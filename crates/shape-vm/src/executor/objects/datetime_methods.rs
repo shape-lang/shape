@@ -1,7 +1,7 @@
 //! PHF-dispatched method handlers for DateTime values.
 //!
 //! Each handler follows the `MethodFn` signature:
-//! `fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<(), VMError>`
+//! `fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<ValueWord, VMError>`
 //!
 //! The receiver (DateTime) is always `args[0]`.
 
@@ -23,135 +23,135 @@ fn recv_dt(args: &[ValueWord]) -> Result<&DateTime<FixedOffset>, VMError> {
 // ===== Component access (return int) =====
 
 pub fn handle_year(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.year() as i64))
+    Ok(ValueWord::from_i64(dt.year() as i64))
 }
 
 pub fn handle_month(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.month() as i64))
+    Ok(ValueWord::from_i64(dt.month() as i64))
 }
 
 pub fn handle_day(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.day() as i64))
+    Ok(ValueWord::from_i64(dt.day() as i64))
 }
 
 pub fn handle_hour(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.hour() as i64))
+    Ok(ValueWord::from_i64(dt.hour() as i64))
 }
 
 pub fn handle_minute(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.minute() as i64))
+    Ok(ValueWord::from_i64(dt.minute() as i64))
 }
 
 pub fn handle_second(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.second() as i64))
+    Ok(ValueWord::from_i64(dt.second() as i64))
 }
 
 pub fn handle_millisecond(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64((dt.nanosecond() / 1_000_000) as i64))
+    Ok(ValueWord::from_i64((dt.nanosecond() / 1_000_000) as i64))
 }
 
 pub fn handle_microsecond(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64((dt.nanosecond() / 1_000) as i64))
+    Ok(ValueWord::from_i64((dt.nanosecond() / 1_000) as i64))
 }
 
 // ===== Day info =====
 
 pub fn handle_day_of_week(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(
+    Ok(ValueWord::from_i64(
         dt.weekday().num_days_from_monday() as i64
     ))
 }
 
 pub fn handle_day_of_year(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.ordinal() as i64))
+    Ok(ValueWord::from_i64(dt.ordinal() as i64))
 }
 
 pub fn handle_week_of_year(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.iso_week().week() as i64))
+    Ok(ValueWord::from_i64(dt.iso_week().week() as i64))
 }
 
 pub fn handle_is_weekday(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let wd = dt.weekday().num_days_from_monday();
-    vm.push_vw(ValueWord::from_bool(wd < 5))
+    Ok(ValueWord::from_bool(wd < 5))
 }
 
 pub fn handle_is_weekend(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let wd = dt.weekday().num_days_from_monday();
-    vm.push_vw(ValueWord::from_bool(wd >= 5))
+    Ok(ValueWord::from_bool(wd >= 5))
 }
 
 // ===== Formatting =====
 
 pub fn handle_format(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let fmt = args
         .get(1)
@@ -161,52 +161,52 @@ pub fn handle_format(
             got: args.get(1).map_or("missing", |a| a.type_name()),
         })?;
     let formatted = dt.format(fmt).to_string();
-    vm.push_vw(ValueWord::from_string(Arc::new(formatted)))
+    Ok(ValueWord::from_string(Arc::new(formatted)))
 }
 
 pub fn handle_iso8601(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_string(Arc::new(dt.to_rfc3339())))
+    Ok(ValueWord::from_string(Arc::new(dt.to_rfc3339())))
 }
 
 pub fn handle_rfc2822(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_string(Arc::new(dt.to_rfc2822())))
+    Ok(ValueWord::from_string(Arc::new(dt.to_rfc2822())))
 }
 
 pub fn handle_unix_timestamp(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.timestamp()))
+    Ok(ValueWord::from_i64(dt.timestamp()))
 }
 
 pub fn handle_to_unix_millis(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
-    vm.push_vw(ValueWord::from_i64(dt.timestamp_millis()))
+    Ok(ValueWord::from_i64(dt.timestamp_millis()))
 }
 
 // ===== Diff =====
 
 pub fn handle_diff(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let other = args
         .get(1)
@@ -250,26 +250,26 @@ pub fn handle_diff(
         ValueWord::from_i64(total_millis),
     ];
 
-    vm.push_vw(ValueWord::from_hashmap_pairs(keys, values))
+    Ok(ValueWord::from_hashmap_pairs(keys, values))
 }
 
 // ===== Timezone =====
 
 pub fn handle_to_utc(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let utc_dt = dt.with_timezone(&chrono::Utc);
-    vm.push_vw(ValueWord::from_time(utc_dt.fixed_offset()))
+    Ok(ValueWord::from_time(utc_dt.fixed_offset()))
 }
 
 pub fn handle_to_timezone(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let tz_name = args
         .get(1)
@@ -282,24 +282,24 @@ pub fn handle_to_timezone(
         .parse()
         .map_err(|_| VMError::RuntimeError(format!("Unknown timezone: '{}'", tz_name)))?;
     let converted = dt.with_timezone(&tz).fixed_offset();
-    vm.push_vw(ValueWord::from_time(converted))
+    Ok(ValueWord::from_time(converted))
 }
 
 pub fn handle_to_local(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let local_dt = dt.with_timezone(&chrono::Local).fixed_offset();
-    vm.push_vw(ValueWord::from_time(local_dt))
+    Ok(ValueWord::from_time(local_dt))
 }
 
 pub fn handle_timezone(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let offset_secs = dt.offset().local_minus_utc();
     // Format as a timezone description
@@ -314,21 +314,21 @@ pub fn handle_timezone(
             format!("UTC{:+}:{:02}", h, m)
         }
     };
-    vm.push_vw(ValueWord::from_string(Arc::new(name)))
+    Ok(ValueWord::from_string(Arc::new(name)))
 }
 
 pub fn handle_offset(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let offset_secs = dt.offset().local_minus_utc();
     let sign = if offset_secs >= 0 { '+' } else { '-' };
     let abs = offset_secs.unsigned_abs();
     let h = abs / 3600;
     let m = (abs % 3600) / 60;
-    vm.push_vw(ValueWord::from_string(Arc::new(format!(
+    Ok(ValueWord::from_string(Arc::new(format!(
         "{}{:02}:{:02}",
         sign, h, m
     ))))
@@ -337,10 +337,10 @@ pub fn handle_offset(
 // ===== Arithmetic =====
 
 pub fn handle_add_days(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let n = args
         .get(1)
@@ -352,14 +352,14 @@ pub fn handle_add_days(
     let result = dt
         .checked_add_signed(chrono::Duration::days(n))
         .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add_days".to_string()))?;
-    vm.push_vw(ValueWord::from_time(result))
+    Ok(ValueWord::from_time(result))
 }
 
 pub fn handle_add_hours(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let n = args
         .get(1)
@@ -371,14 +371,14 @@ pub fn handle_add_hours(
     let result = dt
         .checked_add_signed(chrono::Duration::hours(n))
         .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add_hours".to_string()))?;
-    vm.push_vw(ValueWord::from_time(result))
+    Ok(ValueWord::from_time(result))
 }
 
 pub fn handle_add_minutes(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let n = args
         .get(1)
@@ -390,14 +390,14 @@ pub fn handle_add_minutes(
     let result = dt
         .checked_add_signed(chrono::Duration::minutes(n))
         .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add_minutes".to_string()))?;
-    vm.push_vw(ValueWord::from_time(result))
+    Ok(ValueWord::from_time(result))
 }
 
 pub fn handle_add_seconds(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let n = args
         .get(1)
@@ -409,14 +409,14 @@ pub fn handle_add_seconds(
     let result = dt
         .checked_add_signed(chrono::Duration::seconds(n))
         .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add_seconds".to_string()))?;
-    vm.push_vw(ValueWord::from_time(result))
+    Ok(ValueWord::from_time(result))
 }
 
 pub fn handle_add_months(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let n = args
         .get(1)
@@ -444,16 +444,16 @@ pub fn handle_add_months(
         .ok_or_else(|| {
             VMError::RuntimeError("Ambiguous or invalid local time in add_months".to_string())
         })?;
-    vm.push_vw(ValueWord::from_time(result))
+    Ok(ValueWord::from_time(result))
 }
 
 // ===== Comparison =====
 
 pub fn handle_is_before(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let other = args
         .get(1)
@@ -462,14 +462,14 @@ pub fn handle_is_before(
             expected: "datetime",
             got: args.get(1).map_or("missing", |a| a.type_name()),
         })?;
-    vm.push_vw(ValueWord::from_bool(dt < other))
+    Ok(ValueWord::from_bool(dt < other))
 }
 
 pub fn handle_is_after(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let other = args
         .get(1)
@@ -478,14 +478,14 @@ pub fn handle_is_after(
             expected: "datetime",
             got: args.get(1).map_or("missing", |a| a.type_name()),
         })?;
-    vm.push_vw(ValueWord::from_bool(dt > other))
+    Ok(ValueWord::from_bool(dt > other))
 }
 
 pub fn handle_is_same_day(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = recv_dt(&args)?;
     let other = args
         .get(1)
@@ -494,7 +494,7 @@ pub fn handle_is_same_day(
             expected: "datetime",
             got: args.get(1).map_or("missing", |a| a.type_name()),
         })?;
-    vm.push_vw(ValueWord::from_bool(
+    Ok(ValueWord::from_bool(
         dt.year() == other.year() && dt.month() == other.month() && dt.day() == other.day(),
     ))
 }

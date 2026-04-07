@@ -44,7 +44,7 @@ pub(crate) fn handle_index_by(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
     let schema_id = extract_schema_id_nb(&args[0]);
 
@@ -63,7 +63,7 @@ pub(crate) fn handle_index_by(
         new_dt = new_dt.with_index_col(col_name_str);
         let table = Arc::new(new_dt);
 
-        return vm.push_vw(ValueWord::from_indexed_table(schema_id, table, col_id));
+        return Ok(ValueWord::from_indexed_table(schema_id, table, col_id));
     }
 
     // Closure path: table.index_by(t => t.timestamp)
@@ -93,7 +93,7 @@ pub(crate) fn handle_index_by(
                         let mut new_dt = dt_ref.as_ref().clone();
                         new_dt = new_dt.with_index_col(col_name);
                         let table = Arc::new(new_dt);
-                        return vm.push_vw(ValueWord::from_indexed_table(schema_id, table, col_id));
+                        return Ok(ValueWord::from_indexed_table(schema_id, table, col_id));
                     }
                 }
             }

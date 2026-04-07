@@ -14,7 +14,7 @@ impl VirtualMachine {
         &mut self,
         method: &str,
         args: Vec<ValueWord>,
-    ) -> Result<(), VMError> {
+    ) -> Result<ValueWord, VMError> {
         // args[0] is the receiver (content node)
         if args.is_empty() {
             return Err(VMError::RuntimeError(
@@ -42,8 +42,7 @@ impl VirtualMachine {
             }
             "toString" => {
                 let text = format!("{}", node);
-                self.push_vw(ValueWord::from_string(std::sync::Arc::new(text)))?;
-                return Ok(());
+                return Ok(ValueWord::from_string(std::sync::Arc::new(text)));
             }
             // Delegate to runtime content_methods for table/chart methods
             "border" | "max_rows" | "maxRows" | "series" | "title" | "x_label" | "xLabel"
@@ -56,8 +55,7 @@ impl VirtualMachine {
                     method_args,
                 ) {
                     Some(Ok(result_nb)) => {
-                        self.push_vw(result_nb)?;
-                        return Ok(());
+                        return Ok(result_nb);
                     }
                     Some(Err(e)) => {
                         return Err(VMError::RuntimeError(format!("{}", e)));
@@ -78,8 +76,7 @@ impl VirtualMachine {
             }
         };
 
-        self.push_vw(ValueWord::from_content(result))?;
-        Ok(())
+        Ok(ValueWord::from_content(result))
     }
 }
 

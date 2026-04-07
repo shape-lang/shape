@@ -282,13 +282,13 @@ impl VirtualMachine {
             args_nb[5].clone(), // result selector
         ];
 
-        match join_type_str.as_str() {
+        let result = match join_type_str.as_str() {
             "inner" => crate::executor::objects::datatable_methods::handle_inner_join(
                 self, join_args, None,
-            ),
-            "left" => {
-                crate::executor::objects::datatable_methods::handle_left_join(self, join_args, None)
-            }
+            )?,
+            "left" => crate::executor::objects::datatable_methods::handle_left_join(
+                self, join_args, None,
+            )?,
             "right" => {
                 let swapped_args: Vec<ValueWord> = vec![
                     args_nb[1].clone(),
@@ -301,16 +301,20 @@ impl VirtualMachine {
                     self,
                     swapped_args,
                     None,
-                )
+                )?
             }
-            "full" => {
-                crate::executor::objects::datatable_methods::handle_left_join(self, join_args, None)
+            "full" => crate::executor::objects::datatable_methods::handle_left_join(
+                self, join_args, None,
+            )?,
+            _ => {
+                return Err(VMError::RuntimeError(format!(
+                    "Unknown join type: '{}'. Expected inner, left, right, or full",
+                    join_type_str
+                )));
             }
-            _ => Err(VMError::RuntimeError(format!(
-                "Unknown join type: '{}'. Expected inner, left, right, or full",
-                join_type_str
-            ))),
-        }
+        };
+        self.push_vw(result)?;
+        Ok(())
     }
 
     /// Execute BindSchema: validate a DataTable against a TypeSchema at runtime.

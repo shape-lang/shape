@@ -13,10 +13,10 @@ use shape_value::{VMError, ValueWord};
 /// `sender.send(value)` — send a value through the channel.
 /// Returns true if sent successfully, false if the channel is closed.
 pub fn handle_channel_send(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let value = args.get(1).cloned().unwrap_or_else(ValueWord::none);
     let heap = receiver
@@ -26,14 +26,13 @@ pub fn handle_channel_send(
         HeapValue::Channel(data) => match data.as_ref() {
             shape_value::heap_value::ChannelData::Sender { tx, closed, .. } => {
                 if closed.load(std::sync::atomic::Ordering::Relaxed) {
-                    vm.push_vw(ValueWord::from_bool(false))?;
+                    Ok(ValueWord::from_bool(false))
                 } else {
                     match tx.send(value) {
-                        Ok(()) => vm.push_vw(ValueWord::from_bool(true))?,
-                        Err(_) => vm.push_vw(ValueWord::from_bool(false))?,
+                        Ok(()) => Ok(ValueWord::from_bool(true)),
+                        Err(_) => Ok(ValueWord::from_bool(false)),
                     }
                 }
-                Ok(())
             }
             _ => Err(VMError::RuntimeError(
                 "send() called on channel receiver (use on sender)".to_string(),
@@ -52,10 +51,10 @@ pub fn handle_channel_send(
 /// `receiver.recv()` — receive a value from the channel (blocking).
 /// Returns the value, or None if the channel is closed/disconnected.
 pub fn handle_channel_recv(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
@@ -68,10 +67,9 @@ pub fn handle_channel_recv(
                 // extract the guard and clear the poison flag.
                 let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 match guard.recv() {
-                    Ok(val) => vm.push_vw(val)?,
-                    Err(_) => vm.push_vw(ValueWord::none())?,
+                    Ok(val) => Ok(val),
+                    Err(_) => Ok(ValueWord::none()),
                 }
-                Ok(())
             }
             _ => Err(VMError::RuntimeError(
                 "recv() called on channel sender (use on receiver)".to_string(),
@@ -86,10 +84,10 @@ pub fn handle_channel_recv(
 /// `receiver.try_recv()` — try to receive without blocking.
 /// Returns the value if available, or None otherwise.
 pub fn handle_channel_try_recv(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver.as_heap_ref().ok_or_else(|| {
         type_mismatch_error("try_recv()", "channel")
@@ -102,10 +100,9 @@ pub fn handle_channel_try_recv(
                 // extract the guard and clear the poison flag.
                 let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 match guard.try_recv() {
-                    Ok(val) => vm.push_vw(val)?,
-                    Err(_) => vm.push_vw(ValueWord::none())?,
+                    Ok(val) => Ok(val),
+                    Err(_) => Ok(ValueWord::none()),
                 }
-                Ok(())
             }
             _ => Err(VMError::RuntimeError(
                 "try_recv() called on channel sender (use on receiver)".to_string(),
@@ -123,10 +120,10 @@ pub fn handle_channel_try_recv(
 
 /// `channel.close()` — close the channel.
 pub fn handle_channel_close(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver
         .as_heap_ref()
@@ -134,8 +131,7 @@ pub fn handle_channel_close(
     match heap {
         HeapValue::Channel(data) => {
             data.close();
-            vm.push_vw(ValueWord::none())?;
-            Ok(())
+            Ok(ValueWord::none())
         }
         _ => Err(VMError::RuntimeError(
             "close() called on non-channel value".to_string(),
@@ -145,19 +141,16 @@ pub fn handle_channel_close(
 
 /// `channel.is_closed()` — check if the channel has been closed.
 pub fn handle_channel_is_closed(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver.as_heap_ref().ok_or_else(|| {
         type_mismatch_error("is_closed()", "channel")
     })?;
     match heap {
-        HeapValue::Channel(data) => {
-            vm.push_vw(ValueWord::from_bool(data.is_closed()))?;
-            Ok(())
-        }
+        HeapValue::Channel(data) => Ok(ValueWord::from_bool(data.is_closed())),
         _ => Err(VMError::RuntimeError(
             "is_closed() called on non-channel value".to_string(),
         )),
@@ -166,19 +159,16 @@ pub fn handle_channel_is_closed(
 
 /// `channel.is_sender()` — returns true if this is the sender end.
 pub fn handle_channel_is_sender(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let receiver = &args[0];
     let heap = receiver.as_heap_ref().ok_or_else(|| {
         type_mismatch_error("is_sender()", "channel")
     })?;
     match heap {
-        HeapValue::Channel(data) => {
-            vm.push_vw(ValueWord::from_bool(data.is_sender()))?;
-            Ok(())
-        }
+        HeapValue::Channel(data) => Ok(ValueWord::from_bool(data.is_sender())),
         _ => Err(VMError::RuntimeError(
             "is_sender() called on non-channel value".to_string(),
         )),

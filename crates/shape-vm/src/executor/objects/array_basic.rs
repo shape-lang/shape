@@ -8,97 +8,85 @@ use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
 
 pub(crate) fn handle_len(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let view = require_any_array_arg(&args)?;
-    vm.push_vw(ValueWord::from_i64(view.len() as i64))?;
-    Ok(())
+    Ok(ValueWord::from_i64(view.len() as i64))
 }
 
 pub(crate) fn handle_length(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     handle_len(vm, args, ctx)
 }
 
 pub(crate) fn handle_first(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let view = require_any_array_arg(&args)?;
-    match view.first_nb() {
-        Some(nb) => vm.push_vw(nb)?,
-        None => vm.push_vw(ValueWord::none())?,
-    }
-    Ok(())
+    Ok(view.first_nb().unwrap_or_else(ValueWord::none))
 }
 
 pub(crate) fn handle_last(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let view = require_any_array_arg(&args)?;
-    match view.last_nb() {
-        Some(nb) => vm.push_vw(nb)?,
-        None => vm.push_vw(ValueWord::none())?,
-    }
-    Ok(())
+    Ok(view.last_nb().unwrap_or_else(ValueWord::none))
 }
 
 pub(crate) fn handle_reverse(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = require_any_array_arg(&args)?.to_generic();
 
     let mut reversed = arr.to_vec();
     reversed.reverse();
 
-    vm.push_vw(ValueWord::from_array(Arc::new(reversed)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(reversed)))
 }
 
 pub(crate) fn handle_push(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = require_any_array_arg(&args)?.to_generic();
     let value = args.get(1).cloned().unwrap_or_else(ValueWord::none);
 
     let mut result = arr.to_vec();
     result.push(value);
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 pub(crate) fn handle_pop(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = require_any_array_arg(&args)?.to_generic();
 
     let mut result = arr.to_vec();
     result.pop();
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 pub(crate) fn handle_zip(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr_a = require_any_array_arg(&args)?.to_generic();
     let arr_b = args
         .get(1)
@@ -117,18 +105,16 @@ pub(crate) fn handle_zip(
         result.push(ValueWord::from_array(Arc::new(pair)));
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 /// Clone an array — produces a shallow copy with a distinct Arc allocation.
 pub(crate) fn handle_clone(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let arr = require_any_array_arg(&args)?.to_generic();
     let cloned = arr.to_vec();
-    vm.push_vw(ValueWord::from_array(Arc::new(cloned)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(cloned)))
 }

@@ -11,10 +11,10 @@ use super::common::{append_f64_column, extract_dt_nb, wrap_result_table_nb};
 
 /// `dt.correlation(col_a, col_b)` — Pearson correlation between two f64 columns.
 pub(crate) fn handle_correlation(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
     let col_a = args
         .get(1)
@@ -47,15 +47,15 @@ pub(crate) fn handle_correlation(
     }
 
     let corr = shape_runtime::simd_statistics::correlation(a.values(), b.values());
-    vm.push_vw(ValueWord::from_f64(corr))
+    Ok(ValueWord::from_f64(corr))
 }
 
 /// `dt.covariance(col_a, col_b)` — covariance between two f64 columns.
 pub(crate) fn handle_covariance(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
     let col_a = args
         .get(1)
@@ -84,17 +84,16 @@ pub(crate) fn handle_covariance(
     }
 
     let cov = shape_runtime::simd_statistics::covariance(a.values(), b.values());
-    vm.push_vw(ValueWord::from_f64(cov))
+    Ok(ValueWord::from_f64(cov))
 }
 
 /// Shared implementation for windowed rolling column operations (rolling_sum, rolling_mean, rolling_std).
 fn rolling_windowed_op(
-    vm: &mut VirtualMachine,
     receiver: &ValueWord,
     args: &[ValueWord],
     method_name: &str,
     simd_fn: fn(&[f64], usize) -> Vec<f64>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(receiver)?;
     let col_name = args
         .get(1)
@@ -124,17 +123,16 @@ fn rolling_windowed_op(
     let result = simd_fn(col.values(), window);
     let result_col_name = format!("{}_{}_{}", col_name, method_name, window);
     let new_dt = append_f64_column(dt, &result_col_name, result)?;
-    vm.push_vw(wrap_result_table_nb(receiver, new_dt))
+    Ok(wrap_result_table_nb(receiver, new_dt))
 }
 
 /// Shared implementation for non-windowed column operations (diff, pct_change).
 fn column_transform_op(
-    vm: &mut VirtualMachine,
     receiver: &ValueWord,
     args: &[ValueWord],
     method_name: &str,
     simd_fn: fn(&[f64]) -> Vec<f64>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(receiver)?;
     let col_name = args
         .get(1)
@@ -154,17 +152,16 @@ fn column_transform_op(
     let result = simd_fn(col.values());
     let result_col_name = format!("{}_{}", col_name, method_name);
     let new_dt = append_f64_column(dt, &result_col_name, result)?;
-    vm.push_vw(wrap_result_table_nb(receiver, new_dt))
+    Ok(wrap_result_table_nb(receiver, new_dt))
 }
 
 /// `dt.rolling_sum(col, window)` — rolling sum, result appended as new column.
 pub(crate) fn handle_rolling_sum(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     rolling_windowed_op(
-        vm,
         &args[0],
         &args,
         "rolling_sum",
@@ -174,12 +171,11 @@ pub(crate) fn handle_rolling_sum(
 
 /// `dt.rolling_mean(col, window)` — rolling mean, result appended as new column.
 pub(crate) fn handle_rolling_mean(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     rolling_windowed_op(
-        vm,
         &args[0],
         &args,
         "rolling_mean",
@@ -189,12 +185,11 @@ pub(crate) fn handle_rolling_mean(
 
 /// `dt.rolling_std(col, window)` — rolling standard deviation.
 pub(crate) fn handle_rolling_std(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     rolling_windowed_op(
-        vm,
         &args[0],
         &args,
         "rolling_std",
@@ -204,12 +199,11 @@ pub(crate) fn handle_rolling_std(
 
 /// `dt.diff(col)` — first difference, result appended as new column.
 pub(crate) fn handle_diff(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     column_transform_op(
-        vm,
         &args[0],
         &args,
         "diff",
@@ -219,12 +213,11 @@ pub(crate) fn handle_diff(
 
 /// `dt.pct_change(col)` — percentage change, result appended as new column.
 pub(crate) fn handle_pct_change(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     column_transform_op(
-        vm,
         &args[0],
         &args,
         "pct_change",
@@ -234,10 +227,10 @@ pub(crate) fn handle_pct_change(
 
 /// `dt.forward_fill(col)` — forward-fill NaN values in a column.
 pub(crate) fn handle_forward_fill(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let dt = extract_dt_nb(&args[0])?;
     let col_name = args
         .get(1)
@@ -270,5 +263,5 @@ pub(crate) fn handle_forward_fill(
         .map_err(|e| VMError::RuntimeError(format!("Failed to create RecordBatch: {}", e)))?;
 
     let new_dt = DataTable::new(new_batch);
-    vm.push_vw(wrap_result_table_nb(&args[0], new_dt))
+    Ok(wrap_result_table_nb(&args[0], new_dt))
 }

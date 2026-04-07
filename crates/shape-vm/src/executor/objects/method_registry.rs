@@ -15,12 +15,17 @@ use shape_value::{VMError, ValueWord};
 /// Type alias for method handler functions.
 ///
 /// All method handlers follow this signature:
-/// - `vm`: Mutable VM instance for stack manipulation and state access
+/// - `vm`: Mutable VM instance (used by handlers that invoke closures or
+///   otherwise touch VM state; pure handlers ignore it)
 /// - `args`: Owned vector of arguments (receiver is first element, as ValueWord)
 /// - `ctx`: Optional execution context for runtime integration
-/// - Returns: `Result<(), VMError>` (handlers push results to VM stack)
-pub type MethodFn =
-    fn(&mut VirtualMachine, Vec<ValueWord>, Option<&mut ExecutionContext>) -> Result<(), VMError>;
+/// - Returns: `Result<ValueWord, VMError>` — the result value. The dispatcher
+///   pushes it to the stack on success.
+pub type MethodFn = fn(
+    &mut VirtualMachine,
+    Vec<ValueWord>,
+    Option<&mut ExecutionContext>,
+) -> Result<ValueWord, VMError>;
 
 /// PHF registry for Array methods (47 methods total)
 ///

@@ -54,7 +54,7 @@ pub(crate) fn handle_map(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "map() requires 2 arguments: receiver and mapper".to_string(),
@@ -85,15 +85,14 @@ pub(crate) fn handle_map(
         results.push(mapped);
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(results)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(results)))
 }
 
 pub(crate) fn handle_filter(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "filter() requires 2 arguments: receiver and predicate".to_string(),
@@ -126,20 +125,18 @@ pub(crate) fn handle_filter(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(filtered)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(filtered)))
 }
 
 pub(crate) fn handle_sort(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     let array = require_any_array_arg(&args)?.to_generic();
 
     if array.is_empty() {
-        vm.push_vw(ValueWord::from_array(Arc::new(vec![])))?;
-        return Ok(());
+        return Ok(ValueWord::from_array(Arc::new(vec![])));
     }
 
     let mut sorted = array.to_vec();
@@ -183,15 +180,14 @@ pub(crate) fn handle_sort(
         sorted = keyed.into_iter().map(|(_, v)| v).collect();
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(sorted)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(sorted)))
 }
 
 pub(crate) fn handle_slice(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args: [receiver, start, optional_end]
     let arr = require_any_array_arg(&args)?.to_generic();
 
@@ -222,15 +218,14 @@ pub(crate) fn handle_slice(
     let start = start.min(arr.len());
     let end = end.min(arr.len());
 
-    vm.push_vw(ValueWord::from_array(Arc::new(arr[start..end].to_vec())))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(arr[start..end].to_vec())))
 }
 
 pub(crate) fn handle_concat(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args: [receiver, ...arrays_or_values_to_concat]
     let arr = require_any_array_arg(&args)?.to_generic();
 
@@ -246,15 +241,14 @@ pub(crate) fn handle_concat(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(result)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(result)))
 }
 
 pub(crate) fn handle_take(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args: [receiver, n]
     let arr = require_any_array_arg(&args)?.to_generic();
 
@@ -272,15 +266,14 @@ pub(crate) fn handle_take(
         })? as usize;
     let n = n.min(arr.len());
 
-    vm.push_vw(ValueWord::from_array(Arc::new(arr[..n].to_vec())))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(arr[..n].to_vec())))
 }
 
 pub(crate) fn handle_drop(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args: [receiver, n]
     let arr = require_any_array_arg(&args)?.to_generic();
 
@@ -298,24 +291,23 @@ pub(crate) fn handle_drop(
         })? as usize;
     let n = n.min(arr.len());
 
-    vm.push_vw(ValueWord::from_array(Arc::new(arr[n..].to_vec())))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(arr[n..].to_vec())))
 }
 
 pub(crate) fn handle_skip(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // skip is an alias for drop
     handle_drop(vm, args, ctx)
 }
 
 pub(crate) fn handle_flatten(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     // args: [receiver]
     let arr = require_any_array_arg(&args)?.to_generic();
 
@@ -330,15 +322,14 @@ pub(crate) fn handle_flatten(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(flattened)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(flattened)))
 }
 
 pub(crate) fn handle_flat_map(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "flatMap() requires 2 arguments: receiver and mapper".to_string(),
@@ -374,15 +365,14 @@ pub(crate) fn handle_flat_map(
         }
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(results)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(results)))
 }
 
 pub(crate) fn handle_group_by(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<(), VMError> {
+) -> Result<ValueWord, VMError> {
     if args.len() < 2 {
         return Err(VMError::RuntimeError(
             "groupBy() requires 2 arguments: receiver and key function".to_string(),
@@ -425,6 +415,5 @@ pub(crate) fn handle_group_by(
         pairs.push(ValueWord::from_array(Arc::new(pair)));
     }
 
-    vm.push_vw(ValueWord::from_array(Arc::new(pairs)))?;
-    Ok(())
+    Ok(ValueWord::from_array(Arc::new(pairs)))
 }
