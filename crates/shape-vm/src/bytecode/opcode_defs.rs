@@ -549,6 +549,82 @@ define_opcodes! {
     TypedArrayPushI64 = 0x0D, Object, pops: 2, pushes: 0;
     /// Get length of TypedArray: pops (arr_ptr), pushes len as int
     TypedArrayLen = 0x0E, Object, pops: 1, pushes: 1;
+    /// Create a new TypedArray<bool> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayBool = 0x0F, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<bool>: pops (arr_ptr, index), pushes bool value
+    TypedArrayGetBool = 0x47, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<i32>: pops (arr_ptr, value), pushes nothing
+    TypedArrayPushI32 = 0x48, Object, pops: 2, pushes: 0;
+    /// Push element to TypedArray<bool>: pops (arr_ptr, value), pushes nothing
+    TypedArrayPushBool = 0x49, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<i64>: pops (arr_ptr, index, value), pushes nothing
+    TypedArraySetI64 = 0x4A, Object, pops: 3, pushes: 0;
+    /// Set element in TypedArray<i32>: pops (arr_ptr, index, value), pushes nothing
+    TypedArraySetI32 = 0x4B, Object, pops: 3, pushes: 0;
+    /// Set element in TypedArray<bool>: pops (arr_ptr, index, value), pushes nothing
+    TypedArraySetBool = 0x4C, Object, pops: 3, pushes: 0;
+
+    // ===== v2 Typed Map Operations =====
+    /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
+    NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
+    /// Allocate a new TypedMap<*const StringObj, i64>. Pushes ptr.
+    NewTypedMapStringI64 = 0xCE, Object, pops: 0, pushes: 1;
+    /// Allocate a new TypedMap<*const StringObj, *const u8>. Pushes ptr.
+    NewTypedMapStringPtr = 0xCF, Object, pops: 0, pushes: 1;
+    /// Allocate a new TypedMap<i64, f64>. Pushes ptr.
+    NewTypedMapI64F64 = 0xD5, Object, pops: 0, pushes: 1;
+    /// Allocate a new TypedMap<i64, i64>. Pushes ptr.
+    NewTypedMapI64I64 = 0xD6, Object, pops: 0, pushes: 1;
+    /// Allocate a new TypedMap<i64, *const u8>. Pushes ptr.
+    NewTypedMapI64Ptr = 0xD9, Object, pops: 0, pushes: 1;
+    /// String→f64 get: pops (map_ptr, key), pushes f64 (or null).
+    TypedMapStringF64Get = 0xDA, Object, pops: 2, pushes: 1;
+    /// String→i64 get: pops (map_ptr, key), pushes i64 (or null).
+    TypedMapStringI64Get = 0xDB, Object, pops: 2, pushes: 1;
+    /// String→Ptr get: pops (map_ptr, key), pushes ptr (or null).
+    TypedMapStringPtrGet = 0xDC, Object, pops: 2, pushes: 1;
+    /// I64→f64 get: pops (map_ptr, key), pushes f64 (or null).
+    TypedMapI64F64Get = 0xDD, Object, pops: 2, pushes: 1;
+    /// I64→i64 get: pops (map_ptr, key), pushes i64 (or null).
+    TypedMapI64I64Get = 0xDE, Object, pops: 2, pushes: 1;
+    /// I64→Ptr get: pops (map_ptr, key), pushes ptr (or null).
+    TypedMapI64PtrGet = 0xDF, Object, pops: 2, pushes: 1;
+    /// String→f64 set: pops (map_ptr, key, value).
+    TypedMapStringF64Set = 0x4D, Object, pops: 3, pushes: 0;
+    /// String→i64 set: pops (map_ptr, key, value).
+    TypedMapStringI64Set = 0x4E, Object, pops: 3, pushes: 0;
+    /// String→Ptr set: pops (map_ptr, key, value).
+    TypedMapStringPtrSet = 0x4F, Object, pops: 3, pushes: 0;
+    /// I64→f64 set: pops (map_ptr, key, value).
+    TypedMapI64F64Set = 0x6D, Object, pops: 3, pushes: 0;
+    /// I64→i64 set: pops (map_ptr, key, value).
+    TypedMapI64I64Set = 0x6E, Object, pops: 3, pushes: 0;
+    /// I64→Ptr set: pops (map_ptr, key, value).
+    TypedMapI64PtrSet = 0x6F, Object, pops: 3, pushes: 0;
+    /// String→f64 has: pops (map_ptr, key), pushes bool.
+    TypedMapStringF64Has = 0x8E, Object, pops: 2, pushes: 1;
+    /// String→i64 has: pops (map_ptr, key), pushes bool.
+    TypedMapStringI64Has = 0x8F, Object, pops: 2, pushes: 1;
+    /// String→Ptr has: pops (map_ptr, key), pushes bool.
+    TypedMapStringPtrHas = 0xB9, Object, pops: 2, pushes: 1;
+    /// I64→f64 has: pops (map_ptr, key), pushes bool.
+    TypedMapI64F64Has = 0xBA, Object, pops: 2, pushes: 1;
+    /// I64→i64 has: pops (map_ptr, key), pushes bool.
+    TypedMapI64I64Has = 0xBB, Object, pops: 2, pushes: 1;
+    /// I64→Ptr has: pops (map_ptr, key), pushes bool.
+    TypedMapI64PtrHas = 0xBC, Object, pops: 2, pushes: 1;
+    /// String→f64 delete: pops (map_ptr, key).
+    TypedMapStringF64Delete = 0xBD, Object, pops: 2, pushes: 0;
+    /// String→i64 delete: pops (map_ptr, key).
+    TypedMapStringI64Delete = 0xBE, Object, pops: 2, pushes: 0;
+    /// String→Ptr delete: pops (map_ptr, key).
+    TypedMapStringPtrDelete = 0xBF, Object, pops: 2, pushes: 0;
+    /// I64→f64 delete: pops (map_ptr, key).
+    TypedMapI64F64Delete = 0xF9, Object, pops: 2, pushes: 0;
+    /// I64→i64 delete: pops (map_ptr, key).
+    TypedMapI64I64Delete = 0xFA, Object, pops: 2, pushes: 0;
+    /// I64→Ptr delete: pops (map_ptr, key).
+    TypedMapI64PtrDelete = 0xFB, Object, pops: 2, pushes: 0;
 
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
@@ -627,12 +703,19 @@ impl OpCode {
             OpCode::NewTypedArrayF64
             | OpCode::NewTypedArrayI64
             | OpCode::NewTypedArrayI32
+            | OpCode::NewTypedArrayBool
             | OpCode::TypedArrayGetF64
             | OpCode::TypedArrayGetI64
             | OpCode::TypedArrayGetI32
+            | OpCode::TypedArrayGetBool
             | OpCode::TypedArraySetF64
+            | OpCode::TypedArraySetI64
+            | OpCode::TypedArraySetI32
+            | OpCode::TypedArraySetBool
             | OpCode::TypedArrayPushF64
             | OpCode::TypedArrayPushI64
+            | OpCode::TypedArrayPushI32
+            | OpCode::TypedArrayPushBool
             | OpCode::TypedArrayLen
             // Typed field access
             | OpCode::FieldLoadF64

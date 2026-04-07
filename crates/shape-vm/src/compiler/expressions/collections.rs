@@ -134,6 +134,11 @@ impl BytecodeCompiler {
 
     /// Compile an array expression
     pub(super) fn compile_expr_array(&mut self, elements: &[Expr]) -> Result<()> {
+        use super::super::v2_array_emission::infer_array_element_type;
+        use super::super::v2_typed_emission::{
+            should_use_typed_array_from_slot_kind, TypedArrayKind,
+        };
+
         // Inside function bodies the MIR solver handles ref-in-collection;
         // at top level reject_direct_reference_storage still fires.
         const ARRAY_REF_STORAGE_ERROR: &str = "cannot store a reference in an array — references are scoped borrows that cannot escape into collections. Use owned values instead";
@@ -142,7 +147,69 @@ impl BytecodeCompiler {
         }
         let literal_numeric = infer_array_literal_numeric_type(elements);
         let is_bool = is_homogeneous_bool_array(elements);
-        if elements.iter().any(|elem| matches!(elem, Expr::Spread(..))) {
+
+        // v2 Phase 3.1 (Agent 1 + Agent 3): typed-array fast path.
+        //
+        // Resolve a homogeneous element type from the literal (or from
+        // tracked variable types) and pick a typed-array kind. When that
+        // succeeds, lower the literal to v2 typed-array allocation
+        // (`NewTypedArrayF64/I64/I32/Bool`) followed by per-element
+        // `TypedArrayPush*`. Falls through to the legacy v1 path
+        // (`NewArray`) for spreads, heterogeneous literals, empty
+        // literals without annotation, and element types that don't map
+        // to a typed kind.
+        //
+        // Order of preference:
+        //   1. Explicit `let arr: Array<T> = [...]` annotation
+        //      (`pending_variable_typed_array_kind`).
+        //   2. Inferred element type from the literal itself
+        //      (`infer_array_element_type`) — handles the bare-literal
+        //      case `let x = [1, 2, 3]` without an annotation.
+        //
+        // When the inferred path picks a typed kind we ALSO set
+        // `pending_variable_typed_array_kind` so the post-init capture
+        // in `Statement::VarDecl` records the typed kind against the
+        // local slot / module binding (Phase 3.1 Agent 3 wiring).
+        let typed_kind: Option<TypedArrayKind> = if elements
+            .iter()
+            .any(|e| matches!(e, Expr::Spread(..)))
+        {
+            None
+        } else if let Some(kind) = self.pending_variable_typed_array_kind {
+            // The enclosing `let arr: Array<T> = [...]` already proved
+            // the element type via annotation; trust it.
+            Some(kind)
+        } else if let Some(slot_kind) =
+            infer_array_element_type(elements, &self.type_tracker)
+        {
+            // Bare literal with a homogeneous, statically-resolvable
+            // element type. Pick a typed kind if we have one and signal
+            // it back to the binding code path.
+            let inferred = should_use_typed_array_from_slot_kind(slot_kind);
+            if inferred.is_some() {
+                self.pending_variable_typed_array_kind = inferred;
+            }
+            inferred
+        } else {
+            None
+        };
+
+        if let Some(kind) = typed_kind {
+            // Allocate the typed array with capacity = element count.
+            self.emit(Instruction::new(
+                kind.new_opcode(),
+                Some(Operand::Count(elements.len() as u16)),
+            ));
+            // Stack: [arr]
+            // For each element: [arr] -> [arr, arr] -> [arr, arr, val]
+            //                   -> [arr] (TypedArrayPush* pops arr+val).
+            for elem in elements {
+                self.plan_flexible_binding_escape_from_expr(elem);
+                self.emit(Instruction::simple(OpCode::Dup));
+                self.compile_expr_as_value_or_placeholder(elem)?;
+                self.emit(Instruction::simple(kind.push_opcode()));
+            }
+        } else if elements.iter().any(|elem| matches!(elem, Expr::Spread(..))) {
             self.compile_array_with_spread(elements)?;
         } else {
             for elem in elements {

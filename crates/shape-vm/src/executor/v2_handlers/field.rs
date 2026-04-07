@@ -10,45 +10,45 @@ use shape_value::{VMError, ValueWord};
 
 impl VirtualMachine {
     /// Execute a v2 typed field opcode (FieldLoad/FieldStore/NewTypedStruct).
-    pub(crate) fn exec_v2_typed_field(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    pub(crate) fn exec_v2_typed_field(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         match instruction.opcode {
+            // Field load handlers: the struct pointer is stored as raw bits
+            // (a v2 typed-struct allocation, NOT a heap-boxed ValueWord), so
+            // we use raw pop/push to skip ValueWord materialization.
             OpCode::FieldLoadF64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_vw()?;
-                let struct_ptr = struct_bits.raw_bits() as *const u8;
+                let struct_bits = self.pop_raw_u64()?;
+                let struct_ptr = struct_bits as *const u8;
                 // Safety: compiler has proven the type and offset at compile time.
                 let val: f64 = unsafe { *(struct_ptr.add(offset) as *const f64) };
-                self.push_vw(ValueWord::from_f64(val))
+                self.push_raw_f64(val)
             }
             OpCode::FieldLoadI64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_vw()?;
-                let struct_ptr = struct_bits.raw_bits() as *const u8;
+                let struct_bits = self.pop_raw_u64()?;
+                let struct_ptr = struct_bits as *const u8;
                 let val: i64 = unsafe { *(struct_ptr.add(offset) as *const i64) };
-                self.push_vw(ValueWord::from_i64(val))
+                self.push_raw_i64(val)
             }
             OpCode::FieldLoadI32 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_vw()?;
-                let struct_ptr = struct_bits.raw_bits() as *const u8;
+                let struct_bits = self.pop_raw_u64()?;
+                let struct_ptr = struct_bits as *const u8;
                 let val: i32 = unsafe { *(struct_ptr.add(offset) as *const i32) };
                 // Widen to i64 for the NaN-boxed stack
-                self.push_vw(ValueWord::from_i64(val as i64))
+                self.push_raw_i64(val as i64)
             }
             OpCode::FieldLoadBool => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_vw()?;
-                let struct_ptr = struct_bits.raw_bits() as *const u8;
+                let struct_bits = self.pop_raw_u64()?;
+                let struct_ptr = struct_bits as *const u8;
                 let val: u8 = unsafe { *struct_ptr.add(offset) };
-                self.push_vw(ValueWord::from_bool(val != 0))
+                self.push_raw_bool(val != 0)
             }
             OpCode::FieldLoadPtr => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_vw()?;
-                let struct_ptr = struct_bits.raw_bits() as *const u8;
+                let struct_bits = self.pop_raw_u64()?;
+                let struct_ptr = struct_bits as *const u8;
                 // Load a raw pointer-sized value — treat as NaN-boxed bits
                 let val: u64 = unsafe { *(struct_ptr.add(offset) as *const u64) };
                 // Safety: the stored bits are a valid NaN-boxed ValueWord
@@ -58,28 +58,25 @@ impl VirtualMachine {
             }
             OpCode::FieldStoreF64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let val = self.pop_vw()?;
-                let struct_bits = self.pop_vw()?;
-                let struct_ptr = struct_bits.raw_bits() as *mut u8;
-                let f = unsafe { val.as_f64_unchecked() };
+                let f = self.pop_raw_f64()?;
+                let struct_bits = self.pop_raw_u64()?;
+                let struct_ptr = struct_bits as *mut u8;
                 unsafe { *(struct_ptr.add(offset) as *mut f64) = f };
                 Ok(())
             }
             OpCode::FieldStoreI64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let val = self.pop_vw()?;
-                let struct_bits = self.pop_vw()?;
-                let struct_ptr = struct_bits.raw_bits() as *mut u8;
-                let i = val.as_i64().unwrap_or(0);
+                let i = self.pop_raw_i64()?;
+                let struct_bits = self.pop_raw_u64()?;
+                let struct_ptr = struct_bits as *mut u8;
                 unsafe { *(struct_ptr.add(offset) as *mut i64) = i };
                 Ok(())
             }
             OpCode::FieldStoreI32 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let val = self.pop_vw()?;
-                let struct_bits = self.pop_vw()?;
-                let struct_ptr = struct_bits.raw_bits() as *mut u8;
-                let i = val.as_i64().unwrap_or(0) as i32;
+                let i = self.pop_raw_i64()? as i32;
+                let struct_bits = self.pop_raw_u64()?;
+                let struct_ptr = struct_bits as *mut u8;
                 unsafe { *(struct_ptr.add(offset) as *mut i32) = i };
                 Ok(())
             }
@@ -94,7 +91,7 @@ impl VirtualMachine {
                     _ => {
                         return Err(VMError::RuntimeError(
                             "NewTypedStruct requires TypedObjectAlloc operand".into(),
-                        ))
+                        ));
                     }
                 };
                 // Allocate zeroed memory for the struct (includes HeapHeader space)
@@ -111,11 +108,11 @@ impl VirtualMachine {
                     // kind at offset 4 (u16)
                     *(ptr.add(4) as *mut u16) = schema_id;
                 }
-                // Store the raw pointer as NaN-boxed bits on the stack
-                // Safety: this is a v2 allocation, not a standard Arc<HeapValue>.
-                // The v2 drop/refcount path must handle deallocation.
-                let vw = unsafe { ValueWord::clone_from_bits(ptr as u64) };
-                self.push_vw(vw)
+                // Store the raw pointer directly as a u64 — this is a v2
+                // allocation, NOT a standard Arc<HeapValue>, so we bypass
+                // ValueWord materialization. The v2 drop/refcount path must
+                // handle deallocation.
+                self.push_raw_u64(ptr as u64)
             }
             _ => Err(VMError::RuntimeError(format!(
                 "unhandled v2 field opcode: {:?}",

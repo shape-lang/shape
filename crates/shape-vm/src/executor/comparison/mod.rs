@@ -132,114 +132,199 @@ impl VirtualMachine {
         }
         use OpCode::*;
         match instruction.opcode {
-            // ValueWord fast path for Int/Number comparisons
+            // Raw typed fast paths for Int/Number comparisons. These typed
+            // opcodes are emitted when the compiler has proven both
+            // operands are i48-inline ints (resp. plain f64 numbers), so
+            // the fast path can read raw bits without dispatching through
+            // ValueWord. The slow path tolerates coercible operands
+            // (matching the legacy `*_unchecked` behavior).
+            // (Decimal comparisons remain on the heap path.)
             GtInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(unsafe { ValueWord::gt_i64(&a, &b) })?;
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
+                    self.push_raw_bool(ai > bi)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_i64_unchecked() > b.as_i64_unchecked()
+                    })?;
+                }
             }
             GtNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_f64_unchecked() > b.as_f64_unchecked()
-                }))?;
+                if self.stack_top_both_f64() {
+                    let b = self.pop_raw_f64()?;
+                    let a = self.pop_raw_f64()?;
+                    self.push_raw_bool(a > b)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_f64_unchecked() > b.as_f64_unchecked()
+                    })?;
+                }
             }
             GtDecimal => {
                 let b = self.pop_vw()?;
                 let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
+                self.push_raw_bool(unsafe {
                     a.as_decimal_unchecked() > b.as_decimal_unchecked()
-                }))?;
+                })?;
             }
             LtInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(unsafe { ValueWord::lt_i64(&a, &b) })?;
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
+                    self.push_raw_bool(ai < bi)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_i64_unchecked() < b.as_i64_unchecked()
+                    })?;
+                }
             }
             LtNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_f64_unchecked() < b.as_f64_unchecked()
-                }))?;
+                if self.stack_top_both_f64() {
+                    let b = self.pop_raw_f64()?;
+                    let a = self.pop_raw_f64()?;
+                    self.push_raw_bool(a < b)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_f64_unchecked() < b.as_f64_unchecked()
+                    })?;
+                }
             }
             LtDecimal => {
                 let b = self.pop_vw()?;
                 let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
+                self.push_raw_bool(unsafe {
                     a.as_decimal_unchecked() < b.as_decimal_unchecked()
-                }))?;
+                })?;
             }
             GteInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_i64_unchecked() >= b.as_i64_unchecked()
-                }))?;
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
+                    self.push_raw_bool(ai >= bi)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_i64_unchecked() >= b.as_i64_unchecked()
+                    })?;
+                }
             }
             GteNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_f64_unchecked() >= b.as_f64_unchecked()
-                }))?;
+                if self.stack_top_both_f64() {
+                    let b = self.pop_raw_f64()?;
+                    let a = self.pop_raw_f64()?;
+                    self.push_raw_bool(a >= b)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_f64_unchecked() >= b.as_f64_unchecked()
+                    })?;
+                }
             }
             GteDecimal => {
                 let b = self.pop_vw()?;
                 let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
+                self.push_raw_bool(unsafe {
                     a.as_decimal_unchecked() >= b.as_decimal_unchecked()
-                }))?;
+                })?;
             }
             LteInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_i64_unchecked() <= b.as_i64_unchecked()
-                }))?;
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
+                    self.push_raw_bool(ai <= bi)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_i64_unchecked() <= b.as_i64_unchecked()
+                    })?;
+                }
             }
             LteNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_f64_unchecked() <= b.as_f64_unchecked()
-                }))?;
+                if self.stack_top_both_f64() {
+                    let b = self.pop_raw_f64()?;
+                    let a = self.pop_raw_f64()?;
+                    self.push_raw_bool(a <= b)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_f64_unchecked() <= b.as_f64_unchecked()
+                    })?;
+                }
             }
             LteDecimal => {
                 let b = self.pop_vw()?;
                 let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
+                self.push_raw_bool(unsafe {
                     a.as_decimal_unchecked() <= b.as_decimal_unchecked()
-                }))?;
+                })?;
             }
             EqInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_i64_unchecked() == b.as_i64_unchecked()
-                }))?;
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
+                    self.push_raw_bool(ai == bi)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_i64_unchecked() == b.as_i64_unchecked()
+                    })?;
+                }
             }
             EqNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_f64_unchecked() == b.as_f64_unchecked()
-                }))?;
+                // NOTE: NaN != NaN per IEEE 754 — both fast and slow paths
+                // preserve this semantics via direct f64 == compare.
+                if self.stack_top_both_f64() {
+                    let b = self.pop_raw_f64()?;
+                    let a = self.pop_raw_f64()?;
+                    self.push_raw_bool(a == b)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_f64_unchecked() == b.as_f64_unchecked()
+                    })?;
+                }
             }
             NeqInt => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_i64_unchecked() != b.as_i64_unchecked()
-                }))?;
+                if self.stack_top_both_i48() {
+                    let bi = self.pop_raw_i64()?;
+                    let ai = self.pop_raw_i64()?;
+                    self.push_raw_bool(ai != bi)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_i64_unchecked() != b.as_i64_unchecked()
+                    })?;
+                }
             }
             NeqNumber => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_bool(unsafe {
-                    a.as_f64_unchecked() != b.as_f64_unchecked()
-                }))?;
+                // NaN != NaN per IEEE 754 — preserved by direct f64 compare.
+                if self.stack_top_both_f64() {
+                    let b = self.pop_raw_f64()?;
+                    let a = self.pop_raw_f64()?;
+                    self.push_raw_bool(a != b)?;
+                } else {
+                    let b = self.pop_vw()?;
+                    let a = self.pop_vw()?;
+                    self.push_raw_bool(unsafe {
+                        a.as_f64_unchecked() != b.as_f64_unchecked()
+                    })?;
+                }
             }
             // NOTE: Trusted comparison variants removed — consolidated into
             // the typed variants above (GtInt, LtInt, etc.).
@@ -372,6 +457,8 @@ impl VirtualMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytecode::{Instruction, Operand};
+    use crate::executor::{VMConfig, VirtualMachine};
     use std::cmp::Ordering;
 
     #[test]
@@ -389,5 +476,166 @@ mod tests {
         let a = ValueWord::from_native_u64(u64::MAX);
         let b = ValueWord::from_f64(1.0);
         assert_eq!(VirtualMachine::nb_compare_numeric(&a, &b), None);
+    }
+
+    fn make_vm() -> VirtualMachine {
+        VirtualMachine::new(VMConfig::default())
+    }
+
+    fn run_typed_cmp(vm: &mut VirtualMachine, opcode: OpCode) -> bool {
+        let instr = Instruction { opcode, operand: None };
+        vm.exec_typed_comparison(&instr).unwrap();
+        unsafe { vm.pop_vw().unwrap().as_bool_unchecked() }
+    }
+
+    // ----- Raw Int comparison fast paths -----
+
+    #[test]
+    fn typed_int_eq_uses_raw_fast_path() {
+        let mut vm = make_vm();
+        vm.push_raw_i64(42).unwrap();
+        vm.push_raw_i64(42).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::EqInt));
+    }
+
+    #[test]
+    fn typed_int_neq_uses_raw_fast_path() {
+        let mut vm = make_vm();
+        vm.push_raw_i64(1).unwrap();
+        vm.push_raw_i64(2).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::NeqInt));
+    }
+
+    #[test]
+    fn typed_int_lt_uses_raw_fast_path() {
+        let mut vm = make_vm();
+        vm.push_raw_i64(-5).unwrap();
+        vm.push_raw_i64(3).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::LtInt));
+    }
+
+    #[test]
+    fn typed_int_gt_uses_raw_fast_path() {
+        let mut vm = make_vm();
+        vm.push_raw_i64(7).unwrap();
+        vm.push_raw_i64(3).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::GtInt));
+    }
+
+    #[test]
+    fn typed_int_gte_lte_boundary_equal() {
+        let mut vm = make_vm();
+        vm.push_raw_i64(10).unwrap();
+        vm.push_raw_i64(10).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::GteInt));
+        let mut vm = make_vm();
+        vm.push_raw_i64(10).unwrap();
+        vm.push_raw_i64(10).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::LteInt));
+    }
+
+    // ----- Raw Number comparison fast paths -----
+
+    #[test]
+    fn typed_number_eq_uses_raw_fast_path() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(1.5).unwrap();
+        vm.push_raw_f64(1.5).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
+    }
+
+    #[test]
+    fn typed_number_lt_uses_raw_fast_path() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(-1.0).unwrap();
+        vm.push_raw_f64(0.5).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::LtNumber));
+    }
+
+    #[test]
+    fn typed_number_gt_uses_raw_fast_path() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(3.14).unwrap();
+        vm.push_raw_f64(2.71).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::GtNumber));
+    }
+
+    // ----- NaN semantics: IEEE 754 says NaN != NaN, NaN !< NaN, etc. -----
+
+    #[test]
+    fn typed_number_eq_nan_is_false() {
+        // f64::NAN gets canonicalized on push but the result must still be NaN.
+        let mut vm = make_vm();
+        vm.push_raw_f64(f64::NAN).unwrap();
+        vm.push_raw_f64(f64::NAN).unwrap();
+        // EqNumber: NaN == NaN must be false (IEEE 754)
+        assert!(!run_typed_cmp(&mut vm, OpCode::EqNumber));
+    }
+
+    #[test]
+    fn typed_number_neq_nan_is_true() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(f64::NAN).unwrap();
+        vm.push_raw_f64(f64::NAN).unwrap();
+        // NeqNumber: NaN != NaN must be true (IEEE 754)
+        assert!(run_typed_cmp(&mut vm, OpCode::NeqNumber));
+    }
+
+    #[test]
+    fn typed_number_lt_nan_is_false() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(1.0).unwrap();
+        vm.push_raw_f64(f64::NAN).unwrap();
+        // 1.0 < NaN must be false
+        assert!(!run_typed_cmp(&mut vm, OpCode::LtNumber));
+    }
+
+    #[test]
+    fn typed_number_gt_nan_is_false() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(1.0).unwrap();
+        vm.push_raw_f64(f64::NAN).unwrap();
+        // 1.0 > NaN must be false
+        assert!(!run_typed_cmp(&mut vm, OpCode::GtNumber));
+    }
+
+    #[test]
+    fn typed_number_eq_nan_vs_number_is_false() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(0.0).unwrap();
+        vm.push_raw_f64(f64::NAN).unwrap();
+        assert!(!run_typed_cmp(&mut vm, OpCode::EqNumber));
+    }
+
+    // ----- Negative zero edge case -----
+
+    #[test]
+    fn typed_number_eq_treats_neg_zero_as_zero() {
+        // IEEE 754: -0.0 == 0.0 (the only case where bit-equality differs from
+        // numerical equality for non-NaN floats)
+        let mut vm = make_vm();
+        vm.push_raw_f64(-0.0).unwrap();
+        vm.push_raw_f64(0.0).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
+    }
+
+    // ----- Slow path: ensures vw fallback still works for mixed types -----
+
+    #[test]
+    fn typed_int_eq_slow_path_handles_legacy_vw() {
+        // Push via the legacy ValueWord path so the fast-path detector misses;
+        // the slow path (as_i64_unchecked) must still produce correct results.
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_i64(100)).unwrap();
+        vm.push_vw(ValueWord::from_i64(100)).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::EqInt));
+    }
+
+    #[test]
+    fn typed_number_eq_slow_path_handles_legacy_vw() {
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_f64(2.5)).unwrap();
+        vm.push_vw(ValueWord::from_f64(2.5)).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 }

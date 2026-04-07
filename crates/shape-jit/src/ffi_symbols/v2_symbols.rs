@@ -34,6 +34,13 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_array_push_i32", v2::jit_v2_array_push_i32 as *const u8);
     builder.symbol("jit_v2_array_len_i32", v2::jit_v2_array_len_i32 as *const u8);
 
+    // Array — bool (encoded as u8 internally)
+    builder.symbol("jit_v2_array_new_bool", v2::jit_v2_array_new_bool as *const u8);
+    builder.symbol("jit_v2_array_get_bool", v2::jit_v2_array_get_bool as *const u8);
+    builder.symbol("jit_v2_array_set_bool", v2::jit_v2_array_set_bool as *const u8);
+    builder.symbol("jit_v2_array_push_bool", v2::jit_v2_array_push_bool as *const u8);
+    builder.symbol("jit_v2_array_len_bool", v2::jit_v2_array_len_bool as *const u8);
+
     // Struct field access
     builder.symbol("jit_v2_field_load_f64", v2::jit_v2_field_load_f64 as *const u8);
     builder.symbol("jit_v2_field_load_i64", v2::jit_v2_field_load_i64 as *const u8);
@@ -202,6 +209,52 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I32));
         declare(module, ffi_funcs, "jit_v2_array_len_i32", &sig);
+    }
+
+    // ========================================================================
+    // Array — bool (encoded as u8 internally)
+    // ========================================================================
+
+    // jit_v2_array_new_bool(capacity: u32) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_array_new_bool", &sig);
+    }
+
+    // jit_v2_array_get_bool(arr: ptr, index: i64) -> u8
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I8));
+        declare(module, ffi_funcs, "jit_v2_array_get_bool", &sig);
+    }
+
+    // jit_v2_array_set_bool(arr: ptr, index: i64, val: u8) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I8));
+        declare(module, ffi_funcs, "jit_v2_array_set_bool", &sig);
+    }
+
+    // jit_v2_array_push_bool(arr: ptr, val: u8) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I8));
+        declare(module, ffi_funcs, "jit_v2_array_push_bool", &sig);
+    }
+
+    // jit_v2_array_len_bool(arr: ptr) -> u32
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I32));
+        declare(module, ffi_funcs, "jit_v2_array_len_bool", &sig);
     }
 
     // ========================================================================

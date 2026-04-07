@@ -18,7 +18,15 @@ mod tests {
     const TYPED_OBJECT_ALIGNMENT: usize = 64;
 
     /// Test GetFieldTyped with TypedObject (fast path - direct memory load)
+    ///
+    /// IGNORED (v2 BytecodeToIR removal): This test feeds a hand-built
+    /// `BytecodeProgram` to `JITCompiler::compile_strategy`. After Phase 4 deleted
+    /// `BytecodeToIR`, MirToIR is the only JIT path and requires `top_level_mir`
+    /// to be populated by the bytecode compiler from AST. Equivalent coverage
+    /// exists in `mir_compiler::integration_tests` and the `jit_get_field_typed`
+    /// FFI function is exercised directly in `test_jit_field_access_both_paths`.
     #[test]
+    #[ignore = "v2: tests deleted BytecodeToIR path; FFI exercised by test_jit_field_access_both_paths"]
     fn test_jit_get_field_typed_fast_path() {
         // Note: LoadModuleBinding/StoreModuleBinding read from ctx.locals[] in memory
         // LoadLocal/StoreLocal use Cranelift's SSA variables (not ctx.locals[])
@@ -131,7 +139,10 @@ mod tests {
     }
 
     /// Test SetFieldTyped with TypedObject (fast path - direct memory store)
+    ///
+    /// IGNORED: see `test_jit_get_field_typed_fast_path` above.
     #[test]
+    #[ignore = "v2: tests deleted BytecodeToIR path; FFI exercised by test_jit_field_access_both_paths"]
     fn test_jit_set_field_typed_fast_path() {
         // Create a TypedObject with initial values
         let schema = TypeSchema::new(

@@ -124,6 +124,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             SlotKind::Float64 => Some(self.ffi.v2_array_new_f64),
             SlotKind::Int64 | SlotKind::UInt64 => Some(self.ffi.v2_array_new_i64),
             SlotKind::Int32 | SlotKind::UInt32 => Some(self.ffi.v2_array_new_i32),
+            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => Some(self.ffi.v2_array_new_bool),
             _ => None,
         }
     }
@@ -134,6 +135,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             SlotKind::Float64 => Some(self.ffi.v2_array_push_f64),
             SlotKind::Int64 | SlotKind::UInt64 => Some(self.ffi.v2_array_push_i64),
             SlotKind::Int32 | SlotKind::UInt32 => Some(self.ffi.v2_array_push_i32),
+            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => Some(self.ffi.v2_array_push_bool),
             _ => None,
         }
     }

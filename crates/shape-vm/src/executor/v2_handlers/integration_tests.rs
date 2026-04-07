@@ -172,26 +172,31 @@ fn test_typed_array_filter() {
 
 #[test]
 fn test_typed_array_out_of_bounds() {
-    // Out-of-bounds access on v1 typed arrays returns none (not an error).
-    let result = eval(
+    // v2 STRICT semantics: out-of-bounds index access raises a runtime error
+    // through the `TypedArrayGetI64` fast-path opcode. (Wave B made typed
+    // emission unconditional, so the legacy lenient `GetProp` path is no
+    // longer reachable for inferable element types.)
+    let result = crate::test_utils::eval_result(
         "
         let arr = [1, 2, 3]
         arr[10]
     ",
     );
-    assert!(result.is_none());
+    assert!(result.is_err(), "expected IndexOutOfBounds, got {:?}", result);
 }
 
 #[test]
 fn test_typed_array_negative_index() {
-    // Negative index should work (wraps around)
-    let result = eval(
+    // v2 STRICT semantics: negative index raises a runtime error.
+    // The lenient wrap-around behavior was a legacy v1 feature provided by
+    // generic `GetProp`; the v2 `TypedArrayGetI64` opcode does not wrap.
+    let result = crate::test_utils::eval_result(
         "
         let arr = [10, 20, 30]
         arr[-1]
     ",
     );
-    assert_eq!(result.as_i64(), Some(30));
+    assert!(result.is_err(), "expected IndexOutOfBounds, got {:?}", result);
 }
 
 // ===== Empty arrays =====
@@ -225,4 +230,64 @@ fn test_typed_array_dot_product() {
     let val = result.to_number().expect("expected number");
     // 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
     assert!((val - 32.0).abs() < 1e-10);
+}
+
+// ===== New end-to-end v2 typed array demos (Phase 4 Agent 2) =====
+//
+// These three tests demonstrate end-to-end v2 typed array usage against
+// the consumer-side dispatch paths wired up in `v2_array_detect`:
+//
+//   1. `arr.length` (GetProp "length") returns the v2 header length directly.
+//   2. `for x in arr { ... }` iterates through the typed element buffer.
+//   3. `arr[0] = 99.0; arr[0]` mutates and reads back via typed set/get.
+
+#[test]
+fn test_v2_typed_array_length_property() {
+    // Array<number> literal is lowered to v2 TypedArray<f64>. The
+    // `.length` property access goes through `op_get_prop`, which
+    // recognises the v2 typed array and returns the stamped header len.
+    let result = eval(
+        "
+        let arr: Array<number> = [1.0, 2.0, 3.0]
+        arr.length
+    ",
+    );
+    assert_eq!(result.as_i64(), Some(3));
+}
+
+#[test]
+fn test_v2_typed_array_for_in_iteration() {
+    // Array<number> literal is lowered to v2 TypedArray<f64>. The
+    // `for x in arr` loop dispatches to `op_iter_next`/`op_iter_done`,
+    // which now read elements through the v2 header.
+    let result = eval(
+        "
+        let arr: Array<number> = [1.0, 2.0, 3.0]
+        let mut total = 0.0
+        for x in arr {
+            total = total + x
+        }
+        total
+    ",
+    );
+    let val = result.to_number().expect("expected number");
+    assert!((val - 6.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_v2_typed_array_index_assignment_roundtrip() {
+    // `arr[0] = 99.0; arr[0]` mutates and reads back through the v2
+    // typed array fast path. The compiler may emit either
+    // `TypedArraySetF64`/`TypedArrayGetF64` (compile-time tracked) or
+    // the generic `SetProp`/`GetProp` route — both paths now recognise
+    // the v2 pointer via the stamped header.
+    let result = eval(
+        "
+        let mut arr: Array<number> = [1.0, 2.0, 3.0]
+        arr[0] = 99.0
+        arr[0]
+    ",
+    );
+    let val = result.to_number().expect("expected number");
+    assert!((val - 99.0).abs() < 1e-10);
 }

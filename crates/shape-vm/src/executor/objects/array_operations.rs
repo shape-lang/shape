@@ -12,6 +12,18 @@ impl VirtualMachine {
         let value_nb = self.pop_vw()?;
         let mut array_nb = self.pop_vw()?;
 
+        // v2 typed array fast path: mutate the typed buffer in place via the
+        // stamped header. Push the (unchanged) array pointer back as the
+        // expression result, matching the legacy ArrayPush stack discipline.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&array_nb)
+        {
+            crate::executor::v2_handlers::v2_array_detect::push_element(&view, &value_nb)
+                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+            self.push_vw(array_nb)?;
+            return Ok(());
+        }
+
         // Handle unified arrays (bit-47 tagged) for push.
         if shape_value::tags::is_unified_heap(array_nb.raw_bits()) {
             let kind = unsafe { shape_value::tags::unified_heap_kind(array_nb.raw_bits()) };
@@ -189,6 +201,15 @@ impl VirtualMachine {
         const TAG_BASE: u64 = 0xFFF8_0000_0000_0000;
         const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
+        // v2 typed array fast path: mutate the typed buffer in place via the
+        // stamped header.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(slot)
+        {
+            return crate::executor::v2_handlers::v2_array_detect::push_element(&view, &value)
+                .map_err(|e| VMError::RuntimeError(e.to_string()));
+        }
+
         let bits = slot.raw_bits();
         let is_tagged = (bits & TAG_BASE) == TAG_BASE;
         let tag = (bits >> 48) & 0x7;
@@ -276,6 +297,16 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn op_array_pop(&mut self) -> Result<(), VMError> {
         let array_nb = self.pop_vw()?;
+
+        // v2 typed array fast path: pop directly from the typed buffer.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&array_nb)
+        {
+            let val = crate::executor::v2_handlers::v2_array_detect::pop_element(&view)
+                .unwrap_or_else(ValueWord::none);
+            self.push_vw(val)?;
+            return Ok(());
+        }
 
         let arr = array_nb.as_any_array().ok_or_else(|| VMError::TypeError {
             expected: "array",

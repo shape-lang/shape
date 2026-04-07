@@ -896,6 +896,38 @@ impl BytecodeCompiler {
                 return self.compile_print_with_interpolation(args);
             }
 
+            // v2 Phase 3.2: HashMap() typed-map fast path. When the call site's
+            // surrounding context resolves K and V to a typed-map kind, lower
+            // the constructor to a `NewTypedMap*` opcode instead of the
+            // legacy `BuiltinCall(HashMapCtor)`. Falls through for any
+            // unresolved K/V pair.
+            if builtin == BuiltinFunction::HashMapCtor && args.is_empty() {
+                use crate::compiler::v2_map_emission::infer_hashmap_kv_from_context;
+                use crate::compiler::v2_typed_map_emission::should_use_typed_map;
+
+                // Synthesize a fake call expression so we can query the
+                // span-based side table. The call has no AST node here, so
+                // we use a dummy expression with the call span — the only
+                // shape `infer_hashmap_kv_from_context` actually queries.
+                let dummy = Expr::Identifier(name.to_string(), span);
+                if let Some((k, v)) = infer_hashmap_kv_from_context(self, &dummy) {
+                    if let Some(kind) = should_use_typed_map(&k, &v) {
+                        self.emit(Instruction::simple(kind.new_opcode()));
+                        // Record the kv pair for the call expression's span so
+                        // downstream method dispatch can use it without
+                        // re-inference.
+                        self.record_map_key_value_for_node(span, k, v);
+                        // Propagate basic metadata so subsequent ops see a
+                        // HashMap-shaped value.
+                        self.last_expr_numeric_type = None;
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.clear_last_expr_reference_result();
+                        return Ok(());
+                    }
+                }
+            }
+
             for arg in args {
                 self.compile_expr_as_value_or_placeholder(arg)?;
             }
@@ -1207,6 +1239,12 @@ impl BytecodeCompiler {
         // loops, and blocks (which are compiled as expressions, not statements).
         if method == "push" && args.len() == 1 {
             if let Expr::Identifier(recv_name, _) = receiver {
+                // v2 Phase 3.1 (Agent 3): typed-array fast path for `arr.push(x)`.
+                // Resolved BEFORE arg compilation since compile_expr may
+                // overwrite tracker state. Falls through to legacy
+                // `ArrayPushLocal` for non-typed arrays / unrecognised
+                // element types.
+                let typed_kind = self.resolve_receiver_typed_array_kind(receiver);
                 let source_loc = self.span_to_source_location(receiver.span());
                 if let Some(local_idx) = self.resolve_local(recv_name) {
                     if !self.ref_locals.contains(&local_idx) {
@@ -1214,6 +1252,33 @@ impl BytecodeCompiler {
                             recv_name,
                             Some(source_loc.clone()),
                         )?;
+                    }
+                    if let Some(kind) = typed_kind {
+                        // v2 typed array push: `TypedArrayPush*` pops
+                        // (arr_ptr, value). Push the array, then the value,
+                        // then the typed opcode.
+                        self.emit(Instruction::new(
+                            OpCode::LoadLocal,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                        self.compile_expr(&args[0])?;
+                        self.emit(Instruction::simple(kind.push_opcode()));
+                        // Push the mutated array as expression result.
+                        if self.ref_locals.contains(&local_idx)
+                            || self.reference_value_locals.contains(&local_idx)
+                        {
+                            self.emit(Instruction::new(
+                                OpCode::DerefLoad,
+                                Some(Operand::Local(local_idx)),
+                            ));
+                        } else {
+                            self.emit(Instruction::new(
+                                OpCode::LoadLocal,
+                                Some(Operand::Local(local_idx)),
+                            ));
+                        }
+                        self.clear_last_expr_reference_result();
+                        return Ok(());
                     }
                     self.compile_expr(&args[0])?;
                     let pushed_numeric = self.last_expr_numeric_type;
@@ -1246,6 +1311,21 @@ impl BytecodeCompiler {
                 {
                     self.check_named_binding_write_allowed(recv_name, Some(source_loc))?;
                     let binding_idx = self.get_or_create_module_binding(recv_name);
+                    if let Some(kind) = typed_kind {
+                        // v2 typed array push for module bindings.
+                        self.emit(Instruction::new(
+                            OpCode::LoadModuleBinding,
+                            Some(Operand::ModuleBinding(binding_idx)),
+                        ));
+                        self.compile_expr(&args[0])?;
+                        self.emit(Instruction::simple(kind.push_opcode()));
+                        self.emit(Instruction::new(
+                            OpCode::LoadModuleBinding,
+                            Some(Operand::ModuleBinding(binding_idx)),
+                        ));
+                        self.clear_last_expr_reference_result();
+                        return Ok(());
+                    }
                     self.compile_expr(&args[0])?;
                     self.emit(Instruction::new(
                         OpCode::ArrayPushLocal,
@@ -1259,6 +1339,21 @@ impl BytecodeCompiler {
                     self.clear_last_expr_reference_result();
                     return Ok(());
                 }
+            }
+        }
+
+        // v2 Phase 3.2: HashMap typed-map fast path for `m.set/.get/.has/.delete`.
+        //
+        // Resolved BEFORE compiling the receiver because the typed opcodes
+        // expect (map_ptr, key[, value]) on the stack with raw scalars where
+        // appropriate. Falls through to the legacy CallMethod path when the
+        // receiver isn't tracked as a typed map or when the method isn't one
+        // of the four typed-map methods.
+        if matches!(method, "set" | "get" | "has" | "delete")
+            && self.is_typed_map_receiver(receiver)
+        {
+            if let Some(()) = self.try_compile_typed_map_method(receiver, method, args)? {
+                return Ok(());
             }
         }
 
@@ -2079,5 +2174,68 @@ impl BytecodeCompiler {
     /// during normal compilation with a helpful error message.
     fn is_comptime_only_builtin(name: &str) -> bool {
         shape_runtime::builtin_metadata::is_comptime_builtin_function(name)
+    }
+
+    /// v2 Phase 3.2: emit a typed-map opcode sequence for `m.set(k, v)`,
+    /// `m.get(k)`, `m.has(k)`, or `m.delete(k)` when the receiver `m` is
+    /// tracked as a v2 typed map. Returns `Ok(Some(()))` on success and
+    /// `Ok(None)` when the receiver isn't a typed map (caller should fall
+    /// through to the legacy `CallMethod` path).
+    pub(super) fn try_compile_typed_map_method(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<()>> {
+        let kind = match self.resolve_receiver_typed_map_kind(receiver) {
+            Some(k) => k,
+            None => return Ok(None),
+        };
+        // Compile receiver to put map_ptr on the stack.
+        self.compile_expr(receiver)?;
+
+        match method {
+            "set" => {
+                if args.len() != 2 {
+                    // Wrong arity — fall back to the legacy path.
+                    return Ok(None);
+                }
+                self.compile_expr_as_value_or_placeholder(&args[0])?;
+                self.compile_expr_as_value_or_placeholder(&args[1])?;
+                self.emit(Instruction::simple(kind.set_opcode()));
+                // set() returns the map itself for fluent chaining; mirror
+                // that by re-loading the receiver.
+                self.compile_expr(receiver)?;
+            }
+            "get" => {
+                if args.len() != 1 {
+                    return Ok(None);
+                }
+                self.compile_expr_as_value_or_placeholder(&args[0])?;
+                self.emit(Instruction::simple(kind.get_opcode()));
+            }
+            "has" => {
+                if args.len() != 1 {
+                    return Ok(None);
+                }
+                self.compile_expr_as_value_or_placeholder(&args[0])?;
+                self.emit(Instruction::simple(kind.has_opcode()));
+            }
+            "delete" => {
+                if args.len() != 1 {
+                    return Ok(None);
+                }
+                self.compile_expr_as_value_or_placeholder(&args[0])?;
+                self.emit(Instruction::simple(kind.delete_opcode()));
+                // delete() returns the map itself for chaining.
+                self.compile_expr(receiver)?;
+            }
+            _ => return Ok(None),
+        }
+        self.last_expr_schema = None;
+        self.last_expr_numeric_type = None;
+        self.last_expr_type_info = None;
+        self.clear_last_expr_reference_result();
+        Ok(Some(()))
     }
 }

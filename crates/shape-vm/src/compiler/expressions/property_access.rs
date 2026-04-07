@@ -245,6 +245,21 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
+        // v2 Phase 3.1 (Agent 3): typed-array `length` fast path.
+        //
+        // Resolve the receiver as a tracked typed array BEFORE compiling
+        // the object expression (compile_expr may overwrite tracker state).
+        // We only act on it for the `length` property below; other property
+        // names continue down the legacy path. The receiver is still
+        // compiled normally so the array pointer ends up on the stack —
+        // `TypedArrayLen` pops the pointer just like the legacy `Length`
+        // opcode does, so the only change is the opcode byte.
+        let typed_array_for_length = if property == "length" {
+            self.resolve_receiver_typed_array_kind(object)
+        } else {
+            None
+        };
+
         // Fall back to standard property access
         self.compile_expr(object)?;
 
@@ -386,7 +401,11 @@ impl BytecodeCompiler {
             } else if let Some(operand) = typed_field {
                 self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
             } else if property == "length" {
-                self.emit(Instruction::simple(OpCode::Length));
+                if typed_array_for_length.is_some() {
+                    self.emit(Instruction::simple(OpCode::TypedArrayLen));
+                } else {
+                    self.emit(Instruction::simple(OpCode::Length));
+                }
             } else {
                 let prop_const = self
                     .program
@@ -410,7 +429,11 @@ impl BytecodeCompiler {
         } else if let Some(operand) = typed_field {
             self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
         } else if property == "length" {
-            self.emit(Instruction::simple(OpCode::Length));
+            if typed_array_for_length.is_some() {
+                self.emit(Instruction::simple(OpCode::TypedArrayLen));
+            } else {
+                self.emit(Instruction::simple(OpCode::Length));
+            }
         } else {
             let prop_const = self
                 .program
@@ -474,12 +497,27 @@ impl BytecodeCompiler {
         } else {
             None
         };
+
+        // v2 Phase 3.1 (Agent 3): typed-array fast path for `arr[i]`.
+        // Resolve the receiver kind BEFORE compiling the object —
+        // compile_expr may overwrite tracker state. Falls through to the
+        // legacy `GetProp` path for non-Identifier receivers, slices,
+        // untracked arrays, and any element type without a typed kind.
+        let typed_kind = if end_index.is_none() {
+            self.resolve_receiver_typed_array_kind(object)
+        } else {
+            None
+        };
+
         self.compile_expr(object)?;
         self.compile_expr(index)?;
         if let Some(end) = end_index {
             // Slice access: array[start:end]
             self.compile_expr(end)?;
             self.emit(Instruction::simple(OpCode::SliceAccess));
+        } else if let Some(kind) = typed_kind {
+            // v2 Phase 3.1: typed array element load.
+            self.emit(Instruction::simple(kind.get_opcode()));
         } else {
             // Single index access
             self.emit(Instruction::simple(OpCode::GetProp));

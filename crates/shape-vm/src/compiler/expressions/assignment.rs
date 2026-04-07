@@ -431,7 +431,115 @@ impl BytecodeCompiler {
                 ..
             } => {
                 const ARRAY_REF_STORAGE_ERROR: &str = "cannot store a reference in an array — references are scoped borrows that cannot escape into collections. Use owned values instead";
+                // v2 Phase 3.1 (Agent 3): typed-array fast path for `arr[i] = x`.
+                // Resolve BEFORE compiling the value (compile_expr may
+                // overwrite tracker state).
+                let typed_kind = self.resolve_receiver_typed_array_kind(object);
                 if let Expr::Identifier(name, _) = object.as_ref() {
+                    // Typed array fast path: emit (arr_ptr, index, value)
+                    // directly so the v2 set opcode can pop them in order.
+                    // Skip ref-parameter cases — they fall back to the
+                    // legacy SetIndexRef path below.
+                    if let Some(kind) = typed_kind {
+                        if let Some(local_idx) = self.resolve_local(name) {
+                            if !self.ref_locals.contains(&local_idx) {
+                                let source_loc = self.span_to_source_location(index.span());
+                                self.check_write_allowed_in_current_context(
+                                    Self::borrow_key_for_local(local_idx),
+                                    Some(source_loc),
+                                )
+                                .map_err(|e| match e {
+                                    ShapeError::SemanticError { message, location } => {
+                                        let user_msg = message.replace(
+                                            &format!("(slot {})", local_idx),
+                                            &format!("'{}'", name),
+                                        );
+                                        ShapeError::SemanticError {
+                                            message: user_msg,
+                                            location,
+                                        }
+                                    }
+                                    other => other,
+                                })?;
+                                self.reject_direct_reference_storage(
+                                    &assign_expr.value,
+                                    ARRAY_REF_STORAGE_ERROR,
+                                )?;
+                                // Push (arr, index, value) in the order
+                                // `TypedArraySet*` expects.
+                                self.emit(Instruction::new(
+                                    OpCode::LoadLocal,
+                                    Some(Operand::Local(local_idx)),
+                                ));
+                                self.compile_expr(index)?;
+                                self.compile_expr(&assign_expr.value)?;
+                                // Stash the value for the assignment-result
+                                // expression.
+                                let value_local =
+                                    self.declare_temp_local("__assign_value_")?;
+                                self.emit(Instruction::simple(OpCode::Dup));
+                                self.emit(Instruction::new(
+                                    OpCode::StoreLocal,
+                                    Some(Operand::Local(value_local)),
+                                ));
+                                self.emit(Instruction::simple(kind.set_opcode()));
+                                self.emit(Instruction::new(
+                                    OpCode::LoadLocal,
+                                    Some(Operand::Local(value_local)),
+                                ));
+                                return Ok(());
+                            }
+                        } else {
+                            // Module binding case (top-level `let arr`).
+                            let binding_idx = self.get_or_create_module_binding(name);
+                            let source_loc = self.span_to_source_location(index.span());
+                            self.check_write_allowed_in_current_context(
+                                Self::borrow_key_for_module_binding(binding_idx),
+                                Some(source_loc),
+                            )
+                            .map_err(|e| match e {
+                                ShapeError::SemanticError { message, location } => {
+                                    let user_msg = message.replace(
+                                        &format!(
+                                            "(slot {})",
+                                            Self::borrow_key_for_module_binding(binding_idx)
+                                        ),
+                                        &format!("'{}'", name),
+                                    );
+                                    ShapeError::SemanticError {
+                                        message: user_msg,
+                                        location,
+                                    }
+                                }
+                                other => other,
+                            })?;
+                            self.reject_direct_reference_storage(
+                                &assign_expr.value,
+                                ARRAY_REF_STORAGE_ERROR,
+                            )?;
+                            // Push (arr, index, value) in the order
+                            // `TypedArraySet*` expects.
+                            self.emit(Instruction::new(
+                                OpCode::LoadModuleBinding,
+                                Some(Operand::ModuleBinding(binding_idx)),
+                            ));
+                            self.compile_expr(index)?;
+                            self.compile_expr(&assign_expr.value)?;
+                            let value_local =
+                                self.declare_temp_local("__assign_value_")?;
+                            self.emit(Instruction::simple(OpCode::Dup));
+                            self.emit(Instruction::new(
+                                OpCode::StoreLocal,
+                                Some(Operand::Local(value_local)),
+                            ));
+                            self.emit(Instruction::simple(kind.set_opcode()));
+                            self.emit(Instruction::new(
+                                OpCode::LoadLocal,
+                                Some(Operand::Local(value_local)),
+                            ));
+                            return Ok(());
+                        }
+                    }
                     self.compile_expr(index)?;
                     self.reject_direct_reference_storage(
                         &assign_expr.value,

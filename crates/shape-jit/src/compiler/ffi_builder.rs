@@ -613,6 +613,12 @@ impl JITCompiler {
             v2_array_set_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_set_i32"], builder.func),
             v2_array_push_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_push_i32"], builder.func),
             v2_array_len_i32: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_len_i32"], builder.func),
+            // v2 typed array — bool (encoded as u8 internally)
+            v2_array_new_bool: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_new_bool"], builder.func),
+            v2_array_get_bool: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_get_bool"], builder.func),
+            v2_array_set_bool: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_set_bool"], builder.func),
+            v2_array_push_bool: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_push_bool"], builder.func),
+            v2_array_len_bool: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_len_bool"], builder.func),
             // v2 typed field access
             v2_field_load_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_load_f64"], builder.func),
             v2_field_load_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_field_load_i64"], builder.func),

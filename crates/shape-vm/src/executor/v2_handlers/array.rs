@@ -10,6 +10,9 @@ use shape_value::v2::typed_array::TypedArray;
 use shape_value::{VMError, ValueWord};
 
 use super::super::VirtualMachine;
+use super::v2_array_detect::{
+    ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I32, ELEM_TYPE_I64, stamp_elem_type,
+};
 
 /// Extract a raw pointer (usize) from a ValueWord that was created with
 /// `ValueWord::from_native_ptr()`. Falls back to `raw_bits()` if the value
@@ -39,6 +42,7 @@ impl VirtualMachine {
                     _ => 0,
                 };
                 let ptr = TypedArray::<f64>::with_capacity(cap);
+                unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F64) };
                 self.push_vw(ValueWord::from_native_ptr(ptr as usize))?;
                 Ok(())
             }
@@ -49,6 +53,7 @@ impl VirtualMachine {
                     _ => 0,
                 };
                 let ptr = TypedArray::<i64>::with_capacity(cap);
+                unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I64) };
                 self.push_vw(ValueWord::from_native_ptr(ptr as usize))?;
                 Ok(())
             }
@@ -59,6 +64,18 @@ impl VirtualMachine {
                     _ => 0,
                 };
                 let ptr = TypedArray::<i32>::with_capacity(cap);
+                unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I32) };
+                self.push_vw(ValueWord::from_native_ptr(ptr as usize))?;
+                Ok(())
+            }
+
+            OpCode::NewTypedArrayBool => {
+                let cap = match instruction.operand {
+                    Some(Operand::Count(n)) => n as u32,
+                    _ => 0,
+                };
+                let ptr = TypedArray::<u8>::with_capacity(cap);
+                unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_BOOL) };
                 self.push_vw(ValueWord::from_native_ptr(ptr as usize))?;
                 Ok(())
             }
@@ -117,6 +134,23 @@ impl VirtualMachine {
                 Ok(())
             }
 
+            OpCode::TypedArrayGetBool => {
+                let index_vw = self.pop_vw()?;
+                let arr_vw = self.pop_vw()?;
+                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
+                let arr = extract_ptr(&arr_vw) as *const TypedArray<u8>;
+                let len = unsafe { TypedArray::len(arr) };
+                let val = unsafe {
+                    TypedArray::get(arr, index)
+                        .ok_or(VMError::IndexOutOfBounds {
+                            index: index as i32,
+                            length: len as usize,
+                        })?
+                };
+                self.push_vw(ValueWord::from_bool(val != 0))?;
+                Ok(())
+            }
+
             // ── Element access (set) ────────────────────────────────
 
             OpCode::TypedArraySetF64 => {
@@ -128,6 +162,48 @@ impl VirtualMachine {
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<f64>;
                 unsafe {
                     TypedArray::set(arr, index, val);
+                }
+                Ok(())
+            }
+
+            OpCode::TypedArraySetI64 => {
+                let val_vw = self.pop_vw()?;
+                let index_vw = self.pop_vw()?;
+                let arr_vw = self.pop_vw()?;
+                let val = unsafe { val_vw.as_i64_unchecked() };
+                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
+                let arr = extract_ptr(&arr_vw) as *mut TypedArray<i64>;
+                unsafe {
+                    TypedArray::set(arr, index, val);
+                }
+                Ok(())
+            }
+
+            OpCode::TypedArraySetI32 => {
+                let val_vw = self.pop_vw()?;
+                let index_vw = self.pop_vw()?;
+                let arr_vw = self.pop_vw()?;
+                let val = unsafe { val_vw.as_i64_unchecked() } as i32;
+                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
+                let arr = extract_ptr(&arr_vw) as *mut TypedArray<i32>;
+                unsafe {
+                    TypedArray::set(arr, index, val);
+                }
+                Ok(())
+            }
+
+            OpCode::TypedArraySetBool => {
+                let val_vw = self.pop_vw()?;
+                let index_vw = self.pop_vw()?;
+                let arr_vw = self.pop_vw()?;
+                let val = val_vw.as_bool().ok_or(VMError::TypeError {
+                    expected: "bool",
+                    got: val_vw.type_name(),
+                })?;
+                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
+                let arr = extract_ptr(&arr_vw) as *mut TypedArray<u8>;
+                unsafe {
+                    TypedArray::set(arr, index, if val { 1 } else { 0 });
                 }
                 Ok(())
             }
@@ -152,6 +228,31 @@ impl VirtualMachine {
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i64>;
                 unsafe {
                     TypedArray::push(arr, val);
+                }
+                Ok(())
+            }
+
+            OpCode::TypedArrayPushI32 => {
+                let val_vw = self.pop_vw()?;
+                let arr_vw = self.pop_vw()?;
+                let val = unsafe { val_vw.as_i64_unchecked() } as i32;
+                let arr = extract_ptr(&arr_vw) as *mut TypedArray<i32>;
+                unsafe {
+                    TypedArray::push(arr, val);
+                }
+                Ok(())
+            }
+
+            OpCode::TypedArrayPushBool => {
+                let val_vw = self.pop_vw()?;
+                let arr_vw = self.pop_vw()?;
+                let val = val_vw.as_bool().ok_or(VMError::TypeError {
+                    expected: "bool",
+                    got: val_vw.type_name(),
+                })?;
+                let arr = extract_ptr(&arr_vw) as *mut TypedArray<u8>;
+                unsafe {
+                    TypedArray::push(arr, if val { 1 } else { 0 });
                 }
                 Ok(())
             }

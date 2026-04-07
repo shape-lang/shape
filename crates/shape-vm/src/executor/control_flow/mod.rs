@@ -83,16 +83,19 @@ impl VirtualMachine {
     /// JumpIfFalse — trusted variant.
     ///
     /// The compiler has proved the condition is a boolean value.
-    /// Uses direct bool check instead of full `is_truthy()` dispatch.
+    /// Uses raw `pop_raw_bool` to skip ValueWord materialization entirely.
     #[inline(always)]
     pub(in crate::executor) fn op_jump_if_false_trusted(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Offset(offset)) = instruction.operand {
-            let cond = self.pop_vw()?;
-            debug_assert!(cond.is_bool(), "Trusted JumpIfFalse invariant violated");
-            if !unsafe { cond.as_bool_unchecked() } {
+            debug_assert!(
+                self.stack_top_is_bool(),
+                "Trusted JumpIfFalse invariant violated"
+            );
+            let cond = self.pop_raw_bool()?;
+            if !cond {
                 self.ip = (self.ip as i32 + offset) as usize;
             }
         } else {
@@ -186,8 +189,7 @@ impl VirtualMachine {
                     let args_base = self.sp.saturating_sub(arg_count);
                     for i in 0..copy_count {
                         let vw_slice = self.stack_slice_vw((args_base + i)..(args_base + i + 1));
-                        jit_locals[i] =
-                            jit_abi::marshal_arg_to_jit(&vw_slice[0], param_kinds[i]);
+                        jit_locals[i] = jit_abi::marshal_arg_to_jit(&vw_slice[0], param_kinds[i]);
                     }
 
                     // Build a JIT context on the stack matching the JITContext
@@ -203,7 +205,10 @@ impl VirtualMachine {
 
                     // Compile-time assertion: CTX_U64_SIZE covers through stack_ptr + remaining fields.
                     const _: () = {
-                        assert!(CTX_U64_SIZE * 8 >= 6216 + 136, "CTX_U64_SIZE too small for JITContext layout");
+                        assert!(
+                            CTX_U64_SIZE * 8 >= 6216 + 136,
+                            "CTX_U64_SIZE too small for JITContext layout"
+                        );
                     };
                     let mut ctx_buf = [0u64; CTX_U64_SIZE];
                     for i in 0..copy_count {

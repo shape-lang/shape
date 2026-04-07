@@ -625,18 +625,40 @@ impl BytecodeCompiler {
                 let mut ref_borrow = None;
                 let init_err = if let Some(init_expr) = &var_decl.value {
                     let saved_pending_variable_name = self.pending_variable_name.clone();
+                    let saved_pending_variable_typed_array_kind =
+                        self.pending_variable_typed_array_kind;
                     self.pending_variable_name = var_decl
                         .pattern
                         .as_identifier()
                         .map(|name| name.to_string());
+                    // v2 Phase 3.1 (Agent 3): when the binding has an
+                    // explicit `Array<T>` annotation whose element type
+                    // maps to a typed-array kind, signal it to
+                    // `compile_expr_array` so the literal is lowered to
+                    // the v2 typed-array path.
+                    self.pending_variable_typed_array_kind = var_decl
+                        .type_annotation
+                        .as_ref()
+                        .and_then(|ann| {
+                            crate::compiler::v2_array_emission::typed_array_from_annotation(
+                                ann,
+                            )
+                        })
+                        .and_then(
+                            crate::compiler::v2_typed_emission::should_use_typed_array_from_slot_kind,
+                        );
                     match self.compile_expr_for_reference_binding(init_expr) {
                         Ok(tracked_borrow) => {
                             ref_borrow = tracked_borrow;
                             self.pending_variable_name = saved_pending_variable_name;
+                            self.pending_variable_typed_array_kind =
+                                saved_pending_variable_typed_array_kind;
                             None
                         }
                         Err(e) => {
                             self.pending_variable_name = saved_pending_variable_name;
+                            self.pending_variable_typed_array_kind =
+                                saved_pending_variable_typed_array_kind;
                             // Push null as placeholder so the variable still gets registered
                             self.emit(Instruction::simple(OpCode::PushNull));
                             Some(e)
@@ -664,6 +686,15 @@ impl BytecodeCompiler {
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
+                    // v2 Phase 3.1 (Agent 3): record that this binding holds
+                    // a v2 typed array if the annotation drove the typed
+                    // path during initializer compilation. The kind was
+                    // captured in `pending_variable_typed_array_kind` BEFORE
+                    // the initializer compiled and is still set if the
+                    // typed path was taken.
+                    if let Some(kind) = self.pending_variable_typed_array_kind {
+                        self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                    }
                     if let Some(value) = &var_decl.value {
                         self.finish_reference_binding_from_expr(
                             binding_idx,
@@ -746,12 +777,28 @@ impl BytecodeCompiler {
                     let mut ref_borrow = None;
                     if let Some(init_expr) = &var_decl.value {
                         let saved_pending_variable_name = self.pending_variable_name.clone();
+                        let saved_pending_variable_typed_array_kind =
+                            self.pending_variable_typed_array_kind;
                         self.pending_variable_name = var_decl
                             .pattern
                             .as_identifier()
                             .map(|name| name.to_string());
+                        // v2 Phase 3.1 (Agent 3): see ModuleBinding case above.
+                        self.pending_variable_typed_array_kind = var_decl
+                            .type_annotation
+                            .as_ref()
+                            .and_then(|ann| {
+                                crate::compiler::v2_array_emission::typed_array_from_annotation(
+                                    ann,
+                                )
+                            })
+                            .and_then(
+                                crate::compiler::v2_typed_emission::should_use_typed_array_from_slot_kind,
+                            );
                         let compile_result = self.compile_expr_for_reference_binding(init_expr);
                         self.pending_variable_name = saved_pending_variable_name;
+                        self.pending_variable_typed_array_kind =
+                            saved_pending_variable_typed_array_kind;
                         ref_borrow = compile_result?;
                         if ref_borrow.is_some() {
                             return Err(ShapeError::SemanticError {
@@ -3906,6 +3953,33 @@ impl BytecodeCompiler {
                 // compile_typed_object_literal uses self to include hoisted fields in the schema.
                 self.pending_variable_name =
                     var_decl.pattern.as_identifier().map(|s| s.to_string());
+                // v2 Phase 3.1 (Agent 3): when the binding has an explicit
+                // `Array<T>` annotation whose element type maps to a
+                // typed-array kind, signal it to `compile_expr_array` so
+                // the literal lowers to the v2 typed-array path.
+                self.pending_variable_typed_array_kind = var_decl
+                    .type_annotation
+                    .as_ref()
+                    .and_then(|ann| {
+                        crate::compiler::v2_array_emission::typed_array_from_annotation(ann)
+                    })
+                    .and_then(
+                        crate::compiler::v2_typed_emission::should_use_typed_array_from_slot_kind,
+                    );
+                // v2 Phase 3.2: when the binding has an explicit
+                // `HashMap<K, V>` annotation whose key/value pair maps to a
+                // typed-map kind, signal it to `compile_expr_function_call`
+                // (HashMap ctor path) so the constructor lowers to the v2
+                // typed-map opcode.
+                self.pending_variable_typed_map_kind = var_decl
+                    .type_annotation
+                    .as_ref()
+                    .and_then(|ann| {
+                        crate::compiler::v2_map_emission::map_key_value_from_annotation(ann)
+                    })
+                    .and_then(|(k, v)| {
+                        crate::compiler::v2_typed_map_emission::should_use_typed_map(&k, &v)
+                    });
 
                 // Compile-time range check: if the type annotation is a width type
                 // (i8, u8, i16, etc.) and the initializer is a constant expression,
@@ -4007,8 +4081,16 @@ impl BytecodeCompiler {
                     None
                 };
 
-                // Clear pending variable name after init expression is compiled
+                // Capture (then clear) pending variable name and v2 typed
+                // array kind after the init expression is compiled. The
+                // captured kind is recorded against the binding slot below
+                // so subsequent typed Get/Set/Push opcode emission can
+                // verify the receiver is actually a v2 typed array.
                 self.pending_variable_name = None;
+                let captured_typed_array_kind = self.pending_variable_typed_array_kind;
+                self.pending_variable_typed_array_kind = None;
+                let captured_typed_map_kind = self.pending_variable_typed_map_kind;
+                self.pending_variable_typed_map_kind = None;
 
                 // Emit BindSchema for Table<T> annotations (runtime safety net)
                 if let Some(ref type_ann) = var_decl.type_annotation {
@@ -4061,6 +4143,15 @@ impl BytecodeCompiler {
                                 OpCode::StoreModuleBinding,
                                 Some(Operand::ModuleBinding(binding_idx)),
                             ));
+                        }
+
+                        // v2 Phase 3.1 (Agent 3): record v2 typed array kind for this binding
+                        if let Some(kind) = captured_typed_array_kind {
+                            self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                        }
+                        // v2 Phase 3.2: record v2 typed map kind for this binding
+                        if let Some(kind) = captured_typed_map_kind {
+                            self.v2_typed_map_module_bindings.insert(binding_idx, kind);
                         }
 
                         // Track type annotation if present (for type checker)
@@ -4204,6 +4295,15 @@ impl BytecodeCompiler {
                         } else if let Some(local_idx) = self.resolve_local(name) {
                             let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
                             self.propagate_initializer_type_to_slot(local_idx, true, is_mutable);
+                        }
+                    }
+
+                    // v2 Phase 3.1 (Agent 3): record v2 typed array kind for the local
+                    if let Some(kind) = captured_typed_array_kind {
+                        if let Some(name) = var_decl.pattern.as_identifier() {
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                self.v2_typed_array_locals.insert(local_idx, kind);
+                            }
                         }
                     }
 

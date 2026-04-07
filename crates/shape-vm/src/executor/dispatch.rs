@@ -639,14 +639,55 @@ impl VirtualMachine {
             NewTypedArrayF64
             | NewTypedArrayI64
             | NewTypedArrayI32
+            | NewTypedArrayBool
             | TypedArrayGetF64
             | TypedArrayGetI64
             | TypedArrayGetI32
+            | TypedArrayGetBool
             | TypedArraySetF64
+            | TypedArraySetI64
+            | TypedArraySetI32
+            | TypedArraySetBool
             | TypedArrayPushF64
             | TypedArrayPushI64
+            | TypedArrayPushI32
+            | TypedArrayPushBool
             | TypedArrayLen => {
                 return self.exec_v2_typed_array(instruction);
+            }
+
+            // v2 typed map operations
+            NewTypedMapStringF64
+            | NewTypedMapStringI64
+            | NewTypedMapStringPtr
+            | NewTypedMapI64F64
+            | NewTypedMapI64I64
+            | NewTypedMapI64Ptr
+            | TypedMapStringF64Get
+            | TypedMapStringI64Get
+            | TypedMapStringPtrGet
+            | TypedMapI64F64Get
+            | TypedMapI64I64Get
+            | TypedMapI64PtrGet
+            | TypedMapStringF64Set
+            | TypedMapStringI64Set
+            | TypedMapStringPtrSet
+            | TypedMapI64F64Set
+            | TypedMapI64I64Set
+            | TypedMapI64PtrSet
+            | TypedMapStringF64Has
+            | TypedMapStringI64Has
+            | TypedMapStringPtrHas
+            | TypedMapI64F64Has
+            | TypedMapI64I64Has
+            | TypedMapI64PtrHas
+            | TypedMapStringF64Delete
+            | TypedMapStringI64Delete
+            | TypedMapStringPtrDelete
+            | TypedMapI64F64Delete
+            | TypedMapI64I64Delete
+            | TypedMapI64PtrDelete => {
+                return self.exec_v2_typed_map(instruction);
             }
 
             // Special

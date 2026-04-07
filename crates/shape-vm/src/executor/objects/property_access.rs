@@ -328,6 +328,45 @@ impl VirtualMachine {
         let key_nb = self.pop_vw()?;
         let obj_nb = self.pop_vw()?;
 
+        // v2 typed array fast path. The compiler emits typed array opcodes
+        // for `Array<number>` / `Array<int>` / `Array<i32>` / `Array<bool>`
+        // literals; here we recognise them via the `_pad`-stamped HeapHeader
+        // and dispatch element access without ValueWord/HeapValue.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&obj_nb)
+        {
+            // String key: only "length" is meaningful for typed arrays.
+            if let Some(ks) = key_nb.as_str() {
+                if ks == "length" {
+                    return self.push_vw(ValueWord::from_i64(view.len as i64));
+                }
+                return Err(VMError::UndefinedProperty(ks.to_string()));
+            }
+            // Numeric index: read element at index, return None for OOB to
+            // match the legacy v1 dynamic-array semantics.
+            let idx_opt = key_nb
+                .as_i64()
+                .or_else(|| key_nb.as_f64().map(|f| f as i64));
+            if let Some(idx) = idx_opt {
+                let len = view.len as i64;
+                let actual = if idx < 0 { len + idx } else { idx };
+                if actual >= 0 && (actual as i64) < len {
+                    let val = crate::executor::v2_handlers::v2_array_detect::read_element(
+                        &view,
+                        actual as u32,
+                    )
+                    .unwrap_or_else(ValueWord::none);
+                    return self.push_vw(val);
+                } else {
+                    return self.push_vw(ValueWord::none());
+                }
+            }
+            return Err(VMError::TypeError {
+                expected: "integer index or property name",
+                got: key_nb.type_name(),
+            });
+        }
+
         // Unwrap TypeAnnotatedValue once at the top so all dispatch sees the inner value.
         let obj_ref = match obj_nb.as_heap_ref() {
             Some(HeapValue::TypeAnnotatedValue { value, .. }) => value.as_ref(),
@@ -814,6 +853,36 @@ impl VirtualMachine {
         key_nb: &ValueWord,
         value_nb: ValueWord,
     ) -> Result<(), VMError> {
+        // v2 typed array fast path: index assignment writes through the
+        // stamped header's element type without going through ValueWord/HeapValue.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(object_nb)
+        {
+            // Property names other than indices are not assignable on typed arrays.
+            if let Some(ks) = key_nb.as_str() {
+                return Err(VMError::RuntimeError(format!(
+                    "Cannot set property '{}' on a typed array",
+                    ks
+                )));
+            }
+            let idx = Self::parse_array_index(key_nb)?;
+            let len = view.len as i64;
+            let actual = if idx < 0 { len + idx } else { idx };
+            if actual < 0 || (actual as i64) >= len {
+                return Err(VMError::RuntimeError(format!(
+                    "Array index {} is out of bounds (len={})",
+                    idx, view.len
+                )));
+            }
+            crate::executor::v2_handlers::v2_array_detect::write_element(
+                &view,
+                actual as u32,
+                &value_nb,
+            )
+            .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+            return Ok(());
+        }
+
         if let Some(key_str) = key_nb.as_str() {
             if let Some(HeapValue::NativeView(view)) = object_nb.as_heap_mut() {
                 let field = view
@@ -1054,6 +1123,12 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn op_length(&mut self) -> Result<(), VMError> {
         let nb = self.pop_vw()?;
+        // v2 typed array fast path: read len directly from the header.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&nb)
+        {
+            return self.push_vw(ValueWord::from_i64(view.len as i64));
+        }
         // Handle unified arrays (bit-47 tagged).
         if shape_value::tags::is_unified_heap(nb.raw_bits()) {
             let kind = unsafe { shape_value::tags::unified_heap_kind(nb.raw_bits()) };

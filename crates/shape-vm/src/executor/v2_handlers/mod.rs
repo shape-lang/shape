@@ -3,6 +3,8 @@
 pub(crate) mod array;
 pub(crate) mod field;
 pub(crate) mod int;
+pub(crate) mod typed_map;
+pub(crate) mod v2_array_detect;
 
 #[cfg(test)]
 mod integration_tests;

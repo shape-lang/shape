@@ -320,6 +320,19 @@ impl VirtualMachine {
         }
     }
 
+    /// Check whether the top stack value is a NaN-boxed bool.
+    #[inline(always)]
+    pub(crate) fn stack_top_is_bool(&self) -> bool {
+        if self.sp == 0 {
+            return false;
+        }
+        unsafe {
+            let bits = std::ptr::read(self.stack.as_ptr().add(self.sp - 1) as *const u64);
+            shape_value::tags::is_tagged(bits)
+                && shape_value::tags::get_tag(bits) == shape_value::tags::TAG_BOOL
+        }
+    }
+
     // --- Raw typed stack ops (zero NaN-box overhead) ---
     //
     // These bypass ValueWord construction/destruction entirely.  The caller
@@ -395,13 +408,87 @@ impl VirtualMachine {
         }
     }
 
-    /// Push an f64 directly onto the stack.
+    /// Pop a raw u64 from the stack with no interpretation.
     ///
-    /// Writes the raw f64 bits into the stack slot.  NaN canonicalization
-    /// is applied to prevent collisions with the tagged range.
+    /// This is used by v2 typed handlers that store raw native pointers / values
+    /// directly in stack slots, bypassing ValueWord semantics entirely.  No
+    /// Drop is run on the popped slot — the caller owns the bits.
+    ///
+    /// # Safety contract
+    /// The slot must contain a value placed by a v2 raw push (not a heap-tagged
+    /// ValueWord), or the caller must be otherwise aware that no Arc refcount
+    /// is being released.
+    #[inline(always)]
+    pub(crate) fn pop_raw_u64(&mut self) -> Result<u64, VMError> {
+        if self.sp == 0 {
+            return Err(VMError::StackUnderflow);
+        }
+        self.sp -= 1;
+        unsafe {
+            let ptr = self.stack.as_mut_ptr().add(self.sp);
+            let bits = std::ptr::read(ptr as *const u64);
+            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
+            Ok(bits)
+        }
+    }
+
+    /// Push a raw u64 onto the stack with no NaN-box tagging.
+    ///
+    /// Companion to `pop_raw_u64` — used by v2 typed handlers that store
+    /// raw native pointers / values in stack slots.
+    #[inline(always)]
+    pub(crate) fn push_raw_u64(&mut self, bits: u64) -> Result<(), VMError> {
+        if self.sp >= self.stack.len() {
+            return self.push_vw_slow(bits);
+        }
+        unsafe {
+            let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
+            std::ptr::write(ptr, bits);
+        }
+        self.sp += 1;
+        Ok(())
+    }
+
+    /// Pop a bool from the stack, assuming the top-of-stack is a NaN-boxed bool.
+    ///
+    /// Reads the raw u64 bits and decodes the bool payload.  No ValueWord overhead.
+    ///
+    /// # Safety contract
+    /// The compiler must have proven the value is `bool`.
+    /// If the value is not bool-tagged, the result is garbage (but memory-safe).
+    #[inline(always)]
+    pub(crate) fn pop_raw_bool(&mut self) -> Result<bool, VMError> {
+        if self.sp == 0 {
+            return Err(VMError::StackUnderflow);
+        }
+        self.sp -= 1;
+        unsafe {
+            let ptr = self.stack.as_mut_ptr().add(self.sp);
+            let bits = std::ptr::read(ptr as *const u64);
+            // Write None sentinel — bool is inline, no heap Drop needed.
+            std::ptr::write(ptr as *mut u64, 0xFFFB_0000_0000_0000u64);
+            // Bool payload is bit 0; nonzero = true.
+            Ok(shape_value::tags::get_payload(bits) != 0)
+        }
+    }
+
+    /// Push a bool directly onto the stack as a NaN-boxed bool tag.
+    ///
+    /// Writes the raw tagged u64 directly into the stack slot — no ValueWord
+    /// construction/Drop overhead.
     #[inline(always)]
     pub(crate) fn push_raw_bool(&mut self, value: bool) -> Result<(), VMError> {
-        self.push_vw(ValueWord::from_bool(value))
+        if self.sp >= self.stack.len() {
+            // Cold path: grow via push_vw_slow
+            return self.push_vw(ValueWord::from_bool(value));
+        }
+        unsafe {
+            let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
+            let bits = shape_value::tags::make_tagged(shape_value::tags::TAG_BOOL, value as u64);
+            std::ptr::write(ptr, bits);
+        }
+        self.sp += 1;
+        Ok(())
     }
 
     pub(crate) fn push_raw_f64(&mut self, value: f64) -> Result<(), VMError> {
@@ -436,5 +523,143 @@ impl VirtualMachine {
             .last()
             .map(|frame| frame.base_pointer)
             .unwrap_or(0)
+    }
+
+    /// Wave C Phase C1: Look up the FrameDescriptor for the currently executing
+    /// function. Returns None if no call frame is active or the active function
+    /// has no FrameDescriptor (legacy bytecode).
+    ///
+    /// Used by typed handlers (`op_load_local_trusted`, etc.) to skip ValueWord
+    /// wrapping when the slot kind is a known scalar.
+    #[inline]
+    pub(crate) fn current_frame_descriptor(&self) -> Option<&crate::type_tracking::FrameDescriptor> {
+        let func_id = self.call_stack.last()?.function_id?;
+        let func = self.program.functions.get(func_id as usize)?;
+        func.frame_descriptor.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod raw_stack_tests {
+    use super::*;
+    use crate::executor::VMConfig;
+
+    fn make_vm() -> VirtualMachine {
+        VirtualMachine::new(VMConfig::default())
+    }
+
+    // ----- Bool round-trip -----
+
+    #[test]
+    fn raw_bool_round_trip_true() {
+        let mut vm = make_vm();
+        vm.push_raw_bool(true).unwrap();
+        assert!(vm.stack_top_is_bool());
+        let v = vm.pop_raw_bool().unwrap();
+        assert_eq!(v, true);
+    }
+
+    #[test]
+    fn raw_bool_round_trip_false() {
+        let mut vm = make_vm();
+        vm.push_raw_bool(false).unwrap();
+        assert!(vm.stack_top_is_bool());
+        let v = vm.pop_raw_bool().unwrap();
+        assert_eq!(v, false);
+    }
+
+    #[test]
+    fn raw_bool_compatible_with_vw_pop() {
+        // pop_vw on a raw_bool slot must materialize a bool ValueWord
+        let mut vm = make_vm();
+        vm.push_raw_bool(true).unwrap();
+        let vw = vm.pop_vw().unwrap();
+        assert!(vw.is_bool());
+        assert_eq!(unsafe { vw.as_bool_unchecked() }, true);
+    }
+
+    #[test]
+    fn vw_bool_compatible_with_raw_pop() {
+        // push_vw of a bool followed by pop_raw_bool must yield same value
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_bool(true)).unwrap();
+        assert!(vm.stack_top_is_bool());
+        assert_eq!(vm.pop_raw_bool().unwrap(), true);
+    }
+
+    // ----- f64 round-trip including NaN -----
+
+    #[test]
+    fn raw_f64_round_trip_nan() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(f64::NAN).unwrap();
+        // After push, the bits are CANONICAL_NAN (canonicalized to prevent
+        // collisions with the tagged range). pop_raw_f64 reinterprets as f64.
+        let v = vm.pop_raw_f64().unwrap();
+        assert!(v.is_nan(), "expected NaN, got {}", v);
+    }
+
+    #[test]
+    fn raw_f64_round_trip_neg_zero() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(-0.0).unwrap();
+        let v = vm.pop_raw_f64().unwrap();
+        // -0.0.to_bits() != 0.0.to_bits() but -0.0 == 0.0 numerically
+        assert_eq!(v, -0.0);
+        assert_eq!(v.to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn raw_f64_round_trip_infinity() {
+        let mut vm = make_vm();
+        vm.push_raw_f64(f64::INFINITY).unwrap();
+        let v = vm.pop_raw_f64().unwrap();
+        assert_eq!(v, f64::INFINITY);
+    }
+
+    // ----- i64 round-trip including i48 boundary -----
+
+    #[test]
+    fn raw_i64_round_trip_max_i48() {
+        const I48_MAX: i64 = (1i64 << 47) - 1;
+        let mut vm = make_vm();
+        vm.push_raw_i64(I48_MAX).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), I48_MAX);
+    }
+
+    #[test]
+    fn raw_i64_round_trip_min_i48() {
+        const I48_MIN: i64 = -(1i64 << 47);
+        let mut vm = make_vm();
+        vm.push_raw_i64(I48_MIN).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), I48_MIN);
+    }
+
+    #[test]
+    fn raw_i64_round_trip_negative() {
+        let mut vm = make_vm();
+        vm.push_raw_i64(-12345).unwrap();
+        assert_eq!(vm.pop_raw_i64().unwrap(), -12345);
+    }
+
+    // ----- Underflow -----
+
+    #[test]
+    fn raw_pop_underflows() {
+        let mut vm = make_vm();
+        assert!(vm.pop_raw_bool().is_err());
+        assert!(vm.pop_raw_i64().is_err());
+        assert!(vm.pop_raw_f64().is_err());
+        assert!(vm.pop_raw_u64().is_err());
+    }
+
+    // ----- u64 round-trip (raw, no NaN-box semantics) -----
+
+    #[test]
+    fn raw_u64_round_trip_arbitrary_bits() {
+        let mut vm = make_vm();
+        let bits: u64 = 0x12345678_9abcdef0;
+        vm.push_raw_u64(bits).unwrap();
+        assert_eq!(vm.pop_raw_u64().unwrap(), bits);
     }
 }

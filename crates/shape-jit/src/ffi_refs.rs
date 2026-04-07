@@ -242,6 +242,11 @@ pub struct FFIFuncRefs {
     pub(crate) v2_array_set_i32: FuncRef,
     pub(crate) v2_array_push_i32: FuncRef,
     pub(crate) v2_array_len_i32: FuncRef,
+    pub(crate) v2_array_new_bool: FuncRef,
+    pub(crate) v2_array_get_bool: FuncRef,
+    pub(crate) v2_array_set_bool: FuncRef,
+    pub(crate) v2_array_push_bool: FuncRef,
+    pub(crate) v2_array_len_bool: FuncRef,
     // v2 typed field access
     pub(crate) v2_field_load_f64: FuncRef,
     pub(crate) v2_field_load_i64: FuncRef,

@@ -55,6 +55,11 @@ pub type TypedMapStringF64 = TypedMap<*const u8, f64>;
 pub type TypedMapStringI64 = TypedMap<*const u8, i64>;
 pub type TypedMapStringPtr = TypedMap<*const u8, *const u8>;
 
+// i64-keyed map aliases.
+pub type TypedMapI64F64 = TypedMap<i64, f64>;
+pub type TypedMapI64I64 = TypedMap<i64, i64>;
+pub type TypedMapI64Ptr = TypedMap<i64, *const u8>;
+
 /// FNV-1a hash for byte slices. Simple, fast, good distribution for short keys.
 #[inline]
 fn fnv1a_hash(bytes: &[u8]) -> u64 {
@@ -348,6 +353,139 @@ impl<V: Copy> TypedMap<*const u8, V> {
                         if existing_str == key_str {
                             let old_value = bucket.value;
                             // Replace with tombstone
+                            (*(*this).buckets.add(idx as usize)).hash = HASH_TOMBSTONE;
+                            (*this).len -= 1;
+                            (*this).tombstone_count += 1;
+                            return Some(old_value);
+                        }
+                    }
+                    _ => {}
+                }
+                idx = (idx + 1) & mask;
+            }
+        }
+    }
+}
+
+// --- i64-keyed map operations ---
+//
+// These operate on TypedMap<i64, V>. Keys are compared by raw integer
+// equality. The hash mixes the i64 with FNV-1a over its bytes for a decent
+// distribution across small integers.
+
+impl<V: Copy> TypedMap<i64, V> {
+    /// Insert a key-value pair. If the key already exists, updates the value
+    /// and returns the old value.
+    ///
+    /// # Safety
+    /// `this` must point to a valid `TypedMap<i64, V>`.
+    pub unsafe fn insert_i64(this: *mut Self, key: i64, value: V) -> Option<V> {
+        unsafe {
+            Self::ensure_capacity(this);
+
+            let hash = fix_hash(fnv1a_hash(&key.to_le_bytes()));
+            let map = &*this;
+            let mask = map.bucket_count - 1;
+            let mut idx = (hash as u32) & mask;
+            let mut first_tombstone: Option<u32> = None;
+
+            loop {
+                let bucket = &*map.buckets.add(idx as usize);
+                match bucket.hash {
+                    HASH_EMPTY => {
+                        let insert_idx = first_tombstone.unwrap_or(idx);
+                        if first_tombstone.is_some() {
+                            (*this).tombstone_count -= 1;
+                        }
+                        std::ptr::write(
+                            (*this).buckets.add(insert_idx as usize),
+                            Bucket { hash, key, value },
+                        );
+                        (*this).len += 1;
+                        return None;
+                    }
+                    HASH_TOMBSTONE => {
+                        if first_tombstone.is_none() {
+                            first_tombstone = Some(idx);
+                        }
+                    }
+                    h if h == hash => {
+                        if bucket.key == key {
+                            let old = bucket.value;
+                            (*(*this).buckets.add(idx as usize)).value = value;
+                            return Some(old);
+                        }
+                    }
+                    _ => {}
+                }
+                idx = (idx + 1) & mask;
+            }
+        }
+    }
+
+    /// Look up a value by i64 key.
+    ///
+    /// # Safety
+    /// `this` must point to a valid `TypedMap<i64, V>`.
+    pub unsafe fn get_i64(this: *const Self, key: i64) -> Option<V> {
+        unsafe {
+            let map = &*this;
+            if map.len == 0 || map.bucket_count == 0 {
+                return None;
+            }
+
+            let hash = fix_hash(fnv1a_hash(&key.to_le_bytes()));
+            let mask = map.bucket_count - 1;
+            let mut idx = (hash as u32) & mask;
+
+            loop {
+                let bucket = &*map.buckets.add(idx as usize);
+                match bucket.hash {
+                    HASH_EMPTY => return None,
+                    HASH_TOMBSTONE => {}
+                    h if h == hash => {
+                        if bucket.key == key {
+                            return Some(bucket.value);
+                        }
+                    }
+                    _ => {}
+                }
+                idx = (idx + 1) & mask;
+            }
+        }
+    }
+
+    /// Check if the map contains an i64 key.
+    ///
+    /// # Safety
+    /// `this` must point to a valid `TypedMap<i64, V>`.
+    pub unsafe fn contains_key_i64(this: *const Self, key: i64) -> bool {
+        unsafe { Self::get_i64(this, key).is_some() }
+    }
+
+    /// Remove an i64 key from the map, returning the value if it was present.
+    ///
+    /// # Safety
+    /// `this` must point to a valid `TypedMap<i64, V>`.
+    pub unsafe fn remove_i64(this: *mut Self, key: i64) -> Option<V> {
+        unsafe {
+            let map = &*this;
+            if map.len == 0 || map.bucket_count == 0 {
+                return None;
+            }
+
+            let hash = fix_hash(fnv1a_hash(&key.to_le_bytes()));
+            let mask = map.bucket_count - 1;
+            let mut idx = (hash as u32) & mask;
+
+            loop {
+                let bucket = &*map.buckets.add(idx as usize);
+                match bucket.hash {
+                    HASH_EMPTY => return None,
+                    HASH_TOMBSTONE => {}
+                    h if h == hash => {
+                        if bucket.key == key {
+                            let old_value = bucket.value;
                             (*(*this).buckets.add(idx as usize)).hash = HASH_TOMBSTONE;
                             (*this).len -= 1;
                             (*this).tombstone_count += 1;

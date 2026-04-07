@@ -102,6 +102,14 @@ impl VirtualMachine {
             expected: "number",
             got: "unknown",
         })? as i64;
+        // v2 typed array fast path: read len directly from the stamped header.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&iter)
+        {
+            let done = idx < 0 || idx as u32 >= view.len;
+            self.push_vw(ValueWord::from_bool(done))?;
+            return Ok(());
+        }
         // Handle unified arrays (bit-47 tagged) for iteration.
         if shape_value::tags::is_unified_heap(iter.raw_bits()) {
             let kind = unsafe { shape_value::tags::unified_heap_kind(iter.raw_bits()) };
@@ -171,6 +179,19 @@ impl VirtualMachine {
         let idx = idx_nb.as_number_coerce().ok_or_else(|| {
             VMError::RuntimeError("Expected number for iterator index".to_string())
         })? as i64;
+        // v2 typed array fast path: read element through the stamped header.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&iter)
+        {
+            let result = if idx < 0 || idx as u32 >= view.len {
+                ValueWord::none()
+            } else {
+                crate::executor::v2_handlers::v2_array_detect::read_element(&view, idx as u32)
+                    .unwrap_or_else(ValueWord::none)
+            };
+            self.push_vw(result)?;
+            return Ok(());
+        }
         // Handle unified arrays (bit-47 tagged) for iteration.
         if shape_value::tags::is_unified_heap(iter.raw_bits()) {
             let kind = unsafe { shape_value::tags::unified_heap_kind(iter.raw_bits()) };

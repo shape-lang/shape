@@ -3,6 +3,7 @@
 //! External C functions that are called from JIT-compiled code to perform
 //! operations that cannot be done inline (heap allocation, complex logic, etc.)
 
+pub mod arc;
 pub mod array;
 pub mod data;
 pub mod object;
@@ -21,6 +22,7 @@ pub mod references;
 pub mod result;
 pub mod simd;
 pub mod typed_object;
+pub mod v2;
 pub mod v2_typed;
 pub mod window;
 

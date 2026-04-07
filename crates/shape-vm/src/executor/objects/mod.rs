@@ -237,6 +237,15 @@ impl VirtualMachine {
             return Ok(());
         }
 
+        // v2 typed array method dispatch.
+        if let Some(view) =
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&receiver_nb)
+        {
+            if self.dispatch_v2_typed_array_method(&method_name, &view, &args_nb)? {
+                return Ok(());
+            }
+        }
+
         // IC fast path: if the method dispatch site is monomorphic, skip PHF lookup.
         {
             let ic_ip = self.ip;
@@ -687,6 +696,97 @@ impl VirtualMachine {
     }
 
     /// Handle char methods (is_alphabetic, to_uppercase, etc.)
+    /// Dispatch a method call where the receiver is a v2 typed array.
+    /// Returns Ok(true) if handled, Ok(false) to fall through to legacy path.
+    fn dispatch_v2_typed_array_method(
+        &mut self,
+        method: &str,
+        view: &crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView,
+        args: &[ValueWord],
+    ) -> Result<bool, VMError> {
+        use crate::executor::v2_handlers::v2_array_detect as v2;
+        match method {
+            "len" | "length" => {
+                self.push_vw(ValueWord::from_i64(view.len as i64))?;
+                Ok(true)
+            }
+            "first" => {
+                let val = if view.len == 0 {
+                    ValueWord::none()
+                } else {
+                    v2::read_element(view, 0).unwrap_or_else(ValueWord::none)
+                };
+                self.push_vw(val)?;
+                Ok(true)
+            }
+            "last" => {
+                let val = if view.len == 0 {
+                    ValueWord::none()
+                } else {
+                    v2::read_element(view, view.len - 1).unwrap_or_else(ValueWord::none)
+                };
+                self.push_vw(val)?;
+                Ok(true)
+            }
+            "is_empty" | "isEmpty" => {
+                self.push_vw(ValueWord::from_bool(view.len == 0))?;
+                Ok(true)
+            }
+            "sum" => {
+                if let Some(val) = v2::sum_elements(view) {
+                    self.push_vw(val)?;
+                    Ok(true)
+                } else {
+                    Err(VMError::RuntimeError(
+                        "sum() not supported on bool typed array".to_string(),
+                    ))
+                }
+            }
+            "clone" => {
+                let new_ptr = v2::clone_array(view);
+                self.push_vw(ValueWord::from_native_ptr(new_ptr as usize))?;
+                Ok(true)
+            }
+            "push" => {
+                if args.len() != 2 {
+                    return Err(VMError::ArityMismatch {
+                        function: "push".to_string(),
+                        expected: 1,
+                        got: args.len().saturating_sub(1),
+                    });
+                }
+                v2::push_element(view, &args[1])
+                    .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                self.push_vw(ValueWord::none())?;
+                Ok(true)
+            }
+            "pop" => {
+                let val = v2::pop_element(view).unwrap_or_else(ValueWord::none);
+                self.push_vw(val)?;
+                Ok(true)
+            }
+            "map" | "filter" | "reduce" | "fold" | "forEach" | "for_each" | "find"
+            | "findIndex" | "find_index" | "some" | "every" | "any" | "all" => {
+                let mut elems: Vec<ValueWord> = Vec::with_capacity(view.len as usize);
+                for i in 0..view.len {
+                    elems.push(v2::read_element(view, i).unwrap_or_else(ValueWord::none));
+                }
+                let legacy = ValueWord::from_array(std::sync::Arc::new(elems));
+                let mut new_args: Vec<ValueWord> = args.to_vec();
+                new_args[0] = legacy;
+                let handler = method_registry::ARRAY_METHODS.get(method).ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "Unknown method '{}' on v2 typed array",
+                        method
+                    ))
+                })?;
+                handler(self, new_args, None)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn handle_char_method(&mut self, method: &str, args: Vec<ValueWord>) -> Result<(), VMError> {
         let c = args[0].as_char().ok_or_else(|| VMError::TypeError {
             expected: "char",

@@ -820,6 +820,7 @@ fn v2_stack_frame_with_typed_locals() {
             mutable_captures: vec![],
             frame_descriptor: None,
             osr_entry_points: vec![],
+            mir_data: None,
         }],
         ..Default::default()
     };
@@ -905,6 +906,7 @@ fn v2_stack_frame_locals_isolation() {
             mutable_captures: vec![],
             frame_descriptor: None,
             osr_entry_points: vec![],
+            mir_data: None,
         }],
         ..Default::default()
     };

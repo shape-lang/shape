@@ -1,3 +1,4 @@
+pub mod concrete_type;
 pub mod heap_header;
 pub mod refcount;
 pub mod struct_layout;
@@ -6,3 +7,5 @@ pub mod typed_array;
 pub mod typed_map;
 pub mod typed_option;
 pub mod typed_result;
+
+pub use concrete_type::ConcreteType;

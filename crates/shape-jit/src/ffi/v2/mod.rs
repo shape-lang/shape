@@ -134,6 +134,54 @@ pub extern "C" fn jit_v2_array_len_i32(arr: *const TypedArray<i32>) -> u32 {
 }
 
 // ============================================================================
+// Array FFI — bool (stored as u8 internally)
+// ============================================================================
+//
+// Bool elements are stored as u8 (0 or 1) in the underlying TypedArray<u8>
+// buffer. The Cranelift IR side uses i8 for bool slots (matching SlotKind::Bool
+// → I8 in `cranelift_type_for_slot`), and the FFI translates u8 ↔ bool at the
+// edges. This keeps the buffer compact (1 byte per element) and matches the
+// JIT's native i8 width for bool locals.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_new_bool(capacity: u32) -> *mut TypedArray<u8> {
+    TypedArray::<u8>::with_capacity(capacity)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_get_bool(arr: *const TypedArray<u8>, index: i64) -> u8 {
+    unsafe {
+        if index < 0 || index as u32 >= (*arr).len {
+            panic!(
+                "v2 array bool index {} out of bounds (len {})",
+                index,
+                (*arr).len
+            );
+        }
+        TypedArray::get_unchecked(arr, index as u32)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_set_bool(arr: *mut TypedArray<u8>, index: i64, val: u8) {
+    unsafe {
+        TypedArray::set(arr, index as u32, val);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_push_bool(arr: *mut TypedArray<u8>, val: u8) {
+    unsafe {
+        TypedArray::push(arr, val);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_len_bool(arr: *const TypedArray<u8>) -> u32 {
+    unsafe { TypedArray::len(arr) }
+}
+
+// ============================================================================
 // Struct field access FFI
 // ============================================================================
 
@@ -272,6 +320,31 @@ mod tests {
         assert_eq!(jit_v2_array_len_i32(arr), 2);
         assert_eq!(jit_v2_array_get_i32(arr, 0), 7);
         assert_eq!(jit_v2_array_get_i32(arr, 1), -3);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_array_bool_roundtrip() {
+        // Bool elements are stored as u8 internally (0 = false, 1 = true).
+        let arr = jit_v2_array_new_bool(4);
+        jit_v2_array_push_bool(arr, 1);
+        jit_v2_array_push_bool(arr, 0);
+        jit_v2_array_push_bool(arr, 1);
+        assert_eq!(jit_v2_array_len_bool(arr), 3);
+        assert_eq!(jit_v2_array_get_bool(arr, 0), 1);
+        assert_eq!(jit_v2_array_get_bool(arr, 1), 0);
+        assert_eq!(jit_v2_array_get_bool(arr, 2), 1);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_array_set_bool() {
+        let arr = jit_v2_array_new_bool(4);
+        jit_v2_array_push_bool(arr, 0);
+        jit_v2_array_push_bool(arr, 0);
+        jit_v2_array_set_bool(arr, 0, 1);
+        assert_eq!(jit_v2_array_get_bool(arr, 0), 1);
+        assert_eq!(jit_v2_array_get_bool(arr, 1), 0);
         unsafe { TypedArray::drop_array(arr) };
     }
 

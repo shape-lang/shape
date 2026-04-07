@@ -35,8 +35,14 @@ pub extern "C" fn jit_v2_array_alloc_f64(capacity: i64) -> u64 {
 ///
 /// # Safety
 /// `arr_bits` must be a valid NaN-boxed HK_ARRAY value.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_push_f64(arr_bits: u64, val: f64) -> u64 {
+///
+/// Note: `#[no_mangle]` removed — the symbol name `jit_v2_array_push_f64`
+/// is owned by the typed v2 module (`crates/shape-jit/src/ffi/v2/mod.rs`),
+/// which uses `*mut TypedArray<f64>` instead of NaN-boxed bits. This legacy
+/// thunk is now dead code but is kept here as a Rust-only helper for any
+/// future legacy callers.
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_array_push_f64_legacy(arr_bits: u64, val: f64) -> u64 {
     if !is_heap_kind(arr_bits, HK_ARRAY) {
         return arr_bits;
     }
@@ -54,8 +60,12 @@ pub extern "C" fn jit_v2_array_push_f64(arr_bits: u64, val: f64) -> u64 {
 ///
 /// # Safety
 /// `arr_bits` must be a valid NaN-boxed HK_ARRAY value.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_get_f64(arr_bits: u64, idx: i64) -> f64 {
+///
+/// Note: `#[no_mangle]` removed — the symbol name `jit_v2_array_get_f64`
+/// is owned by the typed v2 module (`crates/shape-jit/src/ffi/v2/mod.rs`),
+/// which uses `*const TypedArray<f64>` instead of NaN-boxed bits.
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_array_get_f64_legacy(arr_bits: u64, idx: i64) -> f64 {
     if !is_heap_kind(arr_bits, HK_ARRAY) {
         return f64::NAN;
     }
@@ -164,22 +174,21 @@ pub extern "C" fn jit_v2_pow_f64(base: f64, exp: f64) -> f64 {
 
 /// Increment the reference count on a heap-allocated value.
 ///
-/// For TAG_HEAP values, increments the JitAlloc refcount (future use).
-/// Currently a no-op placeholder — JIT values use Box-based ownership
-/// and leak on exit. This function exists to establish the v2 refcount
-/// protocol for when proper refcounting is wired.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_retain(_ptr_bits: u64) {
-    // No-op: current JIT allocation model leaks all heap values.
-    // When refcounting is implemented, this will increment the
-    // atomic refcount in the HeapHeader at offset 0.
+/// Currently a no-op placeholder — JIT values use Box-based ownership.
+/// Note: `#[no_mangle]` removed — the typed v2 module owns the symbol
+/// name `jit_v2_retain`. This is the legacy NaN-boxed signature, kept as
+/// a Rust-only helper.
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_retain_legacy(_ptr_bits: u64) {
+    // No-op
 }
 
 /// Decrement the reference count on a heap-allocated value, freeing if zero.
 ///
-/// Currently a no-op placeholder — see jit_v2_retain.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_release(_ptr_bits: u64) {
+/// Note: `#[no_mangle]` removed — the typed v2 module owns the symbol
+/// name `jit_v2_release`.
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_release_legacy(_ptr_bits: u64) {
     // No-op: current JIT allocation model leaks all heap values.
     // When refcounting is implemented, this will decrement and
     // potentially free.

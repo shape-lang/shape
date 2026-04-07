@@ -645,6 +645,80 @@ pub struct BytecodeCompiler {
     /// When compiling a variable initializer, the name of the variable being assigned to.
     /// Used by compile_typed_object_literal to include hoisted fields in the schema.
     pub(crate) pending_variable_name: Option<String>,
+
+    /// v2 Phase 3.1: when the enclosing `let arr: Array<T> = [...]` declares
+    /// an explicit `Array<T>` annotation whose element type maps to a
+    /// [`v2_typed_emission::TypedArrayKind`], stash the kind here so
+    /// `compile_expr_array` can lower the literal to a v2 typed-array
+    /// allocation. The statement-binding code path resets this to `None`
+    /// before each new initializer.
+    pub(crate) pending_variable_typed_array_kind:
+        Option<crate::compiler::v2_typed_emission::TypedArrayKind>,
+
+    /// v2 Phase 3.1: per-local-slot record of which locals hold a v2
+    /// typed array (allocated via `NewTypedArrayF64/I64/I32/Bool` rather
+    /// than the legacy v1 `NewTypedArray`/`NewArray`). Populated by the
+    /// statement-binding code path when an `Array<T>` annotation
+    /// successfully picks a typed kind. Consumed by
+    /// `resolve_receiver_typed_array_kind` so the typed Get/Set/Push/Len
+    /// opcodes are only emitted for receivers that were ALSO allocated
+    /// as v2 typed arrays — never for legacy NaN-boxed arrays.
+    pub(crate) v2_typed_array_locals:
+        HashMap<u16, crate::compiler::v2_typed_emission::TypedArrayKind>,
+    /// v2 Phase 3.1: per-module-binding record of v2 typed arrays.
+    /// Mirrors [`v2_typed_array_locals`] for top-level bindings.
+    pub(crate) v2_typed_array_module_bindings:
+        HashMap<u16, crate::compiler::v2_typed_emission::TypedArrayKind>,
+
+    /// v2 Phase 3.2: when the enclosing `let m: HashMap<K, V> = HashMap()`
+    /// declares an explicit `HashMap<K, V>` annotation whose key/value pair
+    /// maps to a [`v2_typed_map_emission::TypedMapKind`], stash the kind here
+    /// so `compile_expr_function_call` (HashMap ctor path) can lower the
+    /// allocation to a v2 typed-map opcode. The statement-binding code path
+    /// resets this to `None` before each new initializer.
+    pub(crate) pending_variable_typed_map_kind:
+        Option<crate::compiler::v2_typed_map_emission::TypedMapKind>,
+
+    /// v2 Phase 3.2: per-local-slot record of which locals hold a v2 typed
+    /// HashMap (allocated via `NewTypedMap*` rather than the legacy
+    /// `BuiltinCall(HashMapCtor)`). Populated by the statement-binding code
+    /// path. Consumed by HashMap method dispatch (`m.set/.get/.has/.delete`)
+    /// so the typed Set/Get/Has/Delete opcodes are only emitted for receivers
+    /// that were ALSO allocated as v2 typed maps — never for legacy NaN-boxed
+    /// HashMapData.
+    pub(crate) v2_typed_map_locals:
+        HashMap<u16, crate::compiler::v2_typed_map_emission::TypedMapKind>,
+
+    /// v2 Phase 3.2: per-module-binding record of v2 typed maps. Mirrors
+    /// [`v2_typed_map_locals`] for top-level bindings.
+    pub(crate) v2_typed_map_module_bindings:
+        HashMap<u16, crate::compiler::v2_typed_map_emission::TypedMapKind>,
+
+    /// v2 Phase 3.2: per-AST-node side table mapping a HashMap-shaped
+    /// expression to its key/value `ConcreteType` pair. Populated by the
+    /// `let m: HashMap<K, V> = ...` annotation path AND by inference helpers
+    /// (`infer_hashmap_kv_from_context`).
+    pub(crate) map_key_value_types:
+        HashMap<shape_ast::ast::Span, (shape_value::v2::ConcreteType, shape_value::v2::ConcreteType)>,
+
+    /// v2 Phase 3.2: per-local-slot side table for HashMap key/value pairs.
+    pub(crate) local_map_key_value_types:
+        HashMap<u16, (shape_value::v2::ConcreteType, shape_value::v2::ConcreteType)>,
+
+    /// v2 Phase 3.2: per-module-binding side table for HashMap key/value pairs.
+    pub(crate) module_binding_map_key_value_types:
+        HashMap<u16, (shape_value::v2::ConcreteType, shape_value::v2::ConcreteType)>,
+
+    /// v2 Phase 3.2: per-AST-span array element type table — used by
+    /// monomorphization helpers and methods that produce arrays from maps.
+    pub(crate) array_element_types:
+        HashMap<shape_ast::ast::Span, shape_value::v2::ConcreteType>,
+
+    /// v2 Phase 3.2: per-local-slot array element type table.
+    pub(crate) local_array_element_types: HashMap<u16, shape_value::v2::ConcreteType>,
+
+    /// v2 Phase 3.2: per-module-binding array element type table.
+    pub(crate) module_binding_array_element_types: HashMap<u16, shape_value::v2::ConcreteType>,
     /// Lexical names that will later need their binding value to remain a raw reference.
     /// This is only used to choose `Value` vs `PreserveRef` lowering for bindings; MIR
     /// remains the sole authority for borrow legality.
@@ -866,3 +940,6 @@ pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPas
 #[path = "compiler_tests.rs"]
 mod compiler_deep;
 pub(crate) mod v2_array_emission;
+pub(crate) mod v2_map_emission;
+pub(crate) mod v2_typed_emission;
+pub(crate) mod v2_typed_map_emission;

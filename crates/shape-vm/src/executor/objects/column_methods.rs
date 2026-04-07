@@ -314,7 +314,7 @@ mod tests {
         let mut vm = make_vm();
         handle_to_array(&mut vm, make_column_ref(&table, 0), None).unwrap();
         let result = vm.pop().unwrap();
-        if let Some(arr) = result.to_array_arc() {
+        if let Some(arr) = result.to_generic_array() {
             assert_eq!(arr.len(), 5);
             assert_eq!(arr[0].clone(), ValueWord::from_f64(10.0));
             assert_eq!(arr[4].clone(), ValueWord::from_f64(50.0));

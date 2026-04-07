@@ -2129,6 +2129,10 @@ impl ValueWord {
 
     /// Convert a typed array to a generic Array of ValueWord values.
     pub fn to_generic_array(&self) -> Option<crate::value::VMArray> {
+        // Generic Array path: hand back the existing Arc<Vec<ValueWord>>.
+        if let Some(HeapValue::Array(arc)) = self.as_heap_ref() {
+            return Some(arc.clone());
+        }
         match self.as_heap_ref()? {
             HeapValue::IntArray(a) => Some(Arc::new(
                 a.iter().map(|&v| ValueWord::from_i64(v)).collect(),
@@ -2141,6 +2145,13 @@ impl ValueWord {
             )),
             _ => std::option::Option::None,
         }
+    }
+
+    /// Backwards-compat shim for tests that previously used `to_array_arc`.
+    /// Forwards to [`to_generic_array`] which now handles all array variants.
+    #[inline]
+    pub fn to_array_arc(&self) -> Option<crate::value::VMArray> {
+        self.to_generic_array()
     }
 
     /// Fast equality comparison without materializing HeapValue.
