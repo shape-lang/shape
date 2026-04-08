@@ -5,7 +5,12 @@
 //! on user-defined types still goes through `CallMethod` (see Phase 2.5).
 
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{
+    ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I32, ELEM_TYPE_I64, V2ElemType, as_v2_typed_array,
+    stamp_elem_type,
+};
 use shape_value::heap_value::HeapValue;
+use shape_value::v2::typed_array::TypedArray;
 use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
 
@@ -39,5 +44,132 @@ impl VirtualMachine {
             }
         };
         self.push_vw(ValueWord::from_string(Arc::new(result)))
+    }
+
+    /// Concatenate two arrays, push the resulting array.
+    ///
+    /// Stack: `[a, b]` → `[a ++ b]`. Handles both:
+    ///   * legacy v1 generic `HeapValue::Array(Arc<Vec<ValueWord>>)`
+    ///   * v2 monomorphized `TypedArray<T>` (where both operands have the
+    ///     same element type)
+    ///
+    /// Mismatched cases (one v1 + one v2, or two v2 with different element
+    /// types) are a runtime type error. The compiler is supposed to only emit
+    /// this opcode when both operands are statically proven to be arrays of
+    /// compatible element types.
+    #[inline]
+    pub(in crate::executor) fn op_array_concat(&mut self) -> Result<(), VMError> {
+        let b_bits = self.pop_raw_u64()?;
+        let a_bits = self.pop_raw_u64()?;
+        let a = ValueWord::from_raw_bits(a_bits);
+        let b = ValueWord::from_raw_bits(b_bits);
+
+        // ── v2 typed-array fast path ──────────────────────────────────────
+        if let (Some(av), Some(bv)) = (as_v2_typed_array(&a), as_v2_typed_array(&b)) {
+            if av.elem_type != bv.elem_type {
+                return Err(VMError::TypeError {
+                    expected: "v2 typed arrays with matching element types",
+                    got: "mismatched element types",
+                });
+            }
+            let new_len = av.len + bv.len;
+            let (new_ptr, elem_byte) = unsafe {
+                match av.elem_type {
+                    V2ElemType::F64 => {
+                        let new_arr = TypedArray::<f64>::with_capacity(new_len);
+                        let ad = (*(av.ptr as *const TypedArray<f64>)).data;
+                        let bd = (*(bv.ptr as *const TypedArray<f64>)).data;
+                        if av.len > 0 {
+                            std::ptr::copy_nonoverlapping(ad, (*new_arr).data, av.len as usize);
+                        }
+                        if bv.len > 0 {
+                            std::ptr::copy_nonoverlapping(
+                                bd,
+                                (*new_arr).data.add(av.len as usize),
+                                bv.len as usize,
+                            );
+                        }
+                        (*new_arr).len = new_len;
+                        (new_arr as *mut u8, ELEM_TYPE_F64)
+                    }
+                    V2ElemType::I64 => {
+                        let new_arr = TypedArray::<i64>::with_capacity(new_len);
+                        let ad = (*(av.ptr as *const TypedArray<i64>)).data;
+                        let bd = (*(bv.ptr as *const TypedArray<i64>)).data;
+                        if av.len > 0 {
+                            std::ptr::copy_nonoverlapping(ad, (*new_arr).data, av.len as usize);
+                        }
+                        if bv.len > 0 {
+                            std::ptr::copy_nonoverlapping(
+                                bd,
+                                (*new_arr).data.add(av.len as usize),
+                                bv.len as usize,
+                            );
+                        }
+                        (*new_arr).len = new_len;
+                        (new_arr as *mut u8, ELEM_TYPE_I64)
+                    }
+                    V2ElemType::I32 => {
+                        let new_arr = TypedArray::<i32>::with_capacity(new_len);
+                        let ad = (*(av.ptr as *const TypedArray<i32>)).data;
+                        let bd = (*(bv.ptr as *const TypedArray<i32>)).data;
+                        if av.len > 0 {
+                            std::ptr::copy_nonoverlapping(ad, (*new_arr).data, av.len as usize);
+                        }
+                        if bv.len > 0 {
+                            std::ptr::copy_nonoverlapping(
+                                bd,
+                                (*new_arr).data.add(av.len as usize),
+                                bv.len as usize,
+                            );
+                        }
+                        (*new_arr).len = new_len;
+                        (new_arr as *mut u8, ELEM_TYPE_I32)
+                    }
+                    V2ElemType::Bool => {
+                        let new_arr = TypedArray::<u8>::with_capacity(new_len);
+                        let ad = (*(av.ptr as *const TypedArray<u8>)).data;
+                        let bd = (*(bv.ptr as *const TypedArray<u8>)).data;
+                        if av.len > 0 {
+                            std::ptr::copy_nonoverlapping(ad, (*new_arr).data, av.len as usize);
+                        }
+                        if bv.len > 0 {
+                            std::ptr::copy_nonoverlapping(
+                                bd,
+                                (*new_arr).data.add(av.len as usize),
+                                bv.len as usize,
+                            );
+                        }
+                        (*new_arr).len = new_len;
+                        (new_arr as *mut u8, ELEM_TYPE_BOOL)
+                    }
+                }
+            };
+            unsafe { stamp_elem_type(new_ptr, elem_byte) };
+            return self.push_vw(ValueWord::from_native_ptr(new_ptr as usize));
+        }
+
+        // Mismatched v2 + v1 → error.
+        if as_v2_typed_array(&a).is_some() || as_v2_typed_array(&b).is_some() {
+            return Err(VMError::TypeError {
+                expected: "two arrays of the same kind (v1 or v2)",
+                got: "mixed v1/v2 array operands",
+            });
+        }
+
+        // ── v1 legacy generic Array path ─────────────────────────────────
+        if let (Some(HeapValue::Array(arr_a)), Some(HeapValue::Array(arr_b))) =
+            (a.as_heap_ref(), b.as_heap_ref())
+        {
+            let mut result = Vec::with_capacity(arr_a.len() + arr_b.len());
+            result.extend_from_slice(arr_a);
+            result.extend_from_slice(arr_b);
+            return self.push_vw(ValueWord::from_array(Arc::new(result)));
+        }
+
+        Err(VMError::TypeError {
+            expected: "two arrays of compatible types",
+            got: a.type_name(),
+        })
     }
 }

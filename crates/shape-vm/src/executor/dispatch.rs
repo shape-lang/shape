@@ -552,6 +552,9 @@ impl VirtualMachine {
             StringConcat => {
                 return self.op_string_concat();
             }
+            ArrayConcat => {
+                return self.op_array_concat();
+            }
 
             PushTimeframe => {
                 return Err(VMError::NotImplemented(

@@ -446,22 +446,45 @@ impl BytecodeCompiler {
                 // inference hints (inferred_param_type_hints) which can be wrong
                 // when a param is actually a string.
                 else {
-                    // Priority 1.5: dedicated StringConcat for string/char operands.
-                    // When both operands are statically string- or char-typed (and
-                    // at least one is a string), emit `OpCode::StringConcat` instead
-                    // of falling through to generic `OpCode::Add`. This is the
-                    // Phase 2.3 replacement for the heap-heap String/Char arms in
-                    // `exec_arithmetic`.
+                    // Priority 1.5: dedicated StringConcat / ArrayConcat for
+                    // built-in heap types whose operand kinds the compiler can
+                    // prove. These replace the heap-heap arms in `exec_arithmetic`
+                    // (Phase 2.3 / 2.4) without going through the generic Add
+                    // dispatch.
                     let inferred_lhs = self.infer_expr_type(left).ok();
                     let inferred_rhs = self.infer_expr_type(right).ok();
                     let lhs_name = inferred_lhs.as_ref().map(type_display_name);
                     let rhs_name = inferred_rhs.as_ref().map(type_display_name);
+
+                    // String / Char concat: any combination of string + char,
+                    // as long as at least one operand is a string. Char + Char
+                    // also produces a string (matches the legacy heap-heap arms).
                     let is_strish =
                         |n: &Option<String>| matches!(n.as_deref(), Some("string") | Some("char"));
                     let either_is_string = matches!(lhs_name.as_deref(), Some("string"))
                         || matches!(rhs_name.as_deref(), Some("string"));
                     if is_strish(&lhs_name) && is_strish(&rhs_name) && either_is_string {
                         self.emit(Instruction::simple(OpCode::StringConcat));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = None;
+                        return Ok(());
+                    }
+
+                    // Array concat: both operands proven to be arrays. We
+                    // intentionally only fire for the generic `Array<T>` shape,
+                    // not for `Vec<number>`-style FloatArray/IntArray/BoolArray
+                    // (which use element-wise SIMD broadcast for `+`, not concat).
+                    // Display name comes from `type_display_name`: a generic
+                    // `Array<T>` formats as "Array", and a legacy `T[]` formats
+                    // as "T[]".
+                    let is_arrayish = |n: &Option<String>| match n.as_deref() {
+                        Some("Array") => true,
+                        Some(s) if s.ends_with("[]") => true,
+                        _ => false,
+                    };
+                    if is_arrayish(&lhs_name) && is_arrayish(&rhs_name) {
+                        self.emit(Instruction::simple(OpCode::ArrayConcat));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
                         self.last_expr_numeric_type = None;
