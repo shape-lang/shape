@@ -24,6 +24,40 @@ fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
     }
 }
 
+/// Map a binary op to the user-facing trait method name (lowercase).
+/// Used by Phase 2.5 to emit `CallMethod("add"/"sub"/...)` for operator
+/// overloading on user-defined types. The runtime dispatches via
+/// `function_name_index["{Type}::{method}"]` (see `op_call_method` →
+/// `handle_typed_object_method`).
+fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
+    match op {
+        BinaryOp::Add => Some("add"),
+        BinaryOp::Sub => Some("sub"),
+        BinaryOp::Mul => Some("mul"),
+        BinaryOp::Div => Some("div"),
+        _ => None,
+    }
+}
+
+/// Emit a `CallMethod` instruction targeting an operator trait method
+/// (e.g. `Vec2::add`). Both operands must already be on the stack: receiver
+/// first, then the right-hand-side argument.
+fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'static str) {
+    let method_id = shape_value::MethodId::from_name(method_name);
+    let string_id = compiler.program.add_string(method_name.to_string());
+    compiler.emit(Instruction::new(
+        OpCode::CallMethod,
+        Some(Operand::TypedMethodCall {
+            method_id: method_id.0,
+            arg_count: 1,
+            string_id,
+        }),
+    ));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
 fn combined_span(left: &Expr, right: &Expr) -> Span {
     let ls = left.span();
     let rs = right.span();
@@ -425,11 +459,10 @@ impl BytecodeCompiler {
                                 .type_implements_trait(&schema.name, "Add")
                         });
                     if left_has_add {
-                        // Operator trait: emit generic Add for executor dispatch
-                        self.emit(Instruction::simple(OpCode::Add));
-                        self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
+                        // Phase 2.5: operator trait dispatch via CallMethod.
+                        // The left operand (receiver) and right operand (arg)
+                        // are already on the stack from compile_expr above.
+                        emit_operator_trait_call(self, "add");
                     } else {
                         self.compile_typed_merge(left_id, right_id)?;
                         self.last_expr_numeric_type = None;
@@ -696,6 +729,27 @@ impl BytecodeCompiler {
                                     self.span_to_source_location(combined_span(left, right)),
                                 ),
                             });
+                        }
+                    }
+                }
+
+                // ── Phase 2.5: operator trait dispatch via CallMethod ──
+                // If the left operand is a typed object whose schema implements
+                // the operator trait (Sub/Mul/Div), emit a method call instead
+                // of falling through to a generic arithmetic opcode. The receiver
+                // and the right-hand-side operand are already on the stack.
+                if let Some(trait_name) = operator_trait_for_op(op) {
+                    let dispatches_via_trait = left_schema
+                        .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
+                        .is_some_and(|schema| {
+                            self.type_inference
+                                .env
+                                .type_implements_trait(&schema.name, trait_name)
+                        });
+                    if dispatches_via_trait {
+                        if let Some(method_name) = operator_trait_method_for_op(op) {
+                            emit_operator_trait_call(self, method_name);
+                            return Ok(());
                         }
                     }
                 }
