@@ -70,6 +70,10 @@ pub mod concurrency_methods;
 // Channel (MPSC sender/receiver) method handlers
 pub mod channel_methods;
 
+// Concatenation opcodes (StringConcat, ArrayConcat) — dedicated v2 replacements
+// for the generic Add overload on built-in heap types.
+pub mod concat;
+
 use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,

@@ -626,6 +626,12 @@ define_opcodes! {
     /// I64→Ptr delete: pops (map_ptr, key).
     TypedMapI64PtrDelete = 0xFB, Object, pops: 2, pushes: 0;
 
+    // ===== v2 Concatenation Operations =====
+    /// Concatenate two heap strings/chars, pushing a new string. Pops (a, b).
+    StringConcat = 0xFC, Object, pops: 2, pushes: 1;
+    /// Concatenate two arrays, pushing a new array. Pops (a, b).
+    ArrayConcat = 0xFD, Object, pops: 2, pushes: 1;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;

@@ -546,6 +546,13 @@ impl VirtualMachine {
                 return self.op_call_method(instruction, ctx);
             }
 
+            // Dedicated concatenation opcodes (Phase 2.3 / 2.4): replace the
+            // generic Add overload for built-in heap types whose operand types
+            // the compiler can prove statically.
+            StringConcat => {
+                return self.op_string_concat();
+            }
+
             PushTimeframe => {
                 return Err(VMError::NotImplemented(
                     "Opcode 'PushTimeframe' is reserved but not yet implemented".into(),

@@ -446,6 +446,28 @@ impl BytecodeCompiler {
                 // inference hints (inferred_param_type_hints) which can be wrong
                 // when a param is actually a string.
                 else {
+                    // Priority 1.5: dedicated StringConcat for string/char operands.
+                    // When both operands are statically string- or char-typed (and
+                    // at least one is a string), emit `OpCode::StringConcat` instead
+                    // of falling through to generic `OpCode::Add`. This is the
+                    // Phase 2.3 replacement for the heap-heap String/Char arms in
+                    // `exec_arithmetic`.
+                    let inferred_lhs = self.infer_expr_type(left).ok();
+                    let inferred_rhs = self.infer_expr_type(right).ok();
+                    let lhs_name = inferred_lhs.as_ref().map(type_display_name);
+                    let rhs_name = inferred_rhs.as_ref().map(type_display_name);
+                    let is_strish =
+                        |n: &Option<String>| matches!(n.as_deref(), Some("string") | Some("char"));
+                    let either_is_string = matches!(lhs_name.as_deref(), Some("string"))
+                        || matches!(rhs_name.as_deref(), Some("string"));
+                    if is_strish(&lhs_name) && is_strish(&rhs_name) && either_is_string {
+                        self.emit(Instruction::simple(OpCode::StringConcat));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = None;
+                        return Ok(());
+                    }
+
                     // Confirm each operand is numeric via one of three paths:
                     // 1. Syntactic: it's a numeric literal
                     // 2. Storage hint: it's a local with a known numeric hint

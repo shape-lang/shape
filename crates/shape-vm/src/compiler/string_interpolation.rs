@@ -204,9 +204,12 @@ impl BytecodeCompiler {
                 }
             }
 
-            // Concatenate with previous result (except for first part)
+            // Concatenate with previous result (except for first part).
+            // Every interpolation part is statically a String — literal parts
+            // come from `Constant::String` and expression parts go through
+            // `emit_interpolation_format_call` which always produces a string.
             if !first {
-                self.emit(Instruction::simple(OpCode::Add));
+                self.emit(Instruction::simple(OpCode::StringConcat));
             }
             first = false;
         }
