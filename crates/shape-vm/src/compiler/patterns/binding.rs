@@ -3,10 +3,11 @@
 use crate::bytecode::{Constant, Instruction, NumericWidth, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::VariableTypeInfo;
-use shape_ast::ast::{Pattern, PatternConstructorFields, TypeAnnotation};
+use shape_ast::ast::{Literal, Pattern, PatternConstructorFields, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 
 use crate::compiler::BytecodeCompiler;
+use super::helpers::typed_eq_opcode_for_literal;
 
 impl BytecodeCompiler {
     fn resolve_typed_field_operand_binding(
@@ -103,8 +104,30 @@ impl BytecodeCompiler {
                 Ok(())
             }
             Pattern::Literal(lit) => {
+                // Stage 2.6.4: Bool patterns desugar to direct conditional
+                // jump (the scrutinee on top of stack IS the bool to test).
+                if let Literal::Bool(b) = lit {
+                    let jump_op = if *b {
+                        OpCode::JumpIfTrue
+                    } else {
+                        OpCode::JumpIfFalse
+                    };
+                    let ok_jump = self.emit_jump(jump_op, 0);
+                    let msg = self
+                        .program
+                        .add_constant(Constant::String("Pattern match failed".to_string()));
+                    self.emit(Instruction::new(
+                        OpCode::PushConst,
+                        Some(Operand::Const(msg)),
+                    ));
+                    self.emit(Instruction::simple(OpCode::Throw));
+                    self.patch_jump(ok_jump);
+                    return Ok(());
+                }
+
                 self.compile_literal(lit)?;
-                self.emit(Instruction::simple(OpCode::Eq));
+                let eq_op = typed_eq_opcode_for_literal(lit).unwrap_or(OpCode::Eq);
+                self.emit(Instruction::simple(eq_op));
                 let ok_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
 
                 let msg = self
@@ -122,14 +145,15 @@ impl BytecodeCompiler {
             Pattern::Array(patterns) => {
                 self.emit(Instruction::simple(OpCode::Dup));
                 self.emit(Instruction::simple(OpCode::Length));
+                // Stage 2.6.4: Length pushes int, so use Constant::Int + LtInt.
                 let min_len = self
                     .program
-                    .add_constant(Constant::Number(patterns.len() as f64));
+                    .add_constant(Constant::Int(patterns.len() as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(min_len)),
                 ));
-                self.emit(Instruction::simple(OpCode::Lt));
+                self.emit(Instruction::simple(OpCode::LtInt));
                 let ok_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
 
                 let msg = self.program.add_constant(Constant::String(format!(
@@ -145,7 +169,7 @@ impl BytecodeCompiler {
 
                 for (index, pat) in patterns.iter().enumerate() {
                     self.emit(Instruction::simple(OpCode::Dup));
-                    let idx_const = self.program.add_constant(Constant::Number(index as f64));
+                    let idx_const = self.program.add_constant(Constant::Int(index as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(idx_const)),

@@ -3,10 +3,11 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::VariableTypeInfo;
-use shape_ast::ast::{Pattern, PatternConstructorFields};
+use shape_ast::ast::{Literal, Pattern, PatternConstructorFields};
 use shape_ast::error::{Result, ShapeError};
 
 use crate::compiler::BytecodeCompiler;
+use super::helpers::typed_eq_opcode_for_literal;
 
 // Reserved schema fields for TypedObject enum layout
 // __variant at offset 0, __payload_N at offsets 8, 16, etc.
@@ -99,8 +100,24 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(value_local)),
                 ));
+
+                // Bool patterns desugar to a direct conditional jump — no
+                // equality opcode at all. The loaded scrutinee is itself
+                // the bool we want to test.
+                if let Literal::Bool(b) = lit {
+                    let jump_op = if *b {
+                        OpCode::JumpIfFalse
+                    } else {
+                        OpCode::JumpIfTrue
+                    };
+                    let jump = self.emit_jump(jump_op, 0);
+                    fail_jumps.push(jump);
+                    return Ok(());
+                }
+
                 self.compile_literal(lit)?;
-                self.emit(Instruction::simple(OpCode::Eq));
+                let eq_op = typed_eq_opcode_for_literal(lit).unwrap_or(OpCode::Eq);
+                self.emit(Instruction::simple(eq_op));
                 let jump = self.emit_jump(OpCode::JumpIfFalse, 0);
                 fail_jumps.push(jump);
                 Ok(())
@@ -112,14 +129,16 @@ impl BytecodeCompiler {
                     Some(Operand::Local(value_local)),
                 ));
                 self.emit(Instruction::simple(OpCode::Length));
+                // Stage 2.6.4: Length pushes int (op_length emits ValueWord::from_i64),
+                // so use Constant::Int + EqInt for the typed comparison.
                 let expected_len = self
                     .program
-                    .add_constant(Constant::Number(patterns.len() as f64));
+                    .add_constant(Constant::Int(patterns.len() as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(expected_len)),
                 ));
-                self.emit(Instruction::simple(OpCode::Eq));
+                self.emit(Instruction::simple(OpCode::EqInt));
                 let jump = self.emit_jump(OpCode::JumpIfFalse, 0);
                 fail_jumps.push(jump);
 
@@ -128,7 +147,7 @@ impl BytecodeCompiler {
                         OpCode::LoadLocal,
                         Some(Operand::Local(value_local)),
                     ));
-                    let idx_const = self.program.add_constant(Constant::Number(idx as f64));
+                    let idx_const = self.program.add_constant(Constant::Int(idx as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(idx_const)),
@@ -339,7 +358,8 @@ impl BytecodeCompiler {
             }),
         ));
 
-        // Compare to expected variant_id (stored as i64 in __variant)
+        // Compare to expected variant_id (stored as i64 in __variant).
+        // Stage 2.6.4: __variant is always i64, so use EqInt directly.
         let expected_const = self
             .program
             .add_constant(Constant::Int(expected_variant_id as i64));
@@ -347,7 +367,7 @@ impl BytecodeCompiler {
             OpCode::PushConst,
             Some(Operand::Const(expected_const)),
         ));
-        self.emit(Instruction::simple(OpCode::Eq));
+        self.emit(Instruction::simple(OpCode::EqInt));
         let jump = self.emit_jump(OpCode::JumpIfFalse, 0);
         fail_jumps.push(jump);
 

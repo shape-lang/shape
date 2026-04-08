@@ -1,9 +1,31 @@
 //! Helper functions for pattern compilation
 
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
+use shape_ast::ast::Literal;
 use shape_ast::error::Result;
 
 use crate::compiler::BytecodeCompiler;
+
+/// Pick the typed equality opcode for a literal pattern operand. Returns
+/// `None` for literal kinds that need special-case handling at the call
+/// site (`Bool` desugars to direct conditional jump; `None` is a null
+/// check; `Char`/`Unit`/etc. fall through to generic `OpCode::Eq`).
+///
+/// Stage 2.6.4: replaces generic `OpCode::Eq` emission in pattern matching
+/// with type-specialized opcodes when the literal type is known.
+pub(super) fn typed_eq_opcode_for_literal(lit: &Literal) -> Option<OpCode> {
+    match lit {
+        Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(..) => Some(OpCode::EqInt),
+        Literal::Number(_) => Some(OpCode::EqNumber),
+        Literal::Decimal(_) => Some(OpCode::EqDecimal),
+        Literal::String(_) => Some(OpCode::EqString),
+        // Bool: caller desugars to JumpIfFalse/JumpIfTrue (no equality op).
+        // None: caller desugars via Phase 2.6.5 null-sentinel rewrite.
+        // Char/Unit/Timeframe/FormattedString/ContentString: rare or
+        // unreachable in pattern position; caller falls back to OpCode::Eq.
+        _ => None,
+    }
+}
 
 impl BytecodeCompiler {
     pub(super) fn emit_pattern_type_check(
