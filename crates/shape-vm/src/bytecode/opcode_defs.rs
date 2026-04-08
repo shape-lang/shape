@@ -497,8 +497,14 @@ define_opcodes! {
     Nop = 0xF0, Special, pops: 0, pushes: 0;
     /// Halt execution
     Halt = 0xF1, Special, pops: 0, pushes: 0;
-    /// Debug breakpoint
-    Debug = 0xF2, Special, pops: 0, pushes: 0;
+    // Slot 0xF2 reclaimed by Stage 2.6.5.0 (was: Debug breakpoint with no
+    // compiler emission and only stale JIT classifier references). Reused
+    // by IsNull in Stage 2.6.5.1.
+    /// Stage 2.6.5: typed absence check. Pops one value, pushes a bool
+    /// indicating whether the value is the None or Unit sentinel. Replaces
+    /// the legacy `PushNull; Eq` and `emit_unit; Eq` patterns at the 16
+    /// null/unit-check sites in the compiler.
+    IsNull = 0xF2, Comparison, pops: 1, pushes: 1;
 
     // ===== Numeric Coercion Operations =====
     /// Coerce int to number (i64 -> f64)

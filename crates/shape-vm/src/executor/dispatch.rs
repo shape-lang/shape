@@ -448,7 +448,7 @@ impl VirtualMachine {
             // Typed comparison (compiler-guaranteed types, zero dispatch)
             GtInt | GtNumber | GtDecimal | LtInt | LtNumber | LtDecimal | GteInt | GteNumber
             | GteDecimal | LteInt | LteNumber | LteDecimal | EqInt | EqNumber | NeqInt
-            | NeqNumber | EqString | EqDecimal => {
+            | NeqNumber | EqString | EqDecimal | IsNull => {
                 return self.exec_typed_comparison(instruction);
             }
 
@@ -703,19 +703,8 @@ impl VirtualMachine {
             // Special
             Nop => {}
             Halt => {}
-            Debug => {
-                if let Some(ref mut debugger) = self.debugger {
-                    debugger.debug_break(
-                        &DebugVMState {
-                            ip: self.ip,
-                            call_stack_depth: self.call_stack.len(),
-                        },
-                        &self.program,
-                    );
-                } else if self.config.debug_mode {
-                    self.debug_break();
-                }
-            }
+            // Stage 2.6.5.0: Debug opcode removed; slot 0xF2 reused for IsNull.
+            // No compiler ever emitted Debug — it was a stale runtime hook.
 
             _ => return Err(VMError::InvalidOperand),
         }

@@ -347,6 +347,23 @@ impl VirtualMachine {
                 };
                 self.push_raw_bool(eq)?;
             }
+            // Stage 2.6.5.1: typed absence check. Pops one value, pushes a
+            // bool that is true iff the value is the None or Unit sentinel.
+            // Both are absence-of-value markers; the optional-chaining and
+            // null-coalescing desugarings short-circuit on either, so this
+            // opcode covers both cases. Replaces the legacy `PushNull; Eq`
+            // and `emit_unit; Eq` patterns at the 16 sentinel sites in the
+            // compiler.
+            IsNull => {
+                // Compute the absence flag from the popped value's tag
+                // BEFORE the ValueWord goes out of scope, so the borrow
+                // can't outlive the Drop. Avoids the SIGABRT regression
+                // from the original Phase 2.6.5 bigbang attempt.
+                let v = self.pop_vw()?;
+                let is_absent = v.is_none() || v.is_unit();
+                drop(v);
+                self.push_raw_bool(is_absent)?;
+            }
             // NOTE: Trusted comparison variants removed — consolidated into
             // the typed variants above (GtInt, LtInt, etc.).
             _ => unreachable!(
@@ -714,5 +731,60 @@ mod tests {
         vm.push_vw(ValueWord::from_decimal(Decimal::from_str("2.0").unwrap()))
             .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::EqDecimal));
+    }
+
+    // ----- Stage 2.6.5.1: IsNull typed absence check -----
+
+    fn run_is_null(vm: &mut VirtualMachine) -> bool {
+        let instr = Instruction { opcode: OpCode::IsNull, operand: None };
+        vm.exec_typed_comparison(&instr).unwrap();
+        unsafe { vm.pop_vw().unwrap().as_bool_unchecked() }
+    }
+
+    #[test]
+    fn is_null_on_none_returns_true() {
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::none()).unwrap();
+        assert!(run_is_null(&mut vm));
+    }
+
+    #[test]
+    fn is_null_on_unit_returns_true() {
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::unit()).unwrap();
+        assert!(run_is_null(&mut vm));
+    }
+
+    #[test]
+    fn is_null_on_int_returns_false() {
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_i64(42)).unwrap();
+        assert!(!run_is_null(&mut vm));
+    }
+
+    #[test]
+    fn is_null_on_zero_int_returns_false() {
+        // Critical: int 0 is NOT null, even though some null encodings
+        // use raw zero. IsNull must check the tag, not the bit pattern.
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        assert!(!run_is_null(&mut vm));
+    }
+
+    #[test]
+    fn is_null_on_string_returns_false() {
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
+            .unwrap();
+        assert!(!run_is_null(&mut vm));
+    }
+
+    #[test]
+    fn is_null_on_false_bool_returns_false() {
+        // Critical: bool false is NOT null. The is_truthy check would
+        // conflate them but is_none() / is_unit() correctly distinguish.
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_bool(false)).unwrap();
+        assert!(!run_is_null(&mut vm));
     }
 }

@@ -521,7 +521,6 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             // No-ops in JIT
             | OpCode::Halt
             | OpCode::Nop
-            | OpCode::Debug
             | OpCode::PushTimeframe
             | OpCode::PopTimeframe
             | OpCode::WrapTypeAnnotation

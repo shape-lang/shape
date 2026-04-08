@@ -109,7 +109,7 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         // Return (mapped to loop exit)
         OpCode::Return | OpCode::ReturnValue => true,
         // Misc
-        OpCode::Nop | OpCode::Halt | OpCode::Debug => true,
+        OpCode::Nop | OpCode::Halt => true,
         // BuiltinCall: only selected math builtins
         OpCode::BuiltinCall => {
             if let Some(Operand::Builtin(bf)) = operand {
@@ -363,7 +363,7 @@ pub fn compile_osr_loop(
 
             let instr = &instructions[idx];
             match instr.opcode {
-                OpCode::Nop | OpCode::Debug | OpCode::LoopStart => {
+                OpCode::Nop | OpCode::LoopStart => {
                     // No-ops in JIT
                 }
 

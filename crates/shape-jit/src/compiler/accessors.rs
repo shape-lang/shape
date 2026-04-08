@@ -260,7 +260,6 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::DynMethodCall,
     OpCode::Nop,
     OpCode::Halt,
-    OpCode::Debug,
     OpCode::IntToNumber,
     OpCode::NumberToInt,
     OpCode::CallForeign,
