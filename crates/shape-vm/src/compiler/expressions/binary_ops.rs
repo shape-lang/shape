@@ -338,21 +338,19 @@ impl BytecodeCompiler {
                 // Short-circuit null coalescing: a ?? b
                 // Only evaluate RHS if LHS is None.
                 //
-                // Stack discipline:
+                // Stack discipline (Stage 2.6.5.2: typed IsNull replaces PushNull;Eq):
                 //   1. compile LHS          -> [lhs]
                 //   2. Dup                   -> [lhs, lhs]
-                //   3. PushNull              -> [lhs, lhs, null]
-                //   4. Eq                    -> [lhs, is_none]
-                //   5. JumpIfFalse use_lhs   -> [lhs]  (lhs is not None)
-                //   6. Pop                   -> []      (discard None lhs)
-                //   7. compile RHS           -> [rhs]
-                //   8. Jump end
+                //   3. IsNull                -> [lhs, is_none]
+                //   4. JumpIfFalse use_lhs   -> [lhs]  (lhs is not None)
+                //   5. Pop                   -> []      (discard None lhs)
+                //   6. compile RHS           -> [rhs]
+                //   7. Jump end
                 //   use_lhs:                 -> [lhs]   (already on stack)
                 //   end:
                 self.compile_expr(left)?;
                 self.emit(Instruction::simple(OpCode::Dup));
-                self.emit(Instruction::simple(OpCode::PushNull));
-                self.emit(Instruction::simple(OpCode::Eq));
+                self.emit(Instruction::simple(OpCode::IsNull));
                 let use_lhs_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
                 // LHS was None — pop it, compile RHS
                 self.emit(Instruction::simple(OpCode::Pop));

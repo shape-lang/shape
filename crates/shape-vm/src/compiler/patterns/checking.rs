@@ -207,12 +207,12 @@ impl BytecodeCompiler {
                             fail_jumps.push(self.emit_jump(OpCode::Jump, 0));
                             return Ok(());
                         }
+                        // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
                             Some(Operand::Local(value_local)),
                         ));
-                        self.emit(Instruction::simple(OpCode::PushNull));
-                        self.emit(Instruction::simple(OpCode::Eq));
+                        self.emit(Instruction::simple(OpCode::IsNull));
                         let jump = self.emit_jump(OpCode::JumpIfFalse, 0);
                         fail_jumps.push(jump);
                         Ok(())
@@ -225,12 +225,12 @@ impl BytecodeCompiler {
                                 return Ok(());
                             }
                         };
+                        // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
                             Some(Operand::Local(value_local)),
                         ));
-                        self.emit(Instruction::simple(OpCode::PushNull));
-                        self.emit(Instruction::simple(OpCode::Eq));
+                        self.emit(Instruction::simple(OpCode::IsNull));
                         let jump = self.emit_jump(OpCode::JumpIfTrue, 0);
                         fail_jumps.push(jump);
                         self.compile_pattern_check_local(

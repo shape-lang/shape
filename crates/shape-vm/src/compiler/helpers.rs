@@ -392,6 +392,9 @@ impl BytecodeCompiler {
                         | OpCode::EqNumber
                         | OpCode::NeqInt
                         | OpCode::NeqNumber
+                        | OpCode::EqString
+                        | OpCode::EqDecimal
+                        | OpCode::IsNull
                         | OpCode::Gt
                         | OpCode::Lt
                         | OpCode::Gte

@@ -386,14 +386,18 @@ impl BytecodeCompiler {
         };
 
         if optional {
+            // Stage 2.6.5.2: a single typed IsNull check covers both the
+            // None and Unit absence sentinels (the original optional
+            // chaining desugar checked them separately). Two structurally
+            // independent IsNull checks are kept here so that the
+            // null_jump and unit_jump patch points stay distinct for the
+            // surrounding control-flow code.
             self.emit(Instruction::simple(OpCode::Dup));
-            self.emit(Instruction::simple(OpCode::PushNull));
-            self.emit(Instruction::simple(OpCode::Eq));
+            self.emit(Instruction::simple(OpCode::IsNull));
             let null_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
 
             self.emit(Instruction::simple(OpCode::Dup));
-            self.emit_unit();
-            self.emit(Instruction::simple(OpCode::Eq));
+            self.emit(Instruction::simple(OpCode::IsNull));
             let unit_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
 
             if let (Some(opcode), Some(offset)) = (v2_load_opcode, v2_field_offset) {

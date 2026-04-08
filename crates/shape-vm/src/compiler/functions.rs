@@ -1116,13 +1116,15 @@ impl BytecodeCompiler {
         // (arity is enforced at call sites), so no unit-check is needed for them.
         for (idx, param) in func_def.params.iter().enumerate() {
             if let Some(default_expr) = &param.default_value {
-                // Check if the caller omitted this argument (sent unit sentinel)
+                // Check if the caller omitted this argument (sent unit sentinel).
+                // Stage 2.6.5.2: typed IsNull replaces `emit_unit; Eq`. IsNull
+                // matches both None and Unit absence sentinels, so a single
+                // typed instruction covers what previously took three.
                 self.emit(Instruction::new(
                     OpCode::LoadLocal,
                     Some(Operand::Local(idx as u16)),
                 ));
-                self.emit_unit();
-                self.emit(Instruction::simple(OpCode::Eq));
+                self.emit(Instruction::simple(OpCode::IsNull));
 
                 let skip_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
 

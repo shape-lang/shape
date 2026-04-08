@@ -381,9 +381,9 @@ impl BytecodeCompiler {
                 OpCode::GetFieldTyped,
                 Some(result_operand),
             ));
+            // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
             self.emit(Instruction::simple(OpCode::Dup));
-            self.emit(Instruction::simple(OpCode::PushNull));
-            self.emit(Instruction::simple(OpCode::Eq));
+            self.emit(Instruction::simple(OpCode::IsNull));
             let skip_short_circuit = self.emit_jump(OpCode::JumpIfTrue, 0);
             // result is non-null → store it and jump past impl
             self.emit(Instruction::new(
@@ -400,9 +400,9 @@ impl BytecodeCompiler {
             Some(Operand::Local(before_result_local)),
         ));
         self.emit(Instruction::new(OpCode::GetFieldTyped, Some(args_operand)));
+        // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
         self.emit(Instruction::simple(OpCode::Dup));
-        self.emit(Instruction::simple(OpCode::PushNull));
-        self.emit(Instruction::simple(OpCode::Eq));
+        self.emit(Instruction::simple(OpCode::IsNull));
         let skip_args_replace = self.emit_jump(OpCode::JumpIfTrue, 0);
         self.emit(Instruction::new(
             OpCode::StoreLocal,
@@ -418,9 +418,9 @@ impl BytecodeCompiler {
             Some(Operand::Local(before_result_local)),
         ));
         self.emit(Instruction::new(OpCode::GetFieldTyped, Some(state_operand)));
+        // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
         self.emit(Instruction::simple(OpCode::Dup));
-        self.emit(Instruction::simple(OpCode::PushNull));
-        self.emit(Instruction::simple(OpCode::Eq));
+        self.emit(Instruction::simple(OpCode::IsNull));
         let skip_state = self.emit_jump(OpCode::JumpIfTrue, 0);
         self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
         self.emit(Instruction::new(

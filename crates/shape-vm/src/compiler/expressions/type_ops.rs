@@ -453,9 +453,8 @@ impl BytecodeCompiler {
         // Stack: [option_val]
         self.emit(Instruction::simple(OpCode::Dup));
         // Stack: [option_val, option_val]
-        self.emit(Instruction::simple(OpCode::PushNull));
-        // Stack: [option_val, option_val, null]
-        self.emit(Instruction::simple(OpCode::Eq));
+        // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
+        self.emit(Instruction::simple(OpCode::IsNull));
         // Stack: [option_val, is_none]
         let jump_skip = self.emit_jump(OpCode::JumpIfTrue, 0);
         // Stack: [option_val] — not None, convert it
@@ -477,10 +476,10 @@ impl BytecodeCompiler {
         &mut self,
         try_convert_opcode: OpCode,
     ) {
-        // Same pattern as infallible but using TryConvertTo*
+        // Same pattern as infallible but using TryConvertTo*.
+        // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
         self.emit(Instruction::simple(OpCode::Dup));
-        self.emit(Instruction::simple(OpCode::PushNull));
-        self.emit(Instruction::simple(OpCode::Eq));
+        self.emit(Instruction::simple(OpCode::IsNull));
         let jump_skip = self.emit_jump(OpCode::JumpIfTrue, 0);
         self.emit(Instruction::new(try_convert_opcode, None));
         let jump_end = self.emit_jump(OpCode::Jump, 0);
