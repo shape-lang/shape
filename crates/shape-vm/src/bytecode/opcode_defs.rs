@@ -632,6 +632,16 @@ define_opcodes! {
     /// Concatenate two arrays, pushing a new array. Pops (a, b).
     ArrayConcat = 0xFD, Object, pops: 2, pushes: 1;
 
+    // ===== v2 Stage 2.6.3: Typed Equality for Heap Types =====
+    /// Equal (string × string → bool). Pops two `*const StringObj`,
+    /// content-compares the UTF-8 bytes, pushes bool. Both operands must be
+    /// non-null v2 StringObj pointers. Use Neq via `EqString; Not`.
+    EqString = 0xFE, Comparison, pops: 2, pushes: 1;
+    /// Equal (decimal × decimal → bool). Pops two `*const DecimalObj`,
+    /// content-compares the decimal payloads, pushes bool. Both operands
+    /// must be non-null v2 DecimalObj pointers. Use Neq via `EqDecimal; Not`.
+    EqDecimal = 0xFF, Comparison, pops: 2, pushes: 1;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;

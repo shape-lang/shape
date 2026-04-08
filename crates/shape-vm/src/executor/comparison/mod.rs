@@ -326,6 +326,27 @@ impl VirtualMachine {
                     })?;
                 }
             }
+            // Stage 2.6.3: typed equality for heap-backed string and
+            // decimal types. Compiler emits these only when both operands
+            // are statically proven to be the matching type.
+            EqString => {
+                let b = self.pop_vw()?;
+                let a = self.pop_vw()?;
+                let eq = match (a.as_str(), b.as_str()) {
+                    (Some(a_str), Some(b_str)) => a_str == b_str,
+                    _ => false,
+                };
+                self.push_raw_bool(eq)?;
+            }
+            EqDecimal => {
+                let b = self.pop_vw()?;
+                let a = self.pop_vw()?;
+                let eq = match (a.as_decimal(), b.as_decimal()) {
+                    (Some(ad), Some(bd)) => ad == bd,
+                    _ => false,
+                };
+                self.push_raw_bool(eq)?;
+            }
             // NOTE: Trusted comparison variants removed — consolidated into
             // the typed variants above (GtInt, LtInt, etc.).
             _ => unreachable!(
@@ -637,5 +658,61 @@ mod tests {
         vm.push_vw(ValueWord::from_f64(2.5)).unwrap();
         vm.push_vw(ValueWord::from_f64(2.5)).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
+    }
+
+    // ----- Stage 2.6.3: typed equality for heap-backed types -----
+
+    #[test]
+    fn typed_string_eq_same_content_is_true() {
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
+            .unwrap();
+        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
+            .unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::EqString));
+    }
+
+    #[test]
+    fn typed_string_eq_different_content_is_false() {
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("foo".to_string())))
+            .unwrap();
+        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("bar".to_string())))
+            .unwrap();
+        assert!(!run_typed_cmp(&mut vm, OpCode::EqString));
+    }
+
+    #[test]
+    fn typed_string_eq_empty_strings_are_equal() {
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_string(std::sync::Arc::new(String::new())))
+            .unwrap();
+        vm.push_vw(ValueWord::from_string(std::sync::Arc::new(String::new())))
+            .unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::EqString));
+    }
+
+    #[test]
+    fn typed_decimal_eq_same_value_is_true() {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_decimal(Decimal::from_str("12.34").unwrap()))
+            .unwrap();
+        vm.push_vw(ValueWord::from_decimal(Decimal::from_str("12.34").unwrap()))
+            .unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::EqDecimal));
+    }
+
+    #[test]
+    fn typed_decimal_eq_different_value_is_false() {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+        let mut vm = make_vm();
+        vm.push_vw(ValueWord::from_decimal(Decimal::from_str("1.0").unwrap()))
+            .unwrap();
+        vm.push_vw(ValueWord::from_decimal(Decimal::from_str("2.0").unwrap()))
+            .unwrap();
+        assert!(!run_typed_cmp(&mut vm, OpCode::EqDecimal));
     }
 }
