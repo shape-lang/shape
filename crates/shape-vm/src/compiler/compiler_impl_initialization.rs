@@ -134,6 +134,9 @@ impl BytecodeCompiler {
             mir_field_analyses: HashMap::new(),
             graph_namespace_map: HashMap::new(),
             module_graph: None,
+            current_function_local_concrete_types: HashMap::new(),
+            monomorphization_cache: crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
+            next_monomorphization_id: 0,
         }
     }
 

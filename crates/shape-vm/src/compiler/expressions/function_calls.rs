@@ -1,6 +1,9 @@
 //! Function and method call expression compilation
 
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
+use crate::compiler::monomorphization::type_resolution::{
+    concrete_type_for_expr, extract_arg_concrete_types, resolve_call_site_type_args,
+};
 use crate::compiler::string_interpolation::has_interpolation;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{NumericType, VariableKind, VariableTypeInfo};
@@ -1655,6 +1658,19 @@ impl BytecodeCompiler {
                 self.emit_unit();
             }
             let call_arity = actual_arity_with_self.max(effective_total_arity);
+
+            // --- Monomorphization: specialize generic extend methods ---
+            //
+            // When the resolved function has type parameters (e.g. `Vec<T>.indexOf`
+            // where T is generic), try to monomorphize it for the receiver's
+            // concrete element type. This produces a specialized function that
+            // the v2 pipeline can emit typed opcodes for.
+            //
+            // Falls back to the generic function index on any failure.
+            let call_func_idx = self
+                .try_monomorphize_method_call(&func_name, receiver, args)
+                .unwrap_or(func_idx);
+
             let arg_count = self
                 .program
                 .add_constant(Constant::Number(call_arity as f64));
@@ -1662,13 +1678,17 @@ impl BytecodeCompiler {
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
             ));
+
+            let call_func_name = self.program.functions[call_func_idx].name.clone();
             self.emit(Instruction::new(
                 OpCode::Call,
-                Some(Operand::Function(shape_value::FunctionId(func_idx as u16))),
+                Some(Operand::Function(shape_value::FunctionId(
+                    call_func_idx as u16,
+                ))),
             ));
             // Record callee as a blob dependency
             if let Some(ref mut blob) = self.current_blob_builder {
-                blob.record_call(&func_name);
+                blob.record_call(&call_func_name);
             }
             self.last_expr_schema = None;
             // Propagate return type for UFCS method calls.
@@ -2237,5 +2257,59 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
         self.clear_last_expr_reference_result();
         Ok(Some(()))
+    }
+
+    /// Attempt to monomorphize a generic extend method for the receiver's
+    /// concrete type. Returns `Some(specialized_func_idx)` on success, or
+    /// `None` if monomorphization is not applicable or fails.
+    ///
+    /// This is the bridge between generic extend methods (e.g. `Vec<T>.indexOf`)
+    /// and the monomorphization cache. When the receiver has a concretely known
+    /// type (e.g. `Array<int>`), the function's type parameters are resolved
+    /// and a specialized version is compiled/cached.
+    fn try_monomorphize_method_call(
+        &mut self,
+        func_name: &str,
+        receiver: &Expr,
+        args: &[Expr],
+    ) -> Option<usize> {
+        // 1. Check if the function has type parameters.
+        let type_params: Vec<String> = {
+            let def = self.function_defs.get(func_name)?;
+            let tps = def.type_params.as_ref()?;
+            if tps.is_empty() {
+                return None;
+            }
+            tps.iter().map(|tp| tp.name.clone()).collect()
+        };
+
+        // 2. Build combined arg_types: [receiver_concrete_type, arg1_ct, ...].
+        //    The function's first param is `self` (the receiver), followed by
+        //    the explicit method arguments.
+        let receiver_ct = concrete_type_for_expr(self, receiver)?;
+        let method_arg_cts = extract_arg_concrete_types(self, args);
+        let mut combined_arg_types: Vec<Option<shape_value::v2::ConcreteType>> =
+            Vec::with_capacity(1 + method_arg_cts.len());
+        combined_arg_types.push(Some(receiver_ct));
+        combined_arg_types.extend(method_arg_cts);
+
+        // 3. Resolve type parameter bindings from the call site.
+        let resolution =
+            resolve_call_site_type_args(self, func_name, &combined_arg_types, &type_params)?;
+
+        // 4. All type args must be concrete (no unresolved variables).
+        if resolution.type_args.is_empty() {
+            return None;
+        }
+
+        // 5. Call ensure_monomorphic_function to get/create the specialization.
+        //    On failure, return None to fall back to the generic version.
+        match self.ensure_monomorphic_function(func_name, &resolution.type_args) {
+            Ok(specialized_idx) => {
+                let idx = specialized_idx as usize;
+                Some(idx)
+            }
+            Err(_) => None,
+        }
     }
 }

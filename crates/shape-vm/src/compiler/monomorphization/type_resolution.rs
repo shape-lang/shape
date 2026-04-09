@@ -561,7 +561,7 @@ pub fn extract_arg_concrete_types(
 }
 
 /// Best-effort `ConcreteType` for a single argument expression.
-fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Option<ConcreteType> {
+pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Option<ConcreteType> {
     match expr {
         Expr::Literal(literal, _) => literal_concrete_type(literal),
 
@@ -835,7 +835,7 @@ mod tests {
 
         let arg_types = vec![
             Some(ConcreteType::Array(Box::new(ConcreteType::I64))),
-            Some(ConcreteType::Function(shape_value::v2::FunctionTypeId(0))),
+            Some(ConcreteType::Function(shape_value::v2::concrete_type::FunctionTypeId(0))),
         ];
 
         let resolution = resolve_call_site_type_args(
@@ -865,7 +865,7 @@ mod tests {
         let arg_types = vec![
             Some(ConcreteType::Array(Box::new(ConcreteType::F64))),
             // Closure: opaque in Phase 1.
-            Some(ConcreteType::Function(shape_value::v2::FunctionTypeId(0))),
+            Some(ConcreteType::Function(shape_value::v2::concrete_type::FunctionTypeId(0))),
         ];
 
         let resolution =

@@ -56,6 +56,7 @@ mod loops;
 mod patterns;
 mod statements;
 pub mod string_interpolation;
+pub(crate) mod monomorphization;
 
 /// Loop compilation context
 pub(crate) struct LoopContext {
@@ -900,6 +901,15 @@ pub struct BytecodeCompiler {
 
     /// Module dependency graph (set during graph-driven compilation).
     pub(crate) module_graph: Option<std::sync::Arc<crate::module_graph::ModuleGraph>>,
+
+    /// Per-local-slot concrete type table for the function currently being compiled.
+    pub(crate) current_function_local_concrete_types: HashMap<u16, shape_value::v2::ConcreteType>,
+
+    /// Monomorphization cache for generic function specialization.
+    pub(crate) monomorphization_cache: monomorphization::cache::MonomorphizationCache,
+
+    /// Monotonic counter for monomorphization specialization IDs.
+    pub(crate) next_monomorphization_id: u64,
 }
 
 impl Default for BytecodeCompiler {
