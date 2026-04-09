@@ -36,8 +36,8 @@ pub(super) fn emit_runtime_add(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `EqInt`, `EqNumber`, `EqDecimal`, or
 /// `EqString` when the operand types are proven.
-pub(super) fn emit_runtime_eq(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Eq));
+pub(super) fn emit_dynamic_eq(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::EqDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -51,8 +51,8 @@ pub(super) fn emit_runtime_eq(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `NeqInt`, `NeqNumber`, or typed equality +
 /// `Not` when the operand types are proven.
-pub(super) fn emit_runtime_neq(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Neq));
+pub(super) fn emit_dynamic_neq(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::NeqDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -583,8 +583,8 @@ impl BytecodeCompiler {
                         | OpCode::Lt
                         | OpCode::Gte
                         | OpCode::Lte
-                        | OpCode::Eq
-                        | OpCode::Neq
+                        | OpCode::EqDynamic
+                        | OpCode::NeqDynamic
                         | OpCode::Not
                 )
             })

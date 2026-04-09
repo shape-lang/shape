@@ -96,8 +96,8 @@ fn is_comparison(op: OpCode) -> bool {
             | OpCode::Lt
             | OpCode::Gte
             | OpCode::Lte
-            | OpCode::Eq
-            | OpCode::Neq
+            | OpCode::EqDynamic
+            | OpCode::NeqDynamic
             | OpCode::GtInt
             | OpCode::LtInt
             | OpCode::GteInt

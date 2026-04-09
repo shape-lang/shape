@@ -533,8 +533,8 @@ fn stack_effect_simple(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::Lt
         | OpCode::Gte
         | OpCode::Lte
-        | OpCode::Eq
-        | OpCode::Neq
+        | OpCode::EqDynamic
+        | OpCode::NeqDynamic
         | OpCode::GtInt
         | OpCode::LtInt
         | OpCode::GteInt

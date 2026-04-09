@@ -463,7 +463,7 @@ impl VirtualMachine {
                     }
                 }
             }
-            Eq => {
+            EqDynamic => {
                 let b_nb = self.pop_vw()?;
                 let a_nb = self.pop_vw()?;
                 // Check ExprProxy first (rare SQL pushdown path)
@@ -474,7 +474,7 @@ impl VirtualMachine {
                     self.push_vw(ValueWord::from_bool(a_nb.vw_equals(&b_nb)))?;
                 }
             }
-            Neq => {
+            NeqDynamic => {
                 let b_nb = self.pop_vw()?;
                 let a_nb = self.pop_vw()?;
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Neq) {

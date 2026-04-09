@@ -478,7 +478,7 @@ fn test_comparison_operators_complete() {
         instructions: vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-            Instruction::simple(OpCode::Eq),
+            Instruction::simple(OpCode::EqDynamic),
         ],
         constants: vec![Constant::Number(7.0)],
         ..Default::default()
@@ -494,7 +494,7 @@ fn test_comparison_operators_complete() {
         instructions: vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
             Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-            Instruction::simple(OpCode::Neq),
+            Instruction::simple(OpCode::NeqDynamic),
         ],
         constants: vec![Constant::Number(5.0), Constant::Number(3.0)],
         ..Default::default()

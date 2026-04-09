@@ -441,7 +441,7 @@ impl VirtualMachine {
             }
 
             // Comparison (generic, with runtime type dispatch)
-            Gt | Lt | Gte | Lte | Eq | Neq => {
+            Gt | Lt | Gte | Lte | EqDynamic | NeqDynamic => {
                 return self.exec_comparison(instruction);
             }
 

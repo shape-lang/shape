@@ -446,8 +446,8 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::NegInt
             | OpCode::NegNumber
             // Equality comparisons (always inline, no FFI)
-            | OpCode::Eq
-            | OpCode::Neq
+            | OpCode::EqDynamic
+            | OpCode::NeqDynamic
             // Generic ordered comparisons are inline numeric comparisons in JIT.
             | OpCode::Gt
             | OpCode::Lt

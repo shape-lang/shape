@@ -118,8 +118,8 @@ fn emit_generic_via_helper(compiler: &mut BytecodeCompiler, op: &BinaryOp) -> bo
         BinaryOp::Less => { helpers::emit_runtime_lt(compiler); true }
         BinaryOp::GreaterEq => { helpers::emit_runtime_gte(compiler); true }
         BinaryOp::LessEq => { helpers::emit_runtime_lte(compiler); true }
-        BinaryOp::Equal => { helpers::emit_runtime_eq(compiler); true }
-        BinaryOp::NotEqual => { helpers::emit_runtime_neq(compiler); true }
+        BinaryOp::Equal => { helpers::emit_dynamic_eq(compiler); true }
+        BinaryOp::NotEqual => { helpers::emit_dynamic_neq(compiler); true }
         _ => false,
     }
 }
@@ -471,9 +471,9 @@ impl BytecodeCompiler {
         self.compile_expr(left)?;
         self.compile_expr(right)?;
         if is_neq {
-            crate::compiler::helpers::emit_runtime_neq(self);
+            crate::compiler::helpers::emit_dynamic_neq(self);
         } else {
-            crate::compiler::helpers::emit_runtime_eq(self);
+            crate::compiler::helpers::emit_dynamic_eq(self);
         }
         Ok(true)
     }

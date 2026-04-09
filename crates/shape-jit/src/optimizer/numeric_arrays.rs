@@ -95,8 +95,8 @@ fn is_generic_numeric_consumer(op: OpCode) -> bool {
             | OpCode::Lt
             | OpCode::Gte
             | OpCode::Lte
-            | OpCode::Eq
-            | OpCode::Neq
+            | OpCode::EqDynamic
+            | OpCode::NeqDynamic
     )
 }
 
@@ -107,8 +107,8 @@ fn is_comparison_consumer(op: OpCode) -> bool {
             | OpCode::Lt
             | OpCode::Gte
             | OpCode::Lte
-            | OpCode::Eq
-            | OpCode::Neq
+            | OpCode::EqDynamic
+            | OpCode::NeqDynamic
             | OpCode::GtInt
             | OpCode::LtInt
             | OpCode::GteInt
@@ -183,8 +183,8 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::Lt
         | OpCode::Gte
         | OpCode::Lte
-        | OpCode::Eq
-        | OpCode::Neq
+        | OpCode::EqDynamic
+        | OpCode::NeqDynamic
         | OpCode::GtInt
         | OpCode::LtInt
         | OpCode::GteInt

@@ -115,7 +115,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Eq => {
+            OpCode::EqDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();
@@ -126,7 +126,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Neq => {
+            OpCode::NeqDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();

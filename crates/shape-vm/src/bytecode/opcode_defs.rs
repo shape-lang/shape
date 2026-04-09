@@ -121,10 +121,10 @@ define_opcodes! {
     Gte = 0x22, Comparison, pops: 2, pushes: 1;
     /// Less than or equal
     Lte = 0x23, Comparison, pops: 2, pushes: 1;
-    /// Equal
-    Eq = 0x24, Comparison, pops: 2, pushes: 1;
-    /// Not equal
-    Neq = 0x25, Comparison, pops: 2, pushes: 1;
+    /// Dynamic equality -- runtime-dispatched via vw_equals.
+    EqDynamic = 0x24, Comparison, pops: 2, pushes: 1;
+    /// Dynamic not-equal -- runtime-dispatched via vw_equals + negation.
+    NeqDynamic = 0x25, Comparison, pops: 2, pushes: 1;
 
     // ===== Typed Comparison Operations (compiler-guaranteed types, zero dispatch) =====
     /// Greater than (int × int → bool)

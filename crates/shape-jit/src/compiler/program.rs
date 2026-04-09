@@ -73,8 +73,8 @@ fn collect_numeric_opcode_stats(program: &BytecodeProgram) -> NumericOpcodeStats
             | OpCode::Lt
             | OpCode::Gte
             | OpCode::Lte
-            | OpCode::Eq
-            | OpCode::Neq => {
+            | OpCode::EqDynamic
+            | OpCode::NeqDynamic => {
                 stats.generic += 1;
                 bump_breakdown(&mut stats.generic_breakdown, instr.opcode);
             }
