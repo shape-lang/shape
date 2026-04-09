@@ -317,6 +317,7 @@ impl JITCompiler {
                 native_struct_layouts: program.native_struct_layouts.clone(),
                 content_addressed: None,
                 function_blob_hashes: Vec::new(),
+                monomorphization_keys: Vec::new(),
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).

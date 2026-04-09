@@ -277,6 +277,24 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::StoreLocalTyped,
     OpCode::StoreModuleBindingTyped,
     OpCode::CastWidth,
+    // v2 typed array opcodes
+    OpCode::NewTypedArrayF64,
+    OpCode::NewTypedArrayI64,
+    OpCode::NewTypedArrayI32,
+    OpCode::NewTypedArrayBool,
+    OpCode::TypedArrayGetF64,
+    OpCode::TypedArrayGetI64,
+    OpCode::TypedArrayGetI32,
+    OpCode::TypedArrayGetBool,
+    OpCode::TypedArraySetF64,
+    OpCode::TypedArraySetI64,
+    OpCode::TypedArraySetI32,
+    OpCode::TypedArraySetBool,
+    OpCode::TypedArrayPushF64,
+    OpCode::TypedArrayPushI64,
+    OpCode::TypedArrayPushI32,
+    OpCode::TypedArrayPushBool,
+    OpCode::TypedArrayLen,
 ];
 
 const ALL_BUILTINS: &[BuiltinFunction] = &[

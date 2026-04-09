@@ -316,6 +316,7 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
             top_level_mir: None,
         function_blob_hashes: vec![],
         top_level_frame: None,
+        monomorphization_keys: vec![],
     }
 }
 

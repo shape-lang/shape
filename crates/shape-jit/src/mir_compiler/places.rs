@@ -2,7 +2,7 @@
 //!
 //! A Place represents something that can be read from or written to:
 //! - `Place::Local(slot)` → Cranelift variable
-//! - `Place::Field(base, idx)` → FFI call to get/set field
+//! - `Place::Field(base, idx)` → **inline** typed struct access when byte offset is known, FFI fallback otherwise
 //! - `Place::Index(base, operand)` → **inline** array access (no FFI call)
 
 use cranelift::prelude::*;
@@ -11,6 +11,12 @@ use super::MirToIR;
 // v2-boundary: inline array access still uses NaN-boxed heap pointer layout
 use crate::nan_boxing::{UNIFIED_PTR_MASK, JIT_ALLOC_DATA_OFFSET};
 use shape_vm::mir::types::*;
+
+/// Byte offset of the `data` field within `UnifiedValue<T>` (kind u16 + flags u8 + _reserved u8 + refcount u32 = 8).
+const UNIFIED_VALUE_DATA_OFFSET: i32 = 8;
+
+/// Header size of a TypedObject in bytes (schema_id u32 + ref_count u32 = 8).
+const TYPED_OBJ_HEADER: i32 = 8;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
     // ── Inline array access helpers ──────────────────────────────────────
@@ -130,6 +136,43 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
     }
 
+    // ── Inline typed-struct field access ──────────────────────────────
+    //
+    // When the compiler knows the field byte offset at compile time, we
+    // emit 2 Cranelift loads (pointer chase through the UnifiedValue
+    // wrapper) instead of an FFI call to jit_typed_object_get_field.
+    //
+    // Memory layout:
+    //   NaN-boxed bits  --&(UNIFIED_PTR_MASK)-->  UnifiedValue<*const u8>
+    //     +8 (data field) -->  raw TypedObject*
+    //       +8 (TYPED_OBJ_HEADER) + field_byte_offset --> field u64 slot
+
+    /// Extract the raw `TypedObject*` from a NaN-boxed typed-object value.
+    ///
+    /// Two-step pointer chase:
+    /// 1. `uv_ptr = bits & UNIFIED_PTR_MASK` → `UnifiedValue<*const u8>*`
+    /// 2. `to_ptr = load i64 [uv_ptr + 8]`   → `TypedObject*`
+    fn emit_typed_object_ptr(&mut self, nanboxed_bits: Value) -> Value {
+        let ptr_mask = self.builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
+        let uv_ptr = self.builder.ins().band(nanboxed_bits, ptr_mask);
+        // Load the `data` field from the UnifiedValue wrapper
+        self.builder.ins().load(types::I64, MemFlags::trusted(), uv_ptr, UNIFIED_VALUE_DATA_OFFSET)
+    }
+
+    /// Inline typed field read: load u64 from `[typed_obj_ptr + HEADER + byte_off]`.
+    fn inline_typed_field_get(&mut self, nanboxed_bits: Value, byte_off: u16) -> Value {
+        let to_ptr = self.emit_typed_object_ptr(nanboxed_bits);
+        let offset = TYPED_OBJ_HEADER + byte_off as i32;
+        self.builder.ins().load(types::I64, MemFlags::trusted(), to_ptr, offset)
+    }
+
+    /// Inline typed field write: store u64 to `[typed_obj_ptr + HEADER + byte_off]`.
+    fn inline_typed_field_set(&mut self, nanboxed_bits: Value, byte_off: u16, val: Value) {
+        let to_ptr = self.emit_typed_object_ptr(nanboxed_bits);
+        let offset = TYPED_OBJ_HEADER + byte_off as i32;
+        self.builder.ins().store(MemFlags::trusted(), val, to_ptr, offset);
+    }
+
     // ── Field offset resolution ────────────────────────────────────────
 
     fn try_resolve_field_byte_offset(&self, field_idx: &FieldIdx) -> Option<u16> {
@@ -172,9 +215,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // v2-boundary: get_prop/typed_object_get_field FFI expects NaN-boxed I64
                 let base_val = self.ensure_nanboxed(raw_base);
                 if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
-                    let offset = self.builder.ins().iconst(types::I64, byte_off as i64);
-                    let inst = self.builder.ins().call(self.ffi.typed_object_get_field, &[base_val, offset]);
-                    Ok(self.builder.inst_results(inst)[0])
+                    // Inline typed field read — 2 loads, no FFI call.
+                    Ok(self.inline_typed_field_get(base_val, byte_off))
                 } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
                     let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
                     let inst = self.builder.ins().call(self.ffi.get_prop, &[base_val, key]);
@@ -233,8 +275,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let base_val = self.ensure_nanboxed(raw_base);
                 let boxed_val = self.ensure_nanboxed(val);
                 if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
-                    let offset = self.builder.ins().iconst(types::I64, byte_off as i64);
-                    self.builder.ins().call(self.ffi.typed_object_set_field, &[base_val, offset, boxed_val]);
+                    // Inline typed field write — 2 loads + 1 store, no FFI call.
+                    // Write barrier is a no-op without the `gc` feature, so we skip it.
+                    self.inline_typed_field_set(base_val, byte_off, boxed_val);
                 } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
                     let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
                     self.builder.ins().call(self.ffi.set_prop, &[base_val, key, boxed_val]);
