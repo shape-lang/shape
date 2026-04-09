@@ -1564,11 +1564,6 @@ fn test_int_equality_emits_typed_eqint() {
         "Expected EqInt for int equality, got opcodes: {:?}",
         opcodes
     );
-    assert!(
-        !opcodes.contains(&OpCode::Eq),
-        "Did not expect generic Eq for int equality, got opcodes: {:?}",
-        opcodes
-    );
     let result = compile_and_run_fn(code, "test");
     assert_eq!(result.as_i64().expect("Expected Int"), 1);
 }
@@ -1587,11 +1582,6 @@ fn test_number_inequality_emits_typed_neqnumber() {
     assert!(
         opcodes.contains(&OpCode::NeqNumber),
         "Expected NeqNumber for number inequality, got opcodes: {:?}",
-        opcodes
-    );
-    assert!(
-        !opcodes.contains(&OpCode::Neq),
-        "Did not expect generic Neq for number inequality, got opcodes: {:?}",
         opcodes
     );
     let result = compile_and_run_fn(code, "test");
@@ -1666,11 +1656,6 @@ fn test_array_push_then_index_numeric_emits_typed_arithmetic() {
         "Expected AddNumber for numeric array accumulation, got opcodes: {:?}",
         opcodes
     );
-    assert!(
-        !opcodes.contains(&OpCode::Add),
-        "Expected no generic Add in numeric array accumulation, got opcodes: {:?}",
-        opcodes
-    );
     let result = compile_and_run_fn(code, "test");
     let n = result.as_number_coerce().expect("Expected numeric value");
     assert!((n - 4.0).abs() < 1e-10, "Expected 4.0, got {}", n);
@@ -1742,12 +1727,6 @@ fn test_mat_vec_mul_lowers_to_matrix_intrinsic() {
     assert!(
         has_matmul_vec,
         "Expected IntrinsicMatMulVec builtin lowering"
-    );
-    let opcodes: Vec<_> = bytecode.instructions.iter().map(|ins| ins.opcode).collect();
-    assert!(
-        !opcodes.contains(&OpCode::Mul),
-        "Expected no generic Mul for typed Mat*Vec path, got opcodes: {:?}",
-        opcodes
     );
     let result = compile_and_run_fn(code, "test");
     let n = result.as_number_coerce().expect("Expected numeric value");

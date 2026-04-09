@@ -58,6 +58,143 @@ pub(super) fn emit_runtime_neq(compiler: &mut BytecodeCompiler) {
     compiler.last_expr_numeric_type = None;
 }
 
+/// Emit a runtime-dispatched subtraction instruction.
+///
+/// Fallback for `-` when operand types are not proven at compile time.
+/// The VM's `exec_arithmetic` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `SubInt`, `SubNumber`, `SubDecimal`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_sub(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Sub));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched multiplication instruction.
+///
+/// Fallback for `*` when operand types are not proven at compile time.
+/// The VM's `exec_arithmetic` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `MulInt`, `MulNumber`, `MulDecimal`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_mul(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Mul));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched division instruction.
+///
+/// Fallback for `/` when operand types are not proven at compile time.
+/// The VM's `exec_arithmetic` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `DivInt`, `DivNumber`, `DivDecimal`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_div(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Div));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched modulo instruction.
+///
+/// Fallback for `%` when operand types are not proven at compile time.
+/// The VM's `exec_arithmetic` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `ModInt`, `ModNumber`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_mod(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Mod));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched power/exponentiation instruction.
+///
+/// Fallback for `**` when operand types are not proven at compile time.
+/// The VM's `exec_arithmetic` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `PowInt`, `PowNumber`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_pow(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Pow));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched negation instruction.
+///
+/// Fallback for unary `-` when the operand type is not proven at compile time.
+/// The VM's `exec_unary` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `NegInt`, `NegNumber`, `NegDecimal`
+/// when the operand type is proven.
+pub(in crate::compiler) fn emit_runtime_neg(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Neg));
+}
+
+/// Emit a runtime-dispatched greater-than instruction.
+///
+/// Fallback for `>` when operand types are not proven at compile time.
+/// The VM's `exec_comparison` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `GtInt`, `GtNumber`, `GtDecimal`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_gt(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Gt));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched less-than instruction.
+///
+/// Fallback for `<` when operand types are not proven at compile time.
+/// The VM's `exec_comparison` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `LtInt`, `LtNumber`, `LtDecimal`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_lt(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Lt));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched greater-than-or-equal instruction.
+///
+/// Fallback for `>=` when operand types are not proven at compile time.
+/// The VM's `exec_comparison` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `GteInt`, `GteNumber`, `GteDecimal`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_gte(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Gte));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched less-than-or-equal instruction.
+///
+/// Fallback for `<=` when operand types are not proven at compile time.
+/// The VM's `exec_comparison` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `LteInt`, `LteNumber`, `LteDecimal`
+/// when the operand types are proven.
+pub(in crate::compiler) fn emit_runtime_lte(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Lte));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
 /// Extract the core error message from a ShapeError, stripping redundant
 /// "Type error:", "Runtime error:", "Compile error:", etc. prefixes that
 /// thiserror's Display impl adds.  This prevents nested comptime errors

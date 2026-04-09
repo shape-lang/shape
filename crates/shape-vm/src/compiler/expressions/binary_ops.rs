@@ -64,30 +64,27 @@ fn combined_span(left: &Expr, right: &Expr) -> Span {
     Span::new(ls.start.min(rs.start), ls.end.max(rs.end))
 }
 
-/// Map a BinaryOp to its generic OpCode for runtime dispatch.
-/// This is used when the compiler cannot prove operand types at compile time
-/// (e.g. DateTime arithmetic via operator traits, untyped function params).
-/// The executor's `exec_arithmetic` / `exec_comparison` handles these at runtime.
-fn generic_opcode_for(op: &BinaryOp) -> Option<OpCode> {
+/// Emit the appropriate runtime-dispatched opcode for the given binary
+/// operation, routing through the centralized helpers in `helpers.rs`.
+/// Returns `true` if a helper was used, `false` if the caller should
+/// fall through to `compile_binary_op()` for remaining ops (And/Or/BitOps/
+/// NullCoalesce/ErrorContext).
+fn emit_generic_via_helper(compiler: &mut BytecodeCompiler, op: &BinaryOp) -> bool {
+    use crate::compiler::helpers;
     match op {
-        BinaryOp::Add => None, // Add is fully handled by typed dispatch; no generic fallback
-        BinaryOp::Sub => Some(OpCode::Sub),
-        BinaryOp::Mul => Some(OpCode::Mul),
-        BinaryOp::Div => Some(OpCode::Div),
-        BinaryOp::Mod => Some(OpCode::Mod),
-        BinaryOp::Pow => Some(OpCode::Pow),
-        BinaryOp::BitAnd => Some(OpCode::BitAnd),
-        BinaryOp::BitOr => Some(OpCode::BitOr),
-        BinaryOp::BitShl => Some(OpCode::BitShl),
-        BinaryOp::BitXor => Some(OpCode::BitXor),
-        BinaryOp::BitShr => Some(OpCode::BitShr),
-        BinaryOp::Greater => Some(OpCode::Gt),
-        BinaryOp::Less => Some(OpCode::Lt),
-        BinaryOp::GreaterEq => Some(OpCode::Gte),
-        BinaryOp::LessEq => Some(OpCode::Lte),
-        BinaryOp::Equal => None,
-        BinaryOp::NotEqual => None,
-        _ => None,
+        BinaryOp::Add => { helpers::emit_runtime_add(compiler); true }
+        BinaryOp::Sub => { helpers::emit_runtime_sub(compiler); true }
+        BinaryOp::Mul => { helpers::emit_runtime_mul(compiler); true }
+        BinaryOp::Div => { helpers::emit_runtime_div(compiler); true }
+        BinaryOp::Mod => { helpers::emit_runtime_mod(compiler); true }
+        BinaryOp::Pow => { helpers::emit_runtime_pow(compiler); true }
+        BinaryOp::Greater => { helpers::emit_runtime_gt(compiler); true }
+        BinaryOp::Less => { helpers::emit_runtime_lt(compiler); true }
+        BinaryOp::GreaterEq => { helpers::emit_runtime_gte(compiler); true }
+        BinaryOp::LessEq => { helpers::emit_runtime_lte(compiler); true }
+        BinaryOp::Equal => { helpers::emit_runtime_eq(compiler); true }
+        BinaryOp::NotEqual => { helpers::emit_runtime_neq(compiler); true }
+        _ => false,
     }
 }
 
@@ -1040,13 +1037,9 @@ impl BytecodeCompiler {
                     NumericEmitResult::CoercedNeedsGeneric => {
                         // Op has no typed variant for this type combination.
                         // Emit generic opcode for runtime dispatch (e.g. operator traits).
-                        if let Some(opcode) = generic_opcode_for(op) {
-                            self.emit(Instruction::simple(opcode));
-                        } else {
+                        if !emit_generic_via_helper(self, op) {
                             self.compile_binary_op(op)?;
                         }
-                        self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
                     }
                     NumericEmitResult::NoPlan => {
                         // Types unknown from slot tracking — try inference engine.
@@ -1063,13 +1056,9 @@ impl BytecodeCompiler {
                             _ => {
                                 // Emit generic opcode for runtime dispatch
                                 // (DateTime arithmetic, operator traits, untyped params, etc.)
-                                if let Some(opcode) = generic_opcode_for(op) {
-                                    self.emit(Instruction::simple(opcode));
-                                } else {
+                                if !emit_generic_via_helper(self, op) {
                                     self.compile_binary_op(op)?;
                                 }
-                                self.last_expr_type_info = None;
-                                self.last_expr_numeric_type = None;
                             }
                         }
                     }

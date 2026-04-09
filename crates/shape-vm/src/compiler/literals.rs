@@ -61,7 +61,7 @@ impl BytecodeCompiler {
     /// Compile binary operator
     pub(super) fn compile_binary_op(&mut self, op: &BinaryOp) -> Result<()> {
         let opcode = match op {
-            BinaryOp::Add => OpCode::Add,
+            BinaryOp::Add => unreachable!("generic Add should be handled by helpers::emit_runtime_add"),
             BinaryOp::Sub => unreachable!("generic Sub should be handled by typed dispatch"),
             BinaryOp::Mul => unreachable!("generic Mul should be handled by typed dispatch"),
             BinaryOp::Div => unreachable!("generic Div should be handled by typed dispatch"),
@@ -108,7 +108,7 @@ impl BytecodeCompiler {
     pub(super) fn compile_unary_op(&mut self, op: &UnaryOp) -> Result<()> {
         let opcode = match op {
             UnaryOp::Not => OpCode::Not,
-            UnaryOp::Neg => OpCode::Neg,
+            UnaryOp::Neg => unreachable!("generic Neg should be handled by unary_ops::compile_expr_unary_op"),
             UnaryOp::BitNot => OpCode::BitNot,
         };
 
