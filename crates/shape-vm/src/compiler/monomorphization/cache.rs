@@ -513,7 +513,7 @@ mod tests {
         let key = build_mono_key_with_consts(
             "repeat",
             &[],
-            &[shape_value::ValueWord::from_i64(3)],
+            &[ComptimeConstValue::Int(3)],
         );
         assert_eq!(key, "repeat::int_3");
         cache.insert(key.clone(), 11);
@@ -527,12 +527,12 @@ mod tests {
         let k3 = build_mono_key_with_consts(
             "repeat",
             &[],
-            &[shape_value::ValueWord::from_i64(3)],
+            &[ComptimeConstValue::Int(3)],
         );
         let k5 = build_mono_key_with_consts(
             "repeat",
             &[],
-            &[shape_value::ValueWord::from_i64(5)],
+            &[ComptimeConstValue::Int(5)],
         );
         assert_ne!(k3, k5);
         cache.insert(k3.clone(), 11);
@@ -551,7 +551,7 @@ mod tests {
         let key = build_mono_key_with_consts(
             "repeat",
             &[],
-            &[shape_value::ValueWord::from_i64(3)],
+            &[ComptimeConstValue::Int(3)],
         );
         cache.insert(key.clone(), 11);
         cache.insert(key.clone(), 11);
@@ -565,7 +565,7 @@ mod tests {
         let result = compiler.ensure_monomorphic_function_with_consts(
             "definitely_not_a_function",
             &[],
-            &[shape_value::ValueWord::from_i64(3)],
+            &[ComptimeConstValue::Int(3)],
         );
         assert!(
             result.is_err(),

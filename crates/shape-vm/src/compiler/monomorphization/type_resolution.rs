@@ -120,7 +120,6 @@
 //! of the v2 pipeline is being built out.
 
 use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
-use shape_value::ValueWord;
 use shape_value::v2::ConcreteType;
 use std::collections::HashMap;
 
@@ -128,26 +127,53 @@ use crate::compiler::BytecodeCompiler;
 
 /// A compile-time-evaluated value used to specialize a const generic parameter.
 ///
-/// **Phase 5 transitional alias**: ultimately this should become Phase 5 Agent
-/// 1's typed `ComptimeValue` (the v2 typed comptime value). For now we reuse
-/// `ValueWord` because:
-///
-///   - `eval_const_expr_to_nanboxed` (in `expressions/function_calls.rs`)
-///     already returns `ValueWord` and is the canonical entry point for
-///     compile-time const evaluation.
-///   - The existing `const_specializations` mechanism stores
-///     `Vec<(String, ValueWord)>` per specialization, so we stay byte-compatible
-///     with that pipeline.
-///   - `ValueWord` implements `Debug + Clone + PartialEq + Eq`, which is enough
-///     to fingerprint and dedupe const generic instantiations in the
-///     monomorphization cache.
-///
-/// TODO(phase-5-agent-1): once `shape_value::v2::ComptimeValue` exists,
-/// replace this alias with the typed version. The mono_key fingerprinting
-/// (see [`build_mono_key_with_consts`]) and the cache plumbing in
-/// [`crate::compiler::monomorphization::cache`] will need a parallel update
-/// to use the typed-value `Hash` impl instead of the `Debug` fingerprint.
-pub type ComptimeConstValue = ValueWord;
+/// This is a self-contained enum that carries the scalar value directly,
+/// decoupled from the runtime `ValueWord` representation. The compiler never
+/// needs NaN-boxing or heap-allocated values for const generic parameters —
+/// only the four scalar kinds that can appear as compile-time constants.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComptimeConstValue {
+    Int(i64),
+    Number(f64),
+    Bool(bool),
+    String(String),
+}
+
+impl Eq for ComptimeConstValue {}
+
+impl ComptimeConstValue {
+    /// Extract the value as an `i64`, if it is an `Int`.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            ComptimeConstValue::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Extract the value as an `f64`, if it is a `Number`.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            ComptimeConstValue::Number(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Extract the value as a `bool`, if it is a `Bool`.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            ComptimeConstValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Extract the value as a `&str`, if it is a `String`.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ComptimeConstValue::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
 
 /// Render a single const generic value into a stable, filesystem-safe string
 /// for inclusion in a `mono_key`.
@@ -164,34 +190,29 @@ pub type ComptimeConstValue = ValueWord;
 /// switch this to a stable hash-based key (e.g. `"int_<hex8>"`) so the keys
 /// stay compact for large bigint / decimal values.
 pub fn const_value_mono_segment(v: &ComptimeConstValue) -> String {
-    if let Some(i) = v.as_i64() {
-        return format!("int_{}", i);
+    match v {
+        ComptimeConstValue::Int(i) => format!("int_{}", i),
+        ComptimeConstValue::Bool(b) => format!("bool_{}", b),
+        ComptimeConstValue::Number(f) => {
+            // f64 → bit pattern keeps NaN/Inf distinguishable.
+            format!("f64_{:x}", f.to_bits())
+        }
+        ComptimeConstValue::String(s) => {
+            // Sanitise: keep alphanum + underscore so the resulting key is a valid
+            // function symbol suffix on every backend.
+            let safe: String = s
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            format!("string_{}", safe)
+        }
     }
-    if let Some(b) = v.as_bool() {
-        return format!("bool_{}", b);
-    }
-    if let Some(f) = v.as_f64() {
-        // f64 → bit pattern keeps NaN/Inf distinguishable.
-        return format!("f64_{:x}", f.to_bits());
-    }
-    if let Some(s) = v.as_str() {
-        // Sanitise: keep alphanum + underscore so the resulting key is a valid
-        // function symbol suffix on every backend.
-        let safe: String = s
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        return format!("string_{}", safe);
-    }
-    // Catch-all: round-trip through Debug. Stable for the same ValueWord but
-    // not necessarily compact.
-    format!("opaque_{:?}", v)
 }
 
 /// Result of resolving the type arguments at a generic call site.
@@ -1104,20 +1125,20 @@ mod tests {
 
     #[test]
     fn const_value_segment_int() {
-        let v = ValueWord::from_i64(3);
+        let v = ComptimeConstValue::Int(3);
         assert_eq!(const_value_mono_segment(&v), "int_3");
     }
 
     #[test]
     fn const_value_segment_negative_int() {
-        let v = ValueWord::from_i64(-7);
+        let v = ComptimeConstValue::Int(-7);
         assert_eq!(const_value_mono_segment(&v), "int_-7");
     }
 
     #[test]
     fn const_value_segment_bool() {
-        assert_eq!(const_value_mono_segment(&ValueWord::from_bool(true)), "bool_true");
-        assert_eq!(const_value_mono_segment(&ValueWord::from_bool(false)), "bool_false");
+        assert_eq!(const_value_mono_segment(&ComptimeConstValue::Bool(true)), "bool_true");
+        assert_eq!(const_value_mono_segment(&ComptimeConstValue::Bool(false)), "bool_false");
     }
 
     #[test]
@@ -1126,7 +1147,7 @@ mod tests {
         let key = build_mono_key_with_consts(
             "repeat",
             &[],
-            &[ValueWord::from_i64(3)],
+            &[ComptimeConstValue::Int(3)],
         );
         assert_eq!(key, "repeat::int_3");
     }
@@ -1134,8 +1155,8 @@ mod tests {
     #[test]
     fn build_mono_key_with_consts_distinct_for_distinct_values() {
         // repeat<3> and repeat<5> must be distinct cache entries.
-        let k3 = build_mono_key_with_consts("repeat", &[], &[ValueWord::from_i64(3)]);
-        let k5 = build_mono_key_with_consts("repeat", &[], &[ValueWord::from_i64(5)]);
+        let k3 = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
+        let k5 = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(5)]);
         assert_ne!(k3, k5);
         assert_eq!(k3, "repeat::int_3");
         assert_eq!(k5, "repeat::int_5");
@@ -1145,8 +1166,8 @@ mod tests {
     fn build_mono_key_with_consts_same_value_collides() {
         // repeat<3> and repeat<3> must produce IDENTICAL keys (so the cache
         // de-duplicates them).
-        let a = build_mono_key_with_consts("repeat", &[], &[ValueWord::from_i64(3)]);
-        let b = build_mono_key_with_consts("repeat", &[], &[ValueWord::from_i64(3)]);
+        let a = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
+        let b = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
         assert_eq!(a, b);
     }
 
@@ -1156,7 +1177,7 @@ mod tests {
         let key = build_mono_key_with_consts(
             "matrix",
             &[ConcreteType::F64],
-            &[ValueWord::from_i64(3)],
+            &[ComptimeConstValue::Int(3)],
         );
         assert_eq!(key, "matrix::f64_int_3");
     }
@@ -1184,11 +1205,11 @@ mod tests {
         let res = TypeArgResolution::with_consts(
             "repeat",
             vec![ConcreteType::F64],
-            vec![ValueWord::from_i64(3)],
+            vec![ComptimeConstValue::Int(3)],
         );
         assert_eq!(res.fn_name, "repeat");
         assert_eq!(res.type_args, vec![ConcreteType::F64]);
-        assert_eq!(res.const_args, vec![ValueWord::from_i64(3)]);
+        assert_eq!(res.const_args, vec![ComptimeConstValue::Int(3)]);
         assert_eq!(res.mono_key, "repeat::f64_int_3");
     }
 

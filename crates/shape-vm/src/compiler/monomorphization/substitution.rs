@@ -42,7 +42,6 @@ use shape_ast::ast::type_path::TypePath;
 use shape_ast::ast::types::{
     ExtendStatement, FunctionParam, MethodDef, ObjectTypeField, TypeAnnotation,
 };
-use shape_value::ValueWord;
 use shape_value::v2::ConcreteType;
 use std::collections::HashMap;
 
@@ -472,30 +471,20 @@ fn substitute_const_in_expr(
     }
 }
 
-/// Convert a `ComptimeConstValue` (currently `ValueWord`) into an `Expr`
-/// literal node so it can be substituted into an expression position.
+/// Convert a `ComptimeConstValue` into an `Expr` literal node so it can be
+/// substituted into an expression position.
 ///
-/// Returns `None` if the value can't be represented as a literal — e.g. an
-/// opaque heap object. The caller leaves the original identifier in place in
-/// that case.
-///
-/// TODO(phase-5-agent-1): once the typed `ComptimeValue` exists, this should
-/// dispatch on the typed enum directly instead of the loose `as_*` checks.
-fn const_value_to_literal(value: &ValueWord, span: shape_ast::ast::Span) -> Option<Expr> {
+/// Every variant of `ComptimeConstValue` maps to a literal, so this always
+/// returns `Some`. The `Option` return type is preserved for API compatibility
+/// with callers that pattern-match on it.
+fn const_value_to_literal(value: &ComptimeConstValue, span: shape_ast::ast::Span) -> Option<Expr> {
     use shape_ast::ast::Literal;
-    if let Some(i) = value.as_i64() {
-        return Some(Expr::Literal(Literal::Int(i), span));
+    match value {
+        ComptimeConstValue::Int(i) => Some(Expr::Literal(Literal::Int(*i), span)),
+        ComptimeConstValue::Bool(b) => Some(Expr::Literal(Literal::Bool(*b), span)),
+        ComptimeConstValue::Number(f) => Some(Expr::Literal(Literal::Number(*f), span)),
+        ComptimeConstValue::String(s) => Some(Expr::Literal(Literal::String(s.clone()), span)),
     }
-    if let Some(b) = value.as_bool() {
-        return Some(Expr::Literal(Literal::Bool(b), span));
-    }
-    if let Some(f) = value.as_f64() {
-        return Some(Expr::Literal(Literal::Number(f), span));
-    }
-    if let Some(s) = value.as_str() {
-        return Some(Expr::Literal(Literal::String(s.to_string()), span));
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1750,7 +1739,7 @@ mod tests {
         let func = repeat_fn();
         let type_subs: HashMap<String, ConcreteType> = HashMap::new();
         let mut const_subs: HashMap<String, ComptimeConstValue> = HashMap::new();
-        const_subs.insert("__const_0".into(), ValueWord::from_i64(3));
+        const_subs.insert("__const_0".into(), ComptimeConstValue::Int(3));
 
         let mono = substitute_function_def_with_consts(
             &func,
@@ -1769,7 +1758,7 @@ mod tests {
         let func = repeat_fn();
         let type_subs: HashMap<String, ConcreteType> = HashMap::new();
         let mut const_subs: HashMap<String, ComptimeConstValue> = HashMap::new();
-        const_subs.insert("__const_0".into(), ValueWord::from_i64(3));
+        const_subs.insert("__const_0".into(), ComptimeConstValue::Int(3));
 
         let mono = substitute_function_def_with_consts(
             &func,
@@ -1794,9 +1783,9 @@ mod tests {
         let type_subs: HashMap<String, ConcreteType> = HashMap::new();
 
         let mut subs_3: HashMap<String, ComptimeConstValue> = HashMap::new();
-        subs_3.insert("__const_0".into(), ValueWord::from_i64(3));
+        subs_3.insert("__const_0".into(), ComptimeConstValue::Int(3));
         let mut subs_5: HashMap<String, ComptimeConstValue> = HashMap::new();
-        subs_5.insert("__const_0".into(), ValueWord::from_i64(5));
+        subs_5.insert("__const_0".into(), ComptimeConstValue::Int(5));
 
         let mono_3 =
             substitute_function_def_with_consts(&func, &type_subs, &subs_3, "repeat::int_3");
@@ -1872,7 +1861,7 @@ mod tests {
         type_subs.insert("T".into(), ConcreteType::F64);
 
         let mut const_subs: HashMap<String, ComptimeConstValue> = HashMap::new();
-        const_subs.insert("__const_0".into(), ValueWord::from_i64(4));
+        const_subs.insert("__const_0".into(), ComptimeConstValue::Int(4));
 
         let mono = substitute_function_def_with_consts(
             &func,
