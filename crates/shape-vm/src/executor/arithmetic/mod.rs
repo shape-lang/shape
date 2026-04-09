@@ -622,7 +622,7 @@ impl VirtualMachine {
                         expected: "int",
                         got: a.type_name(),
                     })?;
-                    self.push_vw(ValueWord::from_i64(ai / bi))?;
+                    self.push_raw_i64(ai / bi)?;
                 }
             }
             DivNumber => {
@@ -684,7 +684,7 @@ impl VirtualMachine {
                         expected: "int",
                         got: a.type_name(),
                     })?;
-                    self.push_vw(ValueWord::from_i64(ai % bi))?;
+                    self.push_raw_i64(ai % bi)?;
                 }
             }
             ModNumber => {
@@ -750,9 +750,14 @@ impl VirtualMachine {
                         got: b.type_name(),
                     })?;
                     if exp >= 0 && exp < u32::MAX as i64 {
-                        self.push_vw(ValueWord::from_i64(base.pow(exp as u32)))?;
+                        let result = base.pow(exp as u32);
+                        if fits_i48(result) {
+                            self.push_raw_i64(result)?;
+                        } else {
+                            self.push_raw_f64(result as f64)?;
+                        }
                     } else {
-                        self.push_vw(ValueWord::from_f64((base as f64).powf(exp as f64)))?;
+                        self.push_raw_f64((base as f64).powf(exp as f64))?;
                     }
                 }
             }
@@ -797,7 +802,7 @@ impl VirtualMachine {
                     self.push_raw_f64(v as f64)?;
                 } else {
                     let val = self.pop_vw()?;
-                    self.push_vw(ValueWord::from_f64(unsafe { val.as_i64_unchecked() } as f64))?;
+                    self.push_raw_f64(unsafe { val.as_i64_unchecked() } as f64)?;
                 }
             }
             NumberToInt => {
@@ -806,7 +811,7 @@ impl VirtualMachine {
                     self.push_raw_i64(v as i64)?;
                 } else {
                     let val = self.pop_vw()?;
-                    self.push_vw(ValueWord::from_i64(unsafe { val.as_f64_unchecked() } as i64))?;
+                    self.push_raw_i64(unsafe { val.as_f64_unchecked() } as i64)?;
                 }
             }
             _ => unreachable!(

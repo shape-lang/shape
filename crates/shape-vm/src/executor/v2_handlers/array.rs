@@ -83,9 +83,8 @@ impl VirtualMachine {
             // ── Element access (get) ────────────────────────────────
 
             OpCode::TypedArrayGetF64 => {
-                let index_vw = self.pop_vw()?;
+                let index = self.pop_raw_i64()? as u32;
                 let arr_vw = self.pop_vw()?;
-                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<f64>;
                 let len = unsafe { TypedArray::len(arr) };
                 let val = unsafe {
@@ -95,14 +94,13 @@ impl VirtualMachine {
                             length: len as usize,
                         })?
                 };
-                self.push_vw(ValueWord::from_f64(val))?;
+                self.push_raw_f64(val)?;
                 Ok(())
             }
 
             OpCode::TypedArrayGetI64 => {
-                let index_vw = self.pop_vw()?;
+                let index = self.pop_raw_i64()? as u32;
                 let arr_vw = self.pop_vw()?;
-                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<i64>;
                 let len = unsafe { TypedArray::len(arr) };
                 let val = unsafe {
@@ -112,14 +110,13 @@ impl VirtualMachine {
                             length: len as usize,
                         })?
                 };
-                self.push_vw(ValueWord::from_i64(val))?;
+                self.push_raw_i64(val)?;
                 Ok(())
             }
 
             OpCode::TypedArrayGetI32 => {
-                let index_vw = self.pop_vw()?;
+                let index = self.pop_raw_i64()? as u32;
                 let arr_vw = self.pop_vw()?;
-                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<i32>;
                 let len = unsafe { TypedArray::len(arr) };
                 let val = unsafe {
@@ -129,15 +126,14 @@ impl VirtualMachine {
                             length: len as usize,
                         })?
                 };
-                // Store i32 as NaN-boxed i64 (sign-extended).
-                self.push_vw(ValueWord::from_i64(val as i64))?;
+                // Store i32 sign-extended as raw i64.
+                self.push_raw_i64(val as i64)?;
                 Ok(())
             }
 
             OpCode::TypedArrayGetBool => {
-                let index_vw = self.pop_vw()?;
+                let index = self.pop_raw_i64()? as u32;
                 let arr_vw = self.pop_vw()?;
-                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<u8>;
                 let len = unsafe { TypedArray::len(arr) };
                 let val = unsafe {
@@ -147,18 +143,16 @@ impl VirtualMachine {
                             length: len as usize,
                         })?
                 };
-                self.push_vw(ValueWord::from_bool(val != 0))?;
+                self.push_raw_bool(val != 0)?;
                 Ok(())
             }
 
             // ── Element access (set) ────────────────────────────────
 
             OpCode::TypedArraySetF64 => {
-                let val_vw = self.pop_vw()?;
-                let index_vw = self.pop_vw()?;
+                let val = self.pop_raw_f64()?;
+                let index = self.pop_raw_i64()? as u32;
                 let arr_vw = self.pop_vw()?;
-                let val = unsafe { val_vw.as_f64_unchecked() };
-                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<f64>;
                 unsafe {
                     TypedArray::set(arr, index, val);
@@ -167,11 +161,9 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArraySetI64 => {
-                let val_vw = self.pop_vw()?;
-                let index_vw = self.pop_vw()?;
+                let val = self.pop_raw_i64()?;
+                let index = self.pop_raw_i64()? as u32;
                 let arr_vw = self.pop_vw()?;
-                let val = unsafe { val_vw.as_i64_unchecked() };
-                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i64>;
                 unsafe {
                     TypedArray::set(arr, index, val);
@@ -180,11 +172,9 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArraySetI32 => {
-                let val_vw = self.pop_vw()?;
-                let index_vw = self.pop_vw()?;
+                let val = self.pop_raw_i64()? as i32;
+                let index = self.pop_raw_i64()? as u32;
                 let arr_vw = self.pop_vw()?;
-                let val = unsafe { val_vw.as_i64_unchecked() } as i32;
-                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i32>;
                 unsafe {
                     TypedArray::set(arr, index, val);
@@ -193,14 +183,9 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArraySetBool => {
-                let val_vw = self.pop_vw()?;
-                let index_vw = self.pop_vw()?;
+                let val = self.pop_raw_bool()?;
+                let index = self.pop_raw_i64()? as u32;
                 let arr_vw = self.pop_vw()?;
-                let val = val_vw.as_bool().ok_or(VMError::TypeError {
-                    expected: "bool",
-                    got: val_vw.type_name(),
-                })?;
-                let index = unsafe { index_vw.as_i64_unchecked() } as u32;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<u8>;
                 unsafe {
                     TypedArray::set(arr, index, if val { 1 } else { 0 });
@@ -211,9 +196,8 @@ impl VirtualMachine {
             // ── Push ────────────────────────────────────────────────
 
             OpCode::TypedArrayPushF64 => {
-                let val_vw = self.pop_vw()?;
+                let val = self.pop_raw_f64()?;
                 let arr_vw = self.pop_vw()?;
-                let val = unsafe { val_vw.as_f64_unchecked() };
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<f64>;
                 unsafe {
                     TypedArray::push(arr, val);
@@ -222,9 +206,8 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArrayPushI64 => {
-                let val_vw = self.pop_vw()?;
+                let val = self.pop_raw_i64()?;
                 let arr_vw = self.pop_vw()?;
-                let val = unsafe { val_vw.as_i64_unchecked() };
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i64>;
                 unsafe {
                     TypedArray::push(arr, val);
@@ -233,9 +216,8 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArrayPushI32 => {
-                let val_vw = self.pop_vw()?;
+                let val = self.pop_raw_i64()? as i32;
                 let arr_vw = self.pop_vw()?;
-                let val = unsafe { val_vw.as_i64_unchecked() } as i32;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<i32>;
                 unsafe {
                     TypedArray::push(arr, val);
@@ -244,12 +226,8 @@ impl VirtualMachine {
             }
 
             OpCode::TypedArrayPushBool => {
-                let val_vw = self.pop_vw()?;
+                let val = self.pop_raw_bool()?;
                 let arr_vw = self.pop_vw()?;
-                let val = val_vw.as_bool().ok_or(VMError::TypeError {
-                    expected: "bool",
-                    got: val_vw.type_name(),
-                })?;
                 let arr = extract_ptr(&arr_vw) as *mut TypedArray<u8>;
                 unsafe {
                     TypedArray::push(arr, if val { 1 } else { 0 });
@@ -264,7 +242,7 @@ impl VirtualMachine {
                 let arr = extract_ptr(&arr_vw) as *const TypedArray<u8>;
                 // len field is at a fixed offset regardless of T — safe to read via any T.
                 let len = unsafe { TypedArray::len(arr) };
-                self.push_vw(ValueWord::from_i64(len as i64))?;
+                self.push_raw_i64(len as i64)?;
                 Ok(())
             }
 
