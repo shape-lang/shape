@@ -126,7 +126,15 @@ impl BytecodeCompiler {
                 }
 
                 self.compile_literal(lit)?;
-                let eq_op = typed_eq_opcode_for_literal(lit).unwrap_or(OpCode::Eq);
+                let eq_op = typed_eq_opcode_for_literal(lit).ok_or_else(|| {
+                    ShapeError::SemanticError {
+                        message: format!(
+                            "Pattern matching on {} literals is not yet supported",
+                            lit
+                        ),
+                        location: None,
+                    }
+                })?;
                 self.emit(Instruction::simple(eq_op));
                 let ok_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
 

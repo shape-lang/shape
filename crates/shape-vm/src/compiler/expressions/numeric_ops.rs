@@ -279,6 +279,7 @@ pub(super) fn typed_opcode_for(op: &BinaryOp, nt: NumericType) -> Option<OpCode>
         match (op, nt) {
             (BinaryOp::Equal, NumericType::Int) => Some(OpCode::EqInt),
             (BinaryOp::Equal, NumericType::Number) => Some(OpCode::EqNumber),
+            (BinaryOp::Equal, NumericType::Decimal) => Some(OpCode::EqDecimal),
             (BinaryOp::NotEqual, NumericType::Int) => Some(OpCode::NeqInt),
             (BinaryOp::NotEqual, NumericType::Number) => Some(OpCode::NeqNumber),
             _ => None,

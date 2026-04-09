@@ -71,6 +71,17 @@ enum NumericEmitResult {
     NoPlan,
 }
 
+/// Simplified type category for equality dispatch.
+/// Collapses int-width variants to `Int` and char to `String` (EqString
+/// handles both heap-boxed string and char values via `as_str()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EqOperandType {
+    Int,
+    Number,
+    Decimal,
+    String,
+}
+
 impl BytecodeCompiler {
     fn infer_numeric_pair(
         &mut self,
@@ -294,21 +305,20 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Phase 2.6.5.3: inference-driven typed equality dispatch.
+    /// Phase 2.6.5.3/4: inference-driven typed equality dispatch.
     ///
-    /// Architectural shift: query the inference engine for both operand types
-    /// BEFORE compiling them, then pick the typed `Eq*`/`Neq*` opcode based on
-    /// those types. This avoids the slot-tracker dependency that the legacy
-    /// dispatch path relies on (last_expr_numeric_type populated by
-    /// sub-expression compilation), which has many failure modes (loop
-    /// counters, closure params, comptime values).
+    /// Architectural shift: resolve operand types from multiple sources
+    /// BEFORE compiling them, then pick the typed `Eq*`/`Neq*` opcode.
     ///
-    /// Returns `Ok(true)` if a typed opcode was emitted (caller should return
-    /// early), `Ok(false)` if the caller should fall through to the legacy
-    /// slot-tracker dispatch path.
+    /// Type resolution priority:
+    /// 1. Type inference engine (`infer_expr_type`)
+    /// 2. AST literal type (for `Literal::Int`, `Literal::String`, etc.)
+    /// 3. Asymmetric propagation: if one side is typed and the other is not,
+    ///    assume both sides have the same type. This is safe because typed
+    ///    comparison opcodes return false for mismatched runtime types.
     ///
-    /// Same dispatch model as Stage 2.3 (StringConcat) and Stage 2.4
-    /// (ArrayConcat) — query inference, dispatch on canonical type names.
+    /// Returns `Ok(true)` if a typed opcode was emitted, `Ok(false)` to
+    /// fall through to the legacy slot-tracker dispatch.
     fn compile_typed_equality(
         &mut self,
         op: &BinaryOp,
@@ -319,44 +329,43 @@ impl BytecodeCompiler {
             return Ok(false);
         }
 
-        let lhs_type = self.infer_expr_type(left).ok();
-        let rhs_type = self.infer_expr_type(right).ok();
+        // Resolve operand types from inference + literal fallback.
+        let mut lhs_eq = self.resolve_eq_type(left);
+        let mut rhs_eq = self.resolve_eq_type(right);
 
-        let lhs_numeric = lhs_type.as_ref().and_then(inferred_type_to_numeric);
-        let rhs_numeric = rhs_type.as_ref().and_then(inferred_type_to_numeric);
-
-        let lhs_name = lhs_type.as_ref().map(type_display_name);
-        let rhs_name = rhs_type.as_ref().map(type_display_name);
+        // Asymmetric propagation: if one side is typed and the other is not,
+        // propagate the known type. For `x == 5` where x is an untracked
+        // loop counter, the literal 5 tells us to use EqInt.
+        if lhs_eq.is_none() && rhs_eq.is_some() {
+            lhs_eq = rhs_eq;
+        } else if rhs_eq.is_none() && lhs_eq.is_some() {
+            rhs_eq = lhs_eq;
+        }
 
         let is_neq = matches!(op, BinaryOp::NotEqual);
 
         // Pick the typed opcode and whether to negate after.
         // EqString/EqDecimal have no Neq variants → emit Eq + Not for NotEqual.
         // EqInt/EqNumber have NeqInt/NeqNumber variants → use them directly.
-        let emission = match (lhs_numeric, rhs_numeric) {
-            (Some(NumericType::Int), Some(NumericType::Int)) => Some(if is_neq {
+        let emission = match (lhs_eq, rhs_eq) {
+            (Some(EqOperandType::Int), Some(EqOperandType::Int)) => Some(if is_neq {
                 (OpCode::NeqInt, false)
             } else {
                 (OpCode::EqInt, false)
             }),
-            (Some(NumericType::Number), Some(NumericType::Number)) => Some(if is_neq {
+            (Some(EqOperandType::Number), Some(EqOperandType::Number)) => Some(if is_neq {
                 (OpCode::NeqNumber, false)
             } else {
                 (OpCode::EqNumber, false)
             }),
-            (Some(NumericType::Decimal), Some(NumericType::Decimal)) => {
+            (Some(EqOperandType::Decimal), Some(EqOperandType::Decimal)) => {
                 Some((OpCode::EqDecimal, is_neq))
+            }
+            (Some(EqOperandType::String), Some(EqOperandType::String)) => {
+                Some((OpCode::EqString, is_neq))
             }
             _ => None,
         };
-
-        // Fall back to non-numeric type matching (string equality).
-        let emission = emission.or_else(|| {
-            match (lhs_name.as_deref(), rhs_name.as_deref()) {
-                (Some("string"), Some("string")) => Some((OpCode::EqString, is_neq)),
-                _ => None,
-            }
-        });
 
         let Some((opcode, needs_negate)) = emission else {
             return Ok(false);
@@ -372,6 +381,37 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
         self.last_expr_numeric_type = None;
         Ok(true)
+    }
+
+    /// Resolve the equality-relevant type of an expression from multiple
+    /// sources: inference engine, then AST literal kind.
+    fn resolve_eq_type(&mut self, expr: &Expr) -> Option<EqOperandType> {
+        // Source 1: type inference engine
+        if let Ok(ty) = self.infer_expr_type(expr) {
+            if let Some(nt) = inferred_type_to_numeric(&ty) {
+                return Some(match nt {
+                    NumericType::Int | NumericType::IntWidth(_) => EqOperandType::Int,
+                    NumericType::Number => EqOperandType::Number,
+                    NumericType::Decimal => EqOperandType::Decimal,
+                });
+            }
+            let name = type_display_name(&ty);
+            match name.as_str() {
+                "string" | "char" => return Some(EqOperandType::String),
+                _ => {}
+            }
+        }
+
+        // Source 2: AST literal type
+        match expr {
+            Expr::Literal(Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(..), _) => {
+                Some(EqOperandType::Int)
+            }
+            Expr::Literal(Literal::Number(_), _) => Some(EqOperandType::Number),
+            Expr::Literal(Literal::Decimal(_), _) => Some(EqOperandType::Decimal),
+            Expr::Literal(Literal::String(_), _) => Some(EqOperandType::String),
+            _ => None,
+        }
     }
 
     /// Compile a binary operation expression

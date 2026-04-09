@@ -9,10 +9,13 @@ use crate::compiler::BytecodeCompiler;
 /// Pick the typed equality opcode for a literal pattern operand. Returns
 /// `None` for literal kinds that need special-case handling at the call
 /// site (`Bool` desugars to direct conditional jump; `None` is a null
-/// check; `Char`/`Unit`/etc. fall through to generic `OpCode::Eq`).
+/// check).
 ///
 /// Stage 2.6.4: replaces generic `OpCode::Eq` emission in pattern matching
 /// with type-specialized opcodes when the literal type is known.
+///
+/// Stage 2.6.5.4: all reachable literal kinds must return `Some`. The
+/// generic `OpCode::Eq` fallback is being eliminated.
 pub(super) fn typed_eq_opcode_for_literal(lit: &Literal) -> Option<OpCode> {
     match lit {
         Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(..) => Some(OpCode::EqInt),
@@ -21,8 +24,6 @@ pub(super) fn typed_eq_opcode_for_literal(lit: &Literal) -> Option<OpCode> {
         Literal::String(_) => Some(OpCode::EqString),
         // Bool: caller desugars to JumpIfFalse/JumpIfTrue (no equality op).
         // None: caller desugars via Phase 2.6.5 null-sentinel rewrite.
-        // Char/Unit/Timeframe/FormattedString/ContentString: rare or
-        // unreachable in pattern position; caller falls back to OpCode::Eq.
         _ => None,
     }
 }
