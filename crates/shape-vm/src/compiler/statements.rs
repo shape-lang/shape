@@ -1569,7 +1569,18 @@ impl BytecodeCompiler {
         impl_name: Option<&str>,
         target_type: &shape_ast::ast::TypeName,
     ) -> Result<FunctionDef> {
-        let receiver_type = Some(Self::type_name_to_annotation(target_type));
+        // When the target type is a known generic container (Array, HashMap, etc.),
+        // synthesize type parameters (T, K, V) and enrich the receiver annotation
+        // to `Array<T>` (etc.). This enables the monomorphization pipeline to
+        // resolve T from the receiver's concrete element type at call sites,
+        // producing specialized functions that use typed opcodes.
+        //
+        // All methods in `impl Trait for Array` benefit from this because their
+        // body operates on `self` (the generic receiver) — even methods with no
+        // explicit parameters like `flatten()`.
+        let (impl_type_params, receiver_type) =
+            Self::synthesize_impl_type_params(target_type);
+
         let (params, body) = self.desugar_method_signature_and_body(method, receiver_type)?;
 
         // Async drop methods are named "drop_async" so both sync and async
@@ -1593,12 +1604,78 @@ impl BytecodeCompiler {
             params,
             return_type: method.return_type.clone(),
             body,
-            type_params: Some(Vec::new()),
+            type_params: Some(impl_type_params),
             annotations: method.annotations.clone(),
             is_async: method.is_async,
             is_comptime: false,
             where_clause: None,
         })
+    }
+
+    /// Synthesize type parameters and a receiver annotation for impl methods
+    /// on known generic container types.
+    ///
+    /// For `impl Iterable for Array`, the target type `Simple("Array")` becomes
+    /// receiver `Array<T>` with a synthetic type param `T`. This mirrors how
+    /// `extend Vec<T>` propagates type params, enabling monomorphization at
+    /// call sites (e.g. `[1,2,3].findIndex(...)` → T=int).
+    ///
+    /// Returns `(type_params, receiver_annotation)`.
+    fn synthesize_impl_type_params(
+        target_type: &shape_ast::ast::TypeName,
+    ) -> (Vec<shape_ast::ast::TypeParam>, Option<shape_ast::ast::TypeAnnotation>) {
+        let type_base = match target_type {
+            shape_ast::ast::TypeName::Simple(n) => n.as_str(),
+            shape_ast::ast::TypeName::Generic { name, .. } => name.as_str(),
+        };
+
+        // Known single-element generic containers: Array/Vec → T
+        let is_single_param_generic = matches!(type_base, "Array" | "Vec");
+        // Known dual-element generic containers: HashMap/Map → K, V
+        let is_dual_param_generic = matches!(type_base, "HashMap" | "Map");
+
+        if is_single_param_generic {
+            let type_params = vec![shape_ast::ast::TypeParam {
+                name: "T".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
+                default_type: None,
+                trait_bounds: Vec::new(),
+            }];
+            let receiver_ann = shape_ast::ast::TypeAnnotation::Generic {
+                name: shape_ast::ast::type_path::TypePath::simple(type_base),
+                args: vec![shape_ast::ast::TypeAnnotation::Basic("T".to_string())],
+            };
+            (type_params, Some(receiver_ann))
+        } else if is_dual_param_generic {
+            let type_params = vec![
+                shape_ast::ast::TypeParam {
+                    name: "K".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                },
+                shape_ast::ast::TypeParam {
+                    name: "V".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                },
+            ];
+            let receiver_ann = shape_ast::ast::TypeAnnotation::Generic {
+                name: shape_ast::ast::type_path::TypePath::simple(type_base),
+                args: vec![
+                    shape_ast::ast::TypeAnnotation::Basic("K".to_string()),
+                    shape_ast::ast::TypeAnnotation::Basic("V".to_string()),
+                ],
+            };
+            (type_params, Some(receiver_ann))
+        } else {
+            // Unknown type — no synthetic params, plain receiver.
+            (Vec::new(), Some(Self::type_name_to_annotation(target_type)))
+        }
     }
 
     /// Build desugared method params/body with implicit receiver handling.

@@ -1761,6 +1761,17 @@ impl BytecodeCompiler {
                     self.emit_unit();
                 }
                 let call_arity = actual_arity_with_self.max(effective_total_arity);
+
+                // --- Monomorphization: specialize generic impl/trait methods ---
+                //
+                // When an impl method has synthesized type parameters (e.g.
+                // `Array::findIndex` with T from the receiver's element type),
+                // try to monomorphize it for the receiver's concrete type.
+                // Falls back to the generic function index on any failure.
+                let call_func_idx = self
+                    .try_monomorphize_method_call(&func_name, receiver, args)
+                    .unwrap_or(func_idx);
+
                 let arg_count = self
                     .program
                     .add_constant(Constant::Number(call_arity as f64));
@@ -1768,12 +1779,16 @@ impl BytecodeCompiler {
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
                 ));
+
+                let call_func_name = self.program.functions[call_func_idx].name.clone();
                 self.emit(Instruction::new(
                     OpCode::Call,
-                    Some(Operand::Function(shape_value::FunctionId(func_idx as u16))),
+                    Some(Operand::Function(shape_value::FunctionId(
+                        call_func_idx as u16,
+                    ))),
                 ));
                 if let Some(ref mut blob) = self.current_blob_builder {
-                    blob.record_call(&func_name);
+                    blob.record_call(&call_func_name);
                 }
                 self.last_expr_schema = None;
                 self.last_expr_numeric_type = method_return_numeric_type(method);
@@ -2307,6 +2322,14 @@ impl BytecodeCompiler {
         match self.ensure_monomorphic_function(func_name, &resolution.type_args) {
             Ok(specialized_idx) => {
                 let idx = specialized_idx as usize;
+                // Self-call guard: if the monomorphized specialization is the
+                // same function we are currently compiling (e.g. `Vec.len::i64`
+                // calling `self.len()` which monomorphizes back to itself),
+                // return None so the caller falls through to the built-in
+                // method dispatch, preventing infinite recursion at runtime.
+                if self.current_function == Some(idx) {
+                    return None;
+                }
                 Some(idx)
             }
             Err(_) => None,

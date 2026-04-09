@@ -14,9 +14,6 @@
 //!
 //! - `test_user_defined_generic_function`: regular (non-method) function calls
 //!   do not yet trigger monomorphization.
-//! - `test_nested_generic_call`: trait impl methods (e.g. `flatten` from
-//!   `impl Iterable for Array`) dispatch via a different path that does not
-//!   trigger monomorphization.
 
 // ---------------------------------------------------------------------------
 // Meta-test: confirm the monomorphization module is reachable.
@@ -287,12 +284,14 @@ mod e2e_tests {
     /// types — the flatten specialization should be keyed on `i64`, not on
     /// `Array<i64>`.
     ///
-    /// NOTE: `flatten` is defined in `impl Iterable for Array` (a trait impl),
-    /// not in `extend Vec<T>`. Trait impl methods are dispatched via a
-    /// different path that doesn't currently trigger monomorphization. This
-    /// test is gated until trait impl monomorphization is wired up.
+    /// `flatten` is defined in `impl Iterable for Array` (a trait impl).
+    /// Trait impl methods now get synthesized type params (Stage 2.6), enabling
+    /// monomorphization. However, `flatten` goes through the extend path (Vec.flatten
+    /// exists), and the monomorphized body calls `self.len()` via the delegating
+    /// extend method, which causes recursion due to the empty-template-call issue.
+    /// Gated until the delegating extend method recursion issue is resolved.
     #[test]
-    #[ignore] // trait impl methods (Iterable for Array) do not trigger monomorphization yet
+    #[ignore] // pre-existing: monomorphized extend methods calling self.len() overflow
     fn test_nested_generic_call() {
         let source = r#"
             let nested = [[1, 2], [3, 4]]
@@ -366,6 +365,51 @@ mod e2e_tests {
             !cache_keys.iter().any(|k| k.contains("add")),
             "concrete function `add` should NOT be in the monomorphization cache, got: {:?}",
             cache_keys
+        );
+    }
+
+    /// Tests that `impl Trait for Vec` methods with untyped parameters get
+    /// monomorphized via synthesized type params (Stage 2.6).
+    ///
+    /// Uses `Vec` (not `Array`) because the dispatch system maps array literals
+    /// to extend type "Vec". The trait method `contains(value)` has an untyped
+    /// `value` parameter. The compiler synthesizes type param `T` from the Vec
+    /// receiver, and monomorphization resolves `T` to `i64` at the call site.
+    ///
+    /// The method uses `for item in self` (not `self.len()`) to avoid the
+    /// pre-existing delegating extend method recursion issue.
+    #[test]
+    fn test_impl_trait_method_monomorphization() {
+        let source = r#"
+            trait Searchable {
+                contains(value): bool,
+            }
+            impl Searchable for Vec {
+                method contains(value) {
+                    for item in self {
+                        if item == value { return true }
+                    }
+                    false
+                }
+            }
+            let arr = [10, 20, 30]
+            arr.contains(20)
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let cache_keys = &bytecode.monomorphization_keys;
+        assert!(
+            cache_keys
+                .iter()
+                .any(|k| k.contains("contains") && k.contains("i64")),
+            "expected a contains specialization keyed on i64 in cache, got: {:?}",
+            cache_keys
+        );
+
+        let result = run_program(&bytecode);
+        assert_eq!(
+            result.as_bool(),
+            Some(true),
+            "contains(20) on [10,20,30] should return true"
         );
     }
 
