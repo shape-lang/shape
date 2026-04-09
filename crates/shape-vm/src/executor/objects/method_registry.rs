@@ -341,6 +341,10 @@ pub static DATETIME_METHODS: phf::Map<&'static str, MethodFn> = phf_map! {
     "timezone" => crate::executor::objects::datetime_methods::handle_timezone,
     "offset" => crate::executor::objects::datetime_methods::handle_offset,
 
+    // Operator-trait arithmetic (add/sub for temporal binary ops)
+    "add" => crate::executor::objects::datetime_methods::handle_add,
+    "sub" => crate::executor::objects::datetime_methods::handle_sub,
+
     // Arithmetic
     "add_days" => crate::executor::objects::datetime_methods::handle_add_days,
     "add_hours" => crate::executor::objects::datetime_methods::handle_add_hours,
@@ -355,6 +359,14 @@ pub static DATETIME_METHODS: phf::Map<&'static str, MethodFn> = phf_map! {
 
     // Diff
     "diff" => crate::executor::objects::datetime_methods::handle_diff,
+};
+
+/// PHF registry for TimeSpan (Duration) methods.
+///
+/// **Operator-trait:** add, sub
+pub static TIMESPAN_METHODS: phf::Map<&'static str, MethodFn> = phf_map! {
+    "add" => crate::executor::objects::datetime_methods::handle_timespan_add,
+    "sub" => crate::executor::objects::datetime_methods::handle_timespan_sub,
 };
 
 /// PHF registry for Instant methods (6 methods)

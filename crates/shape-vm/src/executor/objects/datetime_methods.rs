@@ -499,6 +499,125 @@ pub fn handle_is_same_day(
     ))
 }
 
+// ===== Operator-trait methods (add/sub) for CallMethod dispatch =====
+
+/// DateTime.add(rhs): rhs must be a TimeSpan (chrono::Duration).
+/// Returns a new DateTime offset by the duration.
+pub fn handle_add(
+    _vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<ValueWord, VMError> {
+    let dt = recv_dt(&args)?;
+    let rhs = args.get(1).ok_or_else(|| VMError::ArityMismatch {
+        function: "DateTime.add".to_string(),
+        expected: 1,
+        got: 0,
+    })?;
+    if let Some(dur) = rhs.as_timespan() {
+        let result = dt
+            .checked_add_signed(dur)
+            .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
+        Ok(ValueWord::from_time(result))
+    } else {
+        Err(VMError::TypeError {
+            expected: "Duration/TimeSpan",
+            got: rhs.type_name(),
+        })
+    }
+}
+
+/// DateTime.sub(rhs): rhs can be a TimeSpan -> DateTime, or another DateTime -> TimeSpan.
+pub fn handle_sub(
+    _vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<ValueWord, VMError> {
+    let dt = recv_dt(&args)?;
+    let rhs = args.get(1).ok_or_else(|| VMError::ArityMismatch {
+        function: "DateTime.sub".to_string(),
+        expected: 1,
+        got: 0,
+    })?;
+    if let Some(dur) = rhs.as_timespan() {
+        let result = dt
+            .checked_sub_signed(dur)
+            .ok_or_else(|| VMError::RuntimeError("DateTime overflow in sub".to_string()))?;
+        Ok(ValueWord::from_time(result))
+    } else if let Some(other_dt) = rhs.as_datetime() {
+        let diff = *dt - *other_dt;
+        Ok(ValueWord::from_timespan(diff))
+    } else {
+        Err(VMError::TypeError {
+            expected: "Duration/TimeSpan or DateTime",
+            got: rhs.type_name(),
+        })
+    }
+}
+
+// ===== TimeSpan (Duration) operator-trait methods =====
+
+/// TimeSpan.add(rhs): rhs can be a TimeSpan -> TimeSpan, or DateTime -> DateTime.
+pub fn handle_timespan_add(
+    _vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<ValueWord, VMError> {
+    let dur = args[0].as_timespan().ok_or_else(|| VMError::TypeError {
+        expected: "Duration/TimeSpan",
+        got: args[0].type_name(),
+    })?;
+    let rhs = args.get(1).ok_or_else(|| VMError::ArityMismatch {
+        function: "TimeSpan.add".to_string(),
+        expected: 1,
+        got: 0,
+    })?;
+    if let Some(other_dur) = rhs.as_timespan() {
+        let result = dur.checked_add(&other_dur).ok_or_else(|| {
+            VMError::RuntimeError("Duration overflow in add".to_string())
+        })?;
+        Ok(ValueWord::from_timespan(result))
+    } else if let Some(dt) = rhs.as_datetime() {
+        let result = dt.checked_add_signed(dur).ok_or_else(|| {
+            VMError::RuntimeError("DateTime overflow in add".to_string())
+        })?;
+        Ok(ValueWord::from_time(result))
+    } else {
+        Err(VMError::TypeError {
+            expected: "Duration/TimeSpan or DateTime",
+            got: rhs.type_name(),
+        })
+    }
+}
+
+/// TimeSpan.sub(rhs): rhs must be a TimeSpan -> TimeSpan.
+pub fn handle_timespan_sub(
+    _vm: &mut VirtualMachine,
+    args: Vec<ValueWord>,
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<ValueWord, VMError> {
+    let dur = args[0].as_timespan().ok_or_else(|| VMError::TypeError {
+        expected: "Duration/TimeSpan",
+        got: args[0].type_name(),
+    })?;
+    let rhs = args.get(1).ok_or_else(|| VMError::ArityMismatch {
+        function: "TimeSpan.sub".to_string(),
+        expected: 1,
+        got: 0,
+    })?;
+    if let Some(other_dur) = rhs.as_timespan() {
+        let result = dur.checked_sub(&other_dur).ok_or_else(|| {
+            VMError::RuntimeError("Duration overflow in sub".to_string())
+        })?;
+        Ok(ValueWord::from_timespan(result))
+    } else {
+        Err(VMError::TypeError {
+            expected: "Duration/TimeSpan",
+            got: rhs.type_name(),
+        })
+    }
+}
+
 /// Helper: days in a given month.
 fn days_in_month(year: i32, month: u32) -> u32 {
     match month {

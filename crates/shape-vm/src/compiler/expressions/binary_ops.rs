@@ -738,9 +738,10 @@ impl BytecodeCompiler {
                     }
 
                     // DateTime/Duration addition: at least one side is
-                    // DateTime or Duration (TimeSpan). These go through the
-                    // VM's generic arithmetic which handles the heap-heap
-                    // temporal arms. Emit via operator trait call.
+                    // DateTime or Duration (TimeSpan). Dispatch via
+                    // CallMethod("add") so the executor's PHF-backed
+                    // datetime/timespan method registry handles the
+                    // type combinations. Replaces the generic Add path.
                     let is_temporal = |n: &Option<String>| {
                         matches!(
                             n.as_deref(),
@@ -748,7 +749,14 @@ impl BytecodeCompiler {
                         )
                     };
                     if is_temporal(&lhs_name) || is_temporal(&rhs_name) {
-                        crate::compiler::helpers::emit_runtime_add(self);
+                        let method_id = shape_value::MethodId::from_name("add");
+                        let string_id = self.program.add_string("add".to_string());
+                        self.emit(Instruction::new(OpCode::CallMethod, Some(Operand::TypedMethodCall {
+                            method_id: method_id.0, arg_count: 1, string_id,
+                        })));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = None;
                         return Ok(());
                     }
 
@@ -900,6 +908,31 @@ impl BytecodeCompiler {
                             self.compile_expr(left)?;
                             self.compile_expr(right)?;
                             self.emit(Instruction::simple(string_cmp_op));
+                            self.last_expr_schema = None;
+                            self.last_expr_type_info = None;
+                            self.last_expr_numeric_type = None;
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Stage 4.2: temporal Sub dispatch via CallMethod("sub").
+                // When one operand is DateTime or Duration/TimeSpan, emit
+                // CallMethod instead of falling through to the strict
+                // arithmetic check which would reject non-numeric types.
+                if matches!(op, BinaryOp::Sub) {
+                    if let (Ok(lt), Ok(rt)) = (self.infer_expr_type(left), self.infer_expr_type(right)) {
+                        let lt_name = type_display_name(&lt);
+                        let rt_name = type_display_name(&rt);
+                        let is_temporal = |n: &str| matches!(n, "DateTime" | "Duration" | "TimeSpan");
+                        if is_temporal(&lt_name) || is_temporal(&rt_name) {
+                            self.compile_expr(left)?;
+                            self.compile_expr(right)?;
+                            let method_id = shape_value::MethodId::from_name("sub");
+                            let string_id = self.program.add_string("sub".to_string());
+                            self.emit(Instruction::new(OpCode::CallMethod, Some(Operand::TypedMethodCall {
+                                method_id: method_id.0, arg_count: 1, string_id,
+                            })));
                             self.last_expr_schema = None;
                             self.last_expr_type_info = None;
                             self.last_expr_numeric_type = None;

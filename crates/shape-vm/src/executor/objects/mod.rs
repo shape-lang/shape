@@ -565,6 +565,18 @@ impl VirtualMachine {
                     let result = handler(self, args_nb, ctx)?;
                     self.push_vw(result)?;
                 }
+                HeapKind::TimeSpan => {
+                    let handler = method_registry::TIMESPAN_METHODS
+                        .get(method_name.as_str())
+                        .ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "Unknown method '{}' on TimeSpan type",
+                                method_name
+                            ))
+                        })?;
+                    let result = handler(self, args_nb, ctx)?;
+                    self.push_vw(result)?;
+                }
                 HeapKind::Instant => {
                     let handler = method_registry::INSTANT_METHODS
                         .get(method_name.as_str())
