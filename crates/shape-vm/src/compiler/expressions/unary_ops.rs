@@ -53,10 +53,10 @@ impl BytecodeCompiler {
                     return Ok(());
                 }
 
-                // Fallback for unknown types (BigInt, Decimal-as-heap, etc.):
-                // emit the generic Neg opcode and let `exec_arithmetic` dispatch
-                // by tag at runtime. Phase 2.6 / later phases narrow this further.
-                self.emit(Instruction::simple(OpCode::Neg));
+                return Err(shape_ast::error::ShapeError::SemanticError {
+                    message: "Cannot infer operand type for unary `-` — add type annotations".to_string(),
+                    location: None,
+                });
             }
             _ => {
                 self.compile_unary_op(op)?;

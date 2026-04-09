@@ -70,7 +70,7 @@ fn combined_span(left: &Expr, right: &Expr) -> Span {
 /// The executor's `exec_arithmetic` / `exec_comparison` handles these at runtime.
 fn generic_opcode_for(op: &BinaryOp) -> Option<OpCode> {
     match op {
-        BinaryOp::Add => Some(OpCode::Add),
+        BinaryOp::Add => None, // Add is fully handled by typed dispatch; no generic fallback
         BinaryOp::Sub => Some(OpCode::Sub),
         BinaryOp::Mul => Some(OpCode::Mul),
         BinaryOp::Div => Some(OpCode::Div),
@@ -694,23 +694,73 @@ impl BytecodeCompiler {
                         return Ok(());
                     }
 
-                    // Confirm each operand is numeric via one of three paths:
+                    // DateTime/Duration addition: at least one side is
+                    // DateTime or Duration (TimeSpan). These go through the
+                    // VM's generic arithmetic which handles the heap-heap
+                    // temporal arms. Emit via operator trait call.
+                    let is_temporal = |n: &Option<String>| {
+                        matches!(
+                            n.as_deref(),
+                            Some("DateTime") | Some("Duration") | Some("TimeSpan")
+                        )
+                    };
+                    if is_temporal(&lhs_name) || is_temporal(&rhs_name) {
+                        emit_operator_trait_call(self, "add");
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = None;
+                        return Ok(());
+                    }
+
+                    // Path 4: if infer_expr_type resolved a numeric type
+                    // name, fill in missing NumericType for the coercion
+                    // planner.
+                    let inferred_numeric = |n: &Option<String>| -> Option<NumericType> {
+                        match n.as_deref() {
+                            Some("int") => Some(NumericType::Int),
+                            Some("number") => Some(NumericType::Number),
+                            Some("decimal") => Some(NumericType::Decimal),
+                            _ => None,
+                        }
+                    };
+                    let lhs_inferred_num = inferred_numeric(&lhs_name);
+                    let rhs_inferred_num = inferred_numeric(&rhs_name);
+                    if left_numeric.is_none() && lhs_inferred_num.is_some() {
+                        left_numeric = lhs_inferred_num;
+                    }
+                    if right_numeric.is_none() && rhs_inferred_num.is_some() {
+                        right_numeric = rhs_inferred_num;
+                    }
+
+                    // Confirm each operand is numeric via one of four paths:
                     // 1. Syntactic: it's a numeric literal
                     // 2. Storage hint: it's a local with a known numeric hint
                     //    (excludes untyped function params — see param_locals)
-                    // 3. Non-identifier with type tracker info: for expressions
-                    //    like a[0], foo.bar, x*y — the type tracker is reliable
-                    //    because the B19 mistyping only affects bare param identifiers
+                    // 3. Type tracker info, excluding only untyped function
+                    //    params (param_locals) whose inferred hints can be
+                    //    wrong (B19). Non-param identifiers (locals, for-loop
+                    //    vars, module bindings) have reliable tracker info.
+                    // 4. infer_expr_type resolved a numeric type name
+                    let is_untyped_param = |e: &Expr| -> bool {
+                        if let Expr::Identifier(name, _) = e {
+                            if let Some(idx) = self.resolve_local(name) {
+                                return self.param_locals.contains(&idx);
+                            }
+                        }
+                        false
+                    };
                     let lhs_confirmed = Self::is_expr_confirmed_numeric(left)
                         || self
                             .storage_hint_for_expr(left)
                             .is_some_and(|h| h.is_numeric_family())
-                        || (!matches!(left, Expr::Identifier(..)) && left_numeric.is_some());
+                        || (!is_untyped_param(left) && left_numeric.is_some())
+                        || lhs_inferred_num.is_some();
                     let rhs_confirmed = Self::is_expr_confirmed_numeric(right)
                         || self
                             .storage_hint_for_expr(right)
                             .is_some_and(|h| h.is_numeric_family())
-                        || (!matches!(right, Expr::Identifier(..)) && right_numeric.is_some());
+                        || (!is_untyped_param(right) && right_numeric.is_some())
+                        || rhs_inferred_num.is_some();
 
                     let primary = if lhs_confirmed && rhs_confirmed {
                         self.emit_numeric_binary_with_coercion_trusted(
@@ -729,11 +779,12 @@ impl BytecodeCompiler {
                             self.last_expr_schema = None;
                         }
                         NumericEmitResult::CoercedNeedsGeneric | NumericEmitResult::NoPlan => {
-                            // Generic Add (string concat, array concat, etc.)
-                            self.emit(Instruction::simple(OpCode::Add));
-                            self.last_expr_schema = None;
-                            self.last_expr_type_info = None;
-                            self.last_expr_numeric_type = None;
+                            return Err(ShapeError::SemanticError {
+                                message: "Cannot infer operand types for `+` — add type annotations".to_string(),
+                                location: Some(
+                                    self.span_to_source_location(combined_span(left, right)),
+                                ),
+                            });
                         }
                     }
                 }
