@@ -20,6 +20,9 @@ fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::Sub => Some("Sub"),
         BinaryOp::Mul => Some("Mul"),
         BinaryOp::Div => Some("Div"),
+        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
+            Some("Ord")
+        }
         _ => None, // Mod, Pow have no operator trait
     }
 }
@@ -35,8 +38,41 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::Sub => Some("sub"),
         BinaryOp::Mul => Some("mul"),
         BinaryOp::Div => Some("div"),
+        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
+            Some("cmp")
+        }
         _ => None,
     }
+}
+
+fn emit_cmp_result_comparison(compiler: &mut BytecodeCompiler, op: &BinaryOp) {
+    use crate::bytecode::Constant;
+    let zero_idx = compiler.program.add_constant(Constant::Int(0));
+    compiler.emit(Instruction::new(OpCode::PushConst, Some(Operand::Const(zero_idx))));
+    let cmp_op = match op {
+        BinaryOp::Greater => OpCode::GtInt,
+        BinaryOp::Less => OpCode::LtInt,
+        BinaryOp::GreaterEq => OpCode::GteInt,
+        BinaryOp::LessEq => OpCode::LteInt,
+        _ => unreachable!(),
+    };
+    compiler.emit(Instruction::simple(cmp_op));
+}
+
+fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_schema: Option<SchemaId>, left_expr: &Expr) -> bool {
+    let trait_name = match operator_trait_for_op(op) { Some(t) => t, None => return false };
+    let method_name = match operator_trait_method_for_op(op) { Some(m) => m, None => return false };
+    let has_trait_via_schema = left_schema
+        .and_then(|sid| compiler.type_tracker.schema_registry().get_by_id(sid))
+        .is_some_and(|schema| compiler.type_inference.env.type_implements_trait(&schema.name, trait_name));
+    let has_trait = has_trait_via_schema || compiler.infer_expr_type(left_expr).ok().is_some_and(|ty| {
+        let name = type_display_name(&ty);
+        compiler.type_inference.env.type_implements_trait(&name, trait_name)
+    });
+    if !has_trait { return false; }
+    emit_operator_trait_call(compiler, method_name);
+    if is_ordered_comparison(op) { emit_cmp_result_comparison(compiler, op); }
+    true
 }
 
 /// Emit a `CallMethod` instruction targeting an operator trait method
@@ -1036,9 +1072,10 @@ impl BytecodeCompiler {
                     NumericEmitResult::EmittedTyped => {}
                     NumericEmitResult::CoercedNeedsGeneric => {
                         // Op has no typed variant for this type combination.
-                        // Emit generic opcode for runtime dispatch (e.g. operator traits).
-                        if !emit_generic_via_helper(self, op) {
-                            self.compile_binary_op(op)?;
+                        if !try_emit_trait_dispatch(self, op, left_schema, left) {
+                            if !emit_generic_via_helper(self, op) {
+                                self.compile_binary_op(op)?;
+                            }
                         }
                     }
                     NumericEmitResult::NoPlan => {
@@ -1054,10 +1091,10 @@ impl BytecodeCompiler {
                         ) {
                             NumericEmitResult::EmittedTyped => {}
                             _ => {
-                                // Emit generic opcode for runtime dispatch
-                                // (DateTime arithmetic, operator traits, untyped params, etc.)
-                                if !emit_generic_via_helper(self, op) {
-                                    self.compile_binary_op(op)?;
+                                if !try_emit_trait_dispatch(self, op, left_schema, left) {
+                                    if !emit_generic_via_helper(self, op) {
+                                        self.compile_binary_op(op)?;
+                                    }
                                 }
                             }
                         }
