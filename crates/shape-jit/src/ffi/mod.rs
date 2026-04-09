@@ -23,6 +23,11 @@ pub mod result;
 pub mod simd;
 pub mod typed_object;
 pub mod v2;
+pub mod v2_array;
+pub mod v2_core;
+pub mod v2_math;
+pub mod v2_string_ffi;
+pub mod v2_struct;
 pub mod v2_typed;
 pub mod window;
 

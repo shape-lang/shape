@@ -21,6 +21,9 @@ mod object_symbols;
 mod reference_symbols;
 mod result_option_symbols;
 mod simd_symbols;
+mod v2_math_symbols;
+mod v2_string_symbols;
+mod v2_struct_symbols;
 mod v2_symbols;
 mod v2_typed_symbols;
 
@@ -47,6 +50,9 @@ pub use object_symbols::{declare_object_functions, register_object_symbols};
 pub use reference_symbols::{declare_reference_functions, register_reference_symbols};
 pub use result_option_symbols::{declare_result_option_functions, register_result_option_symbols};
 pub use simd_symbols::{declare_simd_functions, register_simd_symbols};
+pub use v2_math_symbols::{declare_v2_math_functions, register_v2_math_symbols};
+pub use v2_string_symbols::{declare_v2_string_functions, register_v2_string_symbols};
+pub use v2_struct_symbols::{declare_v2_struct_functions, register_v2_struct_symbols};
 pub use v2_symbols::{declare_v2_functions, register_v2_symbols};
 pub use v2_typed_symbols::{declare_v2_typed_functions, register_v2_typed_symbols};
 
@@ -67,6 +73,9 @@ pub fn register_ffi_symbols(builder: &mut JITBuilder) {
     register_arc_symbols(builder);
     register_v2_symbols(builder);
     register_v2_typed_symbols(builder);
+    register_v2_math_symbols(builder);
+    register_v2_struct_symbols(builder);
+    register_v2_string_symbols(builder);
 }
 
 /// Declare all FFI function signatures in the module
@@ -88,6 +97,9 @@ pub fn declare_ffi_functions(module: &mut JITModule) -> HashMap<String, FuncId> 
     declare_arc_functions(module, &mut ffi_funcs);
     declare_v2_functions(module, &mut ffi_funcs);
     declare_v2_typed_functions(module, &mut ffi_funcs);
+    declare_v2_math_functions(module, &mut ffi_funcs);
+    declare_v2_struct_functions(module, &mut ffi_funcs);
+    declare_v2_string_functions(module, &mut ffi_funcs);
 
     ffi_funcs
 }

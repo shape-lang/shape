@@ -99,8 +99,13 @@ pub extern "C" fn jit_v2_array_get_f64_legacy(arr_bits: u64, idx: i64) -> f64 {
 ///
 /// This is a thin wrapper around jit_typed_object_alloc, but with a simpler
 /// signature for the v2 typed path.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_struct_alloc(schema_id: i32, total_size: i64) -> u64 {
+///
+/// Note: `#[no_mangle]` removed — the symbol name `jit_v2_struct_alloc` is now
+/// owned by `v2_struct.rs` which provides a proper raw-pointer implementation
+/// without NaN-boxing. This legacy version is kept for any callers that still
+/// operate in the NaN-boxed domain.
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_struct_alloc_nanboxed(schema_id: i32, total_size: i64) -> u64 {
     // Delegate to existing typed object allocation
     crate::ffi::typed_object::jit_typed_object_alloc(schema_id as u32, total_size as u64)
 }
@@ -114,8 +119,11 @@ pub extern "C" fn jit_v2_struct_alloc(schema_id: i32, total_size: i64) -> u64 {
 /// # Safety
 /// `ptr_bits` must be a valid NaN-boxed HK_TYPED_OBJECT value.
 /// `offset` must be a valid field byte offset within the object.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_struct_get_f64(ptr_bits: u64, offset: i32) -> f64 {
+///
+/// Note: `#[no_mangle]` removed — the symbol name `jit_v2_struct_get_f64` is now
+/// owned by `v2_struct.rs` which uses raw pointer access without NaN-boxing.
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_struct_get_f64_nanboxed(ptr_bits: u64, offset: i32) -> f64 {
     if !is_heap_kind(ptr_bits, HK_TYPED_OBJECT) {
         return f64::NAN;
     }
@@ -141,8 +149,11 @@ pub extern "C" fn jit_v2_struct_get_f64(ptr_bits: u64, offset: i32) -> f64 {
 /// # Safety
 /// `ptr_bits` must be a valid NaN-boxed HK_TYPED_OBJECT value.
 /// `offset` must be a valid field byte offset within the object.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_struct_set_f64(ptr_bits: u64, offset: i32, val: f64) {
+///
+/// Note: `#[no_mangle]` removed — the symbol name `jit_v2_struct_set_f64` is now
+/// owned by `v2_struct.rs` which uses raw pointer access without NaN-boxing.
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_struct_set_f64_nanboxed(ptr_bits: u64, offset: i32, val: f64) {
     if !is_heap_kind(ptr_bits, HK_TYPED_OBJECT) {
         return;
     }

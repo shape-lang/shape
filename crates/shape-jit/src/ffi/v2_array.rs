@@ -32,7 +32,10 @@ pub extern "C" fn jit_v2_array_get_f64(arr: *mut TypedArrayHeader, index: i64) -
 /// # Safety
 /// `arr` must be valid, elem_type == F64, `index` in bounds.
 pub extern "C" fn jit_v2_array_set_f64(arr: *mut TypedArrayHeader, index: i64, val: f64) {
-    unsafe { typed_array_set_f64(arr, index as u32, val) }
+    unsafe {
+        let data = (*arr).data as *mut f64;
+        data.add(index as usize).write(val);
+    }
 }
 
 /// Push an f64 element.  Returns the (possibly reallocated) header pointer.
@@ -62,7 +65,10 @@ pub extern "C" fn jit_v2_array_get_i64(arr: *mut TypedArrayHeader, index: i64) -
 
 /// Set element at `index` in a `TypedArray<i64>`.
 pub extern "C" fn jit_v2_array_set_i64(arr: *mut TypedArrayHeader, index: i64, val: i64) {
-    unsafe { typed_array_set_i64(arr, index as u32, val) }
+    unsafe {
+        let data = (*arr).data as *mut i64;
+        data.add(index as usize).write(val);
+    }
 }
 
 /// Push an i64 element.  Returns the (possibly reallocated) header pointer.
@@ -89,7 +95,10 @@ pub extern "C" fn jit_v2_array_get_i32(arr: *mut TypedArrayHeader, index: i64) -
 
 /// Set element at `index` in a `TypedArray<i32>`.
 pub extern "C" fn jit_v2_array_set_i32(arr: *mut TypedArrayHeader, index: i64, val: i32) {
-    unsafe { typed_array_set_i32(arr, index as u32, val) }
+    unsafe {
+        let data = (*arr).data as *mut i32;
+        data.add(index as usize).write(val);
+    }
 }
 
 /// Push an i32 element.  Returns the (possibly reallocated) header pointer.
@@ -111,12 +120,12 @@ pub extern "C" fn jit_v2_array_len(arr: *mut TypedArrayHeader) -> i64 {
 
 /// Increment the reference count.
 pub extern "C" fn jit_v2_array_retain(arr: *mut TypedArrayHeader) {
-    unsafe { typed_array_retain(arr) }
+    unsafe { let _ = typed_array_retain(arr); }
 }
 
 /// Decrement the reference count; frees when it reaches zero.
 pub extern "C" fn jit_v2_array_release(arr: *mut TypedArrayHeader) {
-    unsafe { typed_array_release(arr) }
+    unsafe { let _ = typed_array_release(arr); }
 }
 
 // ============================================================================

@@ -1,8 +1,13 @@
-//! v2 Typed FFI Symbol Registration
+//! v2 Typed FFI Symbol Registration (legacy transitional)
 //!
-//! Registers the v2 native-typed FFI function symbols with the JIT builder
-//! and declares their Cranelift signatures. These functions accept native
-//! types (f64, i64, etc.) instead of NaN-boxed u64.
+//! Registers a small set of v2 FFI function symbols that haven't yet been
+//! migrated to their proper v2 sub-modules. As the v2 migration completes,
+//! entries here should move to v2_struct_symbols, v2_math_symbols, etc.
+//!
+//! **Struct symbols** (`jit_v2_struct_alloc`, `jit_v2_struct_get_f64`,
+//! `jit_v2_struct_set_f64`) were removed from here — they are now registered
+//! by `v2_struct_symbols` which provides proper raw-pointer implementations
+//! without NaN-boxing overhead.
 
 use cranelift::prelude::*;
 use cranelift_jit::JITBuilder;
@@ -11,8 +16,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::v2_typed::{
-    jit_v2_array_alloc_f64, jit_v2_pow_f64, jit_v2_print_typed, jit_v2_struct_alloc,
-    jit_v2_struct_get_f64, jit_v2_struct_set_f64,
+    jit_v2_array_alloc_f64, jit_v2_pow_f64, jit_v2_print_typed,
 };
 
 /// Register v2 typed FFI symbols with the JIT builder.
@@ -23,6 +27,9 @@ use super::super::ffi::v2_typed::{
 /// raw f64 values instead of NaN-boxed u64. The legacy entries that used to
 /// live here have been removed to avoid duplicate-declaration errors at
 /// Cranelift module declaration time.
+///
+/// Struct symbols (`jit_v2_struct_alloc`, `jit_v2_struct_get_f64`,
+/// `jit_v2_struct_set_f64`) are now registered by `v2_struct_symbols`.
 pub fn register_v2_typed_symbols(builder: &mut JITBuilder) {
     // Array operations (legacy NaN-boxed allocator — `jit_v2_array_alloc_f64`
     // is a *different* symbol name from the typed-path `jit_v2_array_new_f64`)
@@ -31,21 +38,14 @@ pub fn register_v2_typed_symbols(builder: &mut JITBuilder) {
     // Math operations
     builder.symbol("jit_v2_pow_f64", jit_v2_pow_f64 as *const u8);
 
-    // Struct operations
-    builder.symbol("jit_v2_struct_alloc", jit_v2_struct_alloc as *const u8);
-    builder.symbol("jit_v2_struct_get_f64", jit_v2_struct_get_f64 as *const u8);
-    builder.symbol("jit_v2_struct_set_f64", jit_v2_struct_set_f64 as *const u8);
-
     // Print
     builder.symbol("jit_v2_print_typed", jit_v2_print_typed as *const u8);
 }
 
 /// Declare v2 typed FFI function signatures in the module.
 ///
-/// Note: `jit_v2_array_get_f64`, `jit_v2_array_push_f64`, `jit_v2_retain`, and
-/// `jit_v2_release` are declared by `super::v2_symbols::declare_v2_functions`
-/// instead — those names belong to the typed v2 module with native pointer
-/// signatures, not the legacy NaN-boxed bodies that used to live here.
+/// Note: Struct signatures (`jit_v2_struct_alloc`, `jit_v2_struct_get_f64`,
+/// `jit_v2_struct_set_f64`) are now declared by `v2_struct_symbols`.
 pub fn declare_v2_typed_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<String, FuncId>) {
     // jit_v2_array_alloc_f64(capacity: I64) -> I64 (legacy NaN-boxed array — separate
     // symbol name from the typed-path `jit_v2_array_new_f64`)
@@ -69,42 +69,6 @@ pub fn declare_v2_typed_functions(module: &mut JITModule, ffi_funcs: &mut HashMa
             .declare_function("jit_v2_pow_f64", Linkage::Import, &sig)
             .expect("Failed to declare jit_v2_pow_f64");
         ffi_funcs.insert("jit_v2_pow_f64".to_string(), func_id);
-    }
-
-    // jit_v2_struct_alloc(schema_id: I32, total_size: I64) -> I64
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I32)); // schema_id
-        sig.params.push(AbiParam::new(types::I64)); // total_size
-        sig.returns.push(AbiParam::new(types::I64)); // NaN-boxed typed object
-        let func_id = module
-            .declare_function("jit_v2_struct_alloc", Linkage::Import, &sig)
-            .expect("Failed to declare jit_v2_struct_alloc");
-        ffi_funcs.insert("jit_v2_struct_alloc".to_string(), func_id);
-    }
-
-    // jit_v2_struct_get_f64(ptr_bits: I64, offset: I32) -> F64
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // ptr_bits
-        sig.params.push(AbiParam::new(types::I32)); // offset
-        sig.returns.push(AbiParam::new(types::F64)); // raw f64 value
-        let func_id = module
-            .declare_function("jit_v2_struct_get_f64", Linkage::Import, &sig)
-            .expect("Failed to declare jit_v2_struct_get_f64");
-        ffi_funcs.insert("jit_v2_struct_get_f64".to_string(), func_id);
-    }
-
-    // jit_v2_struct_set_f64(ptr_bits: I64, offset: I32, val: F64)
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // ptr_bits
-        sig.params.push(AbiParam::new(types::I32)); // offset
-        sig.params.push(AbiParam::new(types::F64)); // val (raw f64)
-        let func_id = module
-            .declare_function("jit_v2_struct_set_f64", Linkage::Import, &sig)
-            .expect("Failed to declare jit_v2_struct_set_f64");
-        ffi_funcs.insert("jit_v2_struct_set_f64".to_string(), func_id);
     }
 
     // jit_v2_retain and jit_v2_release are declared by `super::v2_symbols`

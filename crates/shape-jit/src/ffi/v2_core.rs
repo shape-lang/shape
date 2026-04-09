@@ -8,18 +8,22 @@
 //! Part of the v2 NaN-boxing removal plan (Step 4).
 
 use super::typed_object::TypedObject;
-use super::conversion::format_nan_boxed_value;
+use super::conversion::format_nan_boxed;
 
 // ============================================================================
 // Retain / Release — operate on raw heap pointers, no NaN-boxing
 // ============================================================================
 
-/// Increment the reference count on a TypedObject.
+/// Increment the reference count on a TypedObject (legacy v1 TypedObject path).
+///
+/// Note: `#[no_mangle]` removed — the symbol names `jit_v2_retain` and
+/// `jit_v2_release` are owned by `v2/mod.rs` which uses HeapHeader-based
+/// refcounting. This TypedObject-based version is kept as a Rust-only helper.
 ///
 /// # Safety
 /// `ptr` must point to a valid, live `TypedObject` or be null (no-op on null).
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_retain(ptr: *const u8) {
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_retain_typed_object(ptr: *const u8) {
     if ptr.is_null() {
         return;
     }
@@ -29,13 +33,13 @@ pub extern "C" fn jit_v2_retain(ptr: *const u8) {
     }
 }
 
-/// Decrement the reference count on a TypedObject.
+/// Decrement the reference count on a TypedObject (legacy v1 TypedObject path).
 /// Does NOT free the object — the caller (or a separate destructor) handles deallocation.
 ///
 /// # Safety
 /// `ptr` must point to a valid, live `TypedObject` or be null (no-op on null).
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_release(ptr: *const u8) {
+#[allow(dead_code)]
+pub extern "C" fn jit_v2_release_typed_object(ptr: *const u8) {
     if ptr.is_null() {
         return;
     }
@@ -99,13 +103,18 @@ pub extern "C" fn jit_v2_print_string(ptr: *const u8) {
     println!("{}", string_ref);
 }
 
-/// Print a value with an explicit type tag.
+/// Print a value with an explicit type tag (v2 native-typed variant).
 ///
-/// This is the transitional print function: the compiler passes a type_tag
+/// This is the v2-native transitional print function: the compiler passes a type_tag
 /// so the FFI function doesn't need to inspect NaN-box bits to determine the type.
 /// For type_tag == 0 (V2_TYPE_TAG_NANBOXED), falls back to legacy NaN-box formatting.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_print_typed(value_bits: u64, type_tag: u8) {
+///
+/// Note: `#[no_mangle]` is intentionally omitted — the symbol name `jit_v2_print_typed`
+/// is owned by the legacy v2_typed module which uses `i8` tags. This function uses `u8`
+/// tags and will replace the legacy version once the v2 transition is complete.
+/// In the meantime, use the type-specific variants (`jit_v2_print_int`, etc.) from
+/// JIT-compiled code for zero-overhead typed printing.
+pub extern "C" fn jit_v2_print_typed_native(value_bits: u64, type_tag: u8) {
     match type_tag {
         V2_TYPE_TAG_INT => {
             println!("{}", value_bits as i64);
@@ -137,7 +146,7 @@ pub extern "C" fn jit_v2_print_typed(value_bits: u64, type_tag: u8) {
         }
         _ => {
             // Fallback: NaN-boxed legacy path
-            println!("{}", format_nan_boxed_value(value_bits));
+            println!("{}", format_nan_boxed(value_bits));
         }
     }
 }
@@ -153,25 +162,25 @@ mod tests {
     #[test]
     fn test_v2_retain_release_null_is_noop() {
         // Should not crash
-        jit_v2_retain(std::ptr::null());
-        jit_v2_release(std::ptr::null());
+        jit_v2_retain_typed_object(std::ptr::null());
+        jit_v2_release_typed_object(std::ptr::null());
     }
 
     #[test]
     fn test_v2_print_typed_int() {
         // Just verify it doesn't crash
-        jit_v2_print_typed(42u64, V2_TYPE_TAG_INT);
+        jit_v2_print_typed_native(42u64, V2_TYPE_TAG_INT);
     }
 
     #[test]
     fn test_v2_print_typed_number() {
         let f: f64 = 3.14;
-        jit_v2_print_typed(f.to_bits(), V2_TYPE_TAG_NUMBER);
+        jit_v2_print_typed_native(f.to_bits(), V2_TYPE_TAG_NUMBER);
     }
 
     #[test]
     fn test_v2_print_typed_bool() {
-        jit_v2_print_typed(1, V2_TYPE_TAG_BOOL);
-        jit_v2_print_typed(0, V2_TYPE_TAG_BOOL);
+        jit_v2_print_typed_native(1, V2_TYPE_TAG_BOOL);
+        jit_v2_print_typed_native(0, V2_TYPE_TAG_BOOL);
     }
 }
