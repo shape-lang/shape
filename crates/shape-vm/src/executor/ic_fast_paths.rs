@@ -8,7 +8,7 @@
 //! IC state transitions: Uninitialized → Monomorphic → Polymorphic (2-4) → Megamorphic (>4)
 
 use crate::executor::VirtualMachine;
-use crate::executor::objects::method_registry::MethodFn;
+use crate::executor::objects::method_registry::{MethodFn, MethodHandler};
 use crate::feedback::{FeedbackSlot, ICState};
 #[cfg(test)]
 use shape_value::ValueWord;
@@ -20,13 +20,13 @@ use shape_value::heap_value::HeapKind;
 
 /// Result of a monomorphic method IC check.
 pub(crate) struct MethodIcHit {
-    pub handler: MethodFn,
+    pub handler: MethodHandler,
 }
 
 /// Check the method IC for a monomorphic hit.
 ///
 /// If the feedback slot at `ip` is monomorphic and the receiver's `HeapKind`
-/// matches the cached entry, returns the cached `MethodFn` handler pointer
+/// matches the cached entry, returns the cached handler
 /// so the caller can skip the PHF lookup.
 ///
 /// Returns `None` on miss (uninitialized, polymorphic, megamorphic, or kind mismatch).
@@ -48,8 +48,11 @@ pub(crate) fn method_ic_check(
                 && entry.handler_ptr != 0
             {
                 // SAFETY: handler_ptr was stored from a valid MethodFn function pointer.
+                // During the v1→v2 migration, IC only caches Legacy handlers (MethodFn).
                 let handler: MethodFn = unsafe { std::mem::transmute(entry.handler_ptr) };
-                Some(MethodIcHit { handler })
+                Some(MethodIcHit {
+                    handler: MethodHandler::Legacy(handler),
+                })
             } else {
                 None
             }
@@ -59,16 +62,27 @@ pub(crate) fn method_ic_check(
 }
 
 /// Record a method IC observation and store the handler pointer for future fast-path hits.
+///
+/// Currently only supports `Legacy` handlers (function pointer can be stored as usize).
+/// `Native` handlers are not IC-cached yet — they fall through to PHF lookup each time.
 #[inline]
 pub(crate) fn method_ic_record(
     vm: &mut VirtualMachine,
     ip: usize,
     receiver_kind: u8,
     method_name_id: u32,
-    handler: MethodFn,
+    handler: &MethodHandler,
 ) {
-    if let Some(fv) = vm.current_feedback_vector() {
-        fv.record_method(ip, receiver_kind, method_name_id, handler as usize);
+    match handler {
+        MethodHandler::Legacy(f) => {
+            if let Some(fv) = vm.current_feedback_vector() {
+                fv.record_method(ip, receiver_kind, method_name_id, *f as usize);
+            }
+        }
+        MethodHandler::Native(_) => {
+            // V2 native handlers are not IC-cached yet.
+            // They will be supported in a future phase.
+        }
     }
 }
 
@@ -312,5 +326,12 @@ mod tests {
         assert_ne!(ptr, 0);
         let recovered: MethodFn = unsafe { std::mem::transmute(ptr) };
         assert_eq!(recovered as usize, ptr);
+
+        // Verify MethodHandler::Legacy roundtrip through IC
+        let handler = MethodHandler::Legacy(dummy_handler);
+        match handler {
+            MethodHandler::Legacy(f) => assert_eq!(f as usize, ptr),
+            MethodHandler::Native(_) => panic!("expected Legacy"),
+        }
     }
 }

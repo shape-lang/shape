@@ -151,6 +151,32 @@ impl VirtualMachine {
 
     // op_typed_merge_object moved to object_operations.rs
 
+    /// Dispatch a `MethodHandler` (Legacy or Native), pushing the result onto the stack.
+    ///
+    /// - `Legacy`: calls the handler with `Vec<ValueWord>`, pushes `ValueWord` result.
+    /// - `Native`: converts args to raw `u64` slice, calls the handler, pushes raw `u64` result.
+    #[inline]
+    fn dispatch_method_handler(
+        &mut self,
+        handler: &method_registry::MethodHandler,
+        args_nb: Vec<ValueWord>,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
+        match handler {
+            method_registry::MethodHandler::Legacy(f) => {
+                let result = f(self, args_nb, ctx)?;
+                self.push_vw(result)?;
+            }
+            method_registry::MethodHandler::Native(f) => {
+                // Convert Vec<ValueWord> to &[u64] for native handlers.
+                let raw_args: Vec<u64> = args_nb.iter().map(|vw| vw.raw_bits()).collect();
+                let result = f(self, &raw_args, ctx)?;
+                self.push_raw_u64(result)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Call method on a value (series.mean(), etc.)
     ///
     /// Supports two calling conventions:
@@ -258,8 +284,7 @@ impl VirtualMachine {
                 if let Some(hit) =
                     crate::executor::ic_fast_paths::method_ic_check(self, ic_ip, heap_kind, mid)
                 {
-                    let result = (hit.handler)(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(&hit.handler, args_nb, ctx)?;
                     return Ok(());
                 }
             }
@@ -294,10 +319,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Array as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::String => {
                     let result = self.handle_string_method(&method_name, args_nb)?;
@@ -328,22 +352,19 @@ impl VirtualMachine {
                         self.ip,
                         rk,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::IndexedTable => {
                     if let Some(handler) =
                         method_registry::INDEXED_TABLE_METHODS.get(method_name.as_str())
                     {
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else if let Some(handler) =
                         method_registry::DATATABLE_METHODS.get(method_name.as_str())
                     {
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on IndexedTable type",
@@ -365,10 +386,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::ColumnRef as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::HashMap => {
                     let handler = method_registry::HASHMAP_METHODS
@@ -384,10 +404,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::HashMap as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Set => {
                     let handler = method_registry::SET_METHODS
@@ -403,10 +422,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Set as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Deque => {
                     let handler = method_registry::DEQUE_METHODS
@@ -422,10 +440,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Deque as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::PriorityQueue => {
                     let handler = method_registry::PRIORITY_QUEUE_METHODS
@@ -441,25 +458,22 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::PriorityQueue as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::FloatArray => {
                     if let Some(handler) =
                         method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str())
                     {
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else if let Some(handler) =
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
                         // Fallback: promote to generic array for standard array methods
                         args_nb[0] =
                             ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on Vec<number> type",
@@ -482,15 +496,13 @@ impl VirtualMachine {
                     if let Some(handler) =
                         method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str())
                     {
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else if let Some(handler) =
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
                         args_nb[0] =
                             ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on Vec<number> type",
@@ -502,15 +514,13 @@ impl VirtualMachine {
                     if let Some(handler) =
                         method_registry::INT_ARRAY_METHODS.get(method_name.as_str())
                     {
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else if let Some(handler) =
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
                         args_nb[0] =
                             ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on Vec<int> type",
@@ -522,15 +532,13 @@ impl VirtualMachine {
                     if let Some(handler) =
                         method_registry::BOOL_ARRAY_METHODS.get(method_name.as_str())
                     {
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else if let Some(handler) =
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
                         args_nb[0] =
                             ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
-                        let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on Vec<bool> type",
@@ -560,10 +568,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Time as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::TimeSpan => {
                     let handler = method_registry::TIMESPAN_METHODS
@@ -574,8 +581,7 @@ impl VirtualMachine {
                                 method_name
                             ))
                         })?;
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Instant => {
                     let handler = method_registry::INSTANT_METHODS
@@ -591,10 +597,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Instant as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Iterator => {
                     let handler = method_registry::ITERATOR_METHODS
@@ -610,10 +615,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Iterator as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Range => {
                     if method_name == "iter" {
@@ -639,10 +643,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Matrix as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Mutex => {
                     let handler = method_registry::MUTEX_METHODS
@@ -658,10 +661,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Mutex as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Atomic => {
                     let handler = method_registry::ATOMIC_METHODS
@@ -677,10 +679,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Atomic as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Lazy => {
                     let handler = method_registry::LAZY_METHODS
@@ -696,10 +697,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Lazy as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Channel => {
                     let handler = method_registry::CHANNEL_METHODS
@@ -715,10 +715,9 @@ impl VirtualMachine {
                         self.ip,
                         HeapKind::Channel as u8,
                         method_id.0 as u32,
-                        *handler,
+                        handler,
                     );
-                    let result = handler(self, args_nb, ctx)?;
-                    self.push_vw(result)?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Char => {
                     let result = self.handle_char_method(&method_name, args_nb)?;
@@ -829,8 +828,7 @@ impl VirtualMachine {
                         method
                     ))
                 })?;
-                let result = handler(self, new_args, None)?;
-                self.push_vw(result)?;
+                self.dispatch_method_handler(handler, new_args, None)?;
                 Ok(true)
             }
             _ => Ok(false),

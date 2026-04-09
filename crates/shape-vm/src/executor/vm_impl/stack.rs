@@ -223,6 +223,24 @@ impl VirtualMachine {
         unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const ValueWord, slice.len()) }
     }
 
+    /// Peek at the top N raw u64 values on the stack without popping.
+    ///
+    /// Returns a slice `&[u64]` of the topmost `count` stack slots, with
+    /// `slice[0]` being the deepest (pushed first) and `slice[count-1]`
+    /// being the top of stack. This is the natural order for method args
+    /// where the receiver was pushed first.
+    ///
+    /// Used by `MethodFnV2` native handlers to read args directly from
+    /// the stack without allocating a `Vec<ValueWord>`.
+    #[inline(always)]
+    pub(crate) fn peek_args_slice(&self, count: usize) -> Result<&[u64], VMError> {
+        if count > self.sp {
+            return Err(VMError::StackUnderflow);
+        }
+        let start = self.sp - count;
+        Ok(&self.stack[start..self.sp])
+    }
+
     /// Get a read-only `&[ValueWord]` view of the module_bindings.
     #[inline(always)]
     pub(crate) fn bindings_slice_vw(&self) -> &[ValueWord] {
