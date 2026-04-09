@@ -1252,6 +1252,10 @@ impl BytecodeCompiler {
         // Transfer final function definitions after comptime mutation/specialization.
         self.program.expanded_function_defs = self.function_defs.clone();
 
+        // Transfer monomorphization cache keys for diagnostics/testing.
+        self.program.monomorphization_keys =
+            self.monomorphization_cache.keys().cloned().collect();
+
         // Cache top-level MIR data for JIT v2 (MirToIR compilation of __main__).
         // The MIR and borrow analysis were computed by analyze_non_function_items_with_mir
         // above; we combine them with a storage plan here.

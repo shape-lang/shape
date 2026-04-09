@@ -356,10 +356,6 @@ pub fn resolve_call_site_type_args(
 
     for (param_idx, param) in func_def.params.iter().enumerate() {
         let Some(param_annotation) = param.type_annotation.as_ref() else {
-            // Unannotated parameter — nothing structural to extract from. If
-            // this param has no generic mentions it's irrelevant; if it does,
-            // we couldn't possibly know which generic, so leave it unbound and
-            // let the final completeness check decide.
             continue;
         };
 
@@ -369,9 +365,13 @@ pub fn resolve_call_site_type_args(
         };
         let Some(arg_ct) = arg_slot.as_ref() else {
             // We have no concrete type for this arg. Only bail if this param
-            // annotation actually mentions a generic — otherwise it's
-            // irrelevant to type-arg resolution.
-            if annotation_mentions_any(param_annotation, &generics) {
+            // annotation mentions a generic that hasn't been bound yet from
+            // a prior parameter. If the mentioned generics are already bound,
+            // this parameter contributes no new information and we can skip.
+            let has_unbound_mention = generics.iter().any(|g| {
+                annotation_mentions_any(param_annotation, &[g]) && !bindings.contains_key(*g)
+            });
+            if has_unbound_mention {
                 return None;
             }
             continue;
@@ -635,6 +635,15 @@ fn identifier_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<C
         if let Some((k, v)) = compiler.local_map_key_value_types.get(&local_idx).cloned() {
             return Some(ConcreteType::HashMap(Box::new(k), Box::new(v)));
         }
+        // Fallback: type tracker may have a "Vec<int>" / "Vec<number>" etc. name
+        // from which we can derive a concrete array type.
+        if let Some(ct) = compiler
+            .type_tracker
+            .get_local_type(local_idx)
+            .and_then(|info| concrete_type_from_type_name(info.type_name.as_deref()))
+        {
+            return Some(ct);
+        }
     }
 
     // Module binding fallback.
@@ -653,9 +662,50 @@ fn identifier_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<C
         {
             return Some(ConcreteType::HashMap(Box::new(k), Box::new(v)));
         }
+        // Fallback: derive concrete type from type tracker's type name.
+        if let Some(ct) = compiler
+            .type_tracker
+            .get_binding_type(binding_idx)
+            .and_then(|info| concrete_type_from_type_name(info.type_name.as_deref()))
+        {
+            return Some(ct);
+        }
     }
 
     None
+}
+
+/// Extract a `ConcreteType` from a type tracker type name string.
+///
+/// Recognises patterns like `"Vec<int>"`, `"Vec<number>"`, `"Vec<string>"`,
+/// `"Vec<bool>"` and maps them to `ConcreteType::Array(Box::new(...))`.
+fn concrete_type_from_type_name(type_name: Option<&str>) -> Option<ConcreteType> {
+    let name = type_name?;
+    if let Some(inner) = name.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')) {
+        let elem = match inner {
+            "int" => ConcreteType::I64,
+            "number" => ConcreteType::F64,
+            "string" => ConcreteType::String,
+            "bool" => ConcreteType::Bool,
+            "decimal" => ConcreteType::Decimal,
+            nested if nested.starts_with("Vec<") => {
+                // Nested array: Vec<Vec<int>> → Array(Array(I64))
+                concrete_type_from_type_name(Some(nested))
+                    .map(|inner_ct| ConcreteType::Array(Box::new(inner_ct)))?
+            }
+            _ => return None,
+        };
+        return Some(ConcreteType::Array(Box::new(elem)));
+    }
+    // Scalar types
+    match name {
+        "int" => Some(ConcreteType::I64),
+        "number" => Some(ConcreteType::F64),
+        "string" => Some(ConcreteType::String),
+        "bool" => Some(ConcreteType::Bool),
+        "decimal" => Some(ConcreteType::Decimal),
+        _ => None,
+    }
 }
 
 /// Inline copy of the BytecodeCompiler's `resolve_local` helper. The original

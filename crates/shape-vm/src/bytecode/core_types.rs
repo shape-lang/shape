@@ -343,6 +343,14 @@ pub struct BytecodeProgram {
     /// `None` entries indicate missing content-addressed metadata.
     #[serde(default)]
     pub function_blob_hashes: Vec<Option<FunctionHash>>,
+
+    /// Monomorphization cache keys produced during compilation.
+    ///
+    /// Populated at the end of `compile()` for diagnostics and integration tests.
+    /// Each entry is the `mono_key` string (e.g. `"map::i64_string"`) for a
+    /// generic function that was specialized during this compilation session.
+    #[serde(skip, default)]
+    pub monomorphization_keys: Vec<String>,
 }
 
 /// Constants in the constant pool
