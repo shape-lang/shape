@@ -359,3 +359,248 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         Ok(())
     }
 }
+
+// ===========================================================================
+// Unit tests for inline typed-struct field access
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cranelift::prelude::*;
+    use cranelift_jit::{JITBuilder, JITModule};
+    use cranelift_module::Module;
+
+    /// Build a minimal Cranelift JIT environment for testing.
+    fn make_jit_env() -> (JITModule, cranelift::codegen::Context, FunctionBuilderContext) {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", "speed").unwrap();
+        flag_builder.set("is_pic", "false").unwrap();
+        let isa_builder = cranelift_native::builder().unwrap();
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let module = JITModule::new(builder);
+        let ctx = cranelift::codegen::Context::new();
+        let fb_ctx = FunctionBuilderContext::new();
+        (module, ctx, fb_ctx)
+    }
+
+    /// Simulate the NaN-boxed UnifiedValue<*const u8> pointer chase that
+    /// `inline_typed_field_get` / `inline_typed_field_set` perform.
+    ///
+    /// Allocates:
+    /// - A TypedObject (header 8 bytes + N field slots of 8 bytes each)
+    /// - A UnifiedValue wrapper: [kind:u16, flags:u8, _reserved:u8, refcount:u32, data:*const u8]
+    ///
+    /// Returns `(nanboxed_bits, typed_obj_ptr, uv_ptr)` — caller must free both allocations.
+    unsafe fn make_test_typed_object(field_count: usize) -> (u64, *mut u8, *mut u8) {
+        use crate::ffi::typed_object::TYPED_OBJECT_HEADER_SIZE;
+
+        // 1. Allocate the TypedObject itself (8-byte header + fields)
+        let to_size = TYPED_OBJECT_HEADER_SIZE + field_count * 8;
+        let to_layout = std::alloc::Layout::from_size_align(to_size, 8).unwrap();
+        let to_ptr = unsafe { std::alloc::alloc_zeroed(to_layout) };
+        assert!(!to_ptr.is_null());
+
+        // 2. Allocate the UnifiedValue<*const u8> wrapper (16 bytes: 8 header + 8 data)
+        let uv_layout = std::alloc::Layout::from_size_align(16, 8).unwrap();
+        let uv_ptr = unsafe { std::alloc::alloc_zeroed(uv_layout) };
+        assert!(!uv_ptr.is_null());
+
+        // Fill the UnifiedValue fields:
+        //   kind (u16) at offset 0
+        unsafe { *(uv_ptr as *mut u16) = crate::nan_boxing::HK_TYPED_OBJECT };
+        //   refcount (u32) at offset 4
+        unsafe { *(uv_ptr.add(4) as *mut u32) = 1 };
+        //   data (*const u8) at offset 8
+        unsafe { *(uv_ptr.add(8) as *mut *const u8) = to_ptr as *const u8 };
+
+        // 3. Build NaN-boxed bits: TAG_HEAP with UNIFIED_HEAP_FLAG + pointer
+        let bits = shape_value::tags::make_unified_heap(uv_ptr as *const u8);
+
+        (bits, to_ptr, uv_ptr)
+    }
+
+    unsafe fn free_test_typed_object(to_ptr: *mut u8, uv_ptr: *mut u8, field_count: usize) {
+        use crate::ffi::typed_object::TYPED_OBJECT_HEADER_SIZE;
+        let to_size = TYPED_OBJECT_HEADER_SIZE + field_count * 8;
+        let to_layout = std::alloc::Layout::from_size_align(to_size, 8).unwrap();
+        unsafe { std::alloc::dealloc(to_ptr, to_layout) };
+        let uv_layout = std::alloc::Layout::from_size_align(16, 8).unwrap();
+        unsafe { std::alloc::dealloc(uv_ptr, uv_layout) };
+    }
+
+    /// Test that the inline typed field read produces the correct result
+    /// by compiling a Cranelift function that performs the UNIFIED_PTR_MASK +
+    /// double-load pattern used by `inline_typed_field_get`.
+    #[test]
+    fn inline_typed_field_get_through_unified_value() {
+        let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
+
+        // fn(nanboxed_bits: i64) -> i64
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+
+        let func_id = module
+            .declare_function(
+                "test_inline_field_get",
+                cranelift_module::Linkage::Local,
+                &sig,
+            )
+            .unwrap();
+
+        ctx.func.signature = sig;
+        {
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            builder.seal_block(entry);
+
+            let bits = builder.block_params(entry)[0];
+
+            // Manually emit the inline_typed_field_get pattern for field at byte_off=8
+            // (second field, first field is at byte_off=0).
+            let ptr_mask = builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
+            let uv_ptr = builder.ins().band(bits, ptr_mask);
+            let to_ptr = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                uv_ptr,
+                UNIFIED_VALUE_DATA_OFFSET,
+            );
+            // field at byte_off=8 -> total offset = TYPED_OBJ_HEADER(8) + 8 = 16
+            let result = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                to_ptr,
+                TYPED_OBJ_HEADER + 8,
+            );
+
+            builder.ins().return_(&[result]);
+            builder.finalize();
+        }
+
+        module.define_function(func_id, &mut ctx).unwrap();
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().unwrap();
+
+        let code_ptr = module.get_finalized_function(func_id);
+
+        unsafe {
+            let (bits, to_ptr, uv_ptr) = make_test_typed_object(3);
+
+            // Write test values to TypedObject fields (NaN-boxed numbers)
+            let field_base = to_ptr.add(8) as *mut u64; // past 8-byte header
+            *field_base = crate::nan_boxing::box_number(100.0); // field[0] at offset 0
+            *field_base.add(1) = crate::nan_boxing::box_number(200.0); // field[1] at offset 8
+            *field_base.add(2) = crate::nan_boxing::box_number(300.0); // field[2] at offset 16
+
+            let func: unsafe fn(u64) -> u64 = std::mem::transmute(code_ptr);
+            let result = func(bits);
+            assert_eq!(
+                crate::nan_boxing::unbox_number(result),
+                200.0,
+                "inline_typed_field_get should load the second field (byte_off=8)"
+            );
+
+            free_test_typed_object(to_ptr, uv_ptr, 3);
+        }
+    }
+
+    /// Test that the inline typed field write correctly stores a value
+    /// by compiling a Cranelift function that performs the UNIFIED_PTR_MASK +
+    /// load + store pattern used by `inline_typed_field_set`.
+    #[test]
+    fn inline_typed_field_set_through_unified_value() {
+        let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
+
+        // fn(nanboxed_bits: i64, value: i64)
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+
+        let func_id = module
+            .declare_function(
+                "test_inline_field_set",
+                cranelift_module::Linkage::Local,
+                &sig,
+            )
+            .unwrap();
+
+        ctx.func.signature = sig;
+        {
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            builder.seal_block(entry);
+
+            let bits = builder.block_params(entry)[0];
+            let val = builder.block_params(entry)[1];
+
+            // Manually emit the inline_typed_field_set pattern for field at byte_off=0
+            // (first field).
+            let ptr_mask = builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
+            let uv_ptr = builder.ins().band(bits, ptr_mask);
+            let to_ptr = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                uv_ptr,
+                UNIFIED_VALUE_DATA_OFFSET,
+            );
+            // field at byte_off=0 -> total offset = TYPED_OBJ_HEADER(8) + 0 = 8
+            builder.ins().store(
+                MemFlags::trusted(),
+                val,
+                to_ptr,
+                TYPED_OBJ_HEADER + 0,
+            );
+
+            builder.ins().return_(&[]);
+            builder.finalize();
+        }
+
+        module.define_function(func_id, &mut ctx).unwrap();
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().unwrap();
+
+        let code_ptr = module.get_finalized_function(func_id);
+
+        unsafe {
+            let (bits, to_ptr, uv_ptr) = make_test_typed_object(2);
+
+            let func: unsafe fn(u64, u64) = std::mem::transmute(code_ptr);
+            func(bits, crate::nan_boxing::box_number(999.0));
+
+            // Verify the value was written to the correct location
+            let field_base = to_ptr.add(8) as *const u64;
+            let stored = *field_base;
+            assert_eq!(
+                crate::nan_boxing::unbox_number(stored),
+                999.0,
+                "inline_typed_field_set should store to the first field (byte_off=0)"
+            );
+
+            free_test_typed_object(to_ptr, uv_ptr, 2);
+        }
+    }
+
+    /// Verify that the constants match the actual Rust struct layouts.
+    #[test]
+    fn constants_match_struct_layouts() {
+        assert_eq!(
+            UNIFIED_VALUE_DATA_OFFSET as usize,
+            std::mem::offset_of!(crate::nan_boxing::UnifiedValue::<*const u8>, data),
+            "UNIFIED_VALUE_DATA_OFFSET must match UnifiedValue<*const u8>::data offset"
+        );
+        assert_eq!(
+            TYPED_OBJ_HEADER as usize,
+            crate::ffi::typed_object::TYPED_OBJECT_HEADER_SIZE,
+            "TYPED_OBJ_HEADER must match TYPED_OBJECT_HEADER_SIZE"
+        );
+    }
+}
