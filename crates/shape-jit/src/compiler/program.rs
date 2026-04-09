@@ -55,6 +55,10 @@ fn collect_numeric_opcode_stats(program: &BytecodeProgram) -> NumericOpcodeStats
             | OpCode::NeqInt
             | OpCode::NeqNumber
             | OpCode::EqString
+            | OpCode::GtString
+            | OpCode::LtString
+            | OpCode::GteString
+            | OpCode::LteString
             | OpCode::EqDecimal
             | OpCode::IsNull
             | OpCode::NegInt

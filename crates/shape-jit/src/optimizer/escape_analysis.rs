@@ -548,6 +548,10 @@ fn stack_effect_simple(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::NeqInt
         | OpCode::NeqNumber
         | OpCode::EqString
+        | OpCode::GtString
+        | OpCode::LtString
+        | OpCode::GteString
+        | OpCode::LteString
         | OpCode::EqDecimal
         | OpCode::GetProp
         | OpCode::And

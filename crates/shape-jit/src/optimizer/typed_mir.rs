@@ -111,6 +111,10 @@ fn is_comparison(op: OpCode) -> bool {
             | OpCode::NeqInt
             | OpCode::NeqNumber
             | OpCode::EqString
+            | OpCode::GtString
+            | OpCode::LtString
+            | OpCode::GteString
+            | OpCode::LteString
             | OpCode::EqDecimal
     )
 }

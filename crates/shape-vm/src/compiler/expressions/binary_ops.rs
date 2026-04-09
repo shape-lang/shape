@@ -880,6 +880,34 @@ impl BytecodeCompiler {
                     return Ok(());
                 }
 
+                // Stage 4.2: typed string ordered comparison.
+                // When both operands are proven strings and the op is an
+                // ordered comparison (>, <, >=, <=), emit the specialized
+                // string comparison opcode for zero-dispatch execution.
+                if is_ordered_comparison(op) {
+                    if let (Ok(lt), Ok(rt)) = (self.infer_expr_type(left), self.infer_expr_type(right)) {
+                        let lt_name = type_display_name(&lt);
+                        let rt_name = type_display_name(&rt);
+                        let is_strish = |n: &str| matches!(n, "string" | "char");
+                        if is_strish(&lt_name) && is_strish(&rt_name) {
+                            let string_cmp_op = match op {
+                                BinaryOp::Greater => OpCode::GtString,
+                                BinaryOp::Less => OpCode::LtString,
+                                BinaryOp::GreaterEq => OpCode::GteString,
+                                BinaryOp::LessEq => OpCode::LteString,
+                                _ => unreachable!(),
+                            };
+                            self.compile_expr(left)?;
+                            self.compile_expr(right)?;
+                            self.emit(Instruction::simple(string_cmp_op));
+                            self.last_expr_schema = None;
+                            self.last_expr_type_info = None;
+                            self.last_expr_numeric_type = None;
+                            return Ok(());
+                        }
+                    }
+                }
+
                 // ── Compile-time type safety for strict arithmetic ──
                 // Sub, Mul, Div, Mod, Pow require numeric operands.
                 // If both types are known and either is non-numeric → compile error.

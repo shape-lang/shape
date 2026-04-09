@@ -94,7 +94,8 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::EqNumber
         | OpCode::NeqNumber => true,
         // Typed comparisons (string/decimal/null)
-        OpCode::EqString | OpCode::EqDecimal | OpCode::IsNull => true,
+        OpCode::EqString | OpCode::GtString | OpCode::LtString | OpCode::GteString
+        | OpCode::LteString | OpCode::EqDecimal | OpCode::IsNull => true,
         // Logic
         OpCode::And | OpCode::Or | OpCode::Not => true,
         // Control
@@ -711,6 +712,12 @@ pub fn compile_osr_loop(
                 // EqString: compare two string pointers via FFI (deopt for safety)
                 OpCode::EqString => {
                     // String equality requires heap comparison — deopt to interpreter.
+                    builder.ins().jump(deopt_block, &[]);
+                    block_terminated = true;
+                }
+                // GtString/LtString/GteString/LteString: string ordered comparison (deopt)
+                OpCode::GtString | OpCode::LtString | OpCode::GteString | OpCode::LteString => {
+                    // String ordered comparison requires heap comparison — deopt to interpreter.
                     builder.ins().jump(deopt_block, &[]);
                     block_terminated = true;
                 }

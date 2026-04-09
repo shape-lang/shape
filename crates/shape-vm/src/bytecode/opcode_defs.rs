@@ -36,7 +36,7 @@ pub enum OpcodeCategory {
 macro_rules! define_opcodes {
     ($($(#[doc = $doc:expr])* $name:ident = $byte:literal, $cat:ident, pops: $pops:expr, pushes: $pushes:expr);* $(;)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-        #[repr(u8)]
+        #[repr(u16)]
         pub enum OpCode {
             $(
                 $(#[doc = $doc])*
@@ -647,6 +647,16 @@ define_opcodes! {
     /// content-compares the decimal payloads, pushes bool. Both operands
     /// must be non-null v2 DecimalObj pointers. Use Neq via `EqDecimal; Not`.
     EqDecimal = 0xFF, Comparison, pops: 2, pushes: 1;
+
+    // ===== v2 Stage 4.2: Typed Ordered Comparison for Strings =====
+    /// Greater than (string × string → bool). Lexicographic comparison.
+    GtString = 0x100, Comparison, pops: 2, pushes: 1;
+    /// Less than (string × string → bool). Lexicographic comparison.
+    LtString = 0x101, Comparison, pops: 2, pushes: 1;
+    /// Greater than or equal (string × string → bool). Lexicographic comparison.
+    GteString = 0x102, Comparison, pops: 2, pushes: 1;
+    /// Less than or equal (string × string → bool). Lexicographic comparison.
+    LteString = 0x103, Comparison, pops: 2, pushes: 1;
 
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.

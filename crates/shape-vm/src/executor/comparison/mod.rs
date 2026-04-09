@@ -347,6 +347,31 @@ impl VirtualMachine {
                 };
                 self.push_raw_bool(eq)?;
             }
+            // Stage 4.2: typed ordered comparison for strings (lexicographic).
+            GtString => {
+                let b = self.pop_vw()?;
+                let a = self.pop_vw()?;
+                let result = a.as_str().unwrap_or("") > b.as_str().unwrap_or("");
+                self.push_raw_bool(result)?;
+            }
+            LtString => {
+                let b = self.pop_vw()?;
+                let a = self.pop_vw()?;
+                let result = a.as_str().unwrap_or("") < b.as_str().unwrap_or("");
+                self.push_raw_bool(result)?;
+            }
+            GteString => {
+                let b = self.pop_vw()?;
+                let a = self.pop_vw()?;
+                let result = a.as_str().unwrap_or("") >= b.as_str().unwrap_or("");
+                self.push_raw_bool(result)?;
+            }
+            LteString => {
+                let b = self.pop_vw()?;
+                let a = self.pop_vw()?;
+                let result = a.as_str().unwrap_or("") <= b.as_str().unwrap_or("");
+                self.push_raw_bool(result)?;
+            }
             // Stage 2.6.5.1: typed absence check. Pops one value, pushes a
             // bool that is true iff the value is the None or Unit sentinel.
             // Both are absence-of-value markers; the optional-chaining and

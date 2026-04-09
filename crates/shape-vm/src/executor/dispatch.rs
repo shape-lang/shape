@@ -448,7 +448,8 @@ impl VirtualMachine {
             // Typed comparison (compiler-guaranteed types, zero dispatch)
             GtInt | GtNumber | GtDecimal | LtInt | LtNumber | LtDecimal | GteInt | GteNumber
             | GteDecimal | LteInt | LteNumber | LteDecimal | EqInt | EqNumber | NeqInt
-            | NeqNumber | EqString | EqDecimal | IsNull => {
+            | NeqNumber | EqString | EqDecimal | IsNull | GtString | LtString | GteString
+            | LteString => {
                 return self.exec_typed_comparison(instruction);
             }
 

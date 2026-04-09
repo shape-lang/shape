@@ -467,6 +467,10 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::NeqInt
             | OpCode::NeqNumber
             | OpCode::EqString
+            | OpCode::GtString
+            | OpCode::LtString
+            | OpCode::GteString
+            | OpCode::LteString
             | OpCode::EqDecimal
             | OpCode::IsNull
             | OpCode::GtDecimal

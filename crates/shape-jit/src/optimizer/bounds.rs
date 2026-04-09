@@ -177,6 +177,10 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::NeqInt
         | OpCode::NeqNumber
         | OpCode::EqString
+        | OpCode::GtString
+        | OpCode::LtString
+        | OpCode::GteString
+        | OpCode::LteString
         | OpCode::EqDecimal
         | OpCode::GetProp => (2, 1),
         // Stack shuffles
