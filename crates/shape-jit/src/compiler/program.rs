@@ -53,7 +53,12 @@ fn collect_numeric_opcode_stats(program: &BytecodeProgram) -> NumericOpcodeStats
             | OpCode::EqInt
             | OpCode::EqNumber
             | OpCode::NeqInt
-            | OpCode::NeqNumber => {
+            | OpCode::NeqNumber
+            | OpCode::EqString
+            | OpCode::EqDecimal
+            | OpCode::IsNull
+            | OpCode::NegInt
+            | OpCode::NegNumber => {
                 stats.typed += 1;
                 bump_breakdown(&mut stats.typed_breakdown, instr.opcode);
             }

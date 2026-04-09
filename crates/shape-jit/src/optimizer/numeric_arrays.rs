@@ -50,6 +50,7 @@ fn is_typed_int_consumer(op: OpCode) -> bool {
             | OpCode::DivInt
             | OpCode::ModInt
             | OpCode::PowInt
+            | OpCode::NegInt
             | OpCode::GtInt
             | OpCode::LtInt
             | OpCode::GteInt
@@ -68,6 +69,7 @@ fn is_typed_float_consumer(op: OpCode) -> bool {
             | OpCode::DivNumber
             | OpCode::ModNumber
             | OpCode::PowNumber
+            | OpCode::NegNumber
             | OpCode::GtNumber
             | OpCode::LtNumber
             | OpCode::GteNumber
@@ -119,6 +121,9 @@ fn is_comparison_consumer(op: OpCode) -> bool {
             | OpCode::LteNumber
             | OpCode::EqNumber
             | OpCode::NeqNumber
+            | OpCode::EqString
+            | OpCode::EqDecimal
+            | OpCode::IsNull
             | OpCode::GtDecimal
             | OpCode::LtDecimal
             | OpCode::GteDecimal
@@ -151,6 +156,9 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::NumberToInt
         | OpCode::CastWidth
         | OpCode::Neg
+        | OpCode::NegInt
+        | OpCode::NegNumber
+        | OpCode::IsNull
         | OpCode::Not
         | OpCode::Length => (1, 1),
         OpCode::Add
@@ -189,6 +197,8 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::EqNumber
         | OpCode::NeqInt
         | OpCode::NeqNumber
+        | OpCode::EqString
+        | OpCode::EqDecimal
         | OpCode::GetProp => (2, 1),
         OpCode::Dup => (1, 2),
         OpCode::Swap => (2, 2),
@@ -644,7 +654,9 @@ fn producer_is_numeric(program: &BytecodeProgram, producer_idx: usize, depth: u8
         | OpCode::PowNumber
         | OpCode::IntToNumber
         | OpCode::NumberToInt
-        | OpCode::Neg => true,
+        | OpCode::Neg
+        | OpCode::NegInt
+        | OpCode::NegNumber => true,
         _ => false,
     }
 }

@@ -134,6 +134,9 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::NumberToInt
         | OpCode::CastWidth
         | OpCode::Neg
+        | OpCode::NegInt
+        | OpCode::NegNumber
+        | OpCode::IsNull
         | OpCode::Not
         | OpCode::Length => (1, 1),
         // Binary arithmetic/comparison/indexed read
@@ -173,6 +176,8 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::EqNumber
         | OpCode::NeqInt
         | OpCode::NeqNumber
+        | OpCode::EqString
+        | OpCode::EqDecimal
         | OpCode::GetProp => (2, 1),
         // Stack shuffles
         OpCode::Dup => (1, 2),

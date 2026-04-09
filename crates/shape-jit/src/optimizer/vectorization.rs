@@ -69,6 +69,8 @@ fn is_numeric_arith(op: OpCode) -> bool {
             | OpCode::DivNumber
             | OpCode::ModNumber
             | OpCode::PowNumber
+            | OpCode::NegInt
+            | OpCode::NegNumber
     )
 }
 
@@ -118,6 +120,8 @@ fn is_simd_body_safe(op: OpCode) -> bool {
             | OpCode::SubInt
             | OpCode::MulInt
             | OpCode::DivInt
+            | OpCode::NegInt
+            | OpCode::NegNumber
             // Type coercion (numeric)
             | OpCode::IntToNumber
             | OpCode::NumberToInt

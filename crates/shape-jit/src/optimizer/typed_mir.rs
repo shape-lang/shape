@@ -110,6 +110,8 @@ fn is_comparison(op: OpCode) -> bool {
             | OpCode::EqNumber
             | OpCode::NeqInt
             | OpCode::NeqNumber
+            | OpCode::EqString
+            | OpCode::EqDecimal
     )
 }
 
@@ -210,6 +212,26 @@ pub fn build_typed_mir(program: &BytecodeProgram) -> TypedMirFunction {
                 stack.pop();
                 stack.pop();
                 MirOp::SetIndex(op)
+            }
+            // Unary typed arithmetic (pops 1, pushes 1)
+            (OpCode::NegInt, _) => {
+                stack.pop();
+                result_type = ScalarType::I64;
+                stack.push(result_type);
+                MirOp::Arithmetic(op)
+            }
+            (OpCode::NegNumber, _) => {
+                stack.pop();
+                result_type = ScalarType::F64;
+                stack.push(result_type);
+                MirOp::Arithmetic(op)
+            }
+            // Unary comparison (pops 1, pushes 1)
+            (OpCode::IsNull, _) => {
+                stack.pop();
+                result_type = ScalarType::Bool;
+                stack.push(result_type);
+                MirOp::Comparison(op)
             }
             _ if is_typed_int_arith(op) => {
                 stack.pop();

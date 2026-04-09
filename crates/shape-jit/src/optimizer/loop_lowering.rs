@@ -122,6 +122,8 @@ pub fn plan_loops(
                     | OpCode::DivNumber
                     | OpCode::ModNumber
                     | OpCode::PowNumber
+                    | OpCode::NegInt
+                    | OpCode::NegNumber
             ) {
                 numeric_ops += 1;
             }

@@ -506,6 +506,9 @@ fn stack_effect_simple(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::NumberToInt
         | OpCode::CastWidth
         | OpCode::Neg
+        | OpCode::NegInt
+        | OpCode::NegNumber
+        | OpCode::IsNull
         | OpCode::Not
         | OpCode::Length => (1, 1),
         OpCode::Add
@@ -544,6 +547,8 @@ fn stack_effect_simple(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::EqNumber
         | OpCode::NeqInt
         | OpCode::NeqNumber
+        | OpCode::EqString
+        | OpCode::EqDecimal
         | OpCode::GetProp
         | OpCode::And
         | OpCode::Or => (2, 1),

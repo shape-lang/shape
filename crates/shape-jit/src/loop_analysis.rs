@@ -443,6 +443,8 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::Div
             | OpCode::Mod
             | OpCode::Neg
+            | OpCode::NegInt
+            | OpCode::NegNumber
             // Equality comparisons (always inline, no FFI)
             | OpCode::Eq
             | OpCode::Neq
@@ -464,6 +466,9 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::EqNumber
             | OpCode::NeqInt
             | OpCode::NeqNumber
+            | OpCode::EqString
+            | OpCode::EqDecimal
+            | OpCode::IsNull
             | OpCode::GtDecimal
             | OpCode::LtDecimal
             | OpCode::GteDecimal

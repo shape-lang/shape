@@ -78,7 +78,7 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::ModNumber
         | OpCode::PowNumber => true,
         // Neg
-        OpCode::Neg => true,
+        OpCode::Neg | OpCode::NegInt | OpCode::NegNumber => true,
         // Comparison (Int)
         OpCode::GtInt
         | OpCode::LtInt
@@ -93,6 +93,8 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::LteNumber
         | OpCode::EqNumber
         | OpCode::NeqNumber => true,
+        // Typed comparisons (string/decimal/null)
+        OpCode::EqString | OpCode::EqDecimal | OpCode::IsNull => true,
         // Logic
         OpCode::And | OpCode::Or | OpCode::Not => true,
         // Control
@@ -565,6 +567,22 @@ pub fn compile_osr_loop(
                         stack_push!(builder, result, stack_depth);
                     }
                 }
+                OpCode::NegInt => {
+                    if stack_depth >= 1 {
+                        let val = stack_pop!(builder, stack_depth);
+                        let result = builder.ins().ineg(val);
+                        stack_push!(builder, result, stack_depth);
+                    }
+                }
+                OpCode::NegNumber => {
+                    if stack_depth >= 1 {
+                        let val = stack_pop!(builder, stack_depth);
+                        let f = builder.ins().bitcast(types::F64, MemFlags::new(), val);
+                        let neg_f = builder.ins().fneg(f);
+                        let result = builder.ins().bitcast(types::I64, MemFlags::new(), neg_f);
+                        stack_push!(builder, result, stack_depth);
+                    }
+                }
 
                 // Integer comparisons: compare raw i64, produce i64 (0 or 1)
                 OpCode::LtInt => {
@@ -685,6 +703,29 @@ pub fn compile_osr_loop(
                         let a_f = builder.ins().bitcast(types::F64, MemFlags::new(), a);
                         let b_f = builder.ins().bitcast(types::F64, MemFlags::new(), b);
                         let cmp = builder.ins().fcmp(FloatCC::NotEqual, a_f, b_f);
+                        let result = builder.ins().uextend(types::I64, cmp);
+                        stack_push!(builder, result, stack_depth);
+                    }
+                }
+
+                // EqString: compare two string pointers via FFI (deopt for safety)
+                OpCode::EqString => {
+                    // String equality requires heap comparison — deopt to interpreter.
+                    builder.ins().jump(deopt_block, &[]);
+                    block_terminated = true;
+                }
+                // EqDecimal: compare two decimal pointers via FFI (deopt for safety)
+                OpCode::EqDecimal => {
+                    // Decimal equality requires heap comparison — deopt to interpreter.
+                    builder.ins().jump(deopt_block, &[]);
+                    block_terminated = true;
+                }
+                // IsNull: check if top-of-stack is null (0 / tagged null)
+                OpCode::IsNull => {
+                    if stack_depth >= 1 {
+                        let val = stack_pop!(builder, stack_depth);
+                        let zero = builder.ins().iconst(types::I64, 0);
+                        let cmp = builder.ins().icmp(IntCC::Equal, val, zero);
                         let result = builder.ins().uextend(types::I64, cmp);
                         stack_push!(builder, result, stack_depth);
                     }
