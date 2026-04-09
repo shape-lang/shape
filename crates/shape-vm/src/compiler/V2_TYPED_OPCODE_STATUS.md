@@ -1,6 +1,7 @@
 # Typed Opcode Emission Status
 
-Audit date: 2026-04-01
+Initial audit date: 2026-04-01
+Last updated: 2026-04-09 (Wave 1 complete)
 
 ## Summary
 
@@ -9,6 +10,65 @@ The compiler has a well-structured typed opcode dispatch system in
 fallback (slot tracking -> inference engine -> generic opcode). This
 audit catalogs every site that emits a generic arithmetic/comparison
 opcode and classifies whether conversion to typed is feasible.
+
+### Wave 1 Completion Status (Stage 2.6)
+
+Wave 1 is complete. All items below were landed in the `jit-v2-phase1`
+branch. Test count increased from 1768 to 1825 (monomorphization tests
+added).
+
+| Item | Status |
+|------|--------|
+| Typed loop counters (iterator `__idx` as `Int(0)` + `AddInt`) | DONE |
+| Typed arith/cmp in `literals.rs` (`Sub`/`Mul`/`Div`/`Mod`/`Pow`/`Gt`/`Lt`/`Gte`/`Lte`/`Eq`/`Neq` arms marked `unreachable!()`) | DONE |
+| Fuzzy comparison desugaring (`*Number` variants) | DONE |
+| Typed `Neg` dispatch (`NegInt`/`NegNumber`/`NegDecimal` opcodes added + executor handlers) | DONE |
+| Typed `Eq` dispatch (`compile_typed_equality` with inference-driven resolution) | DONE |
+| `Add` fallback structured dispatch (`StringConcat`, `ArrayConcat`, `CallMethod` for operator traits) | DONE |
+| `Eq`/`Neq` unreachable in `literals.rs` | DONE |
+| `IsNull` opcode replacing sentinel `PushNull + Eq` pattern (16 sites) | DONE |
+| `EqString` opcode for string equality comparison | DONE |
+| `EqDecimal` opcode for decimal equality comparison | DONE |
+| `NegDecimal` opcode for decimal negation | DONE |
+| JIT consumer cleanup (new opcodes handled in `shape-jit`) | DONE |
+| Monomorphization module integrated (was orphaned; now wired into method call dispatch) | DONE |
+| `impl Iterable` cleanup (untyped `includes` removed, typed `Vec<T>.includes` exists) | DONE |
+
+### New Opcodes Added in Wave 1
+
+| Opcode | Byte | Category | Description |
+|--------|------|----------|-------------|
+| `NegInt` | `0xCA` | Arithmetic | Typed negation for `int` values |
+| `NegNumber` | `0xCB` | Arithmetic | Typed negation for `number` values |
+| `NegDecimal` | `0xCC` | Arithmetic | Typed negation for `decimal` values |
+| `IsNull` | `0xF2` | Comparison | Replaces `PushNull + Eq` pattern, tests single operand for null |
+| `EqString` | `0xFE` | Comparison | Typed equality for non-null `StringObj` pointers |
+| `EqDecimal` | `0xFF` | Comparison | Typed equality for non-null `DecimalObj` pointers |
+
+### Remaining Generic Emission (Wave 2 scope)
+
+A full inventory of remaining generic opcode emission sites is in
+`V2_AUDIT_WAVE2.md`. Key remaining areas:
+
+1. **`generic_opcode_for()` in `binary_ops.rs`** -- Returns generic
+   `Sub`/`Mul`/`Div`/`Mod`/`Pow`/`Gt`/`Lt`/`Gte`/`Lte` when both
+   operand types are unresolvable. Also covers DateTime/operator trait
+   fallbacks.
+
+2. **`helpers.rs` runtime dispatch** -- `emit_runtime_add()`,
+   `emit_runtime_eq()`, `emit_runtime_neq()` are centralized fallback
+   helpers still emitting generic `Add`/`Eq`/`Neq` when the compiler
+   cannot prove operand types.
+
+3. **`compile_binary_op` `Add` arm in `literals.rs`** -- The only
+   non-`unreachable!()` arithmetic opcode remaining in the legacy
+   dispatch function. Reached when `generic_opcode_for()` returns `None`
+   for `Add`.
+
+Wave 2 plan: replace `generic_opcode_for()` with `CallMethod` dispatch
+for operator traits, add string comparison opcodes, extend inference
+coverage, then delete all generic opcodes from the enum and executor
+(estimated ~2100 lines of executor code removable).
 
 ---
 
@@ -21,7 +81,7 @@ available, with generic fallback only when types cannot be proven:
 |---|---|---|
 | `Sub`, `Mul`, `Div`, `Mod`, `Pow` (strict arithmetic) | `emit_numeric_binary_with_coercion_trusted` -> `typed_opcode_for` | Both operands lack type info from slot tracker AND inference engine |
 | `Gt`, `Lt`, `Gte`, `Lte` (ordered comparisons) | Same as above | Same as above |
-| `Equal`, `NotEqual` on numeric operands | `typed_opcode_for` returns `EqInt`/`EqNumber`/`NeqInt`/`NeqNumber` | Decimal equality not covered; non-numeric operands |
+| `Equal`, `NotEqual` on numeric operands | `typed_opcode_for` returns `EqInt`/`EqNumber`/`EqDecimal`/`NeqInt`/`NeqNumber` | Non-numeric operands without typed opcode (Wave 1 added `EqDecimal`, `EqString`, `IsNull`) |
 | Width-typed arithmetic (`u8 + u8`, `i16 * i16`) | `AddTyped`/`SubTyped` with `Width` operand | Never falls back — IncompatibleWidths is a compile error |
 | Range counter loops (typed path) | `LtInt`/`LteInt`, `AddInt` | Only when `use_typed=false` |
 | Mat * Vec / Mat * Mat | Lowers to `IntrinsicMatMulVec`/`IntrinsicMatMulMat` | N/A (not generic arithmetic) |
@@ -77,36 +137,31 @@ Two paths: `use_typed=true` emits `LtInt/LteInt` + `AddInt`,
 `last_expr_numeric_type = None` (unresolvable type). This happens when
 the range start/end is a complex expression whose type cannot be tracked.
 
-### 2c. Generic iterator loops (lines 450-460, 830-840 of loops.rs)
+### 2c. Generic iterator loops -- RESOLVED (Wave 1)
 
-The generic `for x in iterable` path uses an internal `__idx` counter
+~~The generic `for x in iterable` path used an internal `__idx` counter
 initialized to `Constant::Number(0.0)` and incremented with generic
-`OpCode::Add`. This is an **internal iteration counter**, not user
-arithmetic — the index type is always `number` but the compiler does not
-prove this because the counter is initialized in an opaque way.
+`OpCode::Add`.~~
 
-**Affected sites (6 total):**
-- `loops.rs:158` — range counter loop, `use_typed=false` arm
-- `loops.rs:460` — generic for-in loop index increment
-- `loops.rs:840` — generic for-expr loop index increment
-- `loops.rs:1091` — comprehension clause iterator index increment
-- `loops.rs:1224` — spread-over-range, `use_typed=false` arm
-- `loops.rs:1303` — spread generic iterator index increment
+**Fixed in Stage 2.6**: All iterator index counters now use typed
+`Int(0)` initialization and `AddInt` increment. Range counter loops
+use `LtInt`/`LteInt` for all resolved cases.
 
-### 2d. Fuzzy comparisons (lines 702-988 of binary_ops.rs)
+### 2d. Fuzzy comparisons -- RESOLVED (Wave 1)
 
-All fuzzy comparison desugaring emits generic opcodes (`Sub`, `Lt`, `Neg`,
-`Add`, `Div`, `Lte`, `Gt`). There are ~30 generic opcode emissions in the
-fuzzy comparison lowering.
+~~All fuzzy comparison desugaring emitted generic opcodes (`Sub`, `Lt`,
+`Neg`, `Add`, `Div`, `Lte`, `Gt`). ~30 generic opcode emissions.~~
 
-**Root cause:** Fuzzy comparisons always operate on `number`-typed values
-(tolerance is `f64`) but the desugaring code does not consult or propagate
-numeric type information. It unconditionally emits generic opcodes.
+**Fixed in Stage 2.6**: All fuzzy comparison opcodes replaced with
+typed `*Number` variants (`SubNumber`, `LtNumber`, `GtNumber`,
+`LteNumber`, `AddNumber`, `DivNumber`, `NegNumber`).
 
-### 2e. String interpolation (string_interpolation.rs:209)
+### 2e. String interpolation -- RESOLVED (Wave 1)
 
-One generic `Add` for string concatenation in interpolated strings. This is
-**correct** — string concat requires the generic `Add` path.
+~~One generic `Add` for string concatenation in interpolated strings.~~
+
+**Fixed in Stage 2.3**: String interpolation now uses `StringConcat`
+opcode.
 
 ---
 
@@ -141,22 +196,24 @@ with explicit `: int`/`: number` type annotations get typed opcodes.
 arrays, objects, numbers). The other five (`Sub`, `Mul`, `Div`, `Mod`, `Pow`)
 are numeric-only and can always use typed opcodes when types are proven.
 
-### 3d. Equality/inequality on non-numeric types
+### 3d. Equality/inequality on non-numeric types -- MOSTLY RESOLVED (Wave 1)
 
-`Eq`/`Neq` are used for:
-- Null checks (`PushNull` + `Eq`) — 15+ sites
-- Unit sentinel checks — 2+ sites  
-- Pattern matching value checks — 5+ sites
-- Optional chaining null checks — 2 sites
+~~`Eq`/`Neq` were used for null checks, unit sentinel checks, pattern
+matching, and optional chaining.~~
 
-These cannot be converted to `EqInt`/`EqNumber` because the operands are
-not numeric. They compare against `null`, `unit`, strings, enum tags, etc.
+**Fixed in Stage 2.6.5**: Null checks (16 sites) replaced with `IsNull`
+opcode. Pattern matching uses `typed_eq_for_literal()` to emit typed
+`EqInt`/`EqNumber`/`EqString` based on the matched literal type.
+String equality uses `EqString`. Only truly unresolvable cases still
+fall through to generic `Eq`/`Neq` via `emit_runtime_eq`/`emit_runtime_neq`.
 
-### 3e. Missing typed `Eq`/`Neq` for Decimal
+### 3e. Missing typed `Eq`/`Neq` for Decimal -- RESOLVED (Wave 1)
 
-`typed_opcode_for` returns `None` for `(Equal, Decimal)` and
-`(NotEqual, Decimal)`. The `EqDecimal`/`NeqDecimal` opcodes do not exist
-in the opcode table.
+~~`typed_opcode_for` returned `None` for `(Equal, Decimal)` and
+`(NotEqual, Decimal)`. The `EqDecimal`/`NeqDecimal` opcodes did not exist.~~
+
+**Fixed in Stage 2.6.3**: `EqDecimal` opcode added (`0xFF`). `NeqDecimal`
+handled by `EqDecimal` + `Not`.
 
 ### 3f. Decimal storage hints dropped entirely
 
@@ -175,117 +232,99 @@ block typed emission if callers change.
 
 ---
 
-## 4. Complete List of Generic Opcode Emission Sites
+## 4. Generic Opcode Emission Sites (post-Wave 1)
 
-### Structurally required (cannot be eliminated)
+The "improvable" sites from the original audit (sections 4 old) are now
+resolved. The following remain as the complete set of generic emission
+sites. See `V2_AUDIT_WAVE2.md` for the detailed inventory.
 
-| File | Line | Opcode | Reason |
-|---|---|---|---|
-| `literals.rs` | 62-104 | All generic opcodes | Fallback entry point called from binary_ops.rs when types unknown |
-| `string_interpolation.rs` | 209 | `Add` | String concatenation |
-| `binary_ops.rs` | 321 | `Eq` | Null-coalescing null check |
-| `binary_ops.rs` | 429 | `Add` | Operator trait dispatch (type implements `Add`) |
-| `binary_ops.rs` | 485 | `Add` | Generic Add fallback (unproven types or non-numeric) |
-| `expressions/mod.rs` | 386, 405, 423 | `Eq` | Null checks in annotation `@before` dispatch |
-| `property_access.rs` | 335, 340 | `Eq` | Optional chaining null/unit checks |
-| `functions.rs` | 1078 | `Eq` | Default parameter sentinel check |
-| `functions_annotations.rs` | 1601, 1619, 1637, 1722 | `Eq` | Annotation pipeline null checks |
-| `patterns/checking.rs` | 103, 122, 196, 214, 350 | `Eq` | Pattern match value equality |
-| `patterns/binding.rs` | 107 | `Eq` | Enum variant tag check |
-| `patterns/binding.rs` | 132 | `Lt` | Array length check |
+### Still emitted (runtime dispatch fallbacks)
 
-### Improvable (could emit typed opcodes with work)
+| File | Line | Opcode | Reason | Wave 2 fix |
+|---|---|---|---|---|
+| `helpers.rs` | 24 | `Add` | `emit_runtime_add()` fallback | Replace with `CallMethod("add")` |
+| `helpers.rs` | 40 | `Eq` | `emit_runtime_eq()` fallback | Extend `resolve_eq_type` coverage |
+| `helpers.rs` | 55 | `Neq` | `emit_runtime_neq()` fallback | Same |
+| `binary_ops.rs` | 74-87 | `Sub`/`Mul`/`Div`/`Mod`/`Pow`/`Gt`/`Lt`/`Gte`/`Lte` | `generic_opcode_for()` table | Replace with `CallMethod` dispatch |
+| `literals.rs` | 64 | `Add` | Last non-unreachable arm in `compile_binary_op` | Delete when `emit_runtime_add` is gone |
+| `literals.rs` | 111 | `Neg` | `compile_unary_op()` generic dispatch | Add typed negation dispatch at expression level |
 
-| File | Line | Opcode | What's needed |
-|---|---|---|---|
-| `loops.rs` | 112, 114 | `Lte`/`Lt` | Range counter: propagate numeric proof when `use_typed=false` |
-| `loops.rs` | 158 | `Add` | Range counter increment: same |
-| `loops.rs` | 460 | `Add` | For-in loop `__idx` counter: init as `Int(0)`, use `AddInt` |
-| `loops.rs` | 840 | `Add` | For-expr loop `__idx` counter: same |
-| `loops.rs` | 1091 | `Add` | Comprehension iterator index: same |
-| `loops.rs` | 1184, 1186 | `Lte`/`Lt` | Spread-range: same as range counter |
-| `loops.rs` | 1224 | `Add` | Spread-range increment: same |
-| `loops.rs` | 1303 | `Add` | Spread generic iterator index: same |
-| `binary_ops.rs` | 739-979 | `Sub`, `Lt`, `Neg`, `Add`, `Div`, `Lte`, `Gt` | Fuzzy comparisons: ~30 sites, all on `number` constants |
+### Eliminated in Wave 1
+
+| Former site | What replaced it |
+|---|---|
+| `loops.rs` (8 sites) — iterator index counters | `Int(0)` + `AddInt` |
+| `binary_ops.rs` (30 sites) — fuzzy comparisons | `*Number` typed variants |
+| `string_interpolation.rs` — string concat | `StringConcat` opcode |
+| `binary_ops.rs` — null-coalescing null check | `IsNull` opcode |
+| `expressions/mod.rs` — annotation null checks | `IsNull` opcode |
+| `property_access.rs` — optional chaining null checks | `IsNull` opcode |
+| `functions.rs` — default param sentinel check | `IsNull` opcode |
+| `functions_annotations.rs` — annotation pipeline null checks | `IsNull` opcode |
+| `patterns/checking.rs` — pattern match equality | `typed_eq_for_literal()` |
+| `patterns/binding.rs:107` — enum variant tag check | `typed_eq_for_literal()` |
+| `binary_ops.rs` — operator trait dispatch | `CallMethod` via `emit_operator_trait_call` |
 
 ---
 
-## 5. Changes Needed to Eliminate ALL Improvable Generic Opcodes
+## 5. Remaining Work (Wave 2 scope)
 
-### P1: Generic iterator index counters (8 sites, easy)
+The P1/P2/P3 items from the original audit are all resolved. Remaining
+work to eliminate ALL generic opcodes is documented in `V2_AUDIT_WAVE2.md`.
 
-Change the internal `__idx` counter from `Constant::Number(0.0)` to
-`Constant::Int(0)` and use `AddInt` for increment. These are internal
-counters that are always integer-valued. Affected:
-- `loops.rs` lines 394, 455-460 (for-in loop)
-- `loops.rs` lines 697, 835-840 (for-expr loop)
-- `loops.rs` lines 1086-1091 (comprehension)
-- `loops.rs` lines 1252, 1298-1303 (spread generic iterator)
+### Quick wins
 
-**Risk**: Low. The iterator index is compared via `IterDone` which
-accepts both int and number. The `IterNext` opcode uses the index
-for array indexing, which also works with integers.
+1. **Typed `Neg` at expression level** -- The executor has `NegInt`/
+   `NegNumber`/`NegDecimal` handlers but `compile_unary_op()` still
+   emits generic `Neg`. Fix: check `last_expr_numeric_type` after
+   compiling operand. ~15 lines.
 
-### P2: Fuzzy comparison desugaring (~30 sites, medium)
+2. **Temporal `Add`/`Sub` to `CallMethod`** -- DateTime/Duration
+   arithmetic still calls `emit_runtime_add`. Route through method
+   dispatch instead.
 
-All fuzzy comparison constants are `Number` literals and the temp locals
-are always `number`-valued. Replace every generic opcode in
-`compile_expr_fuzzy_comparison` with its `*Number` variant:
-- `Sub` -> `SubNumber`
-- `Lt` -> `LtNumber`
-- `Gt` -> `GtNumber`
-- `Lte` -> `LteNumber`
-- `Add` -> `AddNumber`
-- `Div` -> `DivNumber`
-- `Neg` -> already generic (no typed Neg variant exists)
+### Medium effort
 
-**Risk**: Low. Fuzzy comparisons are defined over floating-point
-tolerance values, so all operands are provably `number`.
+3. **Replace `generic_opcode_for()` with `CallMethod` fallback** --
+   For `Sub`/`Mul`/`Div` and ordered comparisons when types are
+   unresolvable.
 
-### P3: Range counter `use_typed=false` fallback (6 sites, medium)
+4. **String comparison opcodes** -- `GtString`/`LtString`/etc. for
+   proven string comparisons.
 
-When range endpoints come from expressions that don't set
-`last_expr_numeric_type`, the range counter falls back to generic. Fix
-by consulting the inference engine as a second-pass fallback (similar to
-the binary_ops `NoPlan` -> `infer_numeric_pair` pattern).
+### Endgame
 
-**Risk**: Medium. Need to ensure the inference engine can resolve the
-endpoint types. Non-numeric ranges (e.g., date ranges) should not
-get typed int opcodes.
+5. **Delete generic opcodes from `OpCode` enum** -- Once no compiler
+   path emits them.
 
-### Not eliminable
-
-- Generic `Eq`/`Neq` for null/unit checks (15+ sites): These compare
-  against sentinel values, not numeric operands. Would need a dedicated
-  `EqNull`/`IsNull` opcode to eliminate.
-- Generic `Add` for string/array/object concat: Requires overloaded
-  semantics at runtime. Could be split into `StringConcat`/`ArrayConcat`
-  opcodes but that's a different optimization.
-- Generic `Add` for operator trait dispatch: The type implements a
-  user-defined `Add` trait; the executor resolves at runtime.
-- `patterns/binding.rs:132` `Lt` for array length: Length is always int
-  but the constant is `Number(patterns.len() as f64)`. Could change
-  to `Int` constant + `LtInt`.
+6. **Delete executor handlers** -- Remove `exec_arithmetic` and
+   `exec_comparison` generic dispatch (~2100 lines).
 
 ---
 
 ## 6. Opcode Coverage Matrix
 
-| Operation | Int | Number | Decimal | IntWidth | Non-numeric |
-|---|---|---|---|---|---|
-| Add | AddInt | AddNumber | AddDecimal | AddTyped | Add (generic) |
-| Sub | SubInt | SubNumber | SubDecimal | SubTyped | -- |
-| Mul | MulInt | MulNumber | MulDecimal | MulTyped | -- |
-| Div | DivInt | DivNumber | DivDecimal | DivTyped | -- |
-| Mod | ModInt | ModNumber | ModDecimal | ModTyped | -- |
-| Pow | PowInt | PowNumber | PowDecimal | -- | -- |
-| Gt | GtInt | GtNumber | GtDecimal | GtInt | Gt (generic) |
-| Lt | LtInt | LtNumber | LtDecimal | LtInt | Lt (generic) |
-| Gte | GteInt | GteNumber | GteDecimal | GteInt | Gte (generic) |
-| Lte | LteInt | LteNumber | LteDecimal | LteInt | Lte (generic) |
-| Eq | EqInt | EqNumber | **MISSING** | EqInt | Eq (generic) |
-| Neq | NeqInt | NeqNumber | **MISSING** | NeqInt | Neq (generic) |
-| Neg | -- | -- | -- | -- | Neg (generic) |
+| Operation | Int | Number | Decimal | IntWidth | String | Null | Non-numeric |
+|---|---|---|---|---|---|---|---|
+| Add | AddInt | AddNumber | AddDecimal | AddTyped | StringConcat | -- | Add (generic) |
+| Sub | SubInt | SubNumber | SubDecimal | SubTyped | -- | -- | -- |
+| Mul | MulInt | MulNumber | MulDecimal | MulTyped | -- | -- | -- |
+| Div | DivInt | DivNumber | DivDecimal | DivTyped | -- | -- | -- |
+| Mod | ModInt | ModNumber | ModDecimal | ModTyped | -- | -- | -- |
+| Pow | PowInt | PowNumber | PowDecimal | -- | -- | -- | -- |
+| Gt | GtInt | GtNumber | GtDecimal | GtInt | -- | -- | Gt (generic) |
+| Lt | LtInt | LtNumber | LtDecimal | LtInt | -- | -- | Lt (generic) |
+| Gte | GteInt | GteNumber | GteDecimal | GteInt | -- | -- | Gte (generic) |
+| Lte | LteInt | LteNumber | LteDecimal | LteInt | -- | -- | Lte (generic) |
+| Eq | EqInt | EqNumber | EqDecimal | EqInt | EqString | IsNull | Eq (generic) |
+| Neq | NeqInt | NeqNumber | *(via EqDecimal+Not)* | NeqInt | *(via EqString+Not)* | *(via IsNull+Not)* | Neq (generic) |
+| Neg | NegInt | NegNumber | NegDecimal | -- | -- | -- | Neg (generic) |
 
-**Gaps**: `EqDecimal`, `NeqDecimal`, `NegInt`, `NegNumber`, `NegDecimal`
-do not exist. `Pow` has no `IntWidth` variant (`PowTyped`).
+**Closed gaps (Wave 1)**: `EqDecimal`, `EqString`, `NegInt`, `NegNumber`,
+`NegDecimal`, `IsNull` all added. `NeqDecimal`/`NeqString` handled by
+`EqDecimal`/`EqString` + `Not`.
+
+**Remaining gaps**: `Pow` has no `IntWidth` variant (`PowTyped`). No typed
+string comparison opcodes (`GtString`/`LtString`/`GteString`/`LteString`).
+Generic fallbacks still exist for all operations when both operand types
+are unresolvable (Wave 2 scope).
