@@ -294,6 +294,86 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Phase 2.6.5.3: inference-driven typed equality dispatch.
+    ///
+    /// Architectural shift: query the inference engine for both operand types
+    /// BEFORE compiling them, then pick the typed `Eq*`/`Neq*` opcode based on
+    /// those types. This avoids the slot-tracker dependency that the legacy
+    /// dispatch path relies on (last_expr_numeric_type populated by
+    /// sub-expression compilation), which has many failure modes (loop
+    /// counters, closure params, comptime values).
+    ///
+    /// Returns `Ok(true)` if a typed opcode was emitted (caller should return
+    /// early), `Ok(false)` if the caller should fall through to the legacy
+    /// slot-tracker dispatch path.
+    ///
+    /// Same dispatch model as Stage 2.3 (StringConcat) and Stage 2.4
+    /// (ArrayConcat) — query inference, dispatch on canonical type names.
+    fn compile_typed_equality(
+        &mut self,
+        op: &BinaryOp,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<bool> {
+        if !matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
+            return Ok(false);
+        }
+
+        let lhs_type = self.infer_expr_type(left).ok();
+        let rhs_type = self.infer_expr_type(right).ok();
+
+        let lhs_numeric = lhs_type.as_ref().and_then(inferred_type_to_numeric);
+        let rhs_numeric = rhs_type.as_ref().and_then(inferred_type_to_numeric);
+
+        let lhs_name = lhs_type.as_ref().map(type_display_name);
+        let rhs_name = rhs_type.as_ref().map(type_display_name);
+
+        let is_neq = matches!(op, BinaryOp::NotEqual);
+
+        // Pick the typed opcode and whether to negate after.
+        // EqString/EqDecimal have no Neq variants → emit Eq + Not for NotEqual.
+        // EqInt/EqNumber have NeqInt/NeqNumber variants → use them directly.
+        let emission = match (lhs_numeric, rhs_numeric) {
+            (Some(NumericType::Int), Some(NumericType::Int)) => Some(if is_neq {
+                (OpCode::NeqInt, false)
+            } else {
+                (OpCode::EqInt, false)
+            }),
+            (Some(NumericType::Number), Some(NumericType::Number)) => Some(if is_neq {
+                (OpCode::NeqNumber, false)
+            } else {
+                (OpCode::EqNumber, false)
+            }),
+            (Some(NumericType::Decimal), Some(NumericType::Decimal)) => {
+                Some((OpCode::EqDecimal, is_neq))
+            }
+            _ => None,
+        };
+
+        // Fall back to non-numeric type matching (string equality).
+        let emission = emission.or_else(|| {
+            match (lhs_name.as_deref(), rhs_name.as_deref()) {
+                (Some("string"), Some("string")) => Some((OpCode::EqString, is_neq)),
+                _ => None,
+            }
+        });
+
+        let Some((opcode, needs_negate)) = emission else {
+            return Ok(false);
+        };
+
+        self.compile_expr(left)?;
+        self.compile_expr(right)?;
+        self.emit(Instruction::simple(opcode));
+        if needs_negate {
+            self.emit(Instruction::simple(OpCode::Not));
+        }
+        self.last_expr_schema = None;
+        self.last_expr_type_info = None;
+        self.last_expr_numeric_type = None;
+        Ok(true)
+    }
+
     /// Compile a binary operation expression
     pub(super) fn compile_expr_binary_op(
         &mut self,
@@ -571,6 +651,16 @@ impl BytecodeCompiler {
                 // Lower before generic strict-arithmetic checks so typed matrix
                 // paths never fall back to scalar arithmetic dispatch.
                 if matches!(op, BinaryOp::Mul) && self.try_compile_typed_matrix_mul(left, right)? {
+                    return Ok(());
+                }
+
+                // Phase 2.6.5.3: inference-driven typed Eq/Neq dispatch.
+                // Queries the inference engine for both operand types BEFORE
+                // compiling them and emits the typed opcode directly. This is
+                // the PRIMARY path for Equal/NotEqual; the legacy slot-tracker
+                // dispatch below is the secondary fallback for cases inference
+                // can't resolve.
+                if self.compile_typed_equality(op, left, right)? {
                     return Ok(());
                 }
 
