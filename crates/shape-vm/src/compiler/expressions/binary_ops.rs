@@ -64,6 +64,33 @@ fn combined_span(left: &Expr, right: &Expr) -> Span {
     Span::new(ls.start.min(rs.start), ls.end.max(rs.end))
 }
 
+/// Map a BinaryOp to its generic OpCode for runtime dispatch.
+/// This is used when the compiler cannot prove operand types at compile time
+/// (e.g. DateTime arithmetic via operator traits, untyped function params).
+/// The executor's `exec_arithmetic` / `exec_comparison` handles these at runtime.
+fn generic_opcode_for(op: &BinaryOp) -> Option<OpCode> {
+    match op {
+        BinaryOp::Add => Some(OpCode::Add),
+        BinaryOp::Sub => Some(OpCode::Sub),
+        BinaryOp::Mul => Some(OpCode::Mul),
+        BinaryOp::Div => Some(OpCode::Div),
+        BinaryOp::Mod => Some(OpCode::Mod),
+        BinaryOp::Pow => Some(OpCode::Pow),
+        BinaryOp::BitAnd => Some(OpCode::BitAnd),
+        BinaryOp::BitOr => Some(OpCode::BitOr),
+        BinaryOp::BitShl => Some(OpCode::BitShl),
+        BinaryOp::BitXor => Some(OpCode::BitXor),
+        BinaryOp::BitShr => Some(OpCode::BitShr),
+        BinaryOp::Greater => Some(OpCode::Gt),
+        BinaryOp::Less => Some(OpCode::Lt),
+        BinaryOp::GreaterEq => Some(OpCode::Gte),
+        BinaryOp::LessEq => Some(OpCode::Lte),
+        BinaryOp::Equal => Some(OpCode::Eq),
+        BinaryOp::NotEqual => Some(OpCode::Neq),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericEmitResult {
     EmittedTyped,
@@ -920,8 +947,13 @@ impl BytecodeCompiler {
                 match emit_result {
                     NumericEmitResult::EmittedTyped => {}
                     NumericEmitResult::CoercedNeedsGeneric => {
-                        // Op has no typed variant (e.g., Eq, Neq, bitwise).
-                        self.compile_binary_op(op)?;
+                        // Op has no typed variant for this type combination.
+                        // Emit generic opcode for runtime dispatch (e.g. operator traits).
+                        if let Some(opcode) = generic_opcode_for(op) {
+                            self.emit(Instruction::simple(opcode));
+                        } else {
+                            self.compile_binary_op(op)?;
+                        }
                         self.last_expr_type_info = None;
                         self.last_expr_numeric_type = None;
                     }
@@ -938,7 +970,13 @@ impl BytecodeCompiler {
                         ) {
                             NumericEmitResult::EmittedTyped => {}
                             _ => {
-                                self.compile_binary_op(op)?;
+                                // Emit generic opcode for runtime dispatch
+                                // (DateTime arithmetic, operator traits, untyped params, etc.)
+                                if let Some(opcode) = generic_opcode_for(op) {
+                                    self.emit(Instruction::simple(opcode));
+                                } else {
+                                    self.compile_binary_op(op)?;
+                                }
                                 self.last_expr_type_info = None;
                                 self.last_expr_numeric_type = None;
                             }
