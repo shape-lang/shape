@@ -415,7 +415,7 @@ impl VirtualMachine {
             }
 
             // Arithmetic (generic, with runtime type dispatch)
-            Add | Sub | Mul | Div | Mod | Neg | Pow | BitAnd | BitOr | BitXor | BitShl | BitShr
+            Add | Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | BitShl | BitShr
             | BitNot => {
                 return self.exec_arithmetic(instruction);
             }
@@ -423,7 +423,8 @@ impl VirtualMachine {
             // Typed arithmetic (compiler-guaranteed types, zero dispatch)
             AddInt | AddNumber | AddDecimal | SubInt | SubNumber | SubDecimal | MulInt
             | MulNumber | MulDecimal | DivInt | DivNumber | DivDecimal | ModInt | ModNumber
-            | ModDecimal | PowInt | PowNumber | PowDecimal | IntToNumber | NumberToInt => {
+            | ModDecimal | PowInt | PowNumber | PowDecimal | IntToNumber | NumberToInt
+            | NegInt | NegNumber | NegDecimal => {
                 return self.exec_typed_arithmetic(instruction);
             }
 

@@ -128,17 +128,6 @@ pub(in crate::compiler) fn emit_runtime_pow(compiler: &mut BytecodeCompiler) {
     compiler.last_expr_numeric_type = None;
 }
 
-/// Emit a runtime-dispatched negation instruction.
-///
-/// Fallback for unary `-` when the operand type is not proven at compile time.
-/// The VM's `exec_unary` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `NegInt`, `NegNumber`, `NegDecimal`
-/// when the operand type is proven.
-pub(in crate::compiler) fn emit_runtime_neg(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Neg));
-}
-
 /// Emit a runtime-dispatched greater-than instruction.
 ///
 /// Fallback for `>` when operand types are not proven at compile time.

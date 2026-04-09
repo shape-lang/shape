@@ -85,7 +85,6 @@ fn is_generic_numeric(op: OpCode) -> bool {
             | OpCode::Pow
             | OpCode::IntToNumber
             | OpCode::NumberToInt
-            | OpCode::Neg
     )
 }
 

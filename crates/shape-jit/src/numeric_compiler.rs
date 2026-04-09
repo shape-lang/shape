@@ -65,7 +65,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Neg => {
+            OpCode::NegNumber => {
                 if let Some(a) = value_stack.pop() {
                     let result = builder.ins().fneg(a);
                     value_stack.push(result);

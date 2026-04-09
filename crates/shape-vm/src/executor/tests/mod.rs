@@ -612,11 +612,11 @@ fn test_mod_pow_neg_opcodes() {
         "2 ^ 3"
     );
 
-    // Neg
+    // NegNumber (was Neg — generic Neg removed in Stage 4.2)
     vm.load_program(BytecodeProgram {
         instructions: vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-            Instruction::simple(OpCode::Neg),
+            Instruction::simple(OpCode::NegNumber),
         ],
         constants: vec![Constant::Number(5.0)],
         ..Default::default()

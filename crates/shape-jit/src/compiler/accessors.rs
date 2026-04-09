@@ -120,7 +120,6 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::Mul,
     OpCode::Div,
     OpCode::Mod,
-    OpCode::Neg,
     OpCode::Pow,
     OpCode::BitAnd,
     OpCode::BitOr,

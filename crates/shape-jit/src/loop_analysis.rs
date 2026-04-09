@@ -442,7 +442,6 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::Mul
             | OpCode::Div
             | OpCode::Mod
-            | OpCode::Neg
             | OpCode::NegInt
             | OpCode::NegNumber
             // Equality comparisons (always inline, no FFI)

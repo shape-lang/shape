@@ -88,7 +88,6 @@ fn is_generic_numeric_consumer(op: OpCode) -> bool {
             | OpCode::Div
             | OpCode::Mod
             | OpCode::Pow
-            | OpCode::Neg
             | OpCode::IntToNumber
             | OpCode::NumberToInt
             | OpCode::Gt
@@ -159,7 +158,6 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         OpCode::IntToNumber
         | OpCode::NumberToInt
         | OpCode::CastWidth
-        | OpCode::Neg
         | OpCode::NegInt
         | OpCode::NegNumber
         | OpCode::IsNull
@@ -662,7 +660,6 @@ fn producer_is_numeric(program: &BytecodeProgram, producer_idx: usize, depth: u8
         | OpCode::PowNumber
         | OpCode::IntToNumber
         | OpCode::NumberToInt
-        | OpCode::Neg
         | OpCode::NegInt
         | OpCode::NegNumber => true,
         _ => false,

@@ -814,6 +814,24 @@ impl VirtualMachine {
                     self.push_raw_i64(unsafe { val.as_f64_unchecked() } as i64)?;
                 }
             }
+            // Stage 4.2: typed negation moved here from exec_arithmetic
+            NegInt => {
+                let val = self.pop_raw_i64()?;
+                self.push_raw_i64(-val)?;
+            }
+            NegNumber => {
+                let val = self.pop_raw_f64()?;
+                self.push_raw_f64(-val)?;
+            }
+            NegDecimal => {
+                // Decimal is heap-backed, use ValueWord path
+                let val = self.pop_vw()?;
+                if let Some(d) = val.as_decimal() {
+                    self.push_vw(ValueWord::from_decimal(-d))?;
+                } else {
+                    self.push_vw(val)?;
+                }
+            }
             _ => unreachable!(
                 "exec_typed_arithmetic called with non-typed-arithmetic opcode: {:?}",
                 instruction.opcode
@@ -2562,57 +2580,6 @@ impl VirtualMachine {
                     a_nb.type_name(),
                     b_nb.type_name()
                 )));
-            }
-            NegInt => {
-                let val = self.pop_raw_i64()?;
-                return self.push_raw_i64(-val);
-            }
-            NegNumber => {
-                let val = self.pop_raw_f64()?;
-                return self.push_raw_f64(-val);
-            }
-            NegDecimal => {
-                // Decimal is heap-backed, use ValueWord path
-                let val = self.pop_vw()?;
-                if let Some(d) = val.as_decimal() {
-                    return self.push_vw(ValueWord::from_decimal(-d));
-                }
-                return self.push_vw(val);
-            }
-            Neg => {
-                use shape_value::NanTag;
-                let val_nb = unwrap_annotated(self.pop_vw()?);
-                match val_nb.tag() {
-                    NanTag::I48 => {
-                        return self
-                            .push_vw(ValueWord::from_i64(-unsafe { val_nb.as_i64_unchecked() }));
-                    }
-                    NanTag::F64 => {
-                        return self
-                            .push_vw(ValueWord::from_f64(-unsafe { val_nb.as_f64_unchecked() }));
-                    }
-                    NanTag::Heap => {
-                        if let Some(HeapValue::BigInt(big)) = val_nb.as_heap_ref() {
-                            return self.push_vw(ValueWord::from_i64(
-                                big.checked_neg().ok_or_else(|| {
-                                    VMError::RuntimeError("Integer overflow".into())
-                                })?,
-                            ));
-                        }
-                        if let Some(d) = val_nb.as_decimal() {
-                            return self.push_vw(ValueWord::from_decimal(-d));
-                        }
-                    }
-                    _ => {}
-                }
-                // Operator trait fallback (Neg)
-                if let Some(result) = self.try_unary_operator_trait(val_nb.clone(), "neg")? {
-                    return self.push_vw(result);
-                }
-                return Err(VMError::TypeError {
-                    expected: "number",
-                    got: val_nb.type_name(),
-                });
             }
             Pow => {
                 use shape_value::NanTag;

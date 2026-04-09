@@ -164,7 +164,7 @@ fn test_decimal_neg() {
     // -(5D) => -5D
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 5D
-        Instruction::simple(OpCode::Neg),
+        Instruction::simple(OpCode::NegDecimal),
         Instruction::simple(OpCode::Halt),
     ];
     let constants = vec![Constant::Decimal(Decimal::from(5))];

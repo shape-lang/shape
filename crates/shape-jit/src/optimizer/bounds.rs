@@ -133,7 +133,6 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         OpCode::IntToNumber
         | OpCode::NumberToInt
         | OpCode::CastWidth
-        | OpCode::Neg
         | OpCode::NegInt
         | OpCode::NegNumber
         | OpCode::IsNull

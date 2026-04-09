@@ -95,8 +95,6 @@ define_opcodes! {
     Div = 0x13, Arithmetic, pops: 2, pushes: 1;
     /// Modulo operation
     Mod = 0x14, Arithmetic, pops: 2, pushes: 1;
-    /// Negate number
-    Neg = 0x15, Arithmetic, pops: 1, pushes: 1;
     /// Power operation
     Pow = 0x16, Arithmetic, pops: 2, pushes: 1;
     /// Bitwise AND

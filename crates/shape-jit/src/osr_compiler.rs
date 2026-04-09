@@ -78,7 +78,7 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::ModNumber
         | OpCode::PowNumber => true,
         // Neg
-        OpCode::Neg | OpCode::NegInt | OpCode::NegNumber => true,
+        OpCode::NegInt | OpCode::NegNumber => true,
         // Comparison (Int)
         OpCode::GtInt
         | OpCode::LtInt
@@ -561,13 +561,6 @@ pub fn compile_osr_loop(
                     block_terminated = true;
                 }
 
-                OpCode::Neg => {
-                    if stack_depth >= 1 {
-                        let val = stack_pop!(builder, stack_depth);
-                        let result = builder.ins().ineg(val);
-                        stack_push!(builder, result, stack_depth);
-                    }
-                }
                 OpCode::NegInt => {
                     if stack_depth >= 1 {
                         let val = stack_pop!(builder, stack_depth);
