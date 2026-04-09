@@ -85,8 +85,8 @@ fn generic_opcode_for(op: &BinaryOp) -> Option<OpCode> {
         BinaryOp::Less => Some(OpCode::Lt),
         BinaryOp::GreaterEq => Some(OpCode::Gte),
         BinaryOp::LessEq => Some(OpCode::Lte),
-        BinaryOp::Equal => Some(OpCode::Eq),
-        BinaryOp::NotEqual => Some(OpCode::Neq),
+        BinaryOp::Equal => None,
+        BinaryOp::NotEqual => None,
         _ => None,
     }
 }
@@ -419,19 +419,29 @@ impl BytecodeCompiler {
             _ => None,
         };
 
-        let Some((opcode, needs_negate)) = emission else {
-            return Ok(false);
-        };
+        if let Some((opcode, needs_negate)) = emission {
+            self.compile_expr(left)?;
+            self.compile_expr(right)?;
+            self.emit(Instruction::simple(opcode));
+            if needs_negate {
+                self.emit(Instruction::simple(OpCode::Not));
+            }
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+            self.last_expr_numeric_type = None;
+            return Ok(true);
+        }
 
+        // Fallback: both operand types are unresolved. Compile operands and
+        // emit a runtime-dispatched equality (vw_equals in the executor).
+        // This covers generic stdlib code, untyped function params, etc.
         self.compile_expr(left)?;
         self.compile_expr(right)?;
-        self.emit(Instruction::simple(opcode));
-        if needs_negate {
-            self.emit(Instruction::simple(OpCode::Not));
+        if is_neq {
+            crate::compiler::helpers::emit_runtime_neq(self);
+        } else {
+            crate::compiler::helpers::emit_runtime_eq(self);
         }
-        self.last_expr_schema = None;
-        self.last_expr_type_info = None;
-        self.last_expr_numeric_type = None;
         Ok(true)
     }
 

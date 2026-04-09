@@ -76,8 +76,8 @@ impl BytecodeCompiler {
             BinaryOp::Less => unreachable!("generic Lt should be handled by typed dispatch"),
             BinaryOp::GreaterEq => unreachable!("generic Gte should be handled by typed dispatch"),
             BinaryOp::LessEq => unreachable!("generic Lte should be handled by typed dispatch"),
-            BinaryOp::Equal => OpCode::Eq,
-            BinaryOp::NotEqual => OpCode::Neq,
+            BinaryOp::Equal => unreachable!("generic Eq/Neq should be handled by typed dispatch"),
+            BinaryOp::NotEqual => unreachable!("generic Eq/Neq should be handled by typed dispatch"),
             BinaryOp::And => OpCode::And,
             BinaryOp::Or => OpCode::Or,
             BinaryOp::FuzzyEqual | BinaryOp::FuzzyGreater | BinaryOp::FuzzyLess => {

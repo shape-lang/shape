@@ -27,6 +27,37 @@ pub(super) fn emit_runtime_add(compiler: &mut BytecodeCompiler) {
     compiler.last_expr_numeric_type = None;
 }
 
+/// Emit a runtime-dispatched equality instruction.
+///
+/// This is the fallback path for `==` when the compiler cannot prove both
+/// operand types at compile time (e.g. untyped function params, generic
+/// stdlib code). The VM's `exec_comparison` handles type dispatch at runtime
+/// via `vw_equals`.
+///
+/// Typed callers should prefer `EqInt`, `EqNumber`, `EqDecimal`, or
+/// `EqString` when the operand types are proven.
+pub(super) fn emit_runtime_eq(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Eq));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
+/// Emit a runtime-dispatched not-equal instruction.
+///
+/// This is the fallback path for `!=` when the compiler cannot prove both
+/// operand types at compile time. The VM's `exec_comparison` handles type
+/// dispatch at runtime via `vw_equals`.
+///
+/// Typed callers should prefer `NeqInt`, `NeqNumber`, or typed equality +
+/// `Not` when the operand types are proven.
+pub(super) fn emit_runtime_neq(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Neq));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
 /// Extract the core error message from a ShapeError, stripping redundant
 /// "Type error:", "Runtime error:", "Compile error:", etc. prefixes that
 /// thiserror's Display impl adds.  This prevents nested comptime errors
