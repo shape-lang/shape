@@ -151,6 +151,19 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
+        // Skip compiling bodies of generic extend methods (those with
+        // unresolved type params like T, U, K, V). Their AST is preserved
+        // in `function_defs` for on-demand monomorphization at call sites.
+        // Monomorphized specializations (where type params are substituted
+        // with concrete types) are compiled normally.
+        if func_def
+            .type_params
+            .as_ref()
+            .is_some_and(|tps| !tps.is_empty())
+        {
+            return Ok(());
+        }
+
         let mut effective_def = func_def.clone();
         let effective_pass_modes = self.effective_function_like_pass_modes(
             Some(&effective_def.name),

@@ -329,6 +329,33 @@ impl BytecodeCompiler {
             return Ok(false);
         }
 
+        let is_neq = matches!(op, BinaryOp::NotEqual);
+
+        // Desugar `x == None` / `None == x` to IsNull(x).
+        // This covers Option<T> comparisons and any None-literal equality.
+        if matches!(right, Expr::Literal(Literal::None, _)) {
+            self.compile_expr(left)?;
+            self.emit(Instruction::simple(OpCode::IsNull));
+            if is_neq {
+                self.emit(Instruction::simple(OpCode::Not));
+            }
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+            self.last_expr_numeric_type = None;
+            return Ok(true);
+        }
+        if matches!(left, Expr::Literal(Literal::None, _)) {
+            self.compile_expr(right)?;
+            self.emit(Instruction::simple(OpCode::IsNull));
+            if is_neq {
+                self.emit(Instruction::simple(OpCode::Not));
+            }
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+            self.last_expr_numeric_type = None;
+            return Ok(true);
+        }
+
         // Resolve operand types from inference + literal fallback.
         let mut lhs_eq = self.resolve_eq_type(left);
         let mut rhs_eq = self.resolve_eq_type(right);
@@ -341,8 +368,6 @@ impl BytecodeCompiler {
         } else if rhs_eq.is_none() && lhs_eq.is_some() {
             rhs_eq = lhs_eq;
         }
-
-        let is_neq = matches!(op, BinaryOp::NotEqual);
 
         // Pick the typed opcode and whether to negate after.
         // EqString/EqDecimal have no Neq variants → emit Eq + Not for NotEqual.

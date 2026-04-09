@@ -76,7 +76,7 @@ impl BytecodeCompiler {
             BinaryOp::Less => OpCode::Lt,
             BinaryOp::GreaterEq => OpCode::Gte,
             BinaryOp::LessEq => OpCode::Lte,
-            BinaryOp::Equal => OpCode::Eq,
+            BinaryOp::Equal => OpCode::Eq, // Residual: impl Iterable untyped params
             BinaryOp::NotEqual => OpCode::Neq,
             BinaryOp::And => OpCode::And,
             BinaryOp::Or => OpCode::Or,

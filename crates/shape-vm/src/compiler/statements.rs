@@ -1505,6 +1505,36 @@ impl BytecodeCompiler {
             shape_ast::ast::TypeName::Generic { name, .. } => name.clone(),
         };
 
+        // Propagate type params from the extend block's generic target type.
+        // `extend Vec<T> { method indexOf(value: T) { ... } }` produces a
+        // FunctionDef with type_params = [T]. This enables monomorphization
+        // at call sites (e.g., `[1,2,3].indexOf(2)` → T=int).
+        //
+        // Heuristic: a type arg is a type PARAMETER (not a concrete type) if
+        // it's a Basic annotation whose name is a single uppercase letter
+        // (the standard convention for type variables: T, U, K, V).
+        let extend_type_params: Vec<shape_ast::ast::TypeParam> = match target_type {
+            shape_ast::ast::TypeName::Generic { type_args, .. } => type_args
+                .iter()
+                .filter_map(|ta| match ta {
+                    shape_ast::ast::TypeAnnotation::Basic(name)
+                        if name.len() == 1
+                            && name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) =>
+                    {
+                        Some(shape_ast::ast::TypeParam {
+                            name: name.clone(),
+                            span: Span::DUMMY,
+                            doc_comment: None,
+                            default_type: None,
+                            trait_bounds: Vec::new(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
         Ok(FunctionDef {
             name: format!("{}.{}", type_str, method.name),
             name_span: Span::DUMMY,
@@ -1513,7 +1543,7 @@ impl BytecodeCompiler {
             params,
             return_type: method.return_type.clone(),
             body,
-            type_params: Some(Vec::new()),
+            type_params: Some(extend_type_params),
             annotations: method.annotations.clone(),
             is_async: method.is_async,
             is_comptime: false,
