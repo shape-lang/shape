@@ -413,11 +413,11 @@ impl VirtualMachine {
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Gt) {
                     self.push_vw(expr)?;
                 } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
-                    self.push_vw(ValueWord::from_bool(ord == Ordering::Greater))?;
+                    self.push_raw_bool(ord == Ordering::Greater)?;
                 } else {
                     // String comparison
                     if let (Some(a_str), Some(b_str)) = (a_nb.as_str(), b_nb.as_str()) {
-                        self.push_vw(ValueWord::from_bool(a_str > b_str))?;
+                        self.push_raw_bool(a_str > b_str)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Cannot compare '>' on {} and {}",
@@ -433,10 +433,10 @@ impl VirtualMachine {
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Lt) {
                     self.push_vw(expr)?;
                 } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
-                    self.push_vw(ValueWord::from_bool(ord == Ordering::Less))?;
+                    self.push_raw_bool(ord == Ordering::Less)?;
                 } else {
                     if let (Some(a_str), Some(b_str)) = (a_nb.as_str(), b_nb.as_str()) {
-                        self.push_vw(ValueWord::from_bool(a_str < b_str))?;
+                        self.push_raw_bool(a_str < b_str)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Cannot compare '<' on {} and {}",
@@ -452,12 +452,10 @@ impl VirtualMachine {
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Gte) {
                     self.push_vw(expr)?;
                 } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
-                    self.push_vw(ValueWord::from_bool(
-                        ord == Ordering::Greater || ord == Ordering::Equal,
-                    ))?;
+                    self.push_raw_bool(ord == Ordering::Greater || ord == Ordering::Equal)?;
                 } else {
                     if let (Some(a_str), Some(b_str)) = (a_nb.as_str(), b_nb.as_str()) {
-                        self.push_vw(ValueWord::from_bool(a_str >= b_str))?;
+                        self.push_raw_bool(a_str >= b_str)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Cannot compare '>=' on {} and {}",
@@ -473,12 +471,10 @@ impl VirtualMachine {
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Lte) {
                     self.push_vw(expr)?;
                 } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
-                    self.push_vw(ValueWord::from_bool(
-                        ord == Ordering::Less || ord == Ordering::Equal,
-                    ))?;
+                    self.push_raw_bool(ord == Ordering::Less || ord == Ordering::Equal)?;
                 } else {
                     if let (Some(a_str), Some(b_str)) = (a_nb.as_str(), b_nb.as_str()) {
-                        self.push_vw(ValueWord::from_bool(a_str <= b_str))?;
+                        self.push_raw_bool(a_str <= b_str)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Cannot compare '<=' on {} and {}",
@@ -496,7 +492,7 @@ impl VirtualMachine {
                     self.push_vw(expr)?;
                 } else {
                     // vw_equals handles all types including heap (String, Array, Decimal, etc.)
-                    self.push_vw(ValueWord::from_bool(a_nb.vw_equals(&b_nb)))?;
+                    self.push_raw_bool(a_nb.vw_equals(&b_nb))?;
                 }
             }
             NeqDynamic => {
@@ -505,7 +501,7 @@ impl VirtualMachine {
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Neq) {
                     self.push_vw(expr)?;
                 } else {
-                    self.push_vw(ValueWord::from_bool(!a_nb.vw_equals(&b_nb)))?;
+                    self.push_raw_bool(!a_nb.vw_equals(&b_nb))?;
                 }
             }
             _ => unreachable!(

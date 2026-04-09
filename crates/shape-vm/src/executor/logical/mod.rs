@@ -31,11 +31,11 @@ impl VirtualMachine {
                             Box::new(right.as_ref().clone()),
                         ))))?;
                     } else {
-                        self.push_vw(ValueWord::from_bool(a.is_truthy() && b.is_truthy()))?;
+                        self.push_raw_bool(a.is_truthy() && b.is_truthy())?;
                     }
                 } else {
                     // Fast path: non-heap values, just check truthiness
-                    self.push_vw(ValueWord::from_bool(a.is_truthy() && b.is_truthy()))?;
+                    self.push_raw_bool(a.is_truthy() && b.is_truthy())?;
                 }
             }
             Or => {
@@ -51,11 +51,11 @@ impl VirtualMachine {
                             Box::new(right.as_ref().clone()),
                         ))))?;
                     } else {
-                        self.push_vw(ValueWord::from_bool(a.is_truthy() || b.is_truthy()))?;
+                        self.push_raw_bool(a.is_truthy() || b.is_truthy())?;
                     }
                 } else {
                     // Fast path: non-heap values, just check truthiness
-                    self.push_vw(ValueWord::from_bool(a.is_truthy() || b.is_truthy()))?;
+                    self.push_raw_bool(a.is_truthy() || b.is_truthy())?;
                 }
             }
             Not => {
@@ -67,11 +67,11 @@ impl VirtualMachine {
                             Box::new(node.as_ref().clone()),
                         ))))?;
                     } else {
-                        self.push_vw(ValueWord::from_bool(!val.is_truthy()))?;
+                        self.push_raw_bool(!val.is_truthy())?;
                     }
                 } else {
                     // Fast path: non-heap value, just negate truthiness
-                    self.push_vw(ValueWord::from_bool(!val.is_truthy()))?;
+                    self.push_raw_bool(!val.is_truthy())?;
                 }
             }
             _ => unreachable!(

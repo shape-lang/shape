@@ -909,18 +909,6 @@ impl VirtualMachine {
         }
     }
 
-    /// Width-aware wrapping for sub-64 and u64 widths. I64 returns value unchanged.
-    #[inline(always)]
-    fn width_wrap(value: i64, width: NumericWidth) -> ValueWord {
-        match width.to_int_width() {
-            Some(w) => ValueWord::from_i64(w.truncate(value)),
-            None => {
-                // I64 or F32/F64 — no truncation
-                ValueWord::from_i64(value)
-            }
-        }
-    }
-
     #[inline(always)]
     fn compact_int_checked_binop(
         &mut self,
@@ -943,15 +931,15 @@ impl VirtualMachine {
         };
 
         // For sub-i64 widths: wrapping arithmetic + truncation
-        if width.to_int_width().is_some() {
+        if let Some(int_w) = width.to_int_width() {
             let result = wrapping_op(ai, bi);
-            return self.push_vw(Self::width_wrap(result, width));
+            return self.push_raw_i64(int_w.truncate(result));
         }
 
         // I64: checked with f64 fallback on overflow
         match checked(ai, bi) {
-            Some(result) => self.push_vw(ValueWord::from_i64(result)),
-            None => self.push_vw(ValueWord::from_f64(overflow_fallback(ai, bi))),
+            Some(result) => self.push_raw_i64(result),
+            None => self.push_raw_f64(overflow_fallback(ai, bi)),
         }
     }
 
@@ -976,7 +964,11 @@ impl VirtualMachine {
             got: a.type_name(),
         })?;
         let result = op(ai, bi);
-        self.push_vw(Self::width_wrap(result, width))
+        if let Some(int_w) = width.to_int_width() {
+            self.push_raw_i64(int_w.truncate(result))
+        } else {
+            self.push_raw_i64(result)
+        }
     }
 
     #[inline(always)]
@@ -988,7 +980,7 @@ impl VirtualMachine {
             Self::number_operand(&a).ok_or_else(|| Self::compact_number_type_error(&a, &b))?;
         let rhs =
             Self::number_operand(&b).ok_or_else(|| Self::compact_number_type_error(&a, &b))?;
-        self.push_vw(ValueWord::from_f64(op(lhs, rhs)))
+        self.push_raw_f64(op(lhs, rhs))
     }
 
     #[inline(always)]
@@ -1007,7 +999,7 @@ impl VirtualMachine {
             expected: "number",
             got: a.type_name(),
         })?;
-        self.push_vw(ValueWord::from_f64(op(lhs, rhs)))
+        self.push_raw_f64(op(lhs, rhs))
     }
 
     #[inline(always)]
@@ -1028,7 +1020,7 @@ impl VirtualMachine {
         } else {
             ai.cmp(&bi) as i64
         };
-        self.push_vw(ValueWord::from_i64(ord))
+        self.push_raw_i64(ord)
     }
 
     #[inline(always)]
@@ -1044,7 +1036,7 @@ impl VirtualMachine {
             got: b.type_name(),
         })?;
         let ord = lhs.partial_cmp(&rhs).map_or(0i64, |o| o as i64);
-        self.push_vw(ValueWord::from_i64(ord))
+        self.push_raw_i64(ord)
     }
 
     #[inline(always)]
@@ -1137,10 +1129,10 @@ impl VirtualMachine {
             nb.as_f64().map(|f| f as i64).unwrap_or(0)
         });
         if let Some(int_w) = width.to_int_width() {
-            self.push_vw(ValueWord::from_i64(int_w.truncate(raw)))
+            self.push_raw_i64(int_w.truncate(raw))
         } else {
             // I64 or float: no truncation
-            self.push_vw(ValueWord::from_i64(raw))
+            self.push_raw_i64(raw)
         }
     }
 

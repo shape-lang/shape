@@ -120,10 +120,10 @@ impl VirtualMachine {
         let args_nb = self.pop_builtin_args()?;
 
         match builtin {
-            BuiltinFunction::WindowRowNumber => self.push_vw(ValueWord::from_i64(1)),
-            BuiltinFunction::WindowRank => self.push_vw(ValueWord::from_i64(1)),
-            BuiltinFunction::WindowDenseRank => self.push_vw(ValueWord::from_i64(1)),
-            BuiltinFunction::WindowNtile => self.push_vw(ValueWord::from_i64(1)),
+            BuiltinFunction::WindowRowNumber => self.push_raw_i64(1),
+            BuiltinFunction::WindowRank => self.push_raw_i64(1),
+            BuiltinFunction::WindowDenseRank => self.push_raw_i64(1),
+            BuiltinFunction::WindowNtile => self.push_raw_i64(1),
             BuiltinFunction::WindowLag => {
                 let default = args_nb.get(2).cloned().unwrap_or_else(ValueWord::none);
                 self.push_vw(default)

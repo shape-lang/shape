@@ -60,7 +60,7 @@ impl VirtualMachine {
                 let str_ptr = extract_ptr(&str_vw) as *const StringObj;
                 // Safety: str_ptr was created by NewStringV2 or string FFI.
                 let len = unsafe { StringObj::len(str_ptr) };
-                self.push_vw(ValueWord::from_i64(len as i64))?;
+                self.push_raw_i64(len as i64)?;
                 Ok(())
             }
 
@@ -86,7 +86,7 @@ impl VirtualMachine {
                 let b_ptr = extract_ptr(&b_vw) as *const StringObj;
                 // Safety: both pointers were created by NewStringV2 or string FFI.
                 let eq = unsafe { StringObj::eq(a_ptr, b_ptr) };
-                self.push_vw(ValueWord::from_bool(eq))?;
+                self.push_raw_bool(eq)?;
                 Ok(())
             }
 
