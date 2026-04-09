@@ -11,6 +11,22 @@ use super::{
     BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, ResolutionScope,
 };
 
+/// Emit a runtime-dispatched addition instruction.
+///
+/// This is the fallback path for `+` when the compiler cannot prove both
+/// operand types at compile time (e.g. untyped locals, mixed
+/// string/numeric contexts, DateTime arithmetic). The VM's
+/// `exec_arithmetic` handles type dispatch at runtime.
+///
+/// Typed callers should prefer `AddInt`, `AddNumber`, `AddDecimal`,
+/// `StringConcat`, or `ArrayConcat` when the operand types are proven.
+pub(super) fn emit_runtime_add(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::Add));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+}
+
 /// Extract the core error message from a ShapeError, stripping redundant
 /// "Type error:", "Runtime error:", "Compile error:", etc. prefixes that
 /// thiserror's Display impl adds.  This prevents nested comptime errors

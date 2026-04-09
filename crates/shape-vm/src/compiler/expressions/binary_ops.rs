@@ -705,10 +705,7 @@ impl BytecodeCompiler {
                         )
                     };
                     if is_temporal(&lhs_name) || is_temporal(&rhs_name) {
-                        emit_operator_trait_call(self, "add");
-                        self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
+                        crate::compiler::helpers::emit_runtime_add(self);
                         return Ok(());
                     }
 
@@ -749,18 +746,53 @@ impl BytecodeCompiler {
                         }
                         false
                     };
+                    // Path 5: check if identifier resolves to a local whose
+                    // type_name in the type tracker is numeric. This covers
+                    // locals and for-loop variables that have a known type
+                    // name but whose storage_hint is Unknown (not yet
+                    // propagated).
+                    let local_has_numeric_type_name = |e: &Expr| -> Option<NumericType> {
+                        if let Expr::Identifier(name, _) = e {
+                            if let Some(idx) = self.resolve_local(name) {
+                                if self.param_locals.contains(&idx) {
+                                    return None;
+                                }
+                                if let Some(info) = self.type_tracker.get_local_type(idx) {
+                                    if let Some(ref tn) = info.type_name {
+                                        return match tn.as_str() {
+                                            "int" | "Int" | "Integer" | "i64" => Some(NumericType::Int),
+                                            "number" | "Number" | "Float" | "f64" => Some(NumericType::Number),
+                                            "decimal" | "Decimal" => Some(NumericType::Decimal),
+                                            _ => None,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    };
+                    let lhs_local_num = local_has_numeric_type_name(left);
+                    let rhs_local_num = local_has_numeric_type_name(right);
+                    if left_numeric.is_none() && lhs_local_num.is_some() {
+                        left_numeric = lhs_local_num;
+                    }
+                    if right_numeric.is_none() && rhs_local_num.is_some() {
+                        right_numeric = rhs_local_num;
+                    }
                     let lhs_confirmed = Self::is_expr_confirmed_numeric(left)
                         || self
                             .storage_hint_for_expr(left)
                             .is_some_and(|h| h.is_numeric_family())
                         || (!is_untyped_param(left) && left_numeric.is_some())
-                        || lhs_inferred_num.is_some();
+                        || lhs_inferred_num.is_some()
+                        || lhs_local_num.is_some();
                     let rhs_confirmed = Self::is_expr_confirmed_numeric(right)
                         || self
                             .storage_hint_for_expr(right)
                             .is_some_and(|h| h.is_numeric_family())
                         || (!is_untyped_param(right) && right_numeric.is_some())
-                        || rhs_inferred_num.is_some();
+                        || rhs_inferred_num.is_some()
+                        || rhs_local_num.is_some();
 
                     let primary = if lhs_confirmed && rhs_confirmed {
                         self.emit_numeric_binary_with_coercion_trusted(
@@ -779,12 +811,10 @@ impl BytecodeCompiler {
                             self.last_expr_schema = None;
                         }
                         NumericEmitResult::CoercedNeedsGeneric | NumericEmitResult::NoPlan => {
-                            return Err(ShapeError::SemanticError {
-                                message: "Cannot infer operand types for `+` — add type annotations".to_string(),
-                                location: Some(
-                                    self.span_to_source_location(combined_span(left, right)),
-                                ),
-                            });
+                            // Runtime-dispatched fallback for unresolvable operand
+                            // types. The VM's exec_arithmetic handles type dispatch
+                            // (numeric, string concat, DateTime, etc.) at runtime.
+                            crate::compiler::helpers::emit_runtime_add(self);
                         }
                     }
                 }
