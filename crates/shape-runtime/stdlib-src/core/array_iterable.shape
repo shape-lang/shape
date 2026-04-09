@@ -12,13 +12,6 @@ impl Iterable for Array {
         -1
     }
 
-    method includes(value) {
-        for item in self {
-            if item == value { return true }
-        }
-        false
-    }
-
     method zip(other) {
         let result = [];
         let n = if self.len() < other.len() { self.len() } else { other.len() };
@@ -36,16 +29,6 @@ impl Iterable for Array {
         while i < self.len() {
             result.push(self.slice(i, i + size));
             i = i + size;
-        }
-        result
-    }
-
-    method unique() {
-        let mut result = []
-        for item in self {
-            if !result.includes(item) {
-                result.push(item)
-            }
         }
         result
     }

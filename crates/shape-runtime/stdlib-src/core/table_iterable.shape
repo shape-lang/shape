@@ -17,7 +17,7 @@ impl Iterable for Table {
         -1
     }
 
-    method includes(value) {
+    method includes(value) -> bool {
         self.some(|row| row == value)
     }
 
