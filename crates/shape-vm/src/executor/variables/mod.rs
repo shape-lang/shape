@@ -1436,7 +1436,7 @@ mod tests {
             // Load slot 0 (int), load slot 1 (float), add them
             Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
             Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(1))),
-            Instruction::simple(OpCode::Add),
+            Instruction::simple(OpCode::AddDynamic),
             Instruction::simple(OpCode::Halt),
         ];
         program.top_level_locals_count = 2;

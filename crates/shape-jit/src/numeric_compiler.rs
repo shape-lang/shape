@@ -33,7 +33,7 @@ pub fn compile_numeric_program(
                     value_stack.push(const_val);
                 }
             }
-            OpCode::Add => {
+            OpCode::AddDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();
@@ -41,7 +41,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Sub => {
+            OpCode::SubDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();
@@ -49,7 +49,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Mul => {
+            OpCode::MulDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();
@@ -57,7 +57,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Div => {
+            OpCode::DivDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();
@@ -71,7 +71,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Gt => {
+            OpCode::GtDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();
@@ -82,7 +82,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Lt => {
+            OpCode::LtDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();
@@ -93,7 +93,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Gte => {
+            OpCode::GteDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();
@@ -104,7 +104,7 @@ pub fn compile_numeric_program(
                     value_stack.push(result);
                 }
             }
-            OpCode::Lte => {
+            OpCode::LteDynamic => {
                 if value_stack.len() >= 2 {
                     let b = value_stack.pop().unwrap();
                     let a = value_stack.pop().unwrap();

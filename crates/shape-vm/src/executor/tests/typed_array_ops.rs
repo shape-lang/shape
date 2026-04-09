@@ -108,7 +108,7 @@ fn test_float_array_add() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Add),
+        Instruction::simple(OpCode::AddDynamic),
     ];
     let constants = vec![
         Constant::Value(float_array(&[1.0, 2.0, 3.0])),
@@ -125,7 +125,7 @@ fn test_int_array_add() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Add),
+        Instruction::simple(OpCode::AddDynamic),
     ];
     let constants = vec![
         Constant::Value(int_array(&[10, 20, 30])),
@@ -141,7 +141,7 @@ fn test_float_array_sub() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Sub),
+        Instruction::simple(OpCode::SubDynamic),
     ];
     let constants = vec![
         Constant::Value(float_array(&[10.0, 20.0, 30.0])),
@@ -157,7 +157,7 @@ fn test_float_array_mul() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![
         Constant::Value(float_array(&[2.0, 3.0, 4.0])),
@@ -173,7 +173,7 @@ fn test_float_array_div() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Div),
+        Instruction::simple(OpCode::DivDynamic),
     ];
     let constants = vec![
         Constant::Value(float_array(&[10.0, 20.0, 30.0])),
@@ -192,7 +192,7 @@ fn test_float_array_scalar_mul() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![
         Constant::Value(float_array(&[1.0, 2.0, 3.0])),
@@ -209,7 +209,7 @@ fn test_scalar_mul_float_array() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![
         Constant::Number(10.0),
@@ -226,7 +226,7 @@ fn test_float_array_scalar_add() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Add),
+        Instruction::simple(OpCode::AddDynamic),
     ];
     let constants = vec![
         Constant::Value(float_array(&[1.0, 2.0, 3.0])),
@@ -243,7 +243,7 @@ fn test_float_array_scalar_div() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Div),
+        Instruction::simple(OpCode::DivDynamic),
     ];
     let constants = vec![
         Constant::Value(float_array(&[10.0, 20.0, 30.0])),
@@ -262,7 +262,7 @@ fn test_int_array_plus_float_array_promotes() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Add),
+        Instruction::simple(OpCode::AddDynamic),
     ];
     let constants = vec![
         Constant::Value(int_array(&[1, 2, 3])),

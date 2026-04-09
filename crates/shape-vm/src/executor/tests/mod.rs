@@ -68,7 +68,7 @@ fn test_basic_arithmetic() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // Push 2
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // Push 3
-        Instruction::simple(OpCode::Add),                             // Add
+        Instruction::simple(OpCode::AddDynamic),                             // Add
     ];
     let constants = vec![Constant::Number(2.0), Constant::Number(3.0)];
 
@@ -82,7 +82,7 @@ fn test_subtraction() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Sub),
+        Instruction::simple(OpCode::SubDynamic),
     ];
     let constants = vec![Constant::Number(10.0), Constant::Number(4.0)];
 
@@ -96,7 +96,7 @@ fn test_multiplication() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![Constant::Number(3.0), Constant::Number(4.0)];
 
@@ -110,7 +110,7 @@ fn test_division() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Div),
+        Instruction::simple(OpCode::DivDynamic),
     ];
     let constants = vec![Constant::Number(15.0), Constant::Number(3.0)];
 
@@ -188,7 +188,7 @@ fn test_comparisons() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Gt),
+        Instruction::simple(OpCode::GtDynamic),
     ];
     let constants = vec![Constant::Number(5.0), Constant::Number(3.0)];
 
@@ -199,7 +199,7 @@ fn test_comparisons() {
     let instructions2 = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        Instruction::simple(OpCode::Gt),
+        Instruction::simple(OpCode::GtDynamic),
     ];
     let constants2 = vec![Constant::Number(5.0), Constant::Number(3.0)];
 
@@ -298,7 +298,7 @@ fn test_stack_operations() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::simple(OpCode::Dup),
-        Instruction::simple(OpCode::Add),
+        Instruction::simple(OpCode::AddDynamic),
     ];
     let constants = vec![Constant::Number(5.0)];
 
@@ -351,12 +351,12 @@ fn test_while_loop_simple() {
         // Condition: i < 3
         Instruction::new(OpCode::LoadModuleBinding, Some(Operand::ModuleBinding(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Lt),
+        Instruction::simple(OpCode::LtDynamic),
         Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(5))), // Jump to index 10 (skip body)
         // Body: i = i + 1
         Instruction::new(OpCode::LoadModuleBinding, Some(Operand::ModuleBinding(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::simple(OpCode::Add),
+        Instruction::simple(OpCode::AddDynamic),
         Instruction::new(OpCode::StoreModuleBinding, Some(Operand::ModuleBinding(0))),
         // Jump back to loop condition (index 2)
         // When executing self at index 10, ip will be 11, so offset = 2 - 11 = -9
@@ -397,7 +397,7 @@ fn test_conditional_jump() {
         // Condition: 5 > 3
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 5
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 3
-        Instruction::simple(OpCode::Gt),
+        Instruction::simple(OpCode::GtDynamic),
         // If false, jump to else (instruction 6)
         Instruction::new(OpCode::JumpIfFalse, Some(Operand::Offset(2))),
         // Then: push 10
@@ -446,7 +446,7 @@ fn test_comparison_operators_complete() {
         instructions: vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-            Instruction::simple(OpCode::Gte),
+            Instruction::simple(OpCode::GteDynamic),
         ],
         constants: vec![Constant::Number(5.0)],
         ..Default::default()
@@ -462,7 +462,7 @@ fn test_comparison_operators_complete() {
         instructions: vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
             Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-            Instruction::simple(OpCode::Lte),
+            Instruction::simple(OpCode::LteDynamic),
         ],
         constants: vec![Constant::Number(3.0), Constant::Number(5.0)],
         ..Default::default()
@@ -585,7 +585,7 @@ fn test_mod_pow_neg_opcodes() {
         instructions: vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
             Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-            Instruction::simple(OpCode::Mod),
+            Instruction::simple(OpCode::ModDynamic),
         ],
         constants: vec![Constant::Number(10.0), Constant::Number(3.0)],
         ..Default::default()
@@ -601,7 +601,7 @@ fn test_mod_pow_neg_opcodes() {
         instructions: vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
             Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-            Instruction::simple(OpCode::Pow),
+            Instruction::simple(OpCode::PowDynamic),
         ],
         constants: vec![Constant::Number(2.0), Constant::Number(3.0)],
         ..Default::default()
@@ -831,7 +831,7 @@ fn test_wrap_type_annotation_preserves_operations() {
             Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 10
             Instruction::new(OpCode::WrapTypeAnnotation, Some(Operand::Property(0))), // Wrap
             Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 5
-            Instruction::simple(OpCode::Add), // Should unwrap automatically for operations
+            Instruction::simple(OpCode::AddDynamic), // Should unwrap automatically for operations
         ],
         constants: vec![Constant::Number(10.0), Constant::Number(5.0)],
         strings: vec!["Currency".to_string()],

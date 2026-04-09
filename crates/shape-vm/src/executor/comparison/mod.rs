@@ -406,7 +406,7 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         use OpCode::*;
         match instruction.opcode {
-            Gt => {
+            GtDynamic => {
                 let b_nb = self.pop_vw()?;
                 let a_nb = self.pop_vw()?;
                 // ValueWord-native: try ExprProxy, then numeric comparison
@@ -427,7 +427,7 @@ impl VirtualMachine {
                     }
                 }
             }
-            Lt => {
+            LtDynamic => {
                 let b_nb = self.pop_vw()?;
                 let a_nb = self.pop_vw()?;
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Lt) {
@@ -446,7 +446,7 @@ impl VirtualMachine {
                     }
                 }
             }
-            Gte => {
+            GteDynamic => {
                 let b_nb = self.pop_vw()?;
                 let a_nb = self.pop_vw()?;
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Gte) {
@@ -467,7 +467,7 @@ impl VirtualMachine {
                     }
                 }
             }
-            Lte => {
+            LteDynamic => {
                 let b_nb = self.pop_vw()?;
                 let a_nb = self.pop_vw()?;
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Lte) {

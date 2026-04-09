@@ -348,7 +348,7 @@ fn test_matrix_add() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Add),
+        Instruction::simple(OpCode::AddDynamic),
     ];
     let constants = vec![
         Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
@@ -365,7 +365,7 @@ fn test_matrix_sub() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Sub),
+        Instruction::simple(OpCode::SubDynamic),
     ];
     let constants = vec![
         Constant::Value(test_matrix_2x2(5.0, 6.0, 7.0, 8.0)),
@@ -382,7 +382,7 @@ fn test_matrix_matmul() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![
         Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
@@ -401,7 +401,7 @@ fn test_matrix_scale_right() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![
         Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
@@ -418,7 +418,7 @@ fn test_matrix_scale_left() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![
         Constant::Number(3.0),
@@ -438,7 +438,7 @@ fn test_matrix_matvec() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![
         Constant::Value(test_matrix_2x2(1.0, 2.0, 3.0, 4.0)),
@@ -460,7 +460,7 @@ fn test_matrix_matmul_non_square() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Mul),
+        Instruction::simple(OpCode::MulDynamic),
     ];
     let constants = vec![
         Constant::Value(test_matrix_2x3()),
@@ -479,7 +479,7 @@ fn test_matrix_dimension_mismatch_add() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::simple(OpCode::Add),
+        Instruction::simple(OpCode::AddDynamic),
     ];
     let constants = vec![
         Constant::Value(test_matrix_2x3()),

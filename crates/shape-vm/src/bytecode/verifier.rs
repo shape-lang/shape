@@ -381,7 +381,7 @@ mod tests {
         assert!(OpCode::LoadLocalTrusted.is_trusted());
         assert!(OpCode::JumpIfFalseTrusted.is_trusted());
         assert!(!OpCode::AddInt.is_trusted());
-        assert!(!OpCode::Add.is_trusted());
+        assert!(!OpCode::AddDynamic.is_trusted());
     }
 
     #[test]
@@ -394,7 +394,7 @@ mod tests {
             OpCode::JumpIfFalse.trusted_variant(),
             Some(OpCode::JumpIfFalseTrusted)
         );
-        assert_eq!(OpCode::Add.trusted_variant(), None);
+        assert_eq!(OpCode::AddDynamic.trusted_variant(), None);
         assert_eq!(OpCode::AddInt.trusted_variant(), None);
     }
 
@@ -420,7 +420,7 @@ mod tests {
             mir_data: None,
         };
         let instructions = vec![
-            Instruction::simple(OpCode::Add),
+            Instruction::simple(OpCode::AddDynamic),
             Instruction::simple(OpCode::ReturnValue),
         ];
         let prog = make_program(vec![func], instructions);
@@ -617,7 +617,7 @@ mod tests {
         assert!(OpCode::FieldLoadF64.is_v2_typed());
         assert!(OpCode::AddI32.is_v2_typed());
         assert!(OpCode::NewTypedStruct.is_v2_typed());
-        assert!(!OpCode::Add.is_v2_typed());
+        assert!(!OpCode::AddDynamic.is_v2_typed());
         assert!(!OpCode::AddInt.is_v2_typed());
         assert!(!OpCode::LoadLocal.is_v2_typed());
     }

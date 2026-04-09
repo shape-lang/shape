@@ -108,16 +108,16 @@ fn combined_span(left: &Expr, right: &Expr) -> Span {
 fn emit_generic_via_helper(compiler: &mut BytecodeCompiler, op: &BinaryOp) -> bool {
     use crate::compiler::helpers;
     match op {
-        BinaryOp::Add => { helpers::emit_runtime_add(compiler); true }
-        BinaryOp::Sub => { helpers::emit_runtime_sub(compiler); true }
-        BinaryOp::Mul => { helpers::emit_runtime_mul(compiler); true }
-        BinaryOp::Div => { helpers::emit_runtime_div(compiler); true }
-        BinaryOp::Mod => { helpers::emit_runtime_mod(compiler); true }
-        BinaryOp::Pow => { helpers::emit_runtime_pow(compiler); true }
-        BinaryOp::Greater => { helpers::emit_runtime_gt(compiler); true }
-        BinaryOp::Less => { helpers::emit_runtime_lt(compiler); true }
-        BinaryOp::GreaterEq => { helpers::emit_runtime_gte(compiler); true }
-        BinaryOp::LessEq => { helpers::emit_runtime_lte(compiler); true }
+        BinaryOp::Add => { helpers::emit_dynamic_add(compiler); true }
+        BinaryOp::Sub => { helpers::emit_dynamic_sub(compiler); true }
+        BinaryOp::Mul => { helpers::emit_dynamic_mul(compiler); true }
+        BinaryOp::Div => { helpers::emit_dynamic_div(compiler); true }
+        BinaryOp::Mod => { helpers::emit_dynamic_mod(compiler); true }
+        BinaryOp::Pow => { helpers::emit_dynamic_pow(compiler); true }
+        BinaryOp::Greater => { helpers::emit_dynamic_gt(compiler); true }
+        BinaryOp::Less => { helpers::emit_dynamic_lt(compiler); true }
+        BinaryOp::GreaterEq => { helpers::emit_dynamic_gte(compiler); true }
+        BinaryOp::LessEq => { helpers::emit_dynamic_lte(compiler); true }
         BinaryOp::Equal => { helpers::emit_dynamic_eq(compiler); true }
         BinaryOp::NotEqual => { helpers::emit_dynamic_neq(compiler); true }
         _ => false,
@@ -865,7 +865,7 @@ impl BytecodeCompiler {
                             // Runtime-dispatched fallback for unresolvable operand
                             // types. The VM's exec_arithmetic handles type dispatch
                             // (numeric, string concat, DateTime, etc.) at runtime.
-                            crate::compiler::helpers::emit_runtime_add(self);
+                            crate::compiler::helpers::emit_dynamic_add(self);
                         }
                     }
                 }

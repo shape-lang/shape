@@ -1,6 +1,6 @@
 //! Dedicated concatenation opcodes (StringConcat, ArrayConcat).
 //!
-//! These replace the generic `OpCode::Add` overload for built-in heap types
+//! These replace the generic `OpCode::AddDynamic` overload for built-in heap types
 //! whose operand types the compiler can prove statically. Operator overloading
 //! on user-defined types still goes through `CallMethod` (see Phase 2.5).
 

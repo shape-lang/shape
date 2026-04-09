@@ -414,9 +414,9 @@ impl VirtualMachine {
                 return self.exec_stack_ops(instruction);
             }
 
-            // Arithmetic (generic, with runtime type dispatch)
-            Add | Sub | Mul | Div | Mod | Pow | BitAnd | BitOr | BitXor | BitShl | BitShr
-            | BitNot => {
+            // Arithmetic (dynamic runtime dispatch -- types unresolvable at compile time)
+            AddDynamic | SubDynamic | MulDynamic | DivDynamic | ModDynamic | PowDynamic
+            | BitAnd | BitOr | BitXor | BitShl | BitShr | BitNot => {
                 return self.exec_arithmetic(instruction);
             }
 
@@ -441,8 +441,8 @@ impl VirtualMachine {
                 return self.op_cast_width(instruction);
             }
 
-            // Comparison (generic, with runtime type dispatch)
-            Gt | Lt | Gte | Lte | EqDynamic | NeqDynamic => {
+            // Comparison (dynamic runtime dispatch -- types unresolvable at compile time)
+            GtDynamic | LtDynamic | GteDynamic | LteDynamic | EqDynamic | NeqDynamic => {
                 return self.exec_comparison(instruction);
             }
 

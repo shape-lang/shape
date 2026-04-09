@@ -67,16 +67,16 @@ fn collect_numeric_opcode_stats(program: &BytecodeProgram) -> NumericOpcodeStats
                 bump_breakdown(&mut stats.typed_breakdown, instr.opcode);
             }
             // Generic arithmetic/comparison opcodes
-            OpCode::Add
-            | OpCode::Sub
-            | OpCode::Mul
-            | OpCode::Div
-            | OpCode::Mod
-            | OpCode::Pow
-            | OpCode::Gt
-            | OpCode::Lt
-            | OpCode::Gte
-            | OpCode::Lte
+            OpCode::AddDynamic
+            | OpCode::SubDynamic
+            | OpCode::MulDynamic
+            | OpCode::DivDynamic
+            | OpCode::ModDynamic
+            | OpCode::PowDynamic
+            | OpCode::GtDynamic
+            | OpCode::LtDynamic
+            | OpCode::GteDynamic
+            | OpCode::LteDynamic
             | OpCode::EqDynamic
             | OpCode::NeqDynamic => {
                 stats.generic += 1;

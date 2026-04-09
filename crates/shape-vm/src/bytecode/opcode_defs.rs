@@ -84,19 +84,19 @@ define_opcodes! {
     /// Swap top two values
     Swap = 0x04, Stack, pops: 2, pushes: 2;
 
-    // ===== Arithmetic Operations =====
-    /// Add two numbers
-    Add = 0x10, Arithmetic, pops: 2, pushes: 1;
-    /// Subtract two numbers
-    Sub = 0x11, Arithmetic, pops: 2, pushes: 1;
-    /// Multiply two numbers
-    Mul = 0x12, Arithmetic, pops: 2, pushes: 1;
-    /// Divide two numbers
-    Div = 0x13, Arithmetic, pops: 2, pushes: 1;
-    /// Modulo operation
-    Mod = 0x14, Arithmetic, pops: 2, pushes: 1;
-    /// Power operation
-    Pow = 0x16, Arithmetic, pops: 2, pushes: 1;
+    // ===== Dynamic Arithmetic Operations (runtime type dispatch) =====
+    /// Dynamic add -- runtime-dispatched when operand types unresolvable at compile time.
+    AddDynamic = 0x10, Arithmetic, pops: 2, pushes: 1;
+    /// Dynamic subtract -- runtime-dispatched when operand types unresolvable at compile time.
+    SubDynamic = 0x11, Arithmetic, pops: 2, pushes: 1;
+    /// Dynamic multiply -- runtime-dispatched when operand types unresolvable at compile time.
+    MulDynamic = 0x12, Arithmetic, pops: 2, pushes: 1;
+    /// Dynamic divide -- runtime-dispatched when operand types unresolvable at compile time.
+    DivDynamic = 0x13, Arithmetic, pops: 2, pushes: 1;
+    /// Dynamic modulo -- runtime-dispatched when operand types unresolvable at compile time.
+    ModDynamic = 0x14, Arithmetic, pops: 2, pushes: 1;
+    /// Dynamic power -- runtime-dispatched when operand types unresolvable at compile time.
+    PowDynamic = 0x16, Arithmetic, pops: 2, pushes: 1;
     /// Bitwise AND
     BitAnd = 0x17, Arithmetic, pops: 2, pushes: 1;
     /// Bitwise OR
@@ -110,15 +110,15 @@ define_opcodes! {
     /// Bitwise XOR
     BitXor = 0x1C, Arithmetic, pops: 2, pushes: 1;
 
-    // ===== Comparison Operations =====
-    /// Greater than
-    Gt = 0x20, Comparison, pops: 2, pushes: 1;
-    /// Less than
-    Lt = 0x21, Comparison, pops: 2, pushes: 1;
-    /// Greater than or equal
-    Gte = 0x22, Comparison, pops: 2, pushes: 1;
-    /// Less than or equal
-    Lte = 0x23, Comparison, pops: 2, pushes: 1;
+    // ===== Dynamic Comparison Operations (runtime type dispatch) =====
+    /// Dynamic greater-than -- runtime-dispatched when operand types unresolvable at compile time.
+    GtDynamic = 0x20, Comparison, pops: 2, pushes: 1;
+    /// Dynamic less-than -- runtime-dispatched when operand types unresolvable at compile time.
+    LtDynamic = 0x21, Comparison, pops: 2, pushes: 1;
+    /// Dynamic greater-than-or-equal -- runtime-dispatched when operand types unresolvable at compile time.
+    GteDynamic = 0x22, Comparison, pops: 2, pushes: 1;
+    /// Dynamic less-than-or-equal -- runtime-dispatched when operand types unresolvable at compile time.
+    LteDynamic = 0x23, Comparison, pops: 2, pushes: 1;
     /// Dynamic equality -- runtime-dispatched via vw_equals.
     EqDynamic = 0x24, Comparison, pops: 2, pushes: 1;
     /// Dynamic not-equal -- runtime-dispatched via vw_equals + negation.

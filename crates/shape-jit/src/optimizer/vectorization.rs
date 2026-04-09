@@ -51,12 +51,12 @@ pub struct SIMDPlan {
 fn is_numeric_arith(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Add
-            | OpCode::Sub
-            | OpCode::Mul
-            | OpCode::Div
-            | OpCode::Mod
-            | OpCode::Pow
+        OpCode::AddDynamic
+            | OpCode::SubDynamic
+            | OpCode::MulDynamic
+            | OpCode::DivDynamic
+            | OpCode::ModDynamic
+            | OpCode::PowDynamic
             | OpCode::AddInt
             | OpCode::SubInt
             | OpCode::MulInt
@@ -78,10 +78,10 @@ fn is_numeric_arith(op: OpCode) -> bool {
 /// f64 operation that can be vectorized.
 fn opcode_to_simd_op(op: OpCode) -> Option<SIMDOp> {
     match op {
-        OpCode::Add | OpCode::AddNumber => Some(SIMDOp::Add),
-        OpCode::Sub | OpCode::SubNumber => Some(SIMDOp::Sub),
-        OpCode::Mul | OpCode::MulNumber => Some(SIMDOp::Mul),
-        OpCode::Div | OpCode::DivNumber => Some(SIMDOp::Div),
+        OpCode::AddDynamic | OpCode::AddNumber => Some(SIMDOp::Add),
+        OpCode::SubDynamic | OpCode::SubNumber => Some(SIMDOp::Sub),
+        OpCode::MulDynamic | OpCode::MulNumber => Some(SIMDOp::Mul),
+        OpCode::DivDynamic | OpCode::DivNumber => Some(SIMDOp::Div),
         _ => None,
     }
 }
@@ -108,10 +108,10 @@ fn is_simd_body_safe(op: OpCode) -> bool {
             | OpCode::Dup
             | OpCode::Swap
             // Simple f64 arithmetic
-            | OpCode::Add
-            | OpCode::Sub
-            | OpCode::Mul
-            | OpCode::Div
+            | OpCode::AddDynamic
+            | OpCode::SubDynamic
+            | OpCode::MulDynamic
+            | OpCode::DivDynamic
             | OpCode::AddNumber
             | OpCode::SubNumber
             | OpCode::MulNumber
@@ -126,10 +126,10 @@ fn is_simd_body_safe(op: OpCode) -> bool {
             | OpCode::IntToNumber
             | OpCode::NumberToInt
             // Comparisons (for loop condition)
-            | OpCode::Lt
-            | OpCode::Lte
-            | OpCode::Gt
-            | OpCode::Gte
+            | OpCode::LtDynamic
+            | OpCode::LteDynamic
+            | OpCode::GtDynamic
+            | OpCode::GteDynamic
             | OpCode::LtInt
             | OpCode::LteInt
             | OpCode::GtInt

@@ -77,12 +77,12 @@ fn is_typed_float_arith(op: OpCode) -> bool {
 fn is_generic_numeric(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Add
-            | OpCode::Sub
-            | OpCode::Mul
-            | OpCode::Div
-            | OpCode::Mod
-            | OpCode::Pow
+        OpCode::AddDynamic
+            | OpCode::SubDynamic
+            | OpCode::MulDynamic
+            | OpCode::DivDynamic
+            | OpCode::ModDynamic
+            | OpCode::PowDynamic
             | OpCode::IntToNumber
             | OpCode::NumberToInt
     )
@@ -91,10 +91,10 @@ fn is_generic_numeric(op: OpCode) -> bool {
 fn is_comparison(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Gt
-            | OpCode::Lt
-            | OpCode::Gte
-            | OpCode::Lte
+        OpCode::GtDynamic
+            | OpCode::LtDynamic
+            | OpCode::GteDynamic
+            | OpCode::LteDynamic
             | OpCode::EqDynamic
             | OpCode::NeqDynamic
             | OpCode::GtInt

@@ -510,12 +510,12 @@ fn stack_effect_simple(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::IsNull
         | OpCode::Not
         | OpCode::Length => (1, 1),
-        OpCode::Add
-        | OpCode::Sub
-        | OpCode::Mul
-        | OpCode::Div
-        | OpCode::Mod
-        | OpCode::Pow
+        OpCode::AddDynamic
+        | OpCode::SubDynamic
+        | OpCode::MulDynamic
+        | OpCode::DivDynamic
+        | OpCode::ModDynamic
+        | OpCode::PowDynamic
         | OpCode::AddInt
         | OpCode::SubInt
         | OpCode::MulInt
@@ -528,10 +528,10 @@ fn stack_effect_simple(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::DivNumber
         | OpCode::ModNumber
         | OpCode::PowNumber
-        | OpCode::Gt
-        | OpCode::Lt
-        | OpCode::Gte
-        | OpCode::Lte
+        | OpCode::GtDynamic
+        | OpCode::LtDynamic
+        | OpCode::GteDynamic
+        | OpCode::LteDynamic
         | OpCode::EqDynamic
         | OpCode::NeqDynamic
         | OpCode::GtInt

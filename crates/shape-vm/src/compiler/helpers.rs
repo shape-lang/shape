@@ -20,8 +20,8 @@ use super::{
 ///
 /// Typed callers should prefer `AddInt`, `AddNumber`, `AddDecimal`,
 /// `StringConcat`, or `ArrayConcat` when the operand types are proven.
-pub(super) fn emit_runtime_add(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Add));
+pub(super) fn emit_dynamic_add(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::AddDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -65,8 +65,8 @@ pub(super) fn emit_dynamic_neq(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `SubInt`, `SubNumber`, `SubDecimal`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_sub(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Sub));
+pub(in crate::compiler) fn emit_dynamic_sub(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::SubDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -79,8 +79,8 @@ pub(in crate::compiler) fn emit_runtime_sub(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `MulInt`, `MulNumber`, `MulDecimal`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_mul(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Mul));
+pub(in crate::compiler) fn emit_dynamic_mul(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::MulDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -93,8 +93,8 @@ pub(in crate::compiler) fn emit_runtime_mul(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `DivInt`, `DivNumber`, `DivDecimal`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_div(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Div));
+pub(in crate::compiler) fn emit_dynamic_div(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::DivDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -107,8 +107,8 @@ pub(in crate::compiler) fn emit_runtime_div(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `ModInt`, `ModNumber`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_mod(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Mod));
+pub(in crate::compiler) fn emit_dynamic_mod(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::ModDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -121,8 +121,8 @@ pub(in crate::compiler) fn emit_runtime_mod(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `PowInt`, `PowNumber`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_pow(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Pow));
+pub(in crate::compiler) fn emit_dynamic_pow(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::PowDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -135,8 +135,8 @@ pub(in crate::compiler) fn emit_runtime_pow(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `GtInt`, `GtNumber`, `GtDecimal`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_gt(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Gt));
+pub(in crate::compiler) fn emit_dynamic_gt(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::GtDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -149,8 +149,8 @@ pub(in crate::compiler) fn emit_runtime_gt(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `LtInt`, `LtNumber`, `LtDecimal`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_lt(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Lt));
+pub(in crate::compiler) fn emit_dynamic_lt(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::LtDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -163,8 +163,8 @@ pub(in crate::compiler) fn emit_runtime_lt(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `GteInt`, `GteNumber`, `GteDecimal`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_gte(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Gte));
+pub(in crate::compiler) fn emit_dynamic_gte(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::GteDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -177,8 +177,8 @@ pub(in crate::compiler) fn emit_runtime_gte(compiler: &mut BytecodeCompiler) {
 ///
 /// Typed callers should prefer `LteInt`, `LteNumber`, `LteDecimal`
 /// when the operand types are proven.
-pub(in crate::compiler) fn emit_runtime_lte(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::Lte));
+pub(in crate::compiler) fn emit_dynamic_lte(compiler: &mut BytecodeCompiler) {
+    compiler.emit(Instruction::simple(OpCode::LteDynamic));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -568,10 +568,10 @@ impl BytecodeCompiler {
                         | OpCode::EqString
                         | OpCode::EqDecimal
                         | OpCode::IsNull
-                        | OpCode::Gt
-                        | OpCode::Lt
-                        | OpCode::Gte
-                        | OpCode::Lte
+                        | OpCode::GtDynamic
+                        | OpCode::LtDynamic
+                        | OpCode::GteDynamic
+                        | OpCode::LteDynamic
                         | OpCode::EqDynamic
                         | OpCode::NeqDynamic
                         | OpCode::Not

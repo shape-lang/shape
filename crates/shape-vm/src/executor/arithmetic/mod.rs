@@ -1198,7 +1198,7 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         use OpCode::*;
         match instruction.opcode {
-            Add => {
+            AddDynamic => {
                 use shape_value::NanTag;
                 // IC fast path for Add
                 if self.try_arithmetic_ic_fast_path(
@@ -1694,7 +1694,7 @@ impl VirtualMachine {
                     }
                 }
             }
-            Sub => {
+            SubDynamic => {
                 use shape_value::NanTag;
                 // IC fast path for Sub
                 if self.try_arithmetic_ic_fast_path(
@@ -1934,7 +1934,7 @@ impl VirtualMachine {
                     b_nb.type_name()
                 )));
             }
-            Mul => {
+            MulDynamic => {
                 use shape_value::NanTag;
                 // IC fast path for Mul
                 if self.try_arithmetic_ic_fast_path(
@@ -2203,7 +2203,7 @@ impl VirtualMachine {
                     b_nb.type_name()
                 )));
             }
-            Div => {
+            DivDynamic => {
                 use shape_value::NanTag;
                 // IC fast path for Div
                 {
@@ -2463,7 +2463,7 @@ impl VirtualMachine {
                     b_nb.type_name()
                 )));
             }
-            Mod => {
+            ModDynamic => {
                 use shape_value::NanTag;
                 let b_nb = unwrap_annotated(self.pop_vw()?);
                 let a_nb = unwrap_annotated(self.pop_vw()?);
@@ -2581,7 +2581,7 @@ impl VirtualMachine {
                     b_nb.type_name()
                 )));
             }
-            Pow => {
+            PowDynamic => {
                 use shape_value::NanTag;
                 let b_nb = unwrap_annotated(self.pop_vw()?);
                 let a_nb = unwrap_annotated(self.pop_vw()?);
@@ -2857,7 +2857,7 @@ mod tests {
         program.instructions = vec![
             Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
             Instruction::new(OpCode::PushConst, Some(Operand::Const(c1))),
-            Instruction::simple(OpCode::Add),
+            Instruction::simple(OpCode::AddDynamic),
             Instruction::simple(OpCode::Halt),
         ];
 

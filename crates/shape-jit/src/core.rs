@@ -140,7 +140,7 @@ mod tests {
             instructions: vec![
                 Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
                 Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-                Instruction::simple(OpCode::Add),
+                Instruction::simple(OpCode::AddDynamic),
             ],
             constants: vec![Constant::Number(10.0), Constant::Number(5.0)],
             ..Default::default()
@@ -162,7 +162,7 @@ mod tests {
             instructions: vec![
                 Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
                 Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-                Instruction::simple(OpCode::Gt),
+                Instruction::simple(OpCode::GtDynamic),
             ],
             constants: vec![Constant::Number(10.0), Constant::Number(5.0)],
             ..Default::default()
@@ -992,7 +992,7 @@ mod tests {
                 Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),  // 32: arr
                 Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 33: i (index)
                 Instruction::simple(OpCode::GetProp),                          // 34: arr[i]
-                Instruction::simple(OpCode::Add),                              // 35: sum + arr[i]
+                Instruction::simple(OpCode::AddDynamic),                              // 35: sum + arr[i]
                 Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 36: sum = ...
 
                 // Inner loop increment: i = i + 1
@@ -1123,7 +1123,7 @@ mod tests {
                 Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),  // 39: arr
                 Instruction::new(OpCode::LoadLocal, Some(Operand::Local(6))),  // 40: idx
                 Instruction::simple(OpCode::GetProp),                          // 41: arr[idx]
-                Instruction::simple(OpCode::Add),                              // 42: sum + arr[idx]
+                Instruction::simple(OpCode::AddDynamic),                              // 42: sum + arr[idx]
                 Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 43: sum = ...
 
                 // Inner increment: i = i + 1
@@ -1234,7 +1234,7 @@ mod tests {
                 Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),  // 32: arr
                 Instruction::new(OpCode::LoadLocal, Some(Operand::Local(4))),  // 33: i
                 Instruction::simple(OpCode::GetProp),                          // 34: arr[i]
-                Instruction::simple(OpCode::Add),                              // 35
+                Instruction::simple(OpCode::AddDynamic),                              // 35
                 Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 36
 
                 // Inner increment
@@ -1355,7 +1355,7 @@ mod tests {
                 Instruction::new(OpCode::LoadModuleBinding, Some(Operand::ModuleBinding(0))), // 25: arr
                 Instruction::new(OpCode::LoadLocal, Some(Operand::Local(3))),  // 26: i
                 Instruction::simple(OpCode::GetProp),                          // 27: arr[i]
-                Instruction::simple(OpCode::Add),                              // 28
+                Instruction::simple(OpCode::AddDynamic),                              // 28
                 Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))), // 29
 
                 // Inner increment

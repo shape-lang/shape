@@ -501,7 +501,7 @@ mod tests {
         assert!(is_async_opcode(OpCode::EmitAlert));
         assert!(is_async_opcode(OpCode::AsyncScopeEnter));
         assert!(is_async_opcode(OpCode::AsyncScopeExit));
-        assert!(!is_async_opcode(OpCode::Add));
+        assert!(!is_async_opcode(OpCode::AddDynamic));
         assert!(!is_async_opcode(OpCode::Jump));
     }
 

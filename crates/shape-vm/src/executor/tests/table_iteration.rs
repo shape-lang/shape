@@ -117,12 +117,12 @@ fn run_table_count_loop(table_nb: ValueWord) -> ValueWord {
         // count = count + 1
         Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))), // 15
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 16
-        Instruction::simple(OpCode::Add),                             // 17
+        Instruction::simple(OpCode::AddDynamic),                             // 17
         Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 18
         // idx = idx + 1
         Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))), // 19
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 20
-        Instruction::simple(OpCode::Add),                             // 21
+        Instruction::simple(OpCode::AddDynamic),                             // 21
         Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 22
         // Jump back to iter check
         Instruction::new(

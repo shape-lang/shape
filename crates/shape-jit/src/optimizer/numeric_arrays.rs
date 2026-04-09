@@ -82,18 +82,18 @@ fn is_typed_float_consumer(op: OpCode) -> bool {
 fn is_generic_numeric_consumer(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Add
-            | OpCode::Sub
-            | OpCode::Mul
-            | OpCode::Div
-            | OpCode::Mod
-            | OpCode::Pow
+        OpCode::AddDynamic
+            | OpCode::SubDynamic
+            | OpCode::MulDynamic
+            | OpCode::DivDynamic
+            | OpCode::ModDynamic
+            | OpCode::PowDynamic
             | OpCode::IntToNumber
             | OpCode::NumberToInt
-            | OpCode::Gt
-            | OpCode::Lt
-            | OpCode::Gte
-            | OpCode::Lte
+            | OpCode::GtDynamic
+            | OpCode::LtDynamic
+            | OpCode::GteDynamic
+            | OpCode::LteDynamic
             | OpCode::EqDynamic
             | OpCode::NeqDynamic
     )
@@ -102,10 +102,10 @@ fn is_generic_numeric_consumer(op: OpCode) -> bool {
 fn is_comparison_consumer(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Gt
-            | OpCode::Lt
-            | OpCode::Gte
-            | OpCode::Lte
+        OpCode::GtDynamic
+            | OpCode::LtDynamic
+            | OpCode::GteDynamic
+            | OpCode::LteDynamic
             | OpCode::EqDynamic
             | OpCode::NeqDynamic
             | OpCode::GtInt
@@ -163,12 +163,12 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::IsNull
         | OpCode::Not
         | OpCode::Length => (1, 1),
-        OpCode::Add
-        | OpCode::Sub
-        | OpCode::Mul
-        | OpCode::Div
-        | OpCode::Mod
-        | OpCode::Pow
+        OpCode::AddDynamic
+        | OpCode::SubDynamic
+        | OpCode::MulDynamic
+        | OpCode::DivDynamic
+        | OpCode::ModDynamic
+        | OpCode::PowDynamic
         | OpCode::AddInt
         | OpCode::SubInt
         | OpCode::MulInt
@@ -181,10 +181,10 @@ fn stack_effect(op: OpCode) -> Option<(i32, i32)> {
         | OpCode::DivNumber
         | OpCode::ModNumber
         | OpCode::PowNumber
-        | OpCode::Gt
-        | OpCode::Lt
-        | OpCode::Gte
-        | OpCode::Lte
+        | OpCode::GtDynamic
+        | OpCode::LtDynamic
+        | OpCode::GteDynamic
+        | OpCode::LteDynamic
         | OpCode::EqDynamic
         | OpCode::NeqDynamic
         | OpCode::GtInt
@@ -317,7 +317,7 @@ fn generic_consumer_kind(program: &BytecodeProgram, op_idx: usize) -> NumericKin
     // Generic div/pow preserve floating semantics.
     if matches!(
         program.instructions[op_idx].opcode,
-        OpCode::Div | OpCode::Pow
+        OpCode::DivDynamic | OpCode::PowDynamic
     ) {
         return NumericKind::Float;
     }
@@ -347,12 +347,12 @@ fn generic_consumer_kind(program: &BytecodeProgram, op_idx: usize) -> NumericKin
                     }
                 }
             }
-            OpCode::Add
-            | OpCode::Sub
-            | OpCode::Mul
-            | OpCode::Div
-            | OpCode::Mod
-            | OpCode::Pow
+            OpCode::AddDynamic
+            | OpCode::SubDynamic
+            | OpCode::MulDynamic
+            | OpCode::DivDynamic
+            | OpCode::ModDynamic
+            | OpCode::PowDynamic
             | OpCode::AddInt
             | OpCode::SubInt
             | OpCode::MulInt
@@ -640,12 +640,12 @@ fn producer_is_numeric(program: &BytecodeProgram, producer_idx: usize, depth: u8
             };
             producer_is_numeric(program, src_idx, depth - 1)
         }
-        OpCode::Add
-        | OpCode::Sub
-        | OpCode::Mul
-        | OpCode::Div
-        | OpCode::Mod
-        | OpCode::Pow
+        OpCode::AddDynamic
+        | OpCode::SubDynamic
+        | OpCode::MulDynamic
+        | OpCode::DivDynamic
+        | OpCode::ModDynamic
+        | OpCode::PowDynamic
         | OpCode::AddInt
         | OpCode::SubInt
         | OpCode::MulInt
@@ -795,7 +795,7 @@ mod tests {
                 make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),
                 make_instr(OpCode::GetProp, None), // idx 2
                 make_instr(OpCode::PushConst, Some(Operand::Const(0))),
-                make_instr(OpCode::Mul, None),
+                make_instr(OpCode::MulDynamic, None),
                 make_instr(OpCode::Pop, None),
             ],
             vec![Constant::Number(2.5)],

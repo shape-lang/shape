@@ -227,7 +227,7 @@ fn detect_induction_vars(
 
         let is_arith = matches!(
             arith.opcode,
-            OpCode::AddInt | OpCode::SubInt | OpCode::Add | OpCode::Sub
+            OpCode::AddInt | OpCode::SubInt | OpCode::AddDynamic | OpCode::SubDynamic
         );
         let is_supported_step_src = matches!(
             step_src.opcode,
@@ -246,7 +246,7 @@ fn detect_induction_vars(
             if let Some(Operand::Const(const_idx)) = &step_src.operand {
                 match constants.get(*const_idx as usize) {
                     Some(shape_vm::bytecode::Constant::Int(n)) => {
-                        let step = if matches!(arith.opcode, OpCode::SubInt | OpCode::Sub) {
+                        let step = if matches!(arith.opcode, OpCode::SubInt | OpCode::SubDynamic) {
                             -n
                         } else {
                             *n
@@ -255,7 +255,7 @@ fn detect_induction_vars(
                     }
                     Some(shape_vm::bytecode::Constant::UInt(n)) => {
                         let step = *n as i64;
-                        let step = if matches!(arith.opcode, OpCode::SubInt | OpCode::Sub) {
+                        let step = if matches!(arith.opcode, OpCode::SubInt | OpCode::SubDynamic) {
                             -step
                         } else {
                             step
@@ -263,7 +263,7 @@ fn detect_induction_vars(
                         Some(step)
                     }
                     Some(shape_vm::bytecode::Constant::Number(n)) if *n == (*n as i64) as f64 => {
-                        let step = if matches!(arith.opcode, OpCode::SubInt | OpCode::Sub) {
+                        let step = if matches!(arith.opcode, OpCode::SubInt | OpCode::SubDynamic) {
                             -(*n as i64)
                         } else {
                             *n as i64
@@ -377,14 +377,14 @@ fn detect_bound_comparison(
             if let (Some(l1), Some(l2)) = (l1, l2) {
                 if l1 == indvar_slot {
                     let cc = match cmp.opcode {
-                        OpCode::LtInt | OpCode::Lt => IntCC::SignedLessThan,
-                        OpCode::LteInt | OpCode::Lte => {
+                        OpCode::LtInt | OpCode::LtDynamic => IntCC::SignedLessThan,
+                        OpCode::LteInt | OpCode::LteDynamic => {
                             IntCC::SignedLessThanOrEqual
                         }
-                        OpCode::GtInt | OpCode::Gt => {
+                        OpCode::GtInt | OpCode::GtDynamic => {
                             IntCC::SignedGreaterThan
                         }
-                        OpCode::GteInt | OpCode::Gte => {
+                        OpCode::GteInt | OpCode::GteDynamic => {
                             IntCC::SignedGreaterThanOrEqual
                         }
                         _ => continue,
@@ -436,22 +436,22 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::DivDecimal
             | OpCode::ModDecimal
             // Generic add/sub are lowered to numeric ops in JIT (no alloc path)
-            | OpCode::Add
-            | OpCode::Sub
+            | OpCode::AddDynamic
+            | OpCode::SubDynamic
             // Generic mul/div/mod/neg (always use inline typed_binary_op, no FFI path)
-            | OpCode::Mul
-            | OpCode::Div
-            | OpCode::Mod
+            | OpCode::MulDynamic
+            | OpCode::DivDynamic
+            | OpCode::ModDynamic
             | OpCode::NegInt
             | OpCode::NegNumber
             // Equality comparisons (always inline, no FFI)
             | OpCode::EqDynamic
             | OpCode::NeqDynamic
             // Generic ordered comparisons are inline numeric comparisons in JIT.
-            | OpCode::Gt
-            | OpCode::Lt
-            | OpCode::Gte
-            | OpCode::Lte
+            | OpCode::GtDynamic
+            | OpCode::LtDynamic
+            | OpCode::GteDynamic
+            | OpCode::LteDynamic
             // Typed comparisons (inline fcmp/icmp, no FFI)
             | OpCode::GtInt
             | OpCode::LtInt

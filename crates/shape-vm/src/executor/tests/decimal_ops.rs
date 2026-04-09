@@ -99,7 +99,7 @@ fn test_decimal_mod() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 10D
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 3D
-        Instruction::simple(OpCode::Mod),
+        Instruction::simple(OpCode::ModDynamic),
         Instruction::simple(OpCode::Halt),
     ];
     let constants = vec![
@@ -120,7 +120,7 @@ fn test_decimal_mod_with_int() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 10D
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 3
-        Instruction::simple(OpCode::Mod),
+        Instruction::simple(OpCode::ModDynamic),
         Instruction::simple(OpCode::Halt),
     ];
     let constants = vec![Constant::Decimal(Decimal::from(10)), Constant::Int(3)];
