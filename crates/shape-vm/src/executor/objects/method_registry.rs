@@ -449,31 +449,31 @@ pub static ITERATOR_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Higher-order:** map
 /// **Aggregation:** sum, min, max, mean, rowSum, colSum
 pub static MATRIX_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    // Linear algebra
-    "transpose" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_transpose),
-    "inverse" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_inverse),
-    "det" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_determinant),
-    "determinant" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_determinant),
-    "trace" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_trace),
+    // Linear algebra — MethodFnV2
+    "transpose" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_transpose),
+    "inverse" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_inverse),
+    "det" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_determinant),
+    "determinant" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_determinant),
+    "trace" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_trace),
 
-    // Shape and access
-    "shape" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_shape),
-    "reshape" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_reshape),
-    "row" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_row),
-    "col" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_col),
-    "diag" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_diag),
-    "flatten" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_flatten),
+    // Shape and access — MethodFnV2
+    "shape" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_shape),
+    "reshape" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_reshape),
+    "row" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_row),
+    "col" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_col),
+    "diag" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_diag),
+    "flatten" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_flatten),
 
-    // Higher-order
+    // Higher-order — stays Legacy (closure-based)
     "map" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_map),
 
-    // Aggregation
-    "sum" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_sum),
-    "min" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_min),
-    "max" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_max),
-    "mean" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_mean),
-    "rowSum" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_row_sum),
-    "colSum" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_col_sum),
+    // Aggregation — MethodFnV2
+    "sum" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_sum),
+    "min" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_min),
+    "max" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_max),
+    "mean" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_mean),
+    "rowSum" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_row_sum),
+    "colSum" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_col_sum),
 };
 
 /// PHF registry for IndexedTable-specific methods (2 methods)
@@ -493,15 +493,19 @@ pub static INDEXED_TABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_ma
 /// **Numeric:** dot, norm, normalize, cumsum, diff, abs, sqrt, ln, exp
 /// **Standard:** len, length, map, filter, forEach, toArray
 pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "sum" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_sum),
-    "avg" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_avg),
-    "mean" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_avg),
-    "min" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_min),
-    "max" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_max),
-    "std" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_std),
-    "variance" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_variance),
-    "dot" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_dot),
-    "norm" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_norm),
+    // Aggregations — MethodFnV2 (v2 typed array + v1 fallback)
+    "sum" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_sum),
+    "avg" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_avg),
+    "mean" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_avg),
+    "min" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_min),
+    "max" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_max),
+    "std" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_std),
+    "variance" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_variance),
+    "dot" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_dot),
+    "norm" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_float_norm),
+    "len" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
+    "length" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
+    // Transforms — still Legacy (require VM callback invocation or produce arrays)
     "normalize" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_normalize),
     "cumsum" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_cumsum),
     "diff" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_diff),
@@ -509,8 +513,6 @@ pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map!
     "sqrt" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_sqrt),
     "ln" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_ln),
     "exp" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_exp),
-    "len" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_len),
-    "length" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_len),
     "map" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_map),
     "filter" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_filter),
     "forEach" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_for_each),
@@ -523,14 +525,16 @@ pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map!
 /// **Numeric:** abs
 /// **Standard:** len, length, map, filter, forEach, toArray
 pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "sum" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_sum),
-    "avg" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_avg),
-    "mean" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_avg),
-    "min" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_min),
-    "max" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_max),
+    // Aggregations — MethodFnV2 (v2 typed array + v1 fallback)
+    "sum" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_int_sum),
+    "avg" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_int_avg),
+    "mean" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_int_avg),
+    "min" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_int_min),
+    "max" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_int_max),
+    "len" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
+    "length" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
+    // Transforms — still Legacy
     "abs" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_abs),
-    "len" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_len),
-    "length" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_len),
     "map" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_map),
     "filter" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_filter),
     "forEach" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_for_each),
@@ -542,12 +546,14 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Standard:** len, length, toArray
 /// **Query:** any, all, count
 pub static BOOL_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "len" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_bool_len),
-    "length" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_bool_len),
+    // MethodFnV2 (v2 typed array + v1 fallback)
+    "len" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
+    "length" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
+    "count" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_bool_count),
+    "any" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_bool_any),
+    "all" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_bool_all),
+    // Still Legacy
     "toArray" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_bool_to_array),
-    "count" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_bool_count_true),
-    "any" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_bool_any),
-    "all" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_bool_all),
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -584,4 +590,30 @@ pub static CHANNEL_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "close" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_close),
     "is_closed" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_is_closed),
     "is_sender" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_is_sender),
+};
+
+/// PHF registry for Number/Int methods (simple numeric operations).
+///
+/// **Rounding:** floor, ceil, round
+/// **Arithmetic:** abs, sign
+/// **Conversion:** toInt, to_int, toNumber, to_number
+/// **Predicates:** isNaN, is_nan, isFinite, is_finite
+///
+/// Methods NOT in this map (they need Vec<ValueWord> for multi-arg or string
+/// return): toFixed, to_fixed, toString, to_string, clamp — handled by the
+/// inline `handle_number_method` fallback.
+pub static NUMBER_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    "floor" => MethodHandler::Native(crate::executor::objects::number_methods::number_floor_v2),
+    "ceil" => MethodHandler::Native(crate::executor::objects::number_methods::number_ceil_v2),
+    "round" => MethodHandler::Native(crate::executor::objects::number_methods::number_round_v2),
+    "abs" => MethodHandler::Native(crate::executor::objects::number_methods::number_abs_v2),
+    "sign" => MethodHandler::Native(crate::executor::objects::number_methods::number_sign_v2),
+    "toInt" => MethodHandler::Native(crate::executor::objects::number_methods::number_to_int_v2),
+    "to_int" => MethodHandler::Native(crate::executor::objects::number_methods::number_to_int_v2),
+    "toNumber" => MethodHandler::Native(crate::executor::objects::number_methods::number_to_number_v2),
+    "to_number" => MethodHandler::Native(crate::executor::objects::number_methods::number_to_number_v2),
+    "isNaN" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_nan_v2),
+    "is_nan" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_nan_v2),
+    "isFinite" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_finite_v2),
+    "is_finite" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_finite_v2),
 };
