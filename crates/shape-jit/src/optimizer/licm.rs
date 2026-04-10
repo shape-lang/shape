@@ -162,8 +162,7 @@ fn analyze_loop_calls(
                 }
                 Some(Operand::TypedMethodCall {
                     string_id,
-                    arg_count: _,
-                    method_id: _,
+                    ..
                 }) => {
                     let str_idx = *string_id as usize;
                     if let Some(method_name) = program.strings.get(str_idx) {
@@ -502,6 +501,7 @@ mod tests {
                     method_id: 0,
                     arg_count: 0,
                     string_id: 0,
+                    receiver_type_tag: 0xFF,
                 }),
             ),                                                                        // 7
             make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),                 // 8

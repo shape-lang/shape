@@ -641,8 +641,8 @@ impl Instruction {
                 Operand::ColumnAccess { .. } => 4,
                 // Name: StringId (4 bytes)
                 Operand::Name(_) => 4,
-                // TypedMethodCall: method_id (2) + arg_count (2) + string_id (2) = 6 bytes
-                Operand::TypedMethodCall { .. } => 6,
+                // TypedMethodCall: method_id (2) + arg_count (2) + string_id (2) + receiver_type_tag (1) = 7 bytes
+                Operand::TypedMethodCall { .. } => 7,
                 // ForeignFunction: u16 index = 2 bytes
                 Operand::ForeignFunction(_) => 2,
                 // MatrixDims: rows (2) + cols (2) = 4 bytes

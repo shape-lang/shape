@@ -201,16 +201,18 @@ impl VirtualMachine {
         use crate::bytecode::Operand;
         use shape_value::MethodId;
 
-        // Extract method_id, arg_count, and method_name from instruction or stack
-        let (method_id, arg_count, method_name);
+        // Extract method_id, arg_count, method_name, and receiver_type_tag from instruction or stack
+        let (method_id, arg_count, method_name, receiver_type_tag);
         match &instruction.operand {
             Some(Operand::TypedMethodCall {
                 method_id: mid,
                 arg_count: ac,
                 string_id: sid,
+                receiver_type_tag: rtt,
             }) => {
                 method_id = MethodId(*mid);
                 arg_count = *ac as usize;
+                receiver_type_tag = *rtt;
                 // Resolve string lazily only when needed (dynamic fallback / error messages)
                 method_name = self
                     .program
@@ -236,6 +238,7 @@ impl VirtualMachine {
                     }
                 };
                 method_id = MethodId::from_name(&method_name);
+                receiver_type_tag = 0xFF; // Unknown in legacy path
             }
         }
 

@@ -1855,7 +1855,7 @@ impl BytecodeCompiler {
                 method_id: method_id.0,
                 arg_count: args.len() as u16,
                 string_id: string_idx,
-            }),
+             receiver_type_tag: 0xFF, }),
         ));
         // Propagate known return type for standard method calls
         self.last_expr_schema = None;

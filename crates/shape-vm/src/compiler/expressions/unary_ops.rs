@@ -45,7 +45,7 @@ impl BytecodeCompiler {
                             method_id: method_id.0,
                             arg_count: 0,
                             string_id,
-                        }),
+                         receiver_type_tag: 0xFF, }),
                     ));
                     self.last_expr_schema = None;
                     self.last_expr_type_info = None;

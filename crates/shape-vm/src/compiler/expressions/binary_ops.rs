@@ -87,7 +87,7 @@ fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'stat
             method_id: method_id.0,
             arg_count: 1,
             string_id,
-        }),
+         receiver_type_tag: 0xFF, }),
     ));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
@@ -753,7 +753,7 @@ impl BytecodeCompiler {
                         let string_id = self.program.add_string("add".to_string());
                         self.emit(Instruction::new(OpCode::CallMethod, Some(Operand::TypedMethodCall {
                             method_id: method_id.0, arg_count: 1, string_id,
-                        })));
+                         receiver_type_tag: 0xFF, })));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
                         self.last_expr_numeric_type = None;
@@ -932,7 +932,7 @@ impl BytecodeCompiler {
                             let string_id = self.program.add_string("sub".to_string());
                             self.emit(Instruction::new(OpCode::CallMethod, Some(Operand::TypedMethodCall {
                                 method_id: method_id.0, arg_count: 1, string_id,
-                            })));
+                             receiver_type_tag: 0xFF, })));
                             self.last_expr_schema = None;
                             self.last_expr_type_info = None;
                             self.last_expr_numeric_type = None;

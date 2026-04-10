@@ -149,10 +149,12 @@ fn remap_operand(
             method_id,
             arg_count,
             string_id,
+            receiver_type_tag,
         } => Operand::TypedMethodCall {
             method_id,
             arg_count,
             string_id: (string_base + string_id as usize) as u16,
+            receiver_type_tag,
         },
         // Unchanged operands:
         Operand::Offset(_)
