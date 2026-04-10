@@ -74,21 +74,21 @@ impl MethodHandler {
 /// - Join operations: innerJoin, leftJoin, crossJoin
 /// - Set operations: union, intersect, except
 pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    // Higher-order functions
-    "map" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_map),
-    "filter" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_filter),
+    // Higher-order — Native (closure-based, handler manages VM callbacks)
+    "map" => MethodHandler::Native(crate::executor::objects::array_transform::handle_map_v2),
+    "filter" => MethodHandler::Native(crate::executor::objects::array_transform::handle_filter_v2),
     "reduce" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_reduce),
     "fold" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_reduce),
-    "forEach" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_for_each),
-    "find" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_find),
-    "findIndex" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_find_index),
-    "some" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_some),
-    "every" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_every),
-    "sort" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_sort),
-    "groupBy" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_group_by),
-    "flatMap" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_flat_map),
+    "forEach" => MethodHandler::Native(crate::executor::objects::array_query::handle_for_each_v2),
+    "find" => MethodHandler::Native(crate::executor::objects::array_query::handle_find_v2),
+    "findIndex" => MethodHandler::Native(crate::executor::objects::array_query::handle_find_index_v2),
+    "some" => MethodHandler::Native(crate::executor::objects::array_query::handle_some_v2),
+    "every" => MethodHandler::Native(crate::executor::objects::array_query::handle_every_v2),
+    "sort" => MethodHandler::Native(crate::executor::objects::array_transform::handle_sort_v2),
+    "groupBy" => MethodHandler::Native(crate::executor::objects::array_transform::handle_group_by_v2),
+    "flatMap" => MethodHandler::Native(crate::executor::objects::array_transform::handle_flat_map_v2),
 
-    // Basic operations
+    // Basic operations — still Legacy (waiting for array-basic agent)
     "len" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_len),
     "length" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_length),
     "first" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_first),
@@ -97,55 +97,55 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "push" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_push),
     "pop" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_pop),
     "zip" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_zip),
-    "slice" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_slice),
-    "concat" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_concat),
-    "take" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_take),
-    "drop" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_drop),
-    "skip" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_skip),
+    "slice" => MethodHandler::Native(crate::executor::objects::array_transform::handle_slice_v2),
+    "concat" => MethodHandler::Native(crate::executor::objects::array_transform::handle_concat_v2),
+    "take" => MethodHandler::Native(crate::executor::objects::array_transform::handle_take_v2),
+    "drop" => MethodHandler::Native(crate::executor::objects::array_transform::handle_drop_v2),
+    "skip" => MethodHandler::Native(crate::executor::objects::array_transform::handle_skip_v2),
 
-    // Search methods
-    "indexOf" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_index_of),
-    "includes" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_includes),
+    // Search — Native
+    "indexOf" => MethodHandler::Native(crate::executor::objects::array_query::handle_index_of_v2),
+    "includes" => MethodHandler::Native(crate::executor::objects::array_query::handle_includes_v2),
 
-    // Transform methods
-    "join" => MethodHandler::Legacy(crate::executor::objects::array_sort::handle_join_str),
-    "flatten" => MethodHandler::Legacy(crate::executor::objects::array_transform::handle_flatten),
+    // Transform — Native
+    "join" => MethodHandler::Native(crate::executor::objects::array_sort::handle_join_str_v2),
+    "flatten" => MethodHandler::Native(crate::executor::objects::array_transform::handle_flatten_v2),
     "unique" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_unique),
     "distinct" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_distinct),
     "distinctBy" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_distinct_by),
 
-    // Aggregation methods
+    // Aggregation — still Legacy (waiting for array-basic agent)
     "sum" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_sum),
     "avg" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_avg),
     "min" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_min),
     "max" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_max),
     "count" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_count),
 
-    // SQL-like query methods (aliases and additional)
-    "where" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_where),
-    "select" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_select),
-    "orderBy" => MethodHandler::Legacy(crate::executor::objects::array_sort::handle_order_by),
-    "thenBy" => MethodHandler::Legacy(crate::executor::objects::array_sort::handle_then_by),
-    "takeWhile" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_take_while),
-    "skipWhile" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_skip_while),
-    "single" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_single),
-    "any" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_any),
-    "all" => MethodHandler::Legacy(crate::executor::objects::array_query::handle_all),
+    // SQL-like query — Native
+    "where" => MethodHandler::Native(crate::executor::objects::array_query::handle_where_v2),
+    "select" => MethodHandler::Native(crate::executor::objects::array_query::handle_select_v2),
+    "orderBy" => MethodHandler::Native(crate::executor::objects::array_sort::handle_order_by_v2),
+    "thenBy" => MethodHandler::Native(crate::executor::objects::array_sort::handle_then_by_v2),
+    "takeWhile" => MethodHandler::Native(crate::executor::objects::array_query::handle_take_while_v2),
+    "skipWhile" => MethodHandler::Native(crate::executor::objects::array_query::handle_skip_while_v2),
+    "single" => MethodHandler::Native(crate::executor::objects::array_query::handle_single_v2),
+    "any" => MethodHandler::Native(crate::executor::objects::array_query::handle_any_v2),
+    "all" => MethodHandler::Native(crate::executor::objects::array_query::handle_all_v2),
 
-    // Join operations
+    // Join operations — still Legacy (waiting for array-basic agent)
     "innerJoin" => MethodHandler::Legacy(crate::executor::objects::array_joins::handle_inner_join),
     "leftJoin" => MethodHandler::Legacy(crate::executor::objects::array_joins::handle_left_join),
     "crossJoin" => MethodHandler::Legacy(crate::executor::objects::array_joins::handle_cross_join),
 
-    // Set operations
+    // Set operations — still Legacy (waiting for array-basic agent)
     "union" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_union),
     "intersect" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_intersect),
     "except" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_except),
 
-    // Clone
+    // Clone — still Legacy
     "clone" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_clone),
 
-    // Iterator
+    // Iterator — still Legacy
     "iter" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_array_iter),
 };
 
