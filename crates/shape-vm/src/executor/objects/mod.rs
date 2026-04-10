@@ -251,10 +251,8 @@ impl VirtualMachine {
             receiver_nb
         };
 
-        // Prepend receiver to args (handler functions expect receiver as first arg)
-        args_nb.insert(0, receiver_nb.clone());
-
         // Universal intrinsic methods available on all values.
+        // Check BEFORE moving receiver into args (we need it for push_vw).
         if method_id == MethodId::TYPE {
             if arg_count != 0 {
                 return Err(VMError::ArityMismatch {
@@ -270,9 +268,20 @@ impl VirtualMachine {
             return Ok(());
         }
 
+        // Save receiver type info before moving it into args.
+        use shape_value::NanTag;
+        use shape_value::heap_value::HeapKind;
+        let receiver_tag = receiver_nb.tag();
+        let receiver_heap_kind = receiver_nb.heap_kind();
+
+        // Prepend receiver to args — MOVE, not clone.
+        // This keeps the Arc refcount at 1, allowing mutating methods
+        // (e.g. Set.add, Deque.pushBack) to succeed with Arc::get_mut().
+        args_nb.insert(0, receiver_nb);
+
         // v2 typed array method dispatch.
         if let Some(view) =
-            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&receiver_nb)
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&args_nb[0])
         {
             if self.dispatch_v2_typed_array_method(&method_name, &view, &args_nb)? {
                 return Ok(());
@@ -283,7 +292,7 @@ impl VirtualMachine {
         {
             let ic_ip = self.ip;
             let mid = method_id.0 as u32;
-            if let Some(heap_kind) = receiver_nb.heap_kind() {
+            if let Some(heap_kind) = receiver_heap_kind {
                 if let Some(hit) =
                     crate::executor::ic_fast_paths::method_ic_check(self, ic_ip, heap_kind, mid)
                 {
@@ -294,10 +303,7 @@ impl VirtualMachine {
         }
 
         // ValueWord tag/HeapKind dispatch — no to_vmvalue() needed
-        use shape_value::NanTag;
-        use shape_value::heap_value::HeapKind;
-
-        match receiver_nb.tag() {
+        match receiver_tag {
             NanTag::I48 | NanTag::F64 => {
                 if let Some(handler) =
                     method_registry::NUMBER_METHODS.get(method_name.as_str())
@@ -312,7 +318,7 @@ impl VirtualMachine {
                 let result = self.handle_bool_method(&method_name, args_nb)?;
                 self.push_vw(result)?;
             }
-            NanTag::Heap => match receiver_nb.heap_kind().unwrap() {
+            NanTag::Heap => match receiver_heap_kind.unwrap() {
                 HeapKind::Array => {
                     let handler = method_registry::ARRAY_METHODS
                         .get(method_name.as_str())
@@ -372,7 +378,7 @@ impl VirtualMachine {
                                     ))
                                 }
                             })?;
-                    let rk = receiver_nb.heap_kind().unwrap() as u8;
+                    let rk = receiver_heap_kind.unwrap() as u8;
                     crate::executor::ic_fast_paths::method_ic_record(
                         self,
                         self.ip,
@@ -753,7 +759,7 @@ impl VirtualMachine {
                     return Err(VMError::RuntimeError(format!(
                         "Method '{}' not available on type '{}'",
                         method_name,
-                        receiver_nb.type_name()
+                        args_nb[0].type_name()
                     )));
                 }
             },
@@ -761,7 +767,7 @@ impl VirtualMachine {
                 return Err(VMError::RuntimeError(format!(
                     "Method '{}' not available on type '{}'",
                     method_name,
-                    receiver_nb.type_name()
+                    args_nb[0].type_name()
                 )));
             }
         }
