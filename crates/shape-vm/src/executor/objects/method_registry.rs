@@ -77,8 +77,8 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Higher-order — Native (closure-based, handler manages VM callbacks)
     "map" => MethodHandler::Native(crate::executor::objects::array_transform::handle_map_v2),
     "filter" => MethodHandler::Native(crate::executor::objects::array_transform::handle_filter_v2),
-    "reduce" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_reduce),
-    "fold" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_reduce),
+    "reduce" => MethodHandler::Native(crate::executor::objects::array_aggregation::handle_reduce_v2),
+    "fold" => MethodHandler::Native(crate::executor::objects::array_aggregation::handle_reduce_v2),
     "forEach" => MethodHandler::Native(crate::executor::objects::array_query::handle_for_each_v2),
     "find" => MethodHandler::Native(crate::executor::objects::array_query::handle_find_v2),
     "findIndex" => MethodHandler::Native(crate::executor::objects::array_query::handle_find_index_v2),
@@ -88,15 +88,15 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "groupBy" => MethodHandler::Native(crate::executor::objects::array_transform::handle_group_by_v2),
     "flatMap" => MethodHandler::Native(crate::executor::objects::array_transform::handle_flat_map_v2),
 
-    // Basic operations — still Legacy (waiting for array-basic agent)
-    "len" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_len),
-    "length" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_length),
-    "first" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_first),
-    "last" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_last),
-    "reverse" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_reverse),
-    "push" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_push),
-    "pop" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_pop),
-    "zip" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_zip),
+    // Basic operations — Native
+    "len" => MethodHandler::Native(crate::executor::objects::array_basic::handle_len_v2),
+    "length" => MethodHandler::Native(crate::executor::objects::array_basic::handle_len_v2),
+    "first" => MethodHandler::Native(crate::executor::objects::array_basic::handle_first_v2),
+    "last" => MethodHandler::Native(crate::executor::objects::array_basic::handle_last_v2),
+    "reverse" => MethodHandler::Native(crate::executor::objects::array_basic::handle_reverse_v2),
+    "push" => MethodHandler::Native(crate::executor::objects::array_basic::handle_push_v2),
+    "pop" => MethodHandler::Native(crate::executor::objects::array_basic::handle_pop_v2),
+    "zip" => MethodHandler::Native(crate::executor::objects::array_basic::handle_zip_v2),
     "slice" => MethodHandler::Native(crate::executor::objects::array_transform::handle_slice_v2),
     "concat" => MethodHandler::Native(crate::executor::objects::array_transform::handle_concat_v2),
     "take" => MethodHandler::Native(crate::executor::objects::array_transform::handle_take_v2),
@@ -110,16 +110,16 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Transform — Native
     "join" => MethodHandler::Native(crate::executor::objects::array_sort::handle_join_str_v2),
     "flatten" => MethodHandler::Native(crate::executor::objects::array_transform::handle_flatten_v2),
-    "unique" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_unique),
-    "distinct" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_distinct),
-    "distinctBy" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_distinct_by),
+    "unique" => MethodHandler::Native(crate::executor::objects::array_sets::handle_unique_v2),
+    "distinct" => MethodHandler::Native(crate::executor::objects::array_sets::handle_distinct_v2),
+    "distinctBy" => MethodHandler::Native(crate::executor::objects::array_sets::handle_distinct_by_v2),
 
-    // Aggregation — still Legacy (waiting for array-basic agent)
-    "sum" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_sum),
-    "avg" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_avg),
-    "min" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_min),
-    "max" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_max),
-    "count" => MethodHandler::Legacy(crate::executor::objects::array_aggregation::handle_count),
+    // Aggregation — Native
+    "sum" => MethodHandler::Native(crate::executor::objects::array_aggregation::handle_sum_v2),
+    "avg" => MethodHandler::Native(crate::executor::objects::array_aggregation::handle_avg_v2),
+    "min" => MethodHandler::Native(crate::executor::objects::array_aggregation::handle_min_v2),
+    "max" => MethodHandler::Native(crate::executor::objects::array_aggregation::handle_max_v2),
+    "count" => MethodHandler::Native(crate::executor::objects::array_aggregation::handle_count_v2),
 
     // SQL-like query — Native
     "where" => MethodHandler::Native(crate::executor::objects::array_query::handle_where_v2),
@@ -132,20 +132,20 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "any" => MethodHandler::Native(crate::executor::objects::array_query::handle_any_v2),
     "all" => MethodHandler::Native(crate::executor::objects::array_query::handle_all_v2),
 
-    // Join operations — still Legacy (waiting for array-basic agent)
-    "innerJoin" => MethodHandler::Legacy(crate::executor::objects::array_joins::handle_inner_join),
-    "leftJoin" => MethodHandler::Legacy(crate::executor::objects::array_joins::handle_left_join),
-    "crossJoin" => MethodHandler::Legacy(crate::executor::objects::array_joins::handle_cross_join),
+    // Join operations — Native
+    "innerJoin" => MethodHandler::Native(crate::executor::objects::array_joins::handle_inner_join_v2),
+    "leftJoin" => MethodHandler::Native(crate::executor::objects::array_joins::handle_left_join_v2),
+    "crossJoin" => MethodHandler::Native(crate::executor::objects::array_joins::handle_cross_join_v2),
 
-    // Set operations — still Legacy (waiting for array-basic agent)
-    "union" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_union),
-    "intersect" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_intersect),
-    "except" => MethodHandler::Legacy(crate::executor::objects::array_sets::handle_except),
+    // Set operations — Native
+    "union" => MethodHandler::Native(crate::executor::objects::array_sets::handle_union_v2),
+    "intersect" => MethodHandler::Native(crate::executor::objects::array_sets::handle_intersect_v2),
+    "except" => MethodHandler::Native(crate::executor::objects::array_sets::handle_except_v2),
 
-    // Clone — still Legacy
-    "clone" => MethodHandler::Legacy(crate::executor::objects::array_basic::handle_clone),
+    // Clone — Native
+    "clone" => MethodHandler::Native(crate::executor::objects::array_basic::handle_clone_v2),
 
-    // Iterator — still Legacy
+    // Iterator — still Legacy (waiting for iterator agent)
     "iter" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_array_iter),
 };
 
