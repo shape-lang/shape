@@ -282,20 +282,23 @@ pub static HASHMAP_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Higher-order:** forEach, map, filter
 /// **Set operations:** union, intersection, difference
 pub static SET_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    // Mutating — stay Legacy (Arc refcount sensitivity)
     "add" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_add),
-    "has" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_has),
     "delete" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_delete),
-    "size" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_size),
-    "len" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_size),
-    "length" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_size),
-    "isEmpty" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_is_empty),
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_to_array),
+    // Read-only — MethodFnV2
+    "has" => MethodHandler::Native(crate::executor::objects::set_methods::v2_has),
+    "size" => MethodHandler::Native(crate::executor::objects::set_methods::v2_size),
+    "len" => MethodHandler::Native(crate::executor::objects::set_methods::v2_size),
+    "length" => MethodHandler::Native(crate::executor::objects::set_methods::v2_size),
+    "isEmpty" => MethodHandler::Native(crate::executor::objects::set_methods::v2_is_empty),
+    "toArray" => MethodHandler::Native(crate::executor::objects::set_methods::v2_to_array),
+    "union" => MethodHandler::Native(crate::executor::objects::set_methods::v2_union),
+    "intersection" => MethodHandler::Native(crate::executor::objects::set_methods::v2_intersection),
+    "difference" => MethodHandler::Native(crate::executor::objects::set_methods::v2_difference),
+    // Closure-based — stay Legacy
     "forEach" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_for_each),
     "map" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_map),
     "filter" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_filter),
-    "union" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_union),
-    "intersection" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_intersection),
-    "difference" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_difference),
 };
 
 /// PHF registry for Deque methods
@@ -305,18 +308,20 @@ pub static SET_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Info:** size, len, length, isEmpty
 /// **Conversion:** toArray
 pub static DEQUE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    // Mutating — stay Legacy (Arc refcount sensitivity)
     "pushBack" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_push_back),
     "pushFront" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_push_front),
     "popBack" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_pop_back),
     "popFront" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_pop_front),
-    "peekBack" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_peek_back),
-    "peekFront" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_peek_front),
-    "size" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_size),
-    "len" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_size),
-    "length" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_size),
-    "isEmpty" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_is_empty),
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_to_array),
-    "get" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_get),
+    // Read-only — MethodFnV2
+    "peekBack" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_peek_back),
+    "peekFront" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_peek_front),
+    "size" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_size),
+    "len" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_size),
+    "length" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_size),
+    "isEmpty" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_is_empty),
+    "toArray" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_to_array),
+    "get" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_get),
 };
 
 /// PHF registry for PriorityQueue methods
@@ -326,15 +331,17 @@ pub static DEQUE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Info:** size, len, length, isEmpty
 /// **Conversion:** toArray, toSortedArray
 pub static PRIORITY_QUEUE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    // Mutating — stay Legacy (Arc refcount sensitivity)
     "push" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_push),
     "pop" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_pop),
-    "peek" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_peek),
-    "size" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_size),
-    "len" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_size),
-    "length" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_size),
-    "isEmpty" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_is_empty),
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_to_array),
-    "toSortedArray" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_to_sorted_array),
+    // Read-only — MethodFnV2
+    "peek" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_peek),
+    "size" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_size),
+    "len" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_size),
+    "length" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_size),
+    "isEmpty" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_is_empty),
+    "toArray" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_to_array),
+    "toSortedArray" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_to_sorted_array),
 };
 
 /// PHF registry for DateTime methods (30 methods)

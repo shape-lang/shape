@@ -250,3 +250,194 @@ pub fn handle_difference(
         .collect();
     Ok(ValueWord::from_set(items))
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V2 (Native) handlers — receive &[u64], return u64, no Vec allocation
+// ═══════════════════════════════════════════════════════════════════════════
+
+use std::mem::ManuallyDrop;
+
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+/// Set.add(item) -> Set [v2]
+pub fn v2_add(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let mut receiver = borrow_vw(args[0]);
+    let item_vw = borrow_vw(args[1]);
+    let item = (*item_vw).clone();
+
+    // Mutable fast-path
+    if let Some(data) = receiver.as_set_mut() {
+        data.insert(item);
+        return Ok((*receiver).clone().into_raw_bits());
+    }
+
+    // Slow path: clone
+    if let Some(set_data) = receiver.as_set() {
+        let mut new_data = set_data.clone();
+        new_data.insert(item);
+        let items = new_data.items;
+        Ok(ValueWord::from_set(items).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("add", "Set"))
+    }
+}
+
+/// Set.has(item) -> bool [v2]
+pub fn v2_has(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let item = borrow_vw(args[1]);
+    if let Some(data) = receiver.as_set() {
+        Ok(ValueWord::from_bool(data.contains(&*item)).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("has", "Set"))
+    }
+}
+
+/// Set.delete(item) -> Set [v2]
+pub fn v2_delete(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let mut receiver = borrow_vw(args[0]);
+    let item_vw = borrow_vw(args[1]);
+    let item = (*item_vw).clone();
+
+    if let Some(data) = receiver.as_set_mut() {
+        data.remove(&item);
+        return Ok((*receiver).clone().into_raw_bits());
+    }
+
+    if let Some(set_data) = receiver.as_set() {
+        let mut new_data = set_data.clone();
+        new_data.remove(&item);
+        let items = new_data.items;
+        Ok(ValueWord::from_set(items).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("delete", "Set"))
+    }
+}
+
+/// Set.size() / Set.len() / Set.length -> int [v2]
+pub fn v2_size(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    if let Some(data) = vw.as_set() {
+        Ok(ValueWord::from_i64(data.items.len() as i64).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("size", "Set"))
+    }
+}
+
+/// Set.isEmpty() -> bool [v2]
+pub fn v2_is_empty(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    if let Some(data) = vw.as_set() {
+        Ok(ValueWord::from_bool(data.items.is_empty()).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("isEmpty", "Set"))
+    }
+}
+
+/// Set.toArray() -> array [v2]
+pub fn v2_to_array(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    if let Some(data) = vw.as_set() {
+        let arr: Vec<ValueWord> = data.items.clone();
+        Ok(ValueWord::from_array(Arc::new(arr)).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("toArray", "Set"))
+    }
+}
+
+/// Set.union(other: Set) -> Set [v2]
+pub fn v2_union(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let a_vw = borrow_vw(args[0]);
+    let b_vw = borrow_vw(args[1]);
+    let a = a_vw
+        .as_set()
+        .ok_or_else(|| type_mismatch_error("union", "Set"))?;
+    let b = b_vw
+        .as_set()
+        .ok_or_else(|| VMError::RuntimeError("Set.union requires a Set argument".to_string()))?;
+
+    let mut result = a.clone();
+    for item in &b.items {
+        result.insert(item.clone());
+    }
+    Ok(ValueWord::from_set(result.items).into_raw_bits())
+}
+
+/// Set.intersection(other: Set) -> Set [v2]
+pub fn v2_intersection(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let a_vw = borrow_vw(args[0]);
+    let b_vw = borrow_vw(args[1]);
+    let a = a_vw
+        .as_set()
+        .ok_or_else(|| type_mismatch_error("intersection", "Set"))?;
+    let b = b_vw.as_set().ok_or_else(|| {
+        VMError::RuntimeError("Set.intersection requires a Set argument".to_string())
+    })?;
+
+    let items: Vec<ValueWord> = a
+        .items
+        .iter()
+        .filter(|item| b.contains(item))
+        .cloned()
+        .collect();
+    Ok(ValueWord::from_set(items).into_raw_bits())
+}
+
+/// Set.difference(other: Set) -> Set [v2]
+pub fn v2_difference(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let a_vw = borrow_vw(args[0]);
+    let b_vw = borrow_vw(args[1]);
+    let a = a_vw
+        .as_set()
+        .ok_or_else(|| type_mismatch_error("difference", "Set"))?;
+    let b = b_vw.as_set().ok_or_else(|| {
+        VMError::RuntimeError("Set.difference requires a Set argument".to_string())
+    })?;
+
+    let items: Vec<ValueWord> = a
+        .items
+        .iter()
+        .filter(|item| !b.contains(item))
+        .cloned()
+        .collect();
+    Ok(ValueWord::from_set(items).into_raw_bits())
+}

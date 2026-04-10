@@ -202,3 +202,220 @@ pub fn handle_get(
         Err(type_mismatch_error("get", "Deque"))
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V2 (Native) handlers — receive &[u64], return u64, no Vec allocation
+// ═══════════════════════════════════════════════════════════════════════════
+
+use std::mem::ManuallyDrop;
+
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+/// Deque.pushBack(item) -> Deque [v2]
+pub fn v2_push_back(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let mut receiver = borrow_vw(args[0]);
+    let item_vw = borrow_vw(args[1]);
+    let item = (*item_vw).clone();
+
+    if let Some(data) = receiver.as_deque_mut() {
+        data.items.push_back(item);
+        return Ok((*receiver).clone().into_raw_bits());
+    }
+
+    if let Some(deque_data) = receiver.as_deque() {
+        let mut new_data = deque_data.clone();
+        new_data.items.push_back(item);
+        Ok(ValueWord::from_deque(new_data.items.into()).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("pushBack", "Deque"))
+    }
+}
+
+/// Deque.pushFront(item) -> Deque [v2]
+pub fn v2_push_front(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let mut receiver = borrow_vw(args[0]);
+    let item_vw = borrow_vw(args[1]);
+    let item = (*item_vw).clone();
+
+    if let Some(data) = receiver.as_deque_mut() {
+        data.items.push_front(item);
+        return Ok((*receiver).clone().into_raw_bits());
+    }
+
+    if let Some(deque_data) = receiver.as_deque() {
+        let mut new_data = deque_data.clone();
+        new_data.items.push_front(item);
+        Ok(ValueWord::from_deque(new_data.items.into()).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("pushFront", "Deque"))
+    }
+}
+
+/// Deque.popBack() -> value [v2]
+pub fn v2_pop_back(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let mut receiver = borrow_vw(args[0]);
+
+    if let Some(data) = receiver.as_deque_mut() {
+        return Ok(match data.items.pop_back() {
+            Some(item) => item.into_raw_bits(),
+            None => ValueWord::none().into_raw_bits(),
+        });
+    }
+
+    if let Some(deque_data) = receiver.as_deque() {
+        let mut new_data = deque_data.clone();
+        Ok(match new_data.items.pop_back() {
+            Some(item) => item.into_raw_bits(),
+            None => ValueWord::none().into_raw_bits(),
+        })
+    } else {
+        Err(type_mismatch_error("popBack", "Deque"))
+    }
+}
+
+/// Deque.popFront() -> value [v2]
+pub fn v2_pop_front(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let mut receiver = borrow_vw(args[0]);
+
+    if let Some(data) = receiver.as_deque_mut() {
+        return Ok(match data.items.pop_front() {
+            Some(item) => item.into_raw_bits(),
+            None => ValueWord::none().into_raw_bits(),
+        });
+    }
+
+    if let Some(deque_data) = receiver.as_deque() {
+        let mut new_data = deque_data.clone();
+        Ok(match new_data.items.pop_front() {
+            Some(item) => item.into_raw_bits(),
+            None => ValueWord::none().into_raw_bits(),
+        })
+    } else {
+        Err(type_mismatch_error("popFront", "Deque"))
+    }
+}
+
+/// Deque.peekBack() -> value [v2]
+pub fn v2_peek_back(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    if let Some(data) = vw.as_deque() {
+        Ok(match data.items.back() {
+            Some(item) => item.clone().into_raw_bits(),
+            None => ValueWord::none().into_raw_bits(),
+        })
+    } else {
+        Err(type_mismatch_error("peekBack", "Deque"))
+    }
+}
+
+/// Deque.peekFront() -> value [v2]
+pub fn v2_peek_front(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    if let Some(data) = vw.as_deque() {
+        Ok(match data.items.front() {
+            Some(item) => item.clone().into_raw_bits(),
+            None => ValueWord::none().into_raw_bits(),
+        })
+    } else {
+        Err(type_mismatch_error("peekFront", "Deque"))
+    }
+}
+
+/// Deque.size() / Deque.len() / Deque.length -> int [v2]
+pub fn v2_size(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    if let Some(data) = vw.as_deque() {
+        Ok(ValueWord::from_i64(data.items.len() as i64).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("size", "Deque"))
+    }
+}
+
+/// Deque.isEmpty() -> bool [v2]
+pub fn v2_is_empty(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    if let Some(data) = vw.as_deque() {
+        Ok(ValueWord::from_bool(data.items.is_empty()).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("isEmpty", "Deque"))
+    }
+}
+
+/// Deque.toArray() -> array [v2]
+pub fn v2_to_array(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    if let Some(data) = vw.as_deque() {
+        let arr: Vec<ValueWord> = data.items.iter().cloned().collect();
+        Ok(ValueWord::from_array(Arc::new(arr)).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("toArray", "Deque"))
+    }
+}
+
+/// Deque.get(index) -> value [v2]
+pub fn v2_get(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let idx_vw = borrow_vw(args[1]);
+    if let Some(data) = vw.as_deque() {
+        let idx = idx_vw
+            .as_i64()
+            .or_else(|| idx_vw.as_f64().map(|n| n as i64))
+            .ok_or_else(|| {
+                VMError::RuntimeError("Deque.get requires an integer index".to_string())
+            })?;
+        let idx = if idx < 0 {
+            (data.items.len() as i64 + idx) as usize
+        } else {
+            idx as usize
+        };
+        Ok(match data.items.get(idx) {
+            Some(item) => item.clone().into_raw_bits(),
+            None => ValueWord::none().into_raw_bits(),
+        })
+    } else {
+        Err(type_mismatch_error("get", "Deque"))
+    }
+}
