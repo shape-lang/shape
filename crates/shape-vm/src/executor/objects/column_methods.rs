@@ -11,7 +11,17 @@ use arrow_array::{
 };
 use shape_value::datatable::DataTable;
 use shape_value::{VMError, ValueWord};
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
+
+/// Borrow a `ValueWord` from raw u64 bits without taking ownership.
+///
+/// The returned `ManuallyDrop<ValueWord>` prevents the Drop impl from running,
+/// which is essential because the caller (the VM stack) still owns the heap data.
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
 
 /// Extract the Arrow column array from the DataTable.
 fn get_arrow_col(table: &DataTable, col_id: u32) -> Result<&dyn Array, VMError> {
@@ -224,6 +234,160 @@ fn arrow_array_to_nanboxed(col: &dyn Array) -> Result<Vec<ValueWord>, VMError> {
         values.push(arrow_value_to_nb(col, i));
     }
     Ok(values)
+}
+
+// =============================================================================
+// V2 (MethodFnV2) handlers — raw u64 ABI, no Vec allocation
+// =============================================================================
+
+/// `col.len()` — number of rows (v2).
+pub fn v2_len(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let col = get_arrow_col(table, col_id)?;
+    Ok(ValueWord::from_i64(col.len() as i64).raw_bits())
+}
+
+/// `col.sum()` — sum of numeric column (v2).
+pub fn v2_sum(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let values = col_as_f64(table, col_id)?;
+    let result: f64 = values.iter().sum();
+    Ok(ValueWord::from_f64(result).raw_bits())
+}
+
+/// `col.mean()` — arithmetic mean of numeric column (v2).
+pub fn v2_mean(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let values = col_as_f64(table, col_id)?;
+    if values.is_empty() {
+        return Ok(ValueWord::none().raw_bits());
+    }
+    let sum: f64 = values.iter().sum();
+    Ok(ValueWord::from_f64(sum / values.len() as f64).raw_bits())
+}
+
+/// `col.min()` — minimum value (v2).
+pub fn v2_min(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let values = col_as_f64(table, col_id)?;
+    let result = values.iter().copied().reduce(f64::min);
+    Ok(result
+        .map(ValueWord::from_f64)
+        .unwrap_or_else(ValueWord::none)
+        .raw_bits())
+}
+
+/// `col.max()` — maximum value (v2).
+pub fn v2_max(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let values = col_as_f64(table, col_id)?;
+    let result = values.iter().copied().reduce(f64::max);
+    Ok(result
+        .map(ValueWord::from_f64)
+        .unwrap_or_else(ValueWord::none)
+        .raw_bits())
+}
+
+/// `col.std()` — standard deviation (v2).
+pub fn v2_std(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let values = col_as_f64(table, col_id)?;
+    if values.len() < 2 {
+        return Ok(ValueWord::none().raw_bits());
+    }
+    let mean: f64 = values.iter().sum::<f64>() / values.len() as f64;
+    let variance: f64 =
+        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+    Ok(ValueWord::from_f64(variance.sqrt()).raw_bits())
+}
+
+/// `col.first()` — first non-null value (v2).
+pub fn v2_first(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let col = get_arrow_col(table, col_id)?;
+    if col.is_empty() {
+        return Ok(ValueWord::none().raw_bits());
+    }
+    Ok(arrow_value_to_nb(col, 0).raw_bits())
+}
+
+/// `col.last()` — last non-null value (v2).
+pub fn v2_last(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let col = get_arrow_col(table, col_id)?;
+    if col.is_empty() {
+        return Ok(ValueWord::none().raw_bits());
+    }
+    Ok(arrow_value_to_nb(col, col.len() - 1).raw_bits())
+}
+
+/// `col.toArray()` — convert column to a ValueWord Array (v2).
+pub fn v2_to_array(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let col = get_arrow_col(table, col_id)?;
+    let nb_values = arrow_array_to_nanboxed(col)?;
+    Ok(ValueWord::from_array(Arc::new(nb_values)).raw_bits())
+}
+
+/// `col.abs()` — element-wise absolute value, returns Array (v2).
+pub fn v2_abs(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    let vw = borrow_vw(args[0]);
+    let (table, col_id) = extract_col_nb(&vw)?;
+    let values = col_as_f64(table, col_id)?;
+    let result: Vec<ValueWord> = values
+        .iter()
+        .map(|v| ValueWord::from_f64(v.abs()))
+        .collect();
+    Ok(ValueWord::from_array(Arc::new(result)).raw_bits())
 }
 
 // =============================================================================

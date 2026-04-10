@@ -232,17 +232,17 @@ pub static DATATABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Access:** first, last, toArray
 /// **Transform:** abs
 pub static COLUMN_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "len" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_len),
-    "length" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_len),
-    "sum" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_sum),
-    "mean" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_mean),
-    "min" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_min),
-    "max" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_max),
-    "std" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_std),
-    "first" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_first),
-    "last" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_last),
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_to_array),
-    "abs" => MethodHandler::Legacy(crate::executor::objects::column_methods::handle_abs),
+    "len" => MethodHandler::Native(crate::executor::objects::column_methods::v2_len),
+    "length" => MethodHandler::Native(crate::executor::objects::column_methods::v2_len),
+    "sum" => MethodHandler::Native(crate::executor::objects::column_methods::v2_sum),
+    "mean" => MethodHandler::Native(crate::executor::objects::column_methods::v2_mean),
+    "min" => MethodHandler::Native(crate::executor::objects::column_methods::v2_min),
+    "max" => MethodHandler::Native(crate::executor::objects::column_methods::v2_max),
+    "std" => MethodHandler::Native(crate::executor::objects::column_methods::v2_std),
+    "first" => MethodHandler::Native(crate::executor::objects::column_methods::v2_first),
+    "last" => MethodHandler::Native(crate::executor::objects::column_methods::v2_last),
+    "toArray" => MethodHandler::Native(crate::executor::objects::column_methods::v2_to_array),
+    "abs" => MethodHandler::Native(crate::executor::objects::column_methods::v2_abs),
 };
 
 /// PHF registry for HashMap methods (18 methods)
