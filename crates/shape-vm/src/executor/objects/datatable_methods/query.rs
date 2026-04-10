@@ -24,7 +24,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
     args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
@@ -423,7 +423,7 @@ pub(crate) fn handle_map_legacy(
 
 pub(crate) fn handle_filter(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -433,7 +433,7 @@ pub(crate) fn handle_filter(
 
 pub(crate) fn handle_order_by(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -443,7 +443,7 @@ pub(crate) fn handle_order_by(
 
 pub(crate) fn handle_group_by(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -453,7 +453,7 @@ pub(crate) fn handle_group_by(
 
 pub(crate) fn handle_for_each(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -463,7 +463,7 @@ pub(crate) fn handle_for_each(
 
 pub(crate) fn handle_map(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);

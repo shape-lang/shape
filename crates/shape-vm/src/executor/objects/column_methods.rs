@@ -243,7 +243,7 @@ fn arrow_array_to_nanboxed(col: &dyn Array) -> Result<Vec<ValueWord>, VMError> {
 /// `col.len()` — number of rows (v2).
 pub fn v2_len(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -255,7 +255,7 @@ pub fn v2_len(
 /// `col.sum()` — sum of numeric column (v2).
 pub fn v2_sum(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -268,7 +268,7 @@ pub fn v2_sum(
 /// `col.mean()` — arithmetic mean of numeric column (v2).
 pub fn v2_mean(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -284,7 +284,7 @@ pub fn v2_mean(
 /// `col.min()` — minimum value (v2).
 pub fn v2_min(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -300,7 +300,7 @@ pub fn v2_min(
 /// `col.max()` — maximum value (v2).
 pub fn v2_max(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -316,7 +316,7 @@ pub fn v2_max(
 /// `col.std()` — standard deviation (v2).
 pub fn v2_std(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -334,7 +334,7 @@ pub fn v2_std(
 /// `col.first()` — first non-null value (v2).
 pub fn v2_first(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -349,7 +349,7 @@ pub fn v2_first(
 /// `col.last()` — last non-null value (v2).
 pub fn v2_last(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -364,7 +364,7 @@ pub fn v2_last(
 /// `col.toArray()` — convert column to a ValueWord Array (v2).
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -377,7 +377,7 @@ pub fn v2_to_array(
 /// `col.abs()` — element-wise absolute value, returns Array (v2).
 pub fn v2_abs(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);

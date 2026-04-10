@@ -393,7 +393,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
     args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
@@ -810,7 +810,7 @@ pub fn handle_range_iter_legacy(
 /// Range.iter() -> Iterator (v2 native)
 pub fn v2_range_iter(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
         let receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
@@ -846,7 +846,7 @@ pub fn handle_hashmap_iter_legacy(
 
 pub(crate) fn handle_map(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -856,7 +856,7 @@ pub(crate) fn handle_map(
 
 pub(crate) fn handle_filter(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -866,7 +866,7 @@ pub(crate) fn handle_filter(
 
 pub(crate) fn handle_take(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -876,7 +876,7 @@ pub(crate) fn handle_take(
 
 pub(crate) fn handle_skip(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -886,7 +886,7 @@ pub(crate) fn handle_skip(
 
 pub(crate) fn handle_flat_map(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -896,7 +896,7 @@ pub(crate) fn handle_flat_map(
 
 pub(crate) fn handle_enumerate(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -906,7 +906,7 @@ pub(crate) fn handle_enumerate(
 
 pub(crate) fn handle_chain(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -916,7 +916,7 @@ pub(crate) fn handle_chain(
 
 pub(crate) fn handle_collect(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -926,7 +926,7 @@ pub(crate) fn handle_collect(
 
 pub(crate) fn handle_for_each(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -936,7 +936,7 @@ pub(crate) fn handle_for_each(
 
 pub(crate) fn handle_reduce(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -946,7 +946,7 @@ pub(crate) fn handle_reduce(
 
 pub(crate) fn handle_count(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -956,7 +956,7 @@ pub(crate) fn handle_count(
 
 pub(crate) fn handle_any(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -966,7 +966,7 @@ pub(crate) fn handle_any(
 
 pub(crate) fn handle_all(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -976,7 +976,7 @@ pub(crate) fn handle_all(
 
 pub(crate) fn handle_find(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -986,7 +986,7 @@ pub(crate) fn handle_find(
 
 pub(crate) fn handle_array_iter(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -996,7 +996,7 @@ pub(crate) fn handle_array_iter(
 
 pub(crate) fn handle_string_iter(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1006,7 +1006,7 @@ pub(crate) fn handle_string_iter(
 
 pub(crate) fn handle_range_iter(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1016,7 +1016,7 @@ pub(crate) fn handle_range_iter(
 
 pub(crate) fn handle_hashmap_iter(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);

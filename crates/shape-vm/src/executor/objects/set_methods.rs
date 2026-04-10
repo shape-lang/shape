@@ -264,23 +264,30 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 
 /// Set.add(item) -> Set [v2]
 ///
-/// Always clones — v2 handlers cannot use `as_set_mut()` because the dispatch
-/// infrastructure doesn't propagate the updated heap pointer bits back to
-/// the caller's `args_nb`, causing use-after-free when `Arc::make_mut` reallocates.
+/// Uses `as_set_mut()` for in-place mutation when the receiver has refcount 1.
+/// The dispatcher transfers ownership via `into_raw_bits()` and passes `&mut [u64]`,
+/// so `Arc::get_mut()` succeeds and `args[0]` is updated if `Arc::make_mut` reallocates.
 pub fn v2_add(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let item_vw = borrow_vw(args[1]);
-    let item = (*item_vw).clone();
+    let mut receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
+    let item = (*borrow_vw(args[1])).clone();
 
+    // In-place fast path: mutate directly when we're the sole owner
+    if let Some(data) = receiver.as_set_mut() {
+        data.insert(item);
+        // Update args[0] — as_heap_mut may have reallocated via Arc::make_mut
+        args[0] = receiver.raw_bits();
+        return Ok((*receiver).clone().into_raw_bits());
+    }
+
+    // COW slow path: clone the set data
     if let Some(set_data) = receiver.as_set() {
         let mut new_data = set_data.clone();
         new_data.insert(item);
-        let items = new_data.items;
-        Ok(ValueWord::from_set(items).into_raw_bits())
+        Ok(ValueWord::from_set(new_data.items).into_raw_bits())
     } else {
         Err(type_mismatch_error("add", "Set"))
     }
@@ -289,7 +296,7 @@ pub fn v2_add(
 /// Set.has(item) -> bool [v2]
 pub fn v2_has(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -301,22 +308,25 @@ pub fn v2_has(
     }
 }
 
-/// Set.delete(item) -> Set [v2]
-/// Set.delete(item) -> Set [v2] — always clones (see v2_add comment)
+/// Set.delete(item) -> Set [v2] — in-place fast path + COW slow path
 pub fn v2_delete(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let item_vw = borrow_vw(args[1]);
-    let item = (*item_vw).clone();
+    let mut receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
+    let item = (*borrow_vw(args[1])).clone();
+
+    if let Some(data) = receiver.as_set_mut() {
+        data.remove(&item);
+        args[0] = receiver.raw_bits();
+        return Ok((*receiver).clone().into_raw_bits());
+    }
 
     if let Some(set_data) = receiver.as_set() {
         let mut new_data = set_data.clone();
         new_data.remove(&item);
-        let items = new_data.items;
-        Ok(ValueWord::from_set(items).into_raw_bits())
+        Ok(ValueWord::from_set(new_data.items).into_raw_bits())
     } else {
         Err(type_mismatch_error("delete", "Set"))
     }
@@ -325,7 +335,7 @@ pub fn v2_delete(
 /// Set.size() / Set.len() / Set.length -> int [v2]
 pub fn v2_size(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -339,7 +349,7 @@ pub fn v2_size(
 /// Set.isEmpty() -> bool [v2]
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -353,7 +363,7 @@ pub fn v2_is_empty(
 /// Set.toArray() -> array [v2]
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -368,7 +378,7 @@ pub fn v2_to_array(
 /// Set.union(other: Set) -> Set [v2]
 pub fn v2_union(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let a_vw = borrow_vw(args[0]);
@@ -390,7 +400,7 @@ pub fn v2_union(
 /// Set.intersection(other: Set) -> Set [v2]
 pub fn v2_intersection(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let a_vw = borrow_vw(args[0]);
@@ -414,7 +424,7 @@ pub fn v2_intersection(
 /// Set.difference(other: Set) -> Set [v2]
 pub fn v2_difference(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let a_vw = borrow_vw(args[0]);
@@ -438,7 +448,7 @@ pub fn v2_difference(
 /// Set.forEach(fn(item)) -> unit [v2]
 pub fn v2_for_each(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = (*borrow_vw(args[0])).clone();
@@ -458,7 +468,7 @@ pub fn v2_for_each(
 /// Set.map(fn(item) -> new_item) -> Set [v2]
 pub fn v2_map(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = (*borrow_vw(args[0])).clone();
@@ -481,7 +491,7 @@ pub fn v2_map(
 /// Set.filter(fn(item) -> bool) -> Set [v2]
 pub fn v2_filter(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = (*borrow_vw(args[0])).clone();

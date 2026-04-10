@@ -217,7 +217,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 /// Deque.pushBack(item) -> Deque [v2] — always clones (see set_methods::v2_add)
 pub fn v2_push_back(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -235,7 +235,7 @@ pub fn v2_push_back(
 /// Deque.pushFront(item) -> Deque [v2] — always clones
 pub fn v2_push_front(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -253,7 +253,7 @@ pub fn v2_push_front(
 /// Deque.popBack() -> value [v2] — always clones
 pub fn v2_pop_back(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -271,7 +271,7 @@ pub fn v2_pop_back(
 /// Deque.popFront() -> value [v2] — always clones
 pub fn v2_pop_front(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -289,7 +289,7 @@ pub fn v2_pop_front(
 /// Deque.peekBack() -> value [v2]
 pub fn v2_peek_back(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -306,7 +306,7 @@ pub fn v2_peek_back(
 /// Deque.peekFront() -> value [v2]
 pub fn v2_peek_front(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -323,7 +323,7 @@ pub fn v2_peek_front(
 /// Deque.size() / Deque.len() / Deque.length -> int [v2]
 pub fn v2_size(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -337,7 +337,7 @@ pub fn v2_size(
 /// Deque.isEmpty() -> bool [v2]
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -351,7 +351,7 @@ pub fn v2_is_empty(
 /// Deque.toArray() -> array [v2]
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -366,7 +366,7 @@ pub fn v2_to_array(
 /// Deque.get(index) -> value [v2]
 pub fn v2_get(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);

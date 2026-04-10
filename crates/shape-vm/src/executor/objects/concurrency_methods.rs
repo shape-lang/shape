@@ -300,7 +300,7 @@ pub fn handle_lazy_is_initialized(
 /// `mutex.lock()` — v2 ABI.
 pub fn v2_mutex_lock(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -322,7 +322,7 @@ pub fn v2_mutex_lock(
 /// `mutex.try_lock()` — v2 ABI.
 pub fn v2_mutex_try_lock(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -341,7 +341,7 @@ pub fn v2_mutex_try_lock(
 /// `mutex.set(value)` — v2 ABI.
 pub fn v2_mutex_set(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -372,7 +372,7 @@ pub fn v2_mutex_set(
 /// `atomic.load()` — v2 ABI.
 pub fn v2_atomic_load(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -391,7 +391,7 @@ pub fn v2_atomic_load(
 /// `atomic.store(value)` — v2 ABI.
 pub fn v2_atomic_store(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -416,7 +416,7 @@ pub fn v2_atomic_store(
 /// `atomic.fetch_add(delta)` — v2 ABI.
 pub fn v2_atomic_fetch_add(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -441,7 +441,7 @@ pub fn v2_atomic_fetch_add(
 /// `atomic.fetch_sub(delta)` — v2 ABI.
 pub fn v2_atomic_fetch_sub(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -466,7 +466,7 @@ pub fn v2_atomic_fetch_sub(
 /// `atomic.compare_exchange(expected, new)` — v2 ABI.
 pub fn v2_atomic_compare_exchange(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -506,7 +506,7 @@ pub fn v2_atomic_compare_exchange(
 /// into the VM (`op_call_value`). This handler therefore needs `vm` (not `_vm`).
 pub fn v2_lazy_get(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -562,7 +562,7 @@ pub fn v2_lazy_get(
 /// `lazy.is_initialized()` — v2 ABI.
 pub fn v2_lazy_is_initialized(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);

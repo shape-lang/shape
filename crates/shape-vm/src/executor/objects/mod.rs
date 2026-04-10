@@ -154,7 +154,17 @@ impl VirtualMachine {
 
     // op_typed_merge_object moved to object_operations.rs
 
-    /// Dispatch a method handler, converting args to raw u64 slice and pushing result.
+    /// Dispatch a method handler on raw u64 args.
+    ///
+    /// Transfers ownership from `Vec<ValueWord>` to a raw `Vec<u64>` via
+    /// `into_raw_bits()` (which forgets each ValueWord — no refcount change).
+    /// The handler receives `&mut [u64]` as sole owner of the heap values.
+    /// After the handler returns, we drop each raw arg to decrement refcounts.
+    ///
+    /// This enables `as_*_mut()` in handlers: since no duplicate ValueWord
+    /// exists during the call, `Arc::get_mut()` succeeds when refcount == 1.
+    /// If `Arc::make_mut` reallocates, the handler updates `args[0]` in place,
+    /// and we drop the correct (updated) pointer.
     #[inline]
     fn dispatch_method_handler(
         &mut self,
@@ -162,8 +172,13 @@ impl VirtualMachine {
         args_nb: Vec<ValueWord>,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        let raw_args: Vec<u64> = args_nb.iter().map(|vw| vw.raw_bits()).collect();
-        let result = handler(self, &raw_args, ctx)?;
+        // Transfer ownership: into_raw_bits() forgets each ValueWord (no Drop).
+        let mut raw_args: Vec<u64> = args_nb.into_iter().map(|vw| vw.into_raw_bits()).collect();
+        let result = handler(self, &mut raw_args, ctx)?;
+        // Drop args: the handler may have updated pointers (e.g. after Arc::make_mut).
+        for bits in raw_args {
+            drop(ValueWord::from_raw_bits(bits));
+        }
         self.push_raw_u64(result)?;
         Ok(())
     }

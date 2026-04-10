@@ -237,7 +237,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 /// args: [left_array, right_array, left_key_fn, right_key_fn, result_selector_fn]
 pub(crate) fn handle_inner_join_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() != 5 {
@@ -309,7 +309,7 @@ pub(crate) fn handle_inner_join_v2(
 /// args: [left_array, right_array, left_key_fn, right_key_fn, result_selector_fn]
 pub(crate) fn handle_left_join_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() != 5 {
@@ -392,7 +392,7 @@ pub(crate) fn handle_left_join_v2(
 /// args: [left_array, right_array, result_selector_fn]
 pub(crate) fn handle_cross_join_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() != 3 {

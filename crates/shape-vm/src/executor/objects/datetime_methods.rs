@@ -36,7 +36,7 @@ fn recv_dt_v2(args: &[u64]) -> Result<&DateTime<FixedOffset>, VMError> {
 
 pub fn v2_year(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -45,7 +45,7 @@ pub fn v2_year(
 
 pub fn v2_month(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -54,7 +54,7 @@ pub fn v2_month(
 
 pub fn v2_day(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -63,7 +63,7 @@ pub fn v2_day(
 
 pub fn v2_hour(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -72,7 +72,7 @@ pub fn v2_hour(
 
 pub fn v2_minute(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -81,7 +81,7 @@ pub fn v2_minute(
 
 pub fn v2_second(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -90,7 +90,7 @@ pub fn v2_second(
 
 pub fn v2_millisecond(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -99,7 +99,7 @@ pub fn v2_millisecond(
 
 pub fn v2_microsecond(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -110,7 +110,7 @@ pub fn v2_microsecond(
 
 pub fn v2_day_of_week(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -119,7 +119,7 @@ pub fn v2_day_of_week(
 
 pub fn v2_day_of_year(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -128,7 +128,7 @@ pub fn v2_day_of_year(
 
 pub fn v2_week_of_year(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -137,7 +137,7 @@ pub fn v2_week_of_year(
 
 pub fn v2_is_weekday(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -147,7 +147,7 @@ pub fn v2_is_weekday(
 
 pub fn v2_is_weekend(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -159,7 +159,7 @@ pub fn v2_is_weekend(
 
 pub fn v2_format(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -174,7 +174,7 @@ pub fn v2_format(
 
 pub fn v2_iso8601(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -183,7 +183,7 @@ pub fn v2_iso8601(
 
 pub fn v2_rfc2822(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -192,7 +192,7 @@ pub fn v2_rfc2822(
 
 pub fn v2_unix_timestamp(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -201,7 +201,7 @@ pub fn v2_unix_timestamp(
 
 pub fn v2_to_unix_millis(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -212,7 +212,7 @@ pub fn v2_to_unix_millis(
 
 pub fn v2_diff(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -263,7 +263,7 @@ pub fn v2_diff(
 
 pub fn v2_to_utc(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -273,7 +273,7 @@ pub fn v2_to_utc(
 
 pub fn v2_to_timezone(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -291,7 +291,7 @@ pub fn v2_to_timezone(
 
 pub fn v2_to_local(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -301,7 +301,7 @@ pub fn v2_to_local(
 
 pub fn v2_timezone(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -323,7 +323,7 @@ pub fn v2_timezone(
 
 pub fn v2_offset(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -341,7 +341,7 @@ pub fn v2_offset(
 /// Returns a new DateTime offset by the duration.
 pub fn v2_add(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -362,7 +362,7 @@ pub fn v2_add(
 /// DateTime.sub(rhs): rhs can be a TimeSpan -> DateTime, or another DateTime -> TimeSpan.
 pub fn v2_sub(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -387,7 +387,7 @@ pub fn v2_sub(
 
 pub fn v2_add_days(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -404,7 +404,7 @@ pub fn v2_add_days(
 
 pub fn v2_add_hours(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -421,7 +421,7 @@ pub fn v2_add_hours(
 
 pub fn v2_add_minutes(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -438,7 +438,7 @@ pub fn v2_add_minutes(
 
 pub fn v2_add_seconds(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -455,7 +455,7 @@ pub fn v2_add_seconds(
 
 pub fn v2_add_months(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -490,7 +490,7 @@ pub fn v2_add_months(
 
 pub fn v2_is_before(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -504,7 +504,7 @@ pub fn v2_is_before(
 
 pub fn v2_is_after(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -518,7 +518,7 @@ pub fn v2_is_after(
 
 pub fn v2_is_same_day(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
@@ -538,7 +538,7 @@ pub fn v2_is_same_day(
 /// TimeSpan.add(rhs): rhs can be a TimeSpan -> TimeSpan, or DateTime -> DateTime.
 pub fn v2_timespan_add(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw0 = borrow_vw(args[0]);
@@ -568,7 +568,7 @@ pub fn v2_timespan_add(
 /// TimeSpan.sub(rhs): rhs must be a TimeSpan -> TimeSpan.
 pub fn v2_timespan_sub(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw0 = borrow_vw(args[0]);

@@ -48,7 +48,7 @@ fn decode_number_receiver(raw: u64) -> Result<(f64, bool), VMError> {
 // ---------------------------------------------------------------------------
 pub fn number_floor_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -65,7 +65,7 @@ pub fn number_floor_v2(
 // ---------------------------------------------------------------------------
 pub fn number_ceil_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -81,7 +81,7 @@ pub fn number_ceil_v2(
 // ---------------------------------------------------------------------------
 pub fn number_round_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -97,7 +97,7 @@ pub fn number_round_v2(
 // ---------------------------------------------------------------------------
 pub fn number_abs_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -113,7 +113,7 @@ pub fn number_abs_v2(
 // ---------------------------------------------------------------------------
 pub fn number_sign_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -138,7 +138,7 @@ pub fn number_sign_v2(
 // ---------------------------------------------------------------------------
 pub fn number_to_int_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, _is_int) = decode_number_receiver(args[0])?;
@@ -150,7 +150,7 @@ pub fn number_to_int_v2(
 // ---------------------------------------------------------------------------
 pub fn number_to_number_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, _is_int) = decode_number_receiver(args[0])?;
@@ -162,7 +162,7 @@ pub fn number_to_number_v2(
 // ---------------------------------------------------------------------------
 pub fn number_is_nan_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -176,7 +176,7 @@ pub fn number_is_nan_v2(
 // ---------------------------------------------------------------------------
 pub fn number_is_finite_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -190,7 +190,7 @@ pub fn number_is_finite_v2(
 // ---------------------------------------------------------------------------
 pub fn number_to_fixed_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, _is_int) = decode_number_receiver(args[0])?;
@@ -213,7 +213,7 @@ pub fn number_to_fixed_v2(
 // ---------------------------------------------------------------------------
 pub fn number_to_string_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -229,7 +229,7 @@ pub fn number_to_string_v2(
 // ---------------------------------------------------------------------------
 pub fn number_clamp_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
@@ -270,7 +270,7 @@ pub fn number_clamp_v2(
 /// bool.toString / bool.to_string
 pub fn bool_to_string_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -297,7 +297,7 @@ fn decode_char_receiver(raw: u64) -> Result<char, VMError> {
 
 pub fn char_is_alphabetic_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -306,7 +306,7 @@ pub fn char_is_alphabetic_v2(
 
 pub fn char_is_numeric_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -315,7 +315,7 @@ pub fn char_is_numeric_v2(
 
 pub fn char_is_alphanumeric_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -324,7 +324,7 @@ pub fn char_is_alphanumeric_v2(
 
 pub fn char_is_whitespace_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -333,7 +333,7 @@ pub fn char_is_whitespace_v2(
 
 pub fn char_is_uppercase_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -342,7 +342,7 @@ pub fn char_is_uppercase_v2(
 
 pub fn char_is_lowercase_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -351,7 +351,7 @@ pub fn char_is_lowercase_v2(
 
 pub fn char_is_ascii_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -360,7 +360,7 @@ pub fn char_is_ascii_v2(
 
 pub fn char_to_uppercase_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -374,7 +374,7 @@ pub fn char_to_uppercase_v2(
 
 pub fn char_to_lowercase_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;
@@ -388,7 +388,7 @@ pub fn char_to_lowercase_v2(
 
 pub fn char_to_string_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let c = decode_char_receiver(args[0])?;

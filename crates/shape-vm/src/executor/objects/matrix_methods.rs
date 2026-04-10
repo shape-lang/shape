@@ -24,7 +24,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &[u64]) -> Vec<shape_value::ValueWord> {
+fn args_to_vw(args: &mut [u64]) -> Vec<shape_value::ValueWord> {
     args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
@@ -375,7 +375,7 @@ pub fn handle_col_sum(
 /// mat.transpose() -> Matrix (v2)
 pub fn v2_transpose(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -387,7 +387,7 @@ pub fn v2_transpose(
 /// mat.inverse() -> Matrix (v2)
 pub fn v2_inverse(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -399,7 +399,7 @@ pub fn v2_inverse(
 /// mat.det() / mat.determinant() -> number (v2)
 pub fn v2_determinant(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -411,7 +411,7 @@ pub fn v2_determinant(
 /// mat.trace() -> number (v2)
 pub fn v2_trace(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -423,7 +423,7 @@ pub fn v2_trace(
 /// mat.shape() -> [rows, cols] (v2)
 pub fn v2_shape(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -439,7 +439,7 @@ pub fn v2_shape(
 /// mat.reshape(rows, cols) -> Matrix (v2)
 pub fn v2_reshape(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -482,7 +482,7 @@ pub fn v2_reshape(
 /// mat.row(i) -> FloatArraySlice (v2)
 pub fn v2_row(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -526,7 +526,7 @@ pub fn v2_row(
 /// mat.col(j) -> FloatArray (v2)
 pub fn v2_col(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -560,7 +560,7 @@ pub fn v2_col(
 /// mat.diag() -> FloatArray (v2)
 pub fn v2_diag(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -577,7 +577,7 @@ pub fn v2_diag(
 /// mat.flatten() -> FloatArray (v2)
 pub fn v2_flatten(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -592,7 +592,7 @@ pub fn v2_flatten(
 /// mat.sum() -> number (v2)
 pub fn v2_sum(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -604,7 +604,7 @@ pub fn v2_sum(
 /// mat.min() -> number (v2)
 pub fn v2_min(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -619,7 +619,7 @@ pub fn v2_min(
 /// mat.max() -> number (v2)
 pub fn v2_max(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -634,7 +634,7 @@ pub fn v2_max(
 /// mat.mean() -> number (v2)
 pub fn v2_mean(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -649,7 +649,7 @@ pub fn v2_mean(
 /// mat.rowSum() -> FloatArray (v2)
 pub fn v2_row_sum(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -665,7 +665,7 @@ pub fn v2_row_sum(
 /// mat.colSum() -> FloatArray (v2)
 pub fn v2_col_sum(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -685,7 +685,7 @@ pub fn v2_col_sum(
 
 pub(crate) fn handle_map(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);

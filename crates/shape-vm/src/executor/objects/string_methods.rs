@@ -26,7 +26,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 /// len / length
 pub fn v2_string_len(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -40,7 +40,7 @@ pub fn v2_string_len(
 /// toUpperCase / to_upper_case
 pub fn v2_string_to_upper(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -54,7 +54,7 @@ pub fn v2_string_to_upper(
 /// toLowerCase / to_lower_case
 pub fn v2_string_to_lower(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -68,7 +68,7 @@ pub fn v2_string_to_lower(
 /// trim
 pub fn v2_string_trim(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -82,7 +82,7 @@ pub fn v2_string_trim(
 /// trimStart / trim_start
 pub fn v2_string_trim_start(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -96,7 +96,7 @@ pub fn v2_string_trim_start(
 /// trimEnd / trim_end
 pub fn v2_string_trim_end(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -110,7 +110,7 @@ pub fn v2_string_trim_end(
 /// toString / to_string
 pub fn v2_string_to_string(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     // Identity: return the receiver unchanged
@@ -120,7 +120,7 @@ pub fn v2_string_to_string(
 /// startsWith / starts_with — args[1] is the prefix
 pub fn v2_string_starts_with(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -139,7 +139,7 @@ pub fn v2_string_starts_with(
 /// endsWith / ends_with — args[1] is the suffix
 pub fn v2_string_ends_with(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -158,7 +158,7 @@ pub fn v2_string_ends_with(
 /// contains — args[1] is the needle
 pub fn v2_string_contains(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -177,7 +177,7 @@ pub fn v2_string_contains(
 /// indexOf / index_of — args[1] is the needle
 pub fn v2_string_index_of(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -204,7 +204,7 @@ pub fn v2_string_index_of(
 /// repeat — args[1] is count
 pub fn v2_string_repeat(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -223,7 +223,7 @@ pub fn v2_string_repeat(
 /// charAt / char_at — args[1] is index
 pub fn v2_string_char_at(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -246,7 +246,7 @@ pub fn v2_string_char_at(
 /// reverse
 pub fn v2_string_reverse(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -261,7 +261,7 @@ pub fn v2_string_reverse(
 /// isDigit / is_digit
 pub fn v2_string_is_digit(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -275,7 +275,7 @@ pub fn v2_string_is_digit(
 /// isAlpha / is_alpha
 pub fn v2_string_is_alpha(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -289,7 +289,7 @@ pub fn v2_string_is_alpha(
 /// isAscii / is_ascii
 pub fn v2_string_is_ascii(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -303,7 +303,7 @@ pub fn v2_string_is_ascii(
 /// toInt / to_int
 pub fn v2_string_to_int(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -321,7 +321,7 @@ pub fn v2_string_to_int(
 /// toNumber / to_number / toFloat / to_float
 pub fn v2_string_to_number(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -339,7 +339,7 @@ pub fn v2_string_to_number(
 /// codePointAt / code_point_at — args[1] is index
 pub fn v2_string_code_point_at(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -362,7 +362,7 @@ pub fn v2_string_code_point_at(
 /// graphemeLen / grapheme_len
 pub fn v2_string_grapheme_len(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     use unicode_segmentation::UnicodeSegmentation;
@@ -378,7 +378,7 @@ pub fn v2_string_grapheme_len(
 /// padStart / pad_start — args[1] is target_len, args[2] is optional fill
 pub fn v2_string_pad_start(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -415,7 +415,7 @@ pub fn v2_string_pad_start(
 /// padEnd / pad_end — args[1] is target_len, args[2] is optional fill
 pub fn v2_string_pad_end(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -451,7 +451,7 @@ pub fn v2_string_pad_end(
 /// split — args[1] is delimiter
 pub fn v2_string_split(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -474,7 +474,7 @@ pub fn v2_string_split(
 /// replace — args[1] is from, args[2] is to
 pub fn v2_string_replace(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -499,7 +499,7 @@ pub fn v2_string_replace(
 /// substring — args[1] is start, args[2] is optional end
 pub fn v2_string_substring(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -535,7 +535,7 @@ pub fn v2_string_substring(
 /// join — receiver (args[0]) is an array, args[1] is optional separator
 pub fn v2_string_join(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -584,7 +584,7 @@ pub fn v2_string_join(
 /// graphemes — returns array of grapheme clusters
 pub fn v2_string_graphemes(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     use unicode_segmentation::UnicodeSegmentation;
@@ -603,7 +603,7 @@ pub fn v2_string_graphemes(
 /// normalize — Unicode normalization (NFC, NFD, NFKC, NFKD)
 pub fn v2_string_normalize(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     use unicode_normalization::UnicodeNormalization;
@@ -641,7 +641,7 @@ pub fn v2_string_normalize(
 /// iter — returns an Iterator over chars of the string
 pub fn v2_string_iter(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     use shape_value::heap_value::IteratorState;

@@ -432,7 +432,7 @@ pub(crate) fn handle_group_by(
 
 pub(crate) fn handle_map_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -480,7 +480,7 @@ pub(crate) fn handle_map_v2(
 
 pub(crate) fn handle_filter_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -530,7 +530,7 @@ pub(crate) fn handle_filter_v2(
 
 pub(crate) fn handle_sort_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -590,7 +590,7 @@ pub(crate) fn handle_sort_v2(
 
 pub(crate) fn handle_slice_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -636,7 +636,7 @@ pub(crate) fn handle_slice_v2(
 
 pub(crate) fn handle_concat_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -665,7 +665,7 @@ pub(crate) fn handle_concat_v2(
 
 pub(crate) fn handle_take_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -697,7 +697,7 @@ pub(crate) fn handle_take_v2(
 
 pub(crate) fn handle_drop_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -729,7 +729,7 @@ pub(crate) fn handle_drop_v2(
 
 pub(crate) fn handle_skip_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     handle_drop_v2(vm, args, ctx)
@@ -737,7 +737,7 @@ pub(crate) fn handle_skip_v2(
 
 pub(crate) fn handle_flatten_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -765,7 +765,7 @@ pub(crate) fn handle_flatten_v2(
 
 pub(crate) fn handle_flat_map_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -818,7 +818,7 @@ pub(crate) fn handle_flat_map_v2(
 
 pub(crate) fn handle_group_by_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {

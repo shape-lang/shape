@@ -245,7 +245,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 
 pub(crate) fn handle_sum_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -289,7 +289,7 @@ pub(crate) fn handle_sum_v2(
 
 pub(crate) fn handle_avg_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -337,7 +337,7 @@ pub(crate) fn handle_avg_v2(
 
 pub(crate) fn handle_min_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -385,7 +385,7 @@ pub(crate) fn handle_min_v2(
 
 pub(crate) fn handle_max_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -433,7 +433,7 @@ pub(crate) fn handle_max_v2(
 
 pub(crate) fn handle_count_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -463,7 +463,7 @@ pub(crate) fn handle_count_v2(
 
 pub(crate) fn handle_reduce_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     // args: [receiver, reducer_fn, initial_value]

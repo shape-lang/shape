@@ -208,7 +208,7 @@ pub fn handle_channel_is_sender(
 /// `sender.send(value)` — v2 ABI. args[0]=channel, args[1]=value.
 pub fn v2_channel_send(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -246,7 +246,7 @@ pub fn v2_channel_send(
 /// `receiver.recv()` — v2 ABI.
 pub fn v2_channel_recv(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -275,7 +275,7 @@ pub fn v2_channel_recv(
 /// `receiver.try_recv()` — v2 ABI.
 pub fn v2_channel_try_recv(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -304,7 +304,7 @@ pub fn v2_channel_try_recv(
 /// `channel.close()` — v2 ABI.
 pub fn v2_channel_close(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -325,7 +325,7 @@ pub fn v2_channel_close(
 /// `channel.is_closed()` — v2 ABI.
 pub fn v2_channel_is_closed(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -343,7 +343,7 @@ pub fn v2_channel_is_closed(
 /// `channel.is_sender()` — v2 ABI.
 pub fn v2_channel_is_sender(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);

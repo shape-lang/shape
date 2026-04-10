@@ -25,7 +25,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
     args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
@@ -376,7 +376,7 @@ mod tests {
         let mut vm = make_vm();
         let indexed = sample_indexed_table();
         let args = vec![indexed, ValueWord::from_f64(2.0), ValueWord::from_f64(4.0)];
-        let result_bits = handle_between(&mut vm, &to_raw_args(args), None).unwrap();
+        let result_bits = handle_between(&mut vm, &mut to_raw_args(args), None).unwrap();
         let result = ValueWord::from_raw_bits(result_bits);
         let (_, table, index_col) = result.as_indexed_table().expect("Expected IndexedTable");
         assert_eq!(table.row_count(), 3);
@@ -396,7 +396,7 @@ mod tests {
             ValueWord::from_f64(100.0),
             ValueWord::from_f64(200.0),
         ];
-        let result_bits = handle_between(&mut vm, &to_raw_args(args), None).unwrap();
+        let result_bits = handle_between(&mut vm, &mut to_raw_args(args), None).unwrap();
         let result = ValueWord::from_raw_bits(result_bits);
         let (_, table, _) = result.as_indexed_table().expect("Expected IndexedTable");
         assert_eq!(table.row_count(), 0);
@@ -418,7 +418,7 @@ mod tests {
             ),
         ]);
         let args = vec![indexed, ValueWord::from_f64(3.0), spec];
-        let result_bits = handle_resample(&mut vm, &to_raw_args(args), None).unwrap();
+        let result_bits = handle_resample(&mut vm, &mut to_raw_args(args), None).unwrap();
         let result = ValueWord::from_raw_bits(result_bits);
         let (_, table, index_col) = result.as_indexed_table().expect("Expected IndexedTable");
         assert_eq!(index_col, 0);
@@ -447,7 +447,7 @@ mod tests {
             ValueWord::from_string(Arc::new("mean".to_string())),
         )]);
         let args = vec![indexed, ValueWord::from_f64(-1.0), spec];
-        assert!(handle_resample(&mut vm, &to_raw_args(args), None).is_err());
+        assert!(handle_resample(&mut vm, &mut to_raw_args(args), None).is_err());
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
             b.finish().unwrap()
         }));
         let args = vec![dt, ValueWord::from_f64(0.0), ValueWord::from_f64(1.0)];
-        let err = handle_between(&mut vm, &to_raw_args(args), None).unwrap_err();
+        let err = handle_between(&mut vm, &mut to_raw_args(args), None).unwrap_err();
         let msg = format!("{:?}", err);
         assert!(msg.contains("index_by"));
     }
@@ -468,7 +468,7 @@ mod tests {
 
 pub(crate) fn handle_between(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -478,7 +478,7 @@ pub(crate) fn handle_between(
 
 pub(crate) fn handle_resample(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);

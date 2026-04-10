@@ -143,7 +143,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 /// PriorityQueue.push(item) -> PriorityQueue [v2] — always clones (see set_methods::v2_add)
 pub fn v2_push(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -161,7 +161,7 @@ pub fn v2_push(
 /// PriorityQueue.pop() -> value [v2] — always clones
 pub fn v2_pop(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -179,7 +179,7 @@ pub fn v2_pop(
 /// PriorityQueue.peek() -> value [v2]
 pub fn v2_peek(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -196,7 +196,7 @@ pub fn v2_peek(
 /// PriorityQueue.size() / .len() / .length -> int [v2]
 pub fn v2_size(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -210,7 +210,7 @@ pub fn v2_size(
 /// PriorityQueue.isEmpty() -> bool [v2]
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -224,7 +224,7 @@ pub fn v2_is_empty(
 /// PriorityQueue.toArray() -> array (heap order, NOT sorted) [v2]
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -239,7 +239,7 @@ pub fn v2_to_array(
 /// PriorityQueue.toSortedArray() -> array (sorted order) [v2]
 pub fn v2_to_sorted_array(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);

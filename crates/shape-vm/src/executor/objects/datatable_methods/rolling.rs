@@ -16,7 +16,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
     args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
@@ -279,7 +279,7 @@ pub(crate) fn handle_forward_fill_legacy(
 
 pub(crate) fn handle_correlation(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -289,7 +289,7 @@ pub(crate) fn handle_correlation(
 
 pub(crate) fn handle_covariance(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -299,7 +299,7 @@ pub(crate) fn handle_covariance(
 
 pub(crate) fn handle_rolling_sum(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -309,7 +309,7 @@ pub(crate) fn handle_rolling_sum(
 
 pub(crate) fn handle_rolling_mean(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -319,7 +319,7 @@ pub(crate) fn handle_rolling_mean(
 
 pub(crate) fn handle_rolling_std(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -329,7 +329,7 @@ pub(crate) fn handle_rolling_std(
 
 pub(crate) fn handle_diff(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -339,7 +339,7 @@ pub(crate) fn handle_diff(
 
 pub(crate) fn handle_pct_change(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -349,7 +349,7 @@ pub(crate) fn handle_pct_change(
 
 pub(crate) fn handle_forward_fill(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);

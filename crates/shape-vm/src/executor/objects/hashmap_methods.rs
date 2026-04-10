@@ -586,7 +586,7 @@ fn own_vw(raw: u64) -> ValueWord {
 /// HashMap.get(key) -> value | none
 pub fn v2_get(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -617,7 +617,7 @@ pub fn v2_get(
 /// HashMap.set(key, value) -> HashMap (returns new or mutated HashMap)
 pub fn v2_set(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let key = own_vw(args[1]);
@@ -681,7 +681,7 @@ pub fn v2_set(
 /// HashMap.has(key) -> bool
 pub fn v2_has(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -702,7 +702,7 @@ pub fn v2_has(
 /// HashMap.delete(key) -> HashMap (returns new or mutated HashMap)
 pub fn v2_delete(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let key = own_vw(args[1]);
@@ -772,7 +772,7 @@ pub fn v2_delete(
 /// HashMap.keys() -> Array
 pub fn v2_keys(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -787,7 +787,7 @@ pub fn v2_keys(
 /// HashMap.values() -> Array
 pub fn v2_values(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -802,7 +802,7 @@ pub fn v2_values(
 /// HashMap.entries() -> Array of [key, value] pairs
 pub fn v2_entries(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -825,7 +825,7 @@ pub fn v2_entries(
 /// HashMap.len() -> int
 pub fn v2_len(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -839,7 +839,7 @@ pub fn v2_len(
 /// HashMap.isEmpty() -> bool
 pub fn v2_is_empty(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -853,7 +853,7 @@ pub fn v2_is_empty(
 /// HashMap.merge(other) -> HashMap (other wins on conflict)
 pub fn v2_merge(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -891,7 +891,7 @@ pub fn v2_merge(
 /// HashMap.getOrDefault(key, default) -> value
 pub fn v2_get_or_default(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -916,7 +916,7 @@ pub fn v2_get_or_default(
 /// HashMap.toArray() -> Array of [key, value] pairs (alias for entries)
 pub fn v2_to_array(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     v2_entries(vm, args, ctx)
@@ -929,7 +929,7 @@ pub fn v2_to_array(
 /// HashMap.forEach(fn(key, value)) -> unit [v2]
 pub fn v2_for_each(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = own_vw(args[0]);
@@ -950,7 +950,7 @@ pub fn v2_for_each(
 /// HashMap.filter(fn(key, value) -> bool) -> HashMap [v2]
 pub fn v2_filter(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = own_vw(args[0]);
@@ -980,7 +980,7 @@ pub fn v2_filter(
 /// HashMap.map(fn(key, value) -> new_value) -> HashMap [v2]
 pub fn v2_map(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = own_vw(args[0]);
@@ -1007,7 +1007,7 @@ pub fn v2_map(
 /// HashMap.reduce(fn(acc, key, value) -> acc, initial) -> value [v2]
 pub fn v2_reduce(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = own_vw(args[0]);
@@ -1034,7 +1034,7 @@ pub fn v2_reduce(
 /// HashMap.groupBy(fn(key, value) -> group_key) -> HashMap<group_key, HashMap> [v2]
 pub fn v2_group_by(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = own_vw(args[0]);
@@ -1088,7 +1088,7 @@ pub fn v2_group_by(
 /// HashMap.iter() -> Iterator [v2]
 pub fn v2_iter(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     use shape_value::heap_value::IteratorState;

@@ -46,7 +46,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
     args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
@@ -140,7 +140,7 @@ fn validate_index_column(dt: &Arc<DataTable>, col_id: u32) -> Result<(), VMError
 
 pub(crate) fn handle_index_by(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);

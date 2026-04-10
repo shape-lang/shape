@@ -24,7 +24,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 
 pub fn v2_content_bold(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -37,7 +37,7 @@ pub fn v2_content_bold(
 
 pub fn v2_content_italic(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -50,7 +50,7 @@ pub fn v2_content_italic(
 
 pub fn v2_content_underline(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -63,7 +63,7 @@ pub fn v2_content_underline(
 
 pub fn v2_content_dim(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -76,7 +76,7 @@ pub fn v2_content_dim(
 
 pub fn v2_content_fg(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -90,7 +90,7 @@ pub fn v2_content_fg(
 
 pub fn v2_content_bg(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -104,7 +104,7 @@ pub fn v2_content_bg(
 
 pub fn v2_content_to_string(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let vw = borrow_vw(args[0]);
@@ -123,7 +123,7 @@ macro_rules! content_runtime_method {
     ($fn_name:ident, $method_name:expr) => {
         pub fn $fn_name(
             _vm: &mut VirtualMachine,
-            args: &[u64],
+            args: &mut [u64],
             _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
         ) -> Result<u64, VMError> {
             let receiver = (*borrow_vw(args[0])).clone();
@@ -157,7 +157,7 @@ content_runtime_method!(v2_content_y_label_camel, "yLabel");
 
 /// Parse a color argument from raw u64 args for v2 handlers
 fn parse_color_arg_v2(
-    args: &[u64],
+    args: &mut [u64],
     start_idx: usize,
     method_name: &str,
 ) -> Result<Color, VMError> {

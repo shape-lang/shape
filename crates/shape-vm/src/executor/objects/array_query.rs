@@ -522,7 +522,7 @@ pub(crate) fn handle_for_each(
 
 pub(crate) fn handle_where_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -572,7 +572,7 @@ pub(crate) fn handle_where_v2(
 
 pub(crate) fn handle_select_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -620,7 +620,7 @@ pub(crate) fn handle_select_v2(
 
 pub(crate) fn handle_find_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -669,7 +669,7 @@ pub(crate) fn handle_find_v2(
 
 pub(crate) fn handle_find_index_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -709,7 +709,7 @@ pub(crate) fn handle_find_index_v2(
 
 pub(crate) fn handle_index_of_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -740,7 +740,7 @@ pub(crate) fn handle_index_of_v2(
 
 pub(crate) fn handle_includes_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -771,7 +771,7 @@ pub(crate) fn handle_includes_v2(
 
 pub(crate) fn handle_some_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -820,7 +820,7 @@ pub(crate) fn handle_some_v2(
 
 pub(crate) fn handle_every_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -869,7 +869,7 @@ pub(crate) fn handle_every_v2(
 
 pub(crate) fn handle_any_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     handle_some_v2(vm, args, ctx)
@@ -877,7 +877,7 @@ pub(crate) fn handle_any_v2(
 
 pub(crate) fn handle_all_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     handle_every_v2(vm, args, ctx)
@@ -885,7 +885,7 @@ pub(crate) fn handle_all_v2(
 
 pub(crate) fn handle_single_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -939,7 +939,7 @@ pub(crate) fn handle_single_v2(
 
 pub(crate) fn handle_take_while_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -983,7 +983,7 @@ pub(crate) fn handle_take_while_v2(
 
 pub(crate) fn handle_skip_while_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {
@@ -1034,7 +1034,7 @@ pub(crate) fn handle_skip_while_v2(
 
 pub(crate) fn handle_for_each_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.len() < 2 {

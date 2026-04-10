@@ -171,7 +171,7 @@ pub(crate) fn handle_join_str(
 
 pub(crate) fn handle_order_by_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.is_empty() || args.len() > 3 {
@@ -251,7 +251,7 @@ pub(crate) fn handle_order_by_v2(
 
 pub(crate) fn handle_then_by_v2(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     handle_order_by_v2(vm, args, ctx)
@@ -259,7 +259,7 @@ pub(crate) fn handle_then_by_v2(
 
 pub(crate) fn handle_join_str_v2(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     if args.is_empty() || args.len() > 2 {

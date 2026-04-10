@@ -77,7 +77,7 @@ fn test_filter_f64_gt() {
         ValueWord::from_string(Arc::new(">".to_string())),
         ValueWord::from_f64(100.0),
     ];
-    let result_bits = handle_filter(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_filter(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 2);
@@ -96,7 +96,7 @@ fn test_filter_f64_lt() {
         ValueWord::from_string(Arc::new("<".to_string())),
         ValueWord::from_f64(150.0),
     ];
-    let result_bits = handle_filter(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_filter(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 2);
@@ -115,7 +115,7 @@ fn test_filter_f64_eq() {
         ValueWord::from_string(Arc::new("==".to_string())),
         ValueWord::from_f64(100.0),
     ];
-    let result_bits = handle_filter(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_filter(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 1);
@@ -132,7 +132,7 @@ fn test_filter_string_eq() {
         ValueWord::from_string(Arc::new("==".to_string())),
         ValueWord::from_string(Arc::new("AAPL".to_string())),
     ];
-    let result_bits = handle_filter(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_filter(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 2);
@@ -151,7 +151,7 @@ fn test_filter_no_matches() {
         ValueWord::from_string(Arc::new(">".to_string())),
         ValueWord::from_f64(9999.0),
     ];
-    let result_bits = handle_filter(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_filter(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 0);
@@ -170,7 +170,7 @@ fn test_filter_empty_table() {
         ValueWord::from_string(Arc::new(">".to_string())),
         ValueWord::from_f64(0.0),
     ];
-    let result_bits = handle_filter(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_filter(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 0);
@@ -186,7 +186,7 @@ fn test_filter_i64_gte() {
         ValueWord::from_string(Arc::new(">=".to_string())),
         ValueWord::from_i64(1500),
     ];
-    let result_bits = handle_filter(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_filter(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 2);
@@ -207,7 +207,7 @@ fn test_order_by_ascending() {
         ValueWord::from_datatable(dt),
         ValueWord::from_string(Arc::new("price".to_string())),
     ];
-    let result_bits = handle_order_by(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_order_by(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     let prices = dt.get_f64_column("price").unwrap();
@@ -226,7 +226,7 @@ fn test_order_by_descending() {
         ValueWord::from_string(Arc::new("price".to_string())),
         ValueWord::from_string(Arc::new("desc".to_string())),
     ];
-    let result_bits = handle_order_by(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_order_by(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     let prices = dt.get_f64_column("price").unwrap();
@@ -244,7 +244,7 @@ fn test_order_by_string() {
         ValueWord::from_datatable(dt),
         ValueWord::from_string(Arc::new("symbol".to_string())),
     ];
-    let result_bits = handle_order_by(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_order_by(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     let symbols = dt.get_string_column("symbol").unwrap();
@@ -266,7 +266,7 @@ fn test_group_by_string() {
         ValueWord::from_datatable(dt),
         ValueWord::from_string(Arc::new("symbol".to_string())),
     ];
-    let result_bits = handle_group_by(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_group_by(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let groups = result.to_generic_array().expect("Expected Array");
     assert_eq!(groups.len(), 2);
@@ -308,7 +308,7 @@ fn test_group_by_empty() {
         ValueWord::from_datatable(dt),
         ValueWord::from_string(Arc::new("x".to_string())),
     ];
-    let result_bits = handle_group_by(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_group_by(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let groups = result.to_generic_array().expect("Expected Array");
     assert_eq!(groups.len(), 0);
@@ -339,7 +339,7 @@ fn test_aggregate_sum_mean() {
         ),
     ]);
     let args = vec![ValueWord::from_datatable(dt), spec];
-    let result_bits = handle_aggregate(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_aggregate(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 1);
@@ -377,7 +377,7 @@ fn test_aggregate_min_max_count() {
         ),
     ]);
     let args = vec![ValueWord::from_datatable(dt), spec];
-    let result_bits = handle_aggregate(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_aggregate(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 1);
@@ -396,7 +396,7 @@ fn test_aggregate_shorthand() {
     let spec =
         predeclared_object(&[("price", ValueWord::from_string(Arc::new("sum".to_string())))]);
     let args = vec![ValueWord::from_datatable(dt), spec];
-    let result_bits = handle_aggregate(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_aggregate(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 1);
@@ -413,7 +413,7 @@ fn test_count() {
     let mut vm = make_vm();
     let dt = sample_dt();
     let args = vec![ValueWord::from_datatable(dt)];
-    let result_bits = handle_count(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_count(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     assert_eq!(result, ValueWord::from_i64(4));
 }
@@ -426,7 +426,7 @@ fn test_count_empty() {
     builder.add_f64_column(vec![]);
     let dt = Arc::new(builder.finish().unwrap());
     let args = vec![ValueWord::from_datatable(dt)];
-    let result_bits = handle_count(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_count(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     assert_eq!(result, ValueWord::from_i64(0));
 }
@@ -436,7 +436,7 @@ fn test_to_mat_default_numeric_columns() {
     let mut vm = make_vm();
     let dt = sample_dt();
     let args = vec![ValueWord::from_datatable(dt)];
-    let result_bits = handle_to_mat(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_to_mat(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let mat = result.as_matrix().expect("Expected Matrix");
     assert_eq!(mat.rows, 4);
@@ -459,7 +459,7 @@ fn test_to_mat_selected_column() {
         ValueWord::from_datatable(dt),
         ValueWord::from_string(Arc::new("volume".to_string())),
     ];
-    let result_bits = handle_to_mat(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_to_mat(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let mat = result.as_matrix().expect("Expected Matrix");
     assert_eq!(mat.rows, 4);
@@ -476,7 +476,7 @@ fn test_to_mat_rejects_non_numeric_column() {
         ValueWord::from_datatable(dt),
         ValueWord::from_string(Arc::new("symbol".to_string())),
     ];
-    assert!(handle_to_mat(&mut vm, &to_raw_args(args), None).is_err());
+    assert!(handle_to_mat(&mut vm, &mut to_raw_args(args), None).is_err());
 }
 
 // =========================================================================
@@ -488,7 +488,7 @@ fn test_describe() {
     let mut vm = make_vm();
     let dt = sample_dt();
     let args = vec![ValueWord::from_datatable(dt)];
-    let result_bits = handle_describe(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_describe(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     // 5 stat rows: count, mean, min, max, sum
@@ -520,7 +520,7 @@ fn test_for_each_requires_function() {
     let dt = sample_dt();
     // Missing function argument
     let args = vec![ValueWord::from_datatable(dt)];
-    assert!(handle_for_each(&mut vm, &to_raw_args(args), None).is_err());
+    assert!(handle_for_each(&mut vm, &mut to_raw_args(args), None).is_err());
 }
 
 #[test]
@@ -528,7 +528,7 @@ fn test_for_each_rejects_non_function() {
     let mut vm = make_vm();
     let dt = sample_dt();
     let args = vec![ValueWord::from_datatable(dt), ValueWord::from_f64(42.0)];
-    assert!(handle_for_each(&mut vm, &to_raw_args(args), None).is_err());
+    assert!(handle_for_each(&mut vm, &mut to_raw_args(args), None).is_err());
 }
 
 // =========================================================================
@@ -545,7 +545,7 @@ fn test_apply_comparison_neq() {
         ValueWord::from_string(Arc::new("!=".to_string())),
         ValueWord::from_string(Arc::new("AAPL".to_string())),
     ];
-    let result_bits = handle_filter(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_filter(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.row_count(), 2);
@@ -564,7 +564,7 @@ fn test_filter_invalid_operator() {
         ValueWord::from_string(Arc::new("~=".to_string())),
         ValueWord::from_f64(100.0),
     ];
-    assert!(handle_filter(&mut vm, &to_raw_args(args), None).is_err());
+    assert!(handle_filter(&mut vm, &mut to_raw_args(args), None).is_err());
 }
 
 // =========================================================================
@@ -660,7 +660,7 @@ fn test_simulate_event_log_and_seed() {
         config,
     ];
 
-    let result_bits = handle_simulate(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_simulate(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
 
     let obj = to_obj_map(&result, &vm);
@@ -710,7 +710,7 @@ fn test_simulate_requires_function() {
         ValueWord::from_datatable(dt),
         ValueWord::from_string(Arc::new("not_a_function".to_string())),
     ];
-    let result = handle_simulate(&mut vm, &to_raw_args(args), None);
+    let result = handle_simulate(&mut vm, &mut to_raw_args(args), None);
     assert!(result.is_err());
 }
 
@@ -721,7 +721,7 @@ fn test_simulate_returns_result_object() {
     let mut vm = make_vm();
     let dt = sample_dt();
     let args = vec![ValueWord::from_datatable(dt)]; // No handler
-    let result = handle_simulate(&mut vm, &to_raw_args(args), None);
+    let result = handle_simulate(&mut vm, &mut to_raw_args(args), None);
     assert!(result.is_err());
 }
 
@@ -734,7 +734,7 @@ fn test_rows_returns_array_of_row_views() {
     let mut vm = make_vm();
     let dt = sample_dt();
     let args = vec![ValueWord::from_datatable(dt.clone())];
-    let result_bits = handle_rows(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_rows(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let arr = result.to_generic_array().expect("Expected array");
     assert_eq!(arr.len(), 4);
@@ -755,7 +755,7 @@ fn test_rows_empty_table() {
     builder.add_f64_column(vec![]);
     let dt = Arc::new(builder.finish().unwrap());
     let args = vec![ValueWord::from_datatable(dt)];
-    let result_bits = handle_rows(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_rows(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let arr = result.to_generic_array().expect("Expected array");
     assert_eq!(arr.len(), 0);
@@ -767,7 +767,7 @@ fn test_rows_typed_table_preserves_schema_id() {
     let dt = sample_dt();
     let schema_id = 42u64;
     let args = vec![ValueWord::from_typed_table(schema_id, dt.clone())];
-    let result_bits = handle_rows(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_rows(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let arr = result.to_generic_array().expect("Expected array");
     assert_eq!(arr.len(), 4);
@@ -786,7 +786,7 @@ fn test_columns_ref_returns_array_of_column_refs() {
     let mut vm = make_vm();
     let dt = sample_dt();
     let args = vec![ValueWord::from_datatable(dt.clone())];
-    let result_bits = handle_columns_ref(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_columns_ref(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let arr = result.to_generic_array().expect("Expected array");
     assert_eq!(arr.len(), 3); // price, volume, symbol
@@ -806,7 +806,7 @@ fn test_columns_ref_empty_table() {
     builder.add_f64_column(vec![]);
     let dt = Arc::new(builder.finish().unwrap());
     let args = vec![ValueWord::from_datatable(dt)];
-    let result_bits = handle_columns_ref(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_columns_ref(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let arr = result.to_generic_array().expect("Expected array");
     assert_eq!(arr.len(), 1); // "x" column still exists even with 0 rows
@@ -818,7 +818,7 @@ fn test_columns_ref_typed_table_preserves_schema_id() {
     let dt = sample_dt();
     let schema_id = 99u64;
     let args = vec![ValueWord::from_typed_table(schema_id, dt.clone())];
-    let result_bits = handle_columns_ref(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_columns_ref(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let arr = result.to_generic_array().expect("Expected array");
     assert_eq!(arr.len(), 3);
@@ -841,7 +841,7 @@ fn test_select_string_columns() {
         ValueWord::from_string(Arc::new("price".to_string())),
         ValueWord::from_string(Arc::new("symbol".to_string())),
     ];
-    let result_bits = handle_select(&mut vm, &to_raw_args(args), None).unwrap();
+    let result_bits = handle_select(&mut vm, &mut to_raw_args(args), None).unwrap();
     let result = ValueWord::from_raw_bits(result_bits);
     let dt = result.as_datatable().expect("Expected DataTable");
     assert_eq!(dt.column_count(), 2);
@@ -854,7 +854,7 @@ fn test_select_rejects_non_string_non_callable() {
     let dt = sample_dt();
     // Passing a number (not a string and not a function)
     let args = vec![ValueWord::from_datatable(dt), ValueWord::from_f64(42.0)];
-    let result = handle_select(&mut vm, &to_raw_args(args), None);
+    let result = handle_select(&mut vm, &mut to_raw_args(args), None);
     assert!(result.is_err());
     let err = format!("{:?}", result.unwrap_err());
     assert!(

@@ -28,14 +28,14 @@ fn is_callable_nb(nb: &ValueWord) -> bool {
     }
 }
 
-fn require_string_arg(args: &[u64], idx: usize, method_name: &str) -> Result<String, VMError> {
+fn require_string_arg(args: &mut [u64], idx: usize, method_name: &str) -> Result<String, VMError> {
     let vw = args.get(idx).map(|&r| borrow_vw(r));
     vw.as_ref().and_then(|nb| nb.as_str().map(|s| s.to_string())).ok_or_else(|| {
         VMError::RuntimeError(format!("{}() requires a string column name argument", method_name))
     })
 }
 
-pub(crate) fn handle_sum(vm: &mut VirtualMachine, args: &[u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+pub(crate) fn handle_sum(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
     if let Some(&raw1) = args.get(1) {
@@ -58,7 +58,7 @@ pub(crate) fn handle_sum(vm: &mut VirtualMachine, args: &[u64], mut ctx: Option<
     } else { Err(VMError::RuntimeError(format!("sum() requires a numeric column, '{}' is not numeric", col_name))) }
 }
 
-pub(crate) fn handle_mean(vm: &mut VirtualMachine, args: &[u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+pub(crate) fn handle_mean(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
     if let Some(&raw1) = args.get(1) {
@@ -86,7 +86,7 @@ pub(crate) fn handle_mean(vm: &mut VirtualMachine, args: &[u64], mut ctx: Option
     } else { Err(VMError::RuntimeError(format!("mean() requires a numeric column, '{}' is not numeric", col_name))) }
 }
 
-pub(crate) fn handle_min(vm: &mut VirtualMachine, args: &[u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+pub(crate) fn handle_min(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
     if let Some(&raw1) = args.get(1) {
@@ -109,7 +109,7 @@ pub(crate) fn handle_min(vm: &mut VirtualMachine, args: &[u64], mut ctx: Option<
     } else { Err(VMError::RuntimeError(format!("min() requires a numeric column, '{}' is not numeric", col_name))) }
 }
 
-pub(crate) fn handle_max(vm: &mut VirtualMachine, args: &[u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+pub(crate) fn handle_max(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
     if let Some(&raw1) = args.get(1) {
@@ -132,7 +132,7 @@ pub(crate) fn handle_max(vm: &mut VirtualMachine, args: &[u64], mut ctx: Option<
     } else { Err(VMError::RuntimeError(format!("max() requires a numeric column, '{}' is not numeric", col_name))) }
 }
 
-pub(crate) fn handle_sort(_vm: &mut VirtualMachine, args: &[u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+pub(crate) fn handle_sort(_vm: &mut VirtualMachine, args: &mut [u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
     let col_name = require_string_arg(args, 1, "sort")?;
@@ -147,13 +147,13 @@ pub(crate) fn handle_sort(_vm: &mut VirtualMachine, args: &[u64], _ctx: Option<&
     Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits())
 }
 
-pub(crate) fn handle_count(_vm: &mut VirtualMachine, args: &[u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+pub(crate) fn handle_count(_vm: &mut VirtualMachine, args: &mut [u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
     Ok(ValueWord::from_i64(dt.row_count() as i64).into_raw_bits())
 }
 
-pub(crate) fn handle_describe(_vm: &mut VirtualMachine, args: &[u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+pub(crate) fn handle_describe(_vm: &mut VirtualMachine, args: &mut [u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
     use arrow_schema::{DataType, Field, Schema};
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
@@ -172,7 +172,7 @@ pub(crate) fn handle_describe(_vm: &mut VirtualMachine, args: &[u64], _ctx: Opti
     Ok(ValueWord::from_datatable(Arc::new(DataTable::new(result_batch))).into_raw_bits())
 }
 
-pub(crate) fn handle_aggregate(vm: &mut VirtualMachine, args: &[u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+pub(crate) fn handle_aggregate(vm: &mut VirtualMachine, args: &mut [u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
     let arg1 = args.get(1).map(|&r| borrow_vw(r)).ok_or_else(|| VMError::RuntimeError("aggregate() requires an object argument specifying aggregations".to_string()))?;

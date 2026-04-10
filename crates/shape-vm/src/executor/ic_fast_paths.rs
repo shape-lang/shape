@@ -297,7 +297,7 @@ mod tests {
         // Verify function pointer can be stored and recovered via transmute
         fn dummy_handler(
             _vm: &mut VirtualMachine,
-            _args: &[u64],
+            _args: &mut [u64],
             _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
         ) -> Result<u64, shape_value::VMError> {
             Ok(ValueWord::none().raw_bits())

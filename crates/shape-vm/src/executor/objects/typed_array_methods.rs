@@ -659,7 +659,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &[u64]) -> Vec<shape_value::ValueWord> {
+fn args_to_vw(args: &mut [u64]) -> Vec<shape_value::ValueWord> {
     args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
@@ -669,7 +669,7 @@ fn args_to_vw(args: &[u64]) -> Vec<shape_value::ValueWord> {
 /// FloatArray/IntArray). The caller must handle `None` by re-dispatching
 /// through the legacy handler.
 #[inline]
-fn try_v2_view(args: &[u64]) -> Option<v2::V2TypedArrayView> {
+fn try_v2_view(args: &mut [u64]) -> Option<v2::V2TypedArrayView> {
     let vw = borrow_vw(args[0]);
     v2::as_v2_typed_array(&vw)
 }
@@ -677,7 +677,7 @@ fn try_v2_view(args: &[u64]) -> Option<v2::V2TypedArrayView> {
 /// v2 len: works for all element types (float, int, bool).
 pub fn v2_len(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -692,7 +692,7 @@ pub fn v2_len(
 /// v2 sum for float arrays.
 pub fn v2_float_sum(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -713,7 +713,7 @@ pub fn v2_float_sum(
 /// v2 sum for int arrays.
 pub fn v2_int_sum(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -739,7 +739,7 @@ pub fn v2_int_sum(
 /// v2 avg/mean for float arrays.
 pub fn v2_float_avg(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -762,7 +762,7 @@ pub fn v2_float_avg(
 /// v2 avg/mean for int arrays.
 pub fn v2_int_avg(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -785,7 +785,7 @@ pub fn v2_int_avg(
 /// v2 min for float arrays.
 pub fn v2_float_min(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -813,7 +813,7 @@ pub fn v2_float_min(
 /// v2 min for int arrays.
 pub fn v2_int_min(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -836,7 +836,7 @@ pub fn v2_int_min(
 /// v2 max for float arrays.
 pub fn v2_float_max(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -864,7 +864,7 @@ pub fn v2_float_max(
 /// v2 max for int arrays.
 pub fn v2_int_max(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -887,7 +887,7 @@ pub fn v2_int_max(
 /// v2 variance for float arrays.
 pub fn v2_float_variance(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -907,7 +907,7 @@ pub fn v2_float_variance(
 /// v2 std (standard deviation) for float arrays.
 pub fn v2_float_std(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -927,7 +927,7 @@ pub fn v2_float_std(
 /// v2 dot product for float arrays.
 pub fn v2_float_dot(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     // Try v2 path: both receiver and argument must be v2 typed arrays
@@ -991,7 +991,7 @@ pub fn v2_float_dot(
 /// v2 norm for float arrays.
 pub fn v2_float_norm(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -1011,7 +1011,7 @@ pub fn v2_float_norm(
 /// v2 bool count (count of true values).
 pub fn v2_bool_count(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -1031,7 +1031,7 @@ pub fn v2_bool_count(
 /// v2 bool any.
 pub fn v2_bool_any(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -1050,7 +1050,7 @@ pub fn v2_bool_any(
 /// v2 bool all.
 pub fn v2_bool_all(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     if let Some(view) = try_v2_view(args) {
@@ -1068,7 +1068,7 @@ pub fn v2_bool_all(
 
 pub(crate) fn handle_float_normalize(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1078,7 +1078,7 @@ pub(crate) fn handle_float_normalize(
 
 pub(crate) fn handle_float_cumsum(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1088,7 +1088,7 @@ pub(crate) fn handle_float_cumsum(
 
 pub(crate) fn handle_float_diff(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1098,7 +1098,7 @@ pub(crate) fn handle_float_diff(
 
 pub(crate) fn handle_float_abs(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1108,7 +1108,7 @@ pub(crate) fn handle_float_abs(
 
 pub(crate) fn handle_float_sqrt(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1118,7 +1118,7 @@ pub(crate) fn handle_float_sqrt(
 
 pub(crate) fn handle_float_ln(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1128,7 +1128,7 @@ pub(crate) fn handle_float_ln(
 
 pub(crate) fn handle_float_exp(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1138,7 +1138,7 @@ pub(crate) fn handle_float_exp(
 
 pub(crate) fn handle_float_map(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1148,7 +1148,7 @@ pub(crate) fn handle_float_map(
 
 pub(crate) fn handle_float_filter(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1158,7 +1158,7 @@ pub(crate) fn handle_float_filter(
 
 pub(crate) fn handle_float_for_each(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1168,7 +1168,7 @@ pub(crate) fn handle_float_for_each(
 
 pub(crate) fn handle_float_to_array(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1178,7 +1178,7 @@ pub(crate) fn handle_float_to_array(
 
 pub(crate) fn handle_int_abs(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1188,7 +1188,7 @@ pub(crate) fn handle_int_abs(
 
 pub(crate) fn handle_int_map(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1198,7 +1198,7 @@ pub(crate) fn handle_int_map(
 
 pub(crate) fn handle_int_filter(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1208,7 +1208,7 @@ pub(crate) fn handle_int_filter(
 
 pub(crate) fn handle_int_for_each(
     vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1218,7 +1218,7 @@ pub(crate) fn handle_int_for_each(
 
 pub(crate) fn handle_int_to_array(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);
@@ -1228,7 +1228,7 @@ pub(crate) fn handle_int_to_array(
 
 pub(crate) fn handle_bool_to_array(
     _vm: &mut crate::executor::VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
     let vw_args = args_to_vw(args);

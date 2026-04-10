@@ -12,27 +12,22 @@ use phf::phf_map;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{VMError, ValueWord};
 
-/// Type alias for method handler functions.
-///
-/// All method handlers follow this signature:
-/// - `vm`: Mutable VM instance (used by handlers that invoke closures or
-///   otherwise touch VM state; pure handlers ignore it)
-/// - `args`: Owned vector of arguments (receiver is first element, as ValueWord)
-/// - `ctx`: Optional execution context for runtime integration
-/// Method handler: receives raw u64 stack slots, no Vec allocation.
+/// Method handler: operates on raw u64 stack slots — no Vec, no ValueWord on the hot path.
 ///
 /// - `vm`: Mutable VM instance
-/// - `args`: `args[0]` = receiver, `args[1..]` = arguments, all raw u64 bits
-/// - `ctx`: Optional execution context for runtime integration
-/// - Returns: `Result<u64, VMError>` — the raw result bits. The dispatcher
-///   pushes them onto the stack on success.
+/// - `args`: `args[0]` = receiver, `args[1..]` = arguments, all raw u64 bits.
+///   **Mutable** so handlers can update pointers after in-place mutation
+///   (e.g. `as_heap_mut` → `Arc::make_mut` may reallocate).
+///   The dispatcher owns these bits and drops them after the handler returns.
+/// - `ctx`: Optional execution context
+/// - Returns: `Result<u64, VMError>` — raw result bits pushed onto the stack.
 pub type MethodFnV2 = fn(
     &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError>;
 
-/// Method handler stored in PHF maps. All handlers use the v2 ABI.
+/// Method handler stored in PHF maps.
 pub type MethodHandler = MethodFnV2;
 
 /// PHF registry for Array methods (47 methods total)

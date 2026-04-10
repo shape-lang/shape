@@ -20,7 +20,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 /// `dt.origin()`
 pub(crate) fn handle_origin(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -31,7 +31,7 @@ pub(crate) fn handle_origin(
 /// `dt.len()`
 pub(crate) fn handle_len(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -42,7 +42,7 @@ pub(crate) fn handle_len(
 /// `dt.columns()`
 pub(crate) fn handle_columns(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -58,7 +58,7 @@ pub(crate) fn handle_columns(
 /// `dt.column(name)`
 pub(crate) fn handle_column(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -78,7 +78,7 @@ pub(crate) fn handle_column(
 /// `dt.slice(offset, length)`
 pub(crate) fn handle_slice(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -96,7 +96,7 @@ pub(crate) fn handle_slice(
 /// `dt.head(n)`
 pub(crate) fn handle_head(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -111,7 +111,7 @@ pub(crate) fn handle_head(
 /// `dt.limit(n)`
 pub(crate) fn handle_limit(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -127,7 +127,7 @@ pub(crate) fn handle_limit(
 /// `dt.execute()`
 pub(crate) fn handle_execute(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     Ok(args[0])
@@ -164,7 +164,7 @@ fn numeric_column_to_f64(col: &ArrayRef, col_name: &str, row_count: usize) -> Re
 /// `dt.toMat([cols...])`
 pub(crate) fn handle_to_mat(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -200,7 +200,7 @@ pub(crate) fn handle_to_mat(
 /// `dt.tail(n)`
 pub(crate) fn handle_tail(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -216,7 +216,7 @@ pub(crate) fn handle_tail(
 /// `dt.first()`
 pub(crate) fn handle_first(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -228,7 +228,7 @@ pub(crate) fn handle_first(
 /// `dt.last()`
 pub(crate) fn handle_last(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -240,7 +240,7 @@ pub(crate) fn handle_last(
 /// `dt.select(...)`
 pub(crate) fn handle_select(
     vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -282,7 +282,7 @@ pub(crate) fn handle_select(
 /// `dt.rows()`
 pub(crate) fn handle_rows(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
@@ -297,7 +297,7 @@ pub(crate) fn handle_rows(
 /// `dt.columnsRef()`
 pub(crate) fn handle_columns_ref(
     _vm: &mut VirtualMachine,
-    args: &[u64],
+    args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let receiver = borrow_vw(args[0]);
