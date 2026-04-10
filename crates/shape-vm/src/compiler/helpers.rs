@@ -234,6 +234,55 @@ pub(crate) fn strip_error_prefix(e: &ShapeError) -> String {
 
 
 impl BytecodeCompiler {
+    /// Resolve a ConcreteType type_tag from compiler state for the receiver.
+    /// Returns 0xFF when the type cannot be determined.
+    pub(crate) fn resolve_type_tag(
+        numeric_type: Option<crate::type_tracking::NumericType>,
+        type_info: &Option<crate::type_tracking::VariableTypeInfo>,
+    ) -> u8 {
+        use crate::type_tracking::NumericType;
+        // Priority 1: numeric type (most precise)
+        if let Some(nt) = numeric_type {
+            return match nt {
+                NumericType::Number => 0,   // F64
+                NumericType::Int => 1,      // I64
+                NumericType::IntWidth(_) => 1, // I64 (treat all int widths as I64 for dispatch)
+                NumericType::Decimal => 22, // Decimal
+            };
+        }
+        // Priority 2: type_info type_name
+        if let Some(info) = type_info {
+            if let Some(ref name) = info.type_name {
+                return match name.as_str() {
+                    "number" | "Number" => 0,    // F64
+                    "int" | "Int" => 1,          // I64
+                    "bool" | "Bool" => 9,        // Bool
+                    "string" | "String" => 10,   // String
+                    "DateTime" => 25,            // DateTime
+                    _ => {
+                        // Check for collection types
+                        if name.starts_with("Array") || name.starts_with("Vec") {
+                            12 // Array
+                        } else if name.starts_with("HashMap") || name.starts_with("Map") {
+                            13 // HashMap
+                        } else if name.starts_with("Set") {
+                            14 // Set (mapped to Option tag — we'll refine)
+                        } else {
+                            0xFF
+                        }
+                    }
+                };
+            }
+            // Priority 3: kind-based inference
+            use crate::type_tracking::VariableKind;
+            match &info.kind {
+                VariableKind::Table { .. } => return 11, // Struct-like (DataTable dispatch)
+                _ => {}
+            }
+        }
+        0xFF // Unknown
+    }
+
     fn scalar_type_name_from_numeric(numeric_type: NumericType) -> &'static str {
         match numeric_type {
             NumericType::Int | NumericType::IntWidth(_) => "int",

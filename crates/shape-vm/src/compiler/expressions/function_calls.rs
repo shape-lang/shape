@@ -1849,13 +1849,18 @@ impl BytecodeCompiler {
         // Resolve method name to a typed MethodId at compile time
         let method_id = shape_value::MethodId::from_name(method);
         let string_idx = self.program.add_string(method.to_string());
+
+        // Resolve receiver ConcreteType tag for type-tagged dispatch
+        let rtt = Self::resolve_type_tag(receiver_numeric_type, &receiver_type_info);
+
         self.emit(Instruction::new(
             OpCode::CallMethod,
             Some(Operand::TypedMethodCall {
                 method_id: method_id.0,
                 arg_count: args.len() as u16,
                 string_id: string_idx,
-             receiver_type_tag: 0xFF, }),
+                receiver_type_tag: rtt,
+            }),
         ));
         // Propagate known return type for standard method calls
         self.last_expr_schema = None;
