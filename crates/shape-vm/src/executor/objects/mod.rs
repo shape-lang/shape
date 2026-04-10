@@ -324,8 +324,19 @@ impl VirtualMachine {
                     self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::String => {
-                    let result = self.handle_string_method(&method_name, args_nb)?;
-                    self.push_vw(result)?;
+                    if let Some(handler) = method_registry::STRING_METHODS.get(method_name.as_str()) {
+                        crate::executor::ic_fast_paths::method_ic_record(
+                            self,
+                            self.ip,
+                            HeapKind::String as u8,
+                            method_id.0 as u32,
+                            handler,
+                        );
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    } else {
+                        let result = self.handle_string_method(&method_name, args_nb)?;
+                        self.push_vw(result)?;
+                    }
                 }
                 HeapKind::Decimal => {
                     let result = self.handle_number_method(&method_name, args_nb)?;

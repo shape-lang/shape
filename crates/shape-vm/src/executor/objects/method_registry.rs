@@ -617,3 +617,87 @@ pub static NUMBER_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "isFinite" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_finite_v2),
     "is_finite" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_finite_v2),
 };
+
+/// PHF registry for String methods (v2 native handlers)
+///
+/// **Categories:**
+/// - Info: len, length
+/// - Case: toUpperCase, to_upper_case, toLowerCase, to_lower_case
+/// - Whitespace: trim, trimStart, trim_start, trimEnd, trim_end
+/// - Search: contains, indexOf, index_of, startsWith, starts_with, endsWith, ends_with
+/// - Transform: reverse, repeat, charAt, char_at, substring, replace, split, join
+/// - Padding: padStart, pad_start, padEnd, pad_end
+/// - Predicates: isDigit, is_digit, isAlpha, is_alpha, isAscii, is_ascii
+/// - Conversion: toString, to_string, toInt, to_int, toNumber, to_number, toFloat, to_float
+/// - Unicode: codePointAt, code_point_at, graphemeLen, grapheme_len
+///
+/// **Not included (fall through to legacy):** iter, graphemes, normalize
+pub static STRING_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    // Info
+    "len" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_len),
+    "length" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_len),
+
+    // Case
+    "toUpperCase" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_upper),
+    "to_upper_case" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_upper),
+    "toLowerCase" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_lower),
+    "to_lower_case" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_lower),
+
+    // Whitespace
+    "trim" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_trim),
+    "trimStart" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_trim_start),
+    "trim_start" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_trim_start),
+    "trimEnd" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_trim_end),
+    "trim_end" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_trim_end),
+
+    // Conversion / identity
+    "toString" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_string),
+    "to_string" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_string),
+
+    // Search
+    "startsWith" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_starts_with),
+    "starts_with" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_starts_with),
+    "endsWith" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_ends_with),
+    "ends_with" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_ends_with),
+    "contains" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_contains),
+    "indexOf" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_index_of),
+    "index_of" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_index_of),
+
+    // Transform
+    "repeat" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_repeat),
+    "charAt" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_char_at),
+    "char_at" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_char_at),
+    "reverse" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_reverse),
+    "split" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_split),
+    "replace" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_replace),
+    "substring" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_substring),
+    "join" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_join),
+
+    // Padding
+    "padStart" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_pad_start),
+    "pad_start" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_pad_start),
+    "padEnd" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_pad_end),
+    "pad_end" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_pad_end),
+
+    // Predicates
+    "isDigit" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_is_digit),
+    "is_digit" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_is_digit),
+    "isAlpha" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_is_alpha),
+    "is_alpha" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_is_alpha),
+    "isAscii" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_is_ascii),
+    "is_ascii" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_is_ascii),
+
+    // Numeric conversion
+    "toInt" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_int),
+    "to_int" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_int),
+    "toNumber" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_number),
+    "to_number" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_number),
+    "toFloat" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_number),
+    "to_float" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_to_number),
+
+    // Unicode
+    "codePointAt" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_code_point_at),
+    "code_point_at" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_code_point_at),
+    "graphemeLen" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_grapheme_len),
+    "grapheme_len" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_grapheme_len),
+};
