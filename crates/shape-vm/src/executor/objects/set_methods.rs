@@ -434,3 +434,71 @@ pub fn v2_difference(
         .collect();
     Ok(ValueWord::from_set(items).into_raw_bits())
 }
+
+/// Set.forEach(fn(item)) -> unit [v2]
+pub fn v2_for_each(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = (*borrow_vw(args[0])).clone();
+    let callback = (*borrow_vw(args[1])).clone();
+
+    if let Some(data) = receiver.as_set() {
+        let items = data.items.clone();
+        for item in &items {
+            vm.call_value_immediate_nb(&callback, &[item.clone()], ctx.as_deref_mut())?;
+        }
+        Ok(ValueWord::unit().raw_bits())
+    } else {
+        Err(type_mismatch_error("forEach", "Set"))
+    }
+}
+
+/// Set.map(fn(item) -> new_item) -> Set [v2]
+pub fn v2_map(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = (*borrow_vw(args[0])).clone();
+    let callback = (*borrow_vw(args[1])).clone();
+
+    if let Some(data) = receiver.as_set() {
+        let items = data.items.clone();
+        let mut new_items = Vec::with_capacity(items.len());
+        for item in &items {
+            let result =
+                vm.call_value_immediate_nb(&callback, &[item.clone()], ctx.as_deref_mut())?;
+            new_items.push(result);
+        }
+        Ok(ValueWord::from_set(new_items).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("map", "Set"))
+    }
+}
+
+/// Set.filter(fn(item) -> bool) -> Set [v2]
+pub fn v2_filter(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = (*borrow_vw(args[0])).clone();
+    let callback = (*borrow_vw(args[1])).clone();
+
+    if let Some(data) = receiver.as_set() {
+        let items = data.items.clone();
+        let mut new_items = Vec::new();
+        for item in &items {
+            let result =
+                vm.call_value_immediate_nb(&callback, &[item.clone()], ctx.as_deref_mut())?;
+            if result.is_truthy() {
+                new_items.push(item.clone());
+            }
+        }
+        Ok(ValueWord::from_set(new_items).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("filter", "Set"))
+    }
+}

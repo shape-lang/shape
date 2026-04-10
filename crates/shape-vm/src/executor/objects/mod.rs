@@ -305,18 +305,26 @@ impl VirtualMachine {
         // ValueWord tag/HeapKind dispatch — no to_vmvalue() needed
         match receiver_tag {
             NanTag::I48 | NanTag::F64 => {
-                if let Some(handler) =
-                    method_registry::NUMBER_METHODS.get(method_name.as_str())
-                {
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
-                } else {
-                    let result = self.handle_number_method(&method_name, args_nb)?;
-                    self.push_vw(result)?;
-                }
+                let handler = method_registry::NUMBER_METHODS
+                    .get(method_name.as_str())
+                    .ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Unknown method '{}' on Number type",
+                            method_name
+                        ))
+                    })?;
+                self.dispatch_method_handler(handler, args_nb, ctx)?;
             }
             NanTag::Bool => {
-                let result = self.handle_bool_method(&method_name, args_nb)?;
-                self.push_vw(result)?;
+                let handler = method_registry::BOOL_METHODS
+                    .get(method_name.as_str())
+                    .ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Unknown method '{}' on Boolean type",
+                            method_name
+                        ))
+                    })?;
+                self.dispatch_method_handler(handler, args_nb, ctx)?;
             }
             NanTag::Heap => match receiver_heap_kind.unwrap() {
                 HeapKind::Array => {
@@ -339,29 +347,33 @@ impl VirtualMachine {
                     self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::String => {
-                    if let Some(handler) = method_registry::STRING_METHODS.get(method_name.as_str()) {
-                        crate::executor::ic_fast_paths::method_ic_record(
-                            self,
-                            self.ip,
-                            HeapKind::String as u8,
-                            method_id.0 as u32,
-                            handler,
-                        );
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
-                    } else {
-                        let result = self.handle_string_method(&method_name, args_nb)?;
-                        self.push_vw(result)?;
-                    }
+                    let handler = method_registry::STRING_METHODS
+                        .get(method_name.as_str())
+                        .ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "Unknown method '{}' on String type",
+                                method_name
+                            ))
+                        })?;
+                    crate::executor::ic_fast_paths::method_ic_record(
+                        self,
+                        self.ip,
+                        HeapKind::String as u8,
+                        method_id.0 as u32,
+                        handler,
+                    );
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Decimal => {
-                    if let Some(handler) =
-                        method_registry::NUMBER_METHODS.get(method_name.as_str())
-                    {
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
-                    } else {
-                        let result = self.handle_number_method(&method_name, args_nb)?;
-                        self.push_vw(result)?;
-                    }
+                    let handler = method_registry::NUMBER_METHODS
+                        .get(method_name.as_str())
+                        .ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "Unknown method '{}' on Number type",
+                                method_name
+                            ))
+                        })?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::DataTable | HeapKind::TypedTable => {
                     let handler = method_registry::DATATABLE_METHODS
@@ -579,12 +591,18 @@ impl VirtualMachine {
                     }
                 }
                 HeapKind::TypedObject => {
-                    let result = self.handle_typed_object_method(&method_name, args_nb)?;
-                    self.push_vw(result)?;
+                    self.handle_typed_object_method_v2(&method_name, args_nb)?;
                 }
                 HeapKind::Content => {
-                    let result = self.handle_content_method(&method_name, args_nb)?;
-                    self.push_vw(result)?;
+                    let handler = method_registry::CONTENT_METHODS
+                        .get(method_name.as_str())
+                        .ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "Unknown method '{}' on Content type. Available: bold, italic, underline, dim, fg, bg, border, max_rows, series, title, x_label, y_label, toString",
+                                method_name
+                            ))
+                        })?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Time => {
                     let handler = method_registry::DATETIME_METHODS
@@ -652,14 +670,15 @@ impl VirtualMachine {
                     self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Range => {
-                    if method_name == "iter" {
-                        iterator_methods::handle_range_iter(self, args_nb, ctx)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Unknown method '{}' on Range type",
-                            method_name
-                        )));
-                    }
+                    let handler = method_registry::RANGE_METHODS
+                        .get(method_name.as_str())
+                        .ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "Unknown method '{}' on Range type",
+                                method_name
+                            ))
+                        })?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Matrix => {
                     let handler = method_registry::MATRIX_METHODS
@@ -752,8 +771,15 @@ impl VirtualMachine {
                     self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 HeapKind::Char => {
-                    let result = self.handle_char_method(&method_name, args_nb)?;
-                    self.push_vw(result)?;
+                    let handler = method_registry::CHAR_METHODS
+                        .get(method_name.as_str())
+                        .ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "Unknown method '{}' on char type",
+                                method_name
+                            ))
+                        })?;
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
                 }
                 _ => {
                     return Err(VMError::RuntimeError(format!(
@@ -957,57 +983,14 @@ impl VirtualMachine {
         }
     }
 
-    fn handle_char_method(
-        &mut self,
-        method: &str,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        let c = args[0].as_char().ok_or_else(|| VMError::TypeError {
-            expected: "char",
-            got: args[0].type_name(),
-        })?;
-        let result = match method {
-            "is_alphabetic" | "isAlphabetic" => ValueWord::from_bool(c.is_alphabetic()),
-            "is_numeric" | "isNumeric" => ValueWord::from_bool(c.is_numeric()),
-            "is_alphanumeric" | "isAlphanumeric" => ValueWord::from_bool(c.is_alphanumeric()),
-            "is_whitespace" | "isWhitespace" => ValueWord::from_bool(c.is_whitespace()),
-            "is_uppercase" | "isUppercase" => ValueWord::from_bool(c.is_uppercase()),
-            "is_lowercase" | "isLowercase" => ValueWord::from_bool(c.is_lowercase()),
-            "is_ascii" | "isAscii" => ValueWord::from_bool(c.is_ascii()),
-            "to_uppercase" | "toUppercase" => {
-                let upper: String = c.to_uppercase().collect();
-                if upper.len() == 1 {
-                    ValueWord::from_char(upper.chars().next().unwrap())
-                } else {
-                    ValueWord::from_string(std::sync::Arc::new(upper))
-                }
-            }
-            "to_lowercase" | "toLowercase" => {
-                let lower: String = c.to_lowercase().collect();
-                if lower.len() == 1 {
-                    ValueWord::from_char(lower.chars().next().unwrap())
-                } else {
-                    ValueWord::from_string(std::sync::Arc::new(lower))
-                }
-            }
-            "to_string" | "toString" => ValueWord::from_string(std::sync::Arc::new(c.to_string())),
-            _ => {
-                return Err(VMError::RuntimeError(format!(
-                    "Unknown method '{}' on char type",
-                    method
-                )));
-            }
-        };
-        Ok(result)
-    }
-
-    /// Handle TypedObject methods via direct schema-based access.
+    /// Handle TypedObject methods via direct schema-based access (v2 compatible).
     /// No HashMap conversion — reads/writes slots directly via schema field indices.
-    fn handle_typed_object_method(
+    /// Pushes result directly to stack.
+    fn handle_typed_object_method_v2(
         &mut self,
         method: &str,
         args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
+    ) -> Result<(), VMError> {
         use crate::executor::objects::object_creation::read_slot_nb;
         use shape_value::heap_value::HeapValue;
 
@@ -1046,7 +1029,8 @@ impl VirtualMachine {
             let intrinsic_fn = intrinsic_fn.clone();
             let call_args_nb: Vec<ValueWord> = args[1..].to_vec();
             let result_nb = self.invoke_module_fn(&intrinsic_fn, &call_args_nb)?;
-            return Ok(result_nb);
+            self.push_vw(result_nb)?;
+            return Ok(());
         }
 
         // UFCS method dispatch for impl methods (Type::method) and extend methods (Type.method)
@@ -1060,7 +1044,8 @@ impl VirtualMachine {
             {
                 let func_nb = ValueWord::from_function(func_id);
                 let result_nb = self.call_value_immediate_nb(&func_nb, &args, None)?;
-                return Ok(result_nb);
+                self.push_vw(result_nb)?;
+                return Ok(());
             }
 
             // BUG-TR2 fix: Also check trait_method_symbols for named impls.
@@ -1073,7 +1058,8 @@ impl VirtualMachine {
                 if let Some(&func_id) = self.function_name_index.get(impl_func_name) {
                     let func_nb = ValueWord::from_function(func_id);
                     let result_nb = self.call_value_immediate_nb(&func_nb, &args, None)?;
-                    return Ok(result_nb);
+                    self.push_vw(result_nb)?;
+                    return Ok(());
                 }
             }
         }
@@ -1095,7 +1081,8 @@ impl VirtualMachine {
                 {
                     let call_args_nb: Vec<ValueWord> = args[1..].to_vec();
                     let result_nb = self.call_value_immediate_nb(&field_nb, &call_args_nb, None)?;
-                    return Ok(result_nb);
+                    self.push_vw(result_nb)?;
+                    return Ok(());
                 }
             }
         }
@@ -1104,377 +1091,6 @@ impl VirtualMachine {
             "Unknown method '{}' on TypedObject",
             method
         )))
-    }
-
-    /// Handle Number/Int methods that remain on the legacy (Vec<ValueWord>) path.
-    ///
-    /// Simple numeric methods (floor, ceil, round, abs, sign, toInt, toNumber,
-    /// isNaN, isFinite) have been migrated to `MethodFnV2` in
-    /// `number_methods.rs` and dispatched via the `NUMBER_METHODS` PHF map.
-    /// This function handles the remaining methods that need Vec args or
-    /// produce heap-allocated results (strings).
-    fn handle_number_method(
-        &mut self,
-        method: &str,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        use std::sync::Arc;
-
-        let first = args.first().ok_or_else(|| VMError::TypeError {
-            expected: "number or int",
-            got: "other",
-        })?;
-
-        // Determine is_int and extract the f64 value directly from ValueWord
-        let is_int = first.is_i64();
-        let number = if let Some(i) = first.as_i64() {
-            i as f64
-        } else if let Some(n) = first.as_f64() {
-            n
-        } else {
-            // Decimal fallback — check heap for Decimal variant
-            match first.as_heap_ref() {
-                Some(shape_value::HeapValue::Decimal(d)) => {
-                    use rust_decimal::prelude::ToPrimitive;
-                    d.to_f64().unwrap_or(f64::NAN)
-                }
-                _ => {
-                    return Err(VMError::TypeError {
-                        expected: "number or int",
-                        got: first.type_name(),
-                    });
-                }
-            }
-        };
-
-        let result: ValueWord = match method {
-            "toFixed" | "to_fixed" => {
-                let decimals = if args.len() > 1 {
-                    args[1].as_number_coerce().ok_or_else(|| {
-                        VMError::RuntimeError("Expected number for decimals".to_string())
-                    })? as i32
-                } else {
-                    2
-                };
-                ValueWord::from_string(Arc::new(format!(
-                    "{:.prec$}",
-                    number,
-                    prec = decimals as usize
-                )))
-            }
-            "toString" | "to_string" => {
-                if is_int {
-                    ValueWord::from_string(Arc::new((number as i64).to_string()))
-                } else {
-                    ValueWord::from_string(Arc::new(number.to_string()))
-                }
-            }
-            "clamp" => {
-                let min_val = args
-                    .get(1)
-                    .and_then(|nb| nb.as_number_coerce())
-                    .ok_or_else(|| VMError::InvalidArgument {
-                        function: "clamp".to_string(),
-                        message: "requires a min argument".to_string(),
-                    })?;
-                let max_val = args
-                    .get(2)
-                    .and_then(|nb| nb.as_number_coerce())
-                    .ok_or_else(|| VMError::InvalidArgument {
-                        function: "clamp".to_string(),
-                        message: "requires a max argument".to_string(),
-                    })?;
-                if is_int {
-                    let i = number as i64;
-                    let lo = min_val as i64;
-                    let hi = max_val as i64;
-                    ValueWord::from_i64(i.max(lo).min(hi))
-                } else {
-                    ValueWord::from_f64(number.max(min_val).min(max_val))
-                }
-            }
-            _ => {
-                return Err(VMError::RuntimeError(format!(
-                    "Unknown method '{}' on Number type",
-                    method
-                )));
-            }
-        };
-
-        Ok(result)
-    }
-
-    /// Handle String methods (toUpperCase, toLowerCase, split, contains, replace, substring, etc.)
-    fn handle_string_method(
-        &mut self,
-        method: &str,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        use std::sync::Arc;
-
-        // Delegate to string_methods module for extended methods
-        match method {
-            "iter" => return iterator_methods::handle_string_iter(self, args, None),
-            "split" => return string_methods::handle_split(self, args, None),
-            "contains" => return string_methods::handle_contains(self, args, None),
-            "replace" => return string_methods::handle_replace(self, args, None),
-            "substring" => return string_methods::handle_substring(self, args, None),
-            "join" => return string_methods::handle_join(self, args, None),
-            _ => {}
-        }
-
-        let string = args
-            .first()
-            .and_then(|nb| nb.as_str())
-            .ok_or_else(|| VMError::TypeError {
-                expected: "string",
-                got: "other",
-            })?
-            .to_string();
-
-        let result: ValueWord = match method {
-            "toUpperCase" | "to_upper_case" => {
-                ValueWord::from_string(Arc::new(string.to_uppercase()))
-            }
-            "toLowerCase" | "to_lower_case" => {
-                ValueWord::from_string(Arc::new(string.to_lowercase()))
-            }
-            "trim" => ValueWord::from_string(Arc::new(string.trim().to_string())),
-            "trimStart" | "trim_start" => {
-                ValueWord::from_string(Arc::new(string.trim_start().to_string()))
-            }
-            "trimEnd" | "trim_end" => {
-                ValueWord::from_string(Arc::new(string.trim_end().to_string()))
-            }
-            "length" | "len" => ValueWord::from_i64(string.len() as i64),
-            "toString" | "to_string" => ValueWord::from_string(Arc::new(string)),
-            "startsWith" | "starts_with" => {
-                let prefix = args.get(1).and_then(|nb| nb.as_str()).ok_or_else(|| {
-                    VMError::InvalidArgument {
-                        function: "startsWith".to_string(),
-                        message: "requires a string argument".to_string(),
-                    }
-                })?;
-                ValueWord::from_bool(string.starts_with(prefix))
-            }
-            "endsWith" | "ends_with" => {
-                let suffix = args.get(1).and_then(|nb| nb.as_str()).ok_or_else(|| {
-                    VMError::InvalidArgument {
-                        function: "endsWith".to_string(),
-                        message: "requires a string argument".to_string(),
-                    }
-                })?;
-                ValueWord::from_bool(string.ends_with(suffix))
-            }
-            "padStart" | "pad_start" => {
-                let target_len = args
-                    .get(1)
-                    .and_then(|nb| nb.as_number_coerce())
-                    .ok_or_else(|| VMError::InvalidArgument {
-                        function: "padStart".to_string(),
-                        message: "requires a length argument".to_string(),
-                    })? as usize;
-                let fill = args
-                    .get(2)
-                    .and_then(|nb| nb.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| " ".to_string());
-                let char_count = string.chars().count();
-                if char_count >= target_len {
-                    ValueWord::from_string(Arc::new(string))
-                } else {
-                    let pad_needed = target_len - char_count;
-                    let fill_chars: Vec<char> = fill.chars().collect();
-                    let mut padding = String::with_capacity(pad_needed);
-                    for i in 0..pad_needed {
-                        padding.push(fill_chars[i % fill_chars.len()]);
-                    }
-                    padding.push_str(&string);
-                    ValueWord::from_string(Arc::new(padding))
-                }
-            }
-            "padEnd" | "pad_end" => {
-                let target_len = args
-                    .get(1)
-                    .and_then(|nb| nb.as_number_coerce())
-                    .ok_or_else(|| VMError::InvalidArgument {
-                        function: "padEnd".to_string(),
-                        message: "requires a length argument".to_string(),
-                    })? as usize;
-                let fill = args
-                    .get(2)
-                    .and_then(|nb| nb.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| " ".to_string());
-                let char_count = string.chars().count();
-                if char_count >= target_len {
-                    ValueWord::from_string(Arc::new(string))
-                } else {
-                    let pad_needed = target_len - char_count;
-                    let fill_chars: Vec<char> = fill.chars().collect();
-                    let mut result = string;
-                    for i in 0..pad_needed {
-                        result.push(fill_chars[i % fill_chars.len()]);
-                    }
-                    ValueWord::from_string(Arc::new(result))
-                }
-            }
-            "repeat" => {
-                let count = args
-                    .get(1)
-                    .and_then(|nb| nb.as_number_coerce())
-                    .ok_or_else(|| VMError::InvalidArgument {
-                        function: "repeat".to_string(),
-                        message: "requires a count argument".to_string(),
-                    })? as usize;
-                ValueWord::from_string(Arc::new(string.repeat(count)))
-            }
-            "charAt" | "char_at" => {
-                let index = args
-                    .get(1)
-                    .and_then(|nb| nb.as_number_coerce())
-                    .ok_or_else(|| VMError::InvalidArgument {
-                        function: "charAt".to_string(),
-                        message: "requires an index argument".to_string(),
-                    })? as usize;
-                let ch = string.chars().nth(index);
-                match ch {
-                    Some(c) => ValueWord::from_char(c),
-                    None => ValueWord::none(),
-                }
-            }
-            "reverse" => {
-                let reversed: String = string.chars().rev().collect();
-                ValueWord::from_string(Arc::new(reversed))
-            }
-            "indexOf" | "index_of" => {
-                let needle = args.get(1).and_then(|nb| nb.as_str()).ok_or_else(|| {
-                    VMError::InvalidArgument {
-                        function: "indexOf".to_string(),
-                        message: "requires a string argument".to_string(),
-                    }
-                })?;
-                match string.find(needle) {
-                    Some(pos) => {
-                        // Return char index, not byte index
-                        let char_idx = string[..pos].chars().count() as i64;
-                        ValueWord::from_i64(char_idx)
-                    }
-                    None => ValueWord::from_i64(-1),
-                }
-            }
-            "isDigit" | "is_digit" => ValueWord::from_bool(
-                !string.is_empty() && string.chars().all(|c| c.is_ascii_digit()),
-            ),
-            "isAlpha" | "is_alpha" => ValueWord::from_bool(
-                !string.is_empty() && string.chars().all(|c| c.is_ascii_alphabetic()),
-            ),
-            "isAscii" | "is_ascii" => ValueWord::from_bool(string.is_ascii()),
-            "normalize" => {
-                use unicode_normalization::UnicodeNormalization;
-                let form = args.get(1).and_then(|nb| nb.as_str()).ok_or_else(|| {
-                    VMError::InvalidArgument {
-                        function: "normalize".to_string(),
-                        message:
-                            "requires a form argument (\"NFC\", \"NFD\", \"NFKC\", or \"NFKD\")"
-                                .to_string(),
-                    }
-                })?;
-                let normalized: String = match form {
-                    "NFC" => string.nfc().collect(),
-                    "NFD" => string.nfd().collect(),
-                    "NFKC" => string.nfkc().collect(),
-                    "NFKD" => string.nfkd().collect(),
-                    _ => {
-                        return Err(VMError::InvalidArgument {
-                            function: "normalize".to_string(),
-                            message: format!(
-                                "unknown normalization form '{}', expected NFC/NFD/NFKC/NFKD",
-                                form
-                            ),
-                        });
-                    }
-                };
-                ValueWord::from_string(Arc::new(normalized))
-            }
-            "graphemes" => {
-                use unicode_segmentation::UnicodeSegmentation;
-                let clusters: Vec<ValueWord> = string
-                    .graphemes(true)
-                    .map(|g| ValueWord::from_string(Arc::new(g.to_string())))
-                    .collect();
-                ValueWord::from_array(Arc::new(clusters))
-            }
-            "graphemeLen" | "grapheme_len" => {
-                use unicode_segmentation::UnicodeSegmentation;
-                let count = string.graphemes(true).count();
-                ValueWord::from_i64(count as i64)
-            }
-            "toInt" | "to_int" => {
-                let trimmed = string.trim();
-                let parsed: i64 = trimmed.parse().map_err(|_| {
-                    VMError::RuntimeError(format!("Cannot convert '{}' to int", string))
-                })?;
-                ValueWord::from_i64(parsed)
-            }
-            "toNumber" | "to_number" | "toFloat" | "to_float" => {
-                let trimmed = string.trim();
-                let parsed: f64 = trimmed.parse().map_err(|_| {
-                    VMError::RuntimeError(format!("Cannot convert '{}' to number", string))
-                })?;
-                ValueWord::from_f64(parsed)
-            }
-            "codePointAt" | "code_point_at" => {
-                let index = args
-                    .get(1)
-                    .and_then(|nb| nb.as_number_coerce())
-                    .ok_or_else(|| VMError::InvalidArgument {
-                        function: "codePointAt".to_string(),
-                        message: "requires an index argument".to_string(),
-                    })? as usize;
-                match string.chars().nth(index) {
-                    Some(c) => ValueWord::from_i64(c as u32 as i64),
-                    None => ValueWord::from_i64(-1),
-                }
-            }
-            _ => {
-                return Err(VMError::RuntimeError(format!(
-                    "Unknown method '{}' on String type",
-                    method
-                )));
-            }
-        };
-
-        Ok(result)
-    }
-
-    /// Handle Boolean methods
-    fn handle_bool_method(
-        &mut self,
-        method: &str,
-        args: Vec<ValueWord>,
-    ) -> Result<ValueWord, VMError> {
-        use std::sync::Arc;
-
-        let bool_val =
-            args.first()
-                .and_then(|nb| nb.as_bool())
-                .ok_or_else(|| VMError::TypeError {
-                    expected: "bool",
-                    got: "other",
-                })?;
-
-        let result: ValueWord = match method {
-            "toString" | "to_string" => ValueWord::from_string(Arc::new(bool_val.to_string())),
-            _ => {
-                return Err(VMError::RuntimeError(format!(
-                    "Unknown method '{}' on Boolean type",
-                    method
-                )));
-            }
-        };
-
-        Ok(result)
     }
 
     // op_new_array and op_new_object moved to object_creation.rs

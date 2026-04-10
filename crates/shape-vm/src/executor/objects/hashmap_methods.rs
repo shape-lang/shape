@@ -922,6 +922,186 @@ pub fn v2_to_array(
     v2_entries(vm, args, ctx)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V2 closure-based HashMap methods
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// HashMap.forEach(fn(key, value)) -> unit [v2]
+pub fn v2_for_each(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = own_vw(args[0]);
+    let callback = own_vw(args[1]);
+
+    if let Some((keys, values, _)) = receiver.as_hashmap() {
+        let keys = keys.clone();
+        let values = values.clone();
+        for (k, v) in keys.iter().zip(values.iter()) {
+            vm.call_value_immediate_nb(&callback, &[k.clone(), v.clone()], ctx.as_deref_mut())?;
+        }
+        Ok(ValueWord::unit().raw_bits())
+    } else {
+        Err(type_mismatch_error("forEach", "HashMap"))
+    }
+}
+
+/// HashMap.filter(fn(key, value) -> bool) -> HashMap [v2]
+pub fn v2_filter(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = own_vw(args[0]);
+    let callback = own_vw(args[1]);
+
+    if let Some((old_keys, old_values, _)) = receiver.as_hashmap() {
+        let old_keys = old_keys.clone();
+        let old_values = old_values.clone();
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+
+        for (k, v) in old_keys.iter().zip(old_values.iter()) {
+            let result =
+                vm.call_value_immediate_nb(&callback, &[k.clone(), v.clone()], ctx.as_deref_mut())?;
+            if result.is_truthy() {
+                keys.push(k.clone());
+                values.push(v.clone());
+            }
+        }
+
+        Ok(ValueWord::from_hashmap_pairs(keys, values).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("filter", "HashMap"))
+    }
+}
+
+/// HashMap.map(fn(key, value) -> new_value) -> HashMap [v2]
+pub fn v2_map(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = own_vw(args[0]);
+    let callback = own_vw(args[1]);
+
+    if let Some((old_keys, old_values, old_index)) = receiver.as_hashmap() {
+        let old_keys = old_keys.clone();
+        let old_values = old_values.clone();
+        let old_index = old_index.clone();
+        let mut new_values = Vec::with_capacity(old_values.len());
+
+        for (k, v) in old_keys.iter().zip(old_values.iter()) {
+            let result =
+                vm.call_value_immediate_nb(&callback, &[k.clone(), v.clone()], ctx.as_deref_mut())?;
+            new_values.push(result);
+        }
+
+        Ok(ValueWord::from_hashmap(old_keys.clone(), new_values, old_index).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("map", "HashMap"))
+    }
+}
+
+/// HashMap.reduce(fn(acc, key, value) -> acc, initial) -> value [v2]
+pub fn v2_reduce(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = own_vw(args[0]);
+    let callback = own_vw(args[1]);
+    let initial = own_vw(args[2]);
+
+    if let Some((keys, values, _)) = receiver.as_hashmap() {
+        let keys = keys.clone();
+        let values = values.clone();
+        let mut acc = initial;
+        for (k, v) in keys.iter().zip(values.iter()) {
+            acc = vm.call_value_immediate_nb(
+                &callback,
+                &[acc, k.clone(), v.clone()],
+                ctx.as_deref_mut(),
+            )?;
+        }
+        Ok(acc.into_raw_bits())
+    } else {
+        Err(type_mismatch_error("reduce", "HashMap"))
+    }
+}
+
+/// HashMap.groupBy(fn(key, value) -> group_key) -> HashMap<group_key, HashMap> [v2]
+pub fn v2_group_by(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = own_vw(args[0]);
+    let callback = own_vw(args[1]);
+
+    if let Some((keys, values, _)) = receiver.as_hashmap() {
+        let keys = keys.clone();
+        let values = values.clone();
+
+        // group_key -> (keys, values) for each sub-hashmap
+        let mut groups: Vec<(ValueWord, Vec<ValueWord>, Vec<ValueWord>)> = Vec::new();
+        let mut group_index: HashMap<u64, Vec<usize>> = HashMap::new();
+
+        for (k, v) in keys.iter().zip(values.iter()) {
+            let group_key =
+                vm.call_value_immediate_nb(&callback, &[k.clone(), v.clone()], ctx.as_deref_mut())?;
+            let gk_hash = group_key.vw_hash();
+
+            let found = if let Some(bucket) = group_index.get(&gk_hash) {
+                bucket
+                    .iter()
+                    .copied()
+                    .find(|&gi| groups[gi].0.vw_equals(&group_key))
+            } else {
+                None
+            };
+
+            if let Some(gi) = found {
+                groups[gi].1.push(k.clone());
+                groups[gi].2.push(v.clone());
+            } else {
+                let gi = groups.len();
+                groups.push((group_key, vec![k.clone()], vec![v.clone()]));
+                group_index.entry(gk_hash).or_default().push(gi);
+            }
+        }
+
+        // Build outer HashMap: group_key -> inner HashMap
+        let outer_keys: Vec<ValueWord> = groups.iter().map(|(gk, _, _)| gk.clone()).collect();
+        let outer_values: Vec<ValueWord> = groups
+            .into_iter()
+            .map(|(_, ks, vs)| ValueWord::from_hashmap_pairs(ks, vs))
+            .collect();
+
+        Ok(ValueWord::from_hashmap_pairs(outer_keys, outer_values).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("groupBy", "HashMap"))
+    }
+}
+
+/// HashMap.iter() -> Iterator [v2]
+pub fn v2_iter(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    use shape_value::heap_value::IteratorState;
+    let receiver = own_vw(args[0]);
+    let result = ValueWord::from_iterator(Box::new(IteratorState {
+        source: receiver,
+        position: 0,
+        transforms: vec![],
+        done: false,
+    }));
+    Ok(result.into_raw_bits())
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]

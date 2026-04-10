@@ -577,6 +577,88 @@ pub fn v2_string_join(
     Ok(ValueWord::from_string(Arc::new(result)).raw_bits())
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V2 string methods: graphemes, normalize, iter
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// graphemes — returns array of grapheme clusters
+pub fn v2_string_graphemes(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let vw = borrow_vw(args[0]);
+    let s = vw.as_str().ok_or_else(|| VMError::TypeError {
+        expected: "string",
+        got: vw.type_name(),
+    })?;
+    let clusters: Vec<ValueWord> = s
+        .graphemes(true)
+        .map(|g| ValueWord::from_string(Arc::new(g.to_string())))
+        .collect();
+    Ok(ValueWord::from_array(Arc::new(clusters)).into_raw_bits())
+}
+
+/// normalize — Unicode normalization (NFC, NFD, NFKC, NFKD)
+pub fn v2_string_normalize(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    use unicode_normalization::UnicodeNormalization;
+    let vw = borrow_vw(args[0]);
+    let s = vw.as_str().ok_or_else(|| VMError::TypeError {
+        expected: "string",
+        got: vw.type_name(),
+    })?;
+    let form_vw = borrow_vw(args.get(1).copied().ok_or_else(|| VMError::InvalidArgument {
+        function: "normalize".to_string(),
+        message: "requires a form argument (\"NFC\", \"NFD\", \"NFKC\", or \"NFKD\")".to_string(),
+    })?);
+    let form = form_vw.as_str().ok_or_else(|| VMError::InvalidArgument {
+        function: "normalize".to_string(),
+        message: "requires a form argument (\"NFC\", \"NFD\", \"NFKC\", or \"NFKD\")".to_string(),
+    })?;
+    let normalized: String = match form {
+        "NFC" => s.nfc().collect(),
+        "NFD" => s.nfd().collect(),
+        "NFKC" => s.nfkc().collect(),
+        "NFKD" => s.nfkd().collect(),
+        _ => {
+            return Err(VMError::InvalidArgument {
+                function: "normalize".to_string(),
+                message: format!(
+                    "unknown normalization form '{}', expected NFC/NFD/NFKC/NFKD",
+                    form
+                ),
+            });
+        }
+    };
+    Ok(ValueWord::from_string(Arc::new(normalized)).into_raw_bits())
+}
+
+/// iter — returns an Iterator over chars of the string
+pub fn v2_string_iter(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, VMError> {
+    use shape_value::heap_value::IteratorState;
+    let receiver = (*borrow_vw(args[0])).clone();
+    let result = ValueWord::from_iterator(Box::new(IteratorState {
+        source: receiver,
+        position: 0,
+        transforms: vec![],
+        done: false,
+    }));
+    Ok(result.into_raw_bits())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Legacy MethodFn string handlers (kept for backward compatibility)
+// ═══════════════════════════════════════════════════════════════════════════
+
 /// Handle split(separator) - Split string into array
 pub(crate) fn handle_split(
     _vm: &mut VirtualMachine,

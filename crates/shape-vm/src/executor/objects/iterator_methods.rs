@@ -792,6 +792,28 @@ pub fn handle_range_iter(
     Ok(result)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V2 (MethodFnV2) iter handlers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Range.iter() -> Iterator (v2 native)
+pub fn v2_range_iter(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    use std::mem::ManuallyDrop;
+    let receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
+    let owned = (*receiver).clone();
+    let result = ValueWord::from_iterator(Box::new(IteratorState {
+        source: owned,
+        position: 0,
+        transforms: vec![],
+        done: false,
+    }));
+    Ok(result.into_raw_bits())
+}
+
 /// HashMap.iter() -> Iterator over [key, value] pairs
 pub fn handle_hashmap_iter(
     _vm: &mut VirtualMachine,

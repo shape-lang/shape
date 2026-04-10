@@ -265,15 +265,15 @@ pub static HASHMAP_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "merge" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_merge),
     "getOrDefault" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_get_or_default),
     "toArray" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_to_array),
-    // Closure-based — stay Legacy
-    "map" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_map),
-    "filter" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_filter),
-    "forEach" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_for_each),
-    "reduce" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_reduce),
-    "groupBy" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_group_by),
+    // Closure-based — v2 native
+    "map" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_map),
+    "filter" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_filter),
+    "forEach" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_for_each),
+    "reduce" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_reduce),
+    "groupBy" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_group_by),
 
     // Iterator
-    "iter" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_hashmap_iter),
+    "iter" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_iter),
 };
 
 /// PHF registry for Set methods (14 methods)
@@ -294,10 +294,10 @@ pub static SET_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "union" => MethodHandler::Native(crate::executor::objects::set_methods::v2_union),
     "intersection" => MethodHandler::Native(crate::executor::objects::set_methods::v2_intersection),
     "difference" => MethodHandler::Native(crate::executor::objects::set_methods::v2_difference),
-    // Closure-based — stay Legacy
-    "forEach" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_for_each),
-    "map" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_map),
-    "filter" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_filter),
+    // Closure-based — v2 native
+    "forEach" => MethodHandler::Native(crate::executor::objects::set_methods::v2_for_each),
+    "map" => MethodHandler::Native(crate::executor::objects::set_methods::v2_map),
+    "filter" => MethodHandler::Native(crate::executor::objects::set_methods::v2_filter),
 };
 
 /// PHF registry for Deque methods
@@ -622,6 +622,11 @@ pub static NUMBER_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "is_nan" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_nan_v2),
     "isFinite" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_finite_v2),
     "is_finite" => MethodHandler::Native(crate::executor::objects::number_methods::number_is_finite_v2),
+    "toFixed" => MethodHandler::Native(crate::executor::objects::number_methods::number_to_fixed_v2),
+    "to_fixed" => MethodHandler::Native(crate::executor::objects::number_methods::number_to_fixed_v2),
+    "toString" => MethodHandler::Native(crate::executor::objects::number_methods::number_to_string_v2),
+    "to_string" => MethodHandler::Native(crate::executor::objects::number_methods::number_to_string_v2),
+    "clamp" => MethodHandler::Native(crate::executor::objects::number_methods::number_clamp_v2),
 };
 
 /// PHF registry for String methods (v2 native handlers)
@@ -706,4 +711,70 @@ pub static STRING_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "code_point_at" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_code_point_at),
     "graphemeLen" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_grapheme_len),
     "grapheme_len" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_grapheme_len),
+    "graphemes" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_graphemes),
+    "normalize" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_normalize),
+    "iter" => MethodHandler::Native(crate::executor::objects::string_methods::v2_string_iter),
+};
+
+/// PHF registry for Bool methods
+pub static BOOL_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    "toString" => MethodHandler::Native(crate::executor::objects::number_methods::bool_to_string_v2),
+    "to_string" => MethodHandler::Native(crate::executor::objects::number_methods::bool_to_string_v2),
+};
+
+/// PHF registry for Char methods (11 methods)
+///
+/// **Predicates:** is_alphabetic, is_numeric, is_alphanumeric, is_whitespace, is_uppercase, is_lowercase, is_ascii
+/// **Transform:** to_uppercase, to_lowercase
+/// **Conversion:** to_string, toString
+pub static CHAR_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    "is_alphabetic" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_alphabetic_v2),
+    "isAlphabetic" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_alphabetic_v2),
+    "is_numeric" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_numeric_v2),
+    "isNumeric" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_numeric_v2),
+    "is_alphanumeric" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_alphanumeric_v2),
+    "isAlphanumeric" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_alphanumeric_v2),
+    "is_whitespace" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_whitespace_v2),
+    "isWhitespace" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_whitespace_v2),
+    "is_uppercase" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_uppercase_v2),
+    "isUppercase" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_uppercase_v2),
+    "is_lowercase" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_lowercase_v2),
+    "isLowercase" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_lowercase_v2),
+    "is_ascii" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_ascii_v2),
+    "isAscii" => MethodHandler::Native(crate::executor::objects::number_methods::char_is_ascii_v2),
+    "to_uppercase" => MethodHandler::Native(crate::executor::objects::number_methods::char_to_uppercase_v2),
+    "toUppercase" => MethodHandler::Native(crate::executor::objects::number_methods::char_to_uppercase_v2),
+    "to_lowercase" => MethodHandler::Native(crate::executor::objects::number_methods::char_to_lowercase_v2),
+    "toLowercase" => MethodHandler::Native(crate::executor::objects::number_methods::char_to_lowercase_v2),
+    "to_string" => MethodHandler::Native(crate::executor::objects::number_methods::char_to_string_v2),
+    "toString" => MethodHandler::Native(crate::executor::objects::number_methods::char_to_string_v2),
+};
+
+/// PHF registry for Content methods
+///
+/// **Style:** bold, italic, underline, dim, fg, bg
+/// **Table/Chart:** border, max_rows, maxRows, series, title, x_label, xLabel, y_label, yLabel
+/// **Conversion:** toString
+pub static CONTENT_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    "bold" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_bold),
+    "italic" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_italic),
+    "underline" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_underline),
+    "dim" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_dim),
+    "fg" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_fg),
+    "bg" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_bg),
+    "toString" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_to_string),
+    "border" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_border),
+    "max_rows" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_max_rows),
+    "maxRows" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_max_rows_camel),
+    "series" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_series),
+    "title" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_title),
+    "x_label" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_x_label),
+    "xLabel" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_x_label_camel),
+    "y_label" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_y_label),
+    "yLabel" => MethodHandler::Native(crate::executor::objects::content_methods::v2_content_y_label_camel),
+};
+
+/// PHF registry for Range methods
+pub static RANGE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    "iter" => MethodHandler::Native(crate::executor::objects::iterator_methods::v2_range_iter),
 };
