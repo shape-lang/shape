@@ -351,63 +351,63 @@ pub static PRIORITY_QUEUE_METHODS: phf::Map<&'static str, MethodHandler> = phf_m
 /// - Arithmetic: add_days, add_hours, add_minutes, add_seconds, add_months
 /// - Comparison: is_before, is_after, is_same_day
 pub static DATETIME_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    // Component access
-    "year" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_year),
-    "month" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_month),
-    "day" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_day),
-    "hour" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_hour),
-    "minute" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_minute),
-    "second" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_second),
-    "millisecond" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_millisecond),
-    "microsecond" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_microsecond),
+    // Component access — Native
+    "year" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_year),
+    "month" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_month),
+    "day" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_day),
+    "hour" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_hour),
+    "minute" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_minute),
+    "second" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_second),
+    "millisecond" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_millisecond),
+    "microsecond" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_microsecond),
 
-    // Day info
-    "day_of_week" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_day_of_week),
-    "day_of_year" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_day_of_year),
-    "week_of_year" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_week_of_year),
-    "is_weekday" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_is_weekday),
-    "is_weekend" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_is_weekend),
+    // Day info — Native
+    "day_of_week" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_day_of_week),
+    "day_of_year" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_day_of_year),
+    "week_of_year" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_week_of_year),
+    "is_weekday" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_is_weekday),
+    "is_weekend" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_is_weekend),
 
-    // Formatting
-    "format" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_format),
-    "iso8601" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_iso8601),
-    "rfc2822" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_rfc2822),
-    "unix_timestamp" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_unix_timestamp),
-    "to_unix_millis" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_to_unix_millis),
+    // Formatting — Native
+    "format" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_format),
+    "iso8601" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_iso8601),
+    "rfc2822" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_rfc2822),
+    "unix_timestamp" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_unix_timestamp),
+    "to_unix_millis" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_to_unix_millis),
 
-    // Timezone
-    "to_utc" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_to_utc),
-    "to_timezone" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_to_timezone),
-    "to_local" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_to_local),
-    "timezone" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_timezone),
-    "offset" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_offset),
+    // Timezone — Native
+    "to_utc" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_to_utc),
+    "to_timezone" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_to_timezone),
+    "to_local" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_to_local),
+    "timezone" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_timezone),
+    "offset" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_offset),
 
-    // Operator-trait arithmetic (add/sub for temporal binary ops)
-    "add" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_add),
-    "sub" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_sub),
+    // Operator-trait arithmetic — Native
+    "add" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_add),
+    "sub" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_sub),
 
-    // Arithmetic
-    "add_days" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_add_days),
-    "add_hours" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_add_hours),
-    "add_minutes" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_add_minutes),
-    "add_seconds" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_add_seconds),
-    "add_months" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_add_months),
+    // Arithmetic — Native
+    "add_days" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_add_days),
+    "add_hours" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_add_hours),
+    "add_minutes" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_add_minutes),
+    "add_seconds" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_add_seconds),
+    "add_months" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_add_months),
 
-    // Comparison
-    "is_before" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_is_before),
-    "is_after" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_is_after),
-    "is_same_day" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_is_same_day),
+    // Comparison — Native
+    "is_before" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_is_before),
+    "is_after" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_is_after),
+    "is_same_day" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_is_same_day),
 
-    // Diff
-    "diff" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_diff),
+    // Diff — Native
+    "diff" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_diff),
 };
 
 /// PHF registry for TimeSpan (Duration) methods.
 ///
 /// **Operator-trait:** add, sub
 pub static TIMESPAN_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "add" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_timespan_add),
-    "sub" => MethodHandler::Legacy(crate::executor::objects::datetime_methods::handle_timespan_sub),
+    "add" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_timespan_add),
+    "sub" => MethodHandler::Native(crate::executor::objects::datetime_methods::v2_timespan_sub),
 };
 
 /// PHF registry for Instant methods (6 methods)
@@ -415,12 +415,12 @@ pub static TIMESPAN_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Timing:** elapsed, elapsed_ms, elapsed_us, elapsed_ns, duration_since
 /// **Formatting:** to_string
 pub static INSTANT_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "elapsed" => MethodHandler::Legacy(crate::executor::objects::instant_methods::handle_elapsed),
-    "elapsed_ms" => MethodHandler::Legacy(crate::executor::objects::instant_methods::handle_elapsed_ms),
-    "elapsed_us" => MethodHandler::Legacy(crate::executor::objects::instant_methods::handle_elapsed_us),
-    "elapsed_ns" => MethodHandler::Legacy(crate::executor::objects::instant_methods::handle_elapsed_ns),
-    "duration_since" => MethodHandler::Legacy(crate::executor::objects::instant_methods::handle_duration_since),
-    "to_string" => MethodHandler::Legacy(crate::executor::objects::instant_methods::handle_to_string),
+    "elapsed" => MethodHandler::Native(crate::executor::objects::instant_methods::v2_elapsed),
+    "elapsed_ms" => MethodHandler::Native(crate::executor::objects::instant_methods::v2_elapsed_ms),
+    "elapsed_us" => MethodHandler::Native(crate::executor::objects::instant_methods::v2_elapsed_us),
+    "elapsed_ns" => MethodHandler::Native(crate::executor::objects::instant_methods::v2_elapsed_ns),
+    "duration_since" => MethodHandler::Native(crate::executor::objects::instant_methods::v2_duration_since),
+    "to_string" => MethodHandler::Native(crate::executor::objects::instant_methods::v2_to_string),
 };
 
 /// PHF registry for Iterator methods (15 methods)
