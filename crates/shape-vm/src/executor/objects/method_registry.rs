@@ -564,34 +564,34 @@ pub static BOOL_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! 
 
 /// Mutex<T> methods: lock, try_lock, set
 pub static MUTEX_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "lock" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_mutex_lock),
-    "try_lock" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_mutex_try_lock),
-    "set" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_mutex_set),
+    "lock" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_mutex_lock),
+    "try_lock" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_mutex_try_lock),
+    "set" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_mutex_set),
 };
 
 /// Atomic<T> methods: load, store, fetch_add, fetch_sub, compare_exchange
 pub static ATOMIC_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "load" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_atomic_load),
-    "store" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_atomic_store),
-    "fetch_add" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_atomic_fetch_add),
-    "fetch_sub" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_atomic_fetch_sub),
-    "compare_exchange" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_atomic_compare_exchange),
+    "load" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_atomic_load),
+    "store" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_atomic_store),
+    "fetch_add" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_atomic_fetch_add),
+    "fetch_sub" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_atomic_fetch_sub),
+    "compare_exchange" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_atomic_compare_exchange),
 };
 
 /// Lazy<T> methods: get, is_initialized
 pub static LAZY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "get" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_lazy_get),
-    "is_initialized" => MethodHandler::Legacy(crate::executor::objects::concurrency_methods::handle_lazy_is_initialized),
+    "get" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_lazy_get),
+    "is_initialized" => MethodHandler::Native(crate::executor::objects::concurrency_methods::v2_lazy_is_initialized),
 };
 
 /// Channel methods: send, recv, try_recv, close, is_closed, is_sender
 pub static CHANNEL_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "send" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_send),
-    "recv" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_recv),
-    "try_recv" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_try_recv),
-    "close" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_close),
-    "is_closed" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_is_closed),
-    "is_sender" => MethodHandler::Legacy(crate::executor::objects::channel_methods::handle_channel_is_sender),
+    "send" => MethodHandler::Native(crate::executor::objects::channel_methods::v2_channel_send),
+    "recv" => MethodHandler::Native(crate::executor::objects::channel_methods::v2_channel_recv),
+    "try_recv" => MethodHandler::Native(crate::executor::objects::channel_methods::v2_channel_try_recv),
+    "close" => MethodHandler::Native(crate::executor::objects::channel_methods::v2_channel_close),
+    "is_closed" => MethodHandler::Native(crate::executor::objects::channel_methods::v2_channel_is_closed),
+    "is_sender" => MethodHandler::Native(crate::executor::objects::channel_methods::v2_channel_is_sender),
 };
 
 /// PHF registry for Number/Int methods (simple numeric operations).
