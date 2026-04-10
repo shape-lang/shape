@@ -146,7 +146,7 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "clone" => MethodHandler::Native(crate::executor::objects::array_basic::handle_clone_v2),
 
     // Iterator — still Legacy (waiting for iterator agent)
-    "iter" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_array_iter),
+    "iter" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_array_iter),
 };
 
 /// PHF registry for DataTable methods (24 methods)
@@ -161,69 +161,69 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// - filter, orderBy, group_by, groupBy, aggregate, count, describe, forEach
 pub static DATATABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Core
-    "origin" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_origin),
-    "len" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_len),
-    "length" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_len),
-    "columns" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_columns),
-    "column" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_column),
-    "slice" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_slice),
-    "head" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_head),
-    "tail" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_tail),
-    "first" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_first),
-    "last" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_last),
-    "select" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_select),
-    "toMat" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_to_mat),
-    "to_mat" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_to_mat),
+    "origin" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_origin),
+    "len" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_len),
+    "length" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_len),
+    "columns" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_columns),
+    "column" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_column),
+    "slice" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_slice),
+    "head" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_head),
+    "tail" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_tail),
+    "first" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_first),
+    "last" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_last),
+    "select" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_select),
+    "toMat" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_to_mat),
+    "to_mat" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_to_mat),
 
     // Row/column iteration
-    "rows" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_rows),
-    "columnsRef" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_columns_ref),
+    "rows" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_rows),
+    "columnsRef" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_columns_ref),
 
     // Compute
-    "sum" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_sum),
-    "mean" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_mean),
-    "min" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_min),
-    "max" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_max),
-    "sort" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_sort),
+    "sum" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_sum),
+    "mean" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_mean),
+    "min" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_min),
+    "max" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_max),
+    "sort" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_sort),
 
     // Query (Phase 4)
-    "filter" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_filter),
-    "orderBy" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_order_by),
-    "group_by" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_group_by),
-    "groupBy" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_group_by),
-    "aggregate" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_aggregate),
-    "count" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_count),
-    "describe" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_describe),
-    "forEach" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_for_each),
-    "map" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_map),
-    "index_by" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_index_by),
-    "indexBy" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_index_by),
+    "filter" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_filter),
+    "orderBy" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_order_by),
+    "group_by" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_group_by),
+    "groupBy" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_group_by),
+    "aggregate" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_aggregate),
+    "count" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_count),
+    "describe" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_describe),
+    "forEach" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_for_each),
+    "map" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_map),
+    "index_by" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_index_by),
+    "indexBy" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_index_by),
 
     // Queryable interface (consistent with DbTable)
-    "limit" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_limit),
-    "execute" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_execute),
+    "limit" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_limit),
+    "execute" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_execute),
 
     // Joins
-    "innerJoin" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_inner_join),
-    "leftJoin" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_left_join),
+    "innerJoin" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_inner_join),
+    "leftJoin" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_left_join),
 
     // Simulation
-    "simulate" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_simulate),
+    "simulate" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_simulate),
 
     // SIMD-backed methods
-    "correlation" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_correlation),
-    "covariance" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_covariance),
-    "rolling_sum" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_rolling_sum),
-    "rollingSum" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_rolling_sum),
-    "rolling_mean" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_rolling_mean),
-    "rollingMean" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_rolling_mean),
-    "rolling_std" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_rolling_std),
-    "rollingStd" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_rolling_std),
-    "diff" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_diff),
-    "pct_change" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_pct_change),
-    "pctChange" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_pct_change),
-    "forward_fill" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_forward_fill),
-    "forwardFill" => MethodHandler::Legacy(crate::executor::objects::datatable_methods::handle_forward_fill),
+    "correlation" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_correlation),
+    "covariance" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_covariance),
+    "rolling_sum" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_rolling_sum),
+    "rollingSum" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_rolling_sum),
+    "rolling_mean" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_rolling_mean),
+    "rollingMean" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_rolling_mean),
+    "rolling_std" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_rolling_std),
+    "rollingStd" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_rolling_std),
+    "diff" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_diff),
+    "pct_change" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_pct_change),
+    "pctChange" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_pct_change),
+    "forward_fill" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_forward_fill),
+    "forwardFill" => MethodHandler::Native(crate::executor::objects::datatable_methods::handle_forward_fill),
 };
 
 /// PHF registry for Column methods (10 methods)
@@ -429,23 +429,23 @@ pub static INSTANT_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Terminal operations:** collect, toArray, forEach, reduce, count, any, all, find
 pub static ITERATOR_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Lazy transforms (return new Iterator)
-    "map" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_map),
-    "filter" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_filter),
-    "take" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_take),
-    "skip" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_skip),
-    "flatMap" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_flat_map),
-    "enumerate" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_enumerate),
-    "chain" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_chain),
+    "map" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_map),
+    "filter" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_filter),
+    "take" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_take),
+    "skip" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_skip),
+    "flatMap" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_flat_map),
+    "enumerate" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_enumerate),
+    "chain" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_chain),
 
     // Terminal operations (consume the iterator)
-    "collect" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_collect),
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_collect),
-    "forEach" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_for_each),
-    "reduce" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_reduce),
-    "count" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_count),
-    "any" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_any),
-    "all" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_all),
-    "find" => MethodHandler::Legacy(crate::executor::objects::iterator_methods::handle_find),
+    "collect" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_collect),
+    "toArray" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_collect),
+    "forEach" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_for_each),
+    "reduce" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_reduce),
+    "count" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_count),
+    "any" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_any),
+    "all" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_all),
+    "find" => MethodHandler::Native(crate::executor::objects::iterator_methods::handle_find),
 };
 
 /// PHF registry for Matrix methods (18 methods)
@@ -471,7 +471,7 @@ pub static MATRIX_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "flatten" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_flatten),
 
     // Higher-order — stays Legacy (closure-based)
-    "map" => MethodHandler::Legacy(crate::executor::objects::matrix_methods::handle_map),
+    "map" => MethodHandler::Native(crate::executor::objects::matrix_methods::handle_map),
 
     // Aggregation — MethodFnV2
     "sum" => MethodHandler::Native(crate::executor::objects::matrix_methods::v2_sum),
@@ -489,8 +489,8 @@ pub static MATRIX_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 ///
 /// **Query:** between, resample
 pub static INDEXED_TABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "between" => MethodHandler::Legacy(crate::executor::objects::indexed_table_methods::handle_between),
-    "resample" => MethodHandler::Legacy(crate::executor::objects::indexed_table_methods::handle_resample),
+    "between" => MethodHandler::Native(crate::executor::objects::indexed_table_methods::handle_between),
+    "resample" => MethodHandler::Native(crate::executor::objects::indexed_table_methods::handle_resample),
 };
 
 /// PHF registry for Vec<number> (FloatArray) methods
@@ -512,17 +512,17 @@ pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map!
     "len" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
     "length" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
     // Transforms — still Legacy (require VM callback invocation or produce arrays)
-    "normalize" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_normalize),
-    "cumsum" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_cumsum),
-    "diff" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_diff),
-    "abs" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_abs),
-    "sqrt" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_sqrt),
-    "ln" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_ln),
-    "exp" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_exp),
-    "map" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_map),
-    "filter" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_filter),
-    "forEach" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_for_each),
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_float_to_array),
+    "normalize" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_normalize),
+    "cumsum" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_cumsum),
+    "diff" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_diff),
+    "abs" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_abs),
+    "sqrt" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_sqrt),
+    "ln" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_ln),
+    "exp" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_exp),
+    "map" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_map),
+    "filter" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_filter),
+    "forEach" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_for_each),
+    "toArray" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_float_to_array),
 };
 
 /// PHF registry for Vec<int> (IntArray) methods
@@ -540,11 +540,11 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "len" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
     "length" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_len),
     // Transforms — still Legacy
-    "abs" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_abs),
-    "map" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_map),
-    "filter" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_filter),
-    "forEach" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_for_each),
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_int_to_array),
+    "abs" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_int_abs),
+    "map" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_int_map),
+    "filter" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_int_filter),
+    "forEach" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_int_for_each),
+    "toArray" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_int_to_array),
 };
 
 /// PHF registry for Vec<bool> (BoolArray) methods
@@ -559,7 +559,7 @@ pub static BOOL_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! 
     "any" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_bool_any),
     "all" => MethodHandler::Native(crate::executor::objects::typed_array_methods::v2_bool_all),
     // Still Legacy
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::typed_array_methods::handle_bool_to_array),
+    "toArray" => MethodHandler::Native(crate::executor::objects::typed_array_methods::handle_bool_to_array),
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

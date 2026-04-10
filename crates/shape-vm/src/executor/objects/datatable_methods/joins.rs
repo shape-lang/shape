@@ -3,6 +3,7 @@
 use crate::executor::VirtualMachine;
 use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
+use std::mem::ManuallyDrop;
 
 use super::common::{build_datatable_from_objects_nb, extract_dt_nb};
 
@@ -42,7 +43,17 @@ fn nb_join_keys_equal(a: &ValueWord, b: &ValueWord) -> bool {
 /// Key closures receive RowView and should return a comparable value (number or string).
 /// Result selector receives two RowView args (left, right) and should return an object.
 /// The result is a new DataTable built from the collected objects.
-pub(crate) fn handle_inner_join(
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
+}
+
+
+pub(crate) fn handle_inner_join_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -95,7 +106,7 @@ pub(crate) fn handle_inner_join(
 ///
 /// Like innerJoin, but includes all left rows. When no right match, result selector
 /// receives ValueWord::none() for the right argument.
-pub(crate) fn handle_left_join(
+pub(crate) fn handle_left_join_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -163,4 +174,24 @@ pub(crate) fn handle_left_join(
     }
 
     build_datatable_from_objects_nb(vm, &rows)
+}
+
+pub(crate) fn handle_inner_join(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_inner_join_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_left_join(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_left_join_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
 }

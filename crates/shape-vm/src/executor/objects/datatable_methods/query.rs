@@ -15,10 +15,21 @@ use super::common::{
     apply_comparison_nb, array_values_equal, build_datatable_from_objects_nb, cmp_nb_values,
     extract_array_value_nb, extract_dt_nb, is_callable_nb, wrap_result_table_nb,
 };
+use std::mem::ManuallyDrop;
 
 /// `dt.filter("col", "op", value)` — filter rows using Arrow compute kernels (string path).
 /// `dt.filter(row => bool)` — filter rows using closure (closure path).
-pub(crate) fn handle_filter(
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
+}
+
+
+pub(crate) fn handle_filter_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -88,7 +99,7 @@ pub(crate) fn handle_filter(
 
 /// `dt.orderBy("col", "asc"|"desc")` — sort by column with direction (string path).
 /// `dt.orderBy(row => row.field, "asc"|"desc")` — sort by closure key (closure path).
-pub(crate) fn handle_order_by(
+pub(crate) fn handle_order_by_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -188,7 +199,7 @@ pub(crate) fn handle_order_by(
 /// `dt.group_by(row => row.field)` — group rows by closure key (closure path).
 ///
 /// Returns Array of {key: value, group: DataTable} objects.
-pub(crate) fn handle_group_by(
+pub(crate) fn handle_group_by_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -346,7 +357,7 @@ pub(crate) fn handle_group_by(
 }
 
 /// `dt.forEach(fn)` — iterate rows as RowView values, calling closure for each.
-pub(crate) fn handle_for_each(
+pub(crate) fn handle_for_each_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -374,7 +385,7 @@ pub(crate) fn handle_for_each(
 }
 
 /// `dt.map(fn)` — transform each row via closure, producing a new DataTable.
-pub(crate) fn handle_map(
+pub(crate) fn handle_map_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -408,4 +419,54 @@ pub(crate) fn handle_map(
     }
 
     build_datatable_from_objects_nb(vm, &rows)
+}
+
+pub(crate) fn handle_filter(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_filter_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_order_by(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_order_by_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_group_by(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_group_by_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_for_each(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_for_each_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_map(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_map_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
 }

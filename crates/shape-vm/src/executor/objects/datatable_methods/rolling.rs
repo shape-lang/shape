@@ -8,9 +8,20 @@ use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
 
 use super::common::{append_f64_column, extract_dt_nb, wrap_result_table_nb};
+use std::mem::ManuallyDrop;
 
 /// `dt.correlation(col_a, col_b)` — Pearson correlation between two f64 columns.
-pub(crate) fn handle_correlation(
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
+}
+
+
+pub(crate) fn handle_correlation_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -51,7 +62,7 @@ pub(crate) fn handle_correlation(
 }
 
 /// `dt.covariance(col_a, col_b)` — covariance between two f64 columns.
-pub(crate) fn handle_covariance(
+pub(crate) fn handle_covariance_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -156,7 +167,7 @@ fn column_transform_op(
 }
 
 /// `dt.rolling_sum(col, window)` — rolling sum, result appended as new column.
-pub(crate) fn handle_rolling_sum(
+pub(crate) fn handle_rolling_sum_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -170,7 +181,7 @@ pub(crate) fn handle_rolling_sum(
 }
 
 /// `dt.rolling_mean(col, window)` — rolling mean, result appended as new column.
-pub(crate) fn handle_rolling_mean(
+pub(crate) fn handle_rolling_mean_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -184,7 +195,7 @@ pub(crate) fn handle_rolling_mean(
 }
 
 /// `dt.rolling_std(col, window)` — rolling standard deviation.
-pub(crate) fn handle_rolling_std(
+pub(crate) fn handle_rolling_std_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -198,7 +209,7 @@ pub(crate) fn handle_rolling_std(
 }
 
 /// `dt.diff(col)` — first difference, result appended as new column.
-pub(crate) fn handle_diff(
+pub(crate) fn handle_diff_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -212,7 +223,7 @@ pub(crate) fn handle_diff(
 }
 
 /// `dt.pct_change(col)` — percentage change, result appended as new column.
-pub(crate) fn handle_pct_change(
+pub(crate) fn handle_pct_change_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -226,7 +237,7 @@ pub(crate) fn handle_pct_change(
 }
 
 /// `dt.forward_fill(col)` — forward-fill NaN values in a column.
-pub(crate) fn handle_forward_fill(
+pub(crate) fn handle_forward_fill_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -264,4 +275,84 @@ pub(crate) fn handle_forward_fill(
 
     let new_dt = DataTable::new(new_batch);
     Ok(wrap_result_table_nb(&args[0], new_dt))
+}
+
+pub(crate) fn handle_correlation(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_correlation_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_covariance(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_covariance_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_rolling_sum(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_rolling_sum_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_rolling_mean(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_rolling_mean_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_rolling_std(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_rolling_std_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_diff(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_diff_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_pct_change(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_pct_change_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_forward_fill(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_forward_fill_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
 }

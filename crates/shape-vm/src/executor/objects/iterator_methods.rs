@@ -12,6 +12,7 @@ use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::{HeapValue, IteratorState, IteratorTransform};
 use shape_value::{HeapKind, NanTag, VMError, ValueWord};
 use std::sync::Arc;
+use std::mem::ManuallyDrop;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -387,7 +388,17 @@ fn collect_all(
 // ── Lazy transform methods (return new Iterator) ───────────────────────────
 
 /// Iterator.map(fn) -> Iterator
-pub fn handle_map(
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
+}
+
+
+pub fn handle_map_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -408,7 +419,7 @@ pub fn handle_map(
 }
 
 /// Iterator.filter(fn) -> Iterator
-pub fn handle_filter(
+pub fn handle_filter_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -429,7 +440,7 @@ pub fn handle_filter(
 }
 
 /// Iterator.take(n) -> Iterator
-pub fn handle_take(
+pub fn handle_take_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -448,7 +459,7 @@ pub fn handle_take(
 }
 
 /// Iterator.skip(n) -> Iterator
-pub fn handle_skip(
+pub fn handle_skip_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -467,7 +478,7 @@ pub fn handle_skip(
 }
 
 /// Iterator.flatMap(fn) -> Iterator
-pub fn handle_flat_map(
+pub fn handle_flat_map_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -491,7 +502,7 @@ pub fn handle_flat_map(
 /// Implemented by wrapping source into an array of [idx, val] pairs via map.
 /// Since we don't have a stateful index counter in the transform chain,
 /// we collect the source and re-wrap as an indexed array iterator.
-pub fn handle_enumerate(
+pub fn handle_enumerate_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -513,7 +524,7 @@ pub fn handle_enumerate(
 }
 
 /// Iterator.chain(other) -> Iterator that concatenates two iterators
-pub fn handle_chain(
+pub fn handle_chain_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -555,7 +566,7 @@ pub fn handle_chain(
 // ── Terminal operations (consume the iterator) ─────────────────────────────
 
 /// Iterator.collect() / Iterator.toArray() -> Array
-pub fn handle_collect(
+pub fn handle_collect_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -566,7 +577,7 @@ pub fn handle_collect(
 }
 
 /// Iterator.forEach(fn) -> none
-pub fn handle_for_each(
+pub fn handle_for_each_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -591,7 +602,7 @@ pub fn handle_for_each(
 }
 
 /// Iterator.reduce(fn, init) -> value
-pub fn handle_reduce(
+pub fn handle_reduce_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -618,7 +629,7 @@ pub fn handle_reduce(
 }
 
 /// Iterator.count() -> int
-pub fn handle_count(
+pub fn handle_count_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -629,7 +640,7 @@ pub fn handle_count(
 }
 
 /// Iterator.any(fn) -> bool (short-circuits on first truthy)
-pub fn handle_any(
+pub fn handle_any_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -661,7 +672,7 @@ pub fn handle_any(
 }
 
 /// Iterator.all(fn) -> bool (short-circuits on first falsy)
-pub fn handle_all(
+pub fn handle_all_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -693,7 +704,7 @@ pub fn handle_all(
 }
 
 /// Iterator.find(fn) -> value | none (short-circuits on first match)
-pub fn handle_find(
+pub fn handle_find_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -738,7 +749,7 @@ pub fn make_array_iterator(source: ValueWord) -> ValueWord {
 }
 
 /// Array.iter() -> Iterator
-pub fn handle_array_iter(
+pub fn handle_array_iter_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -753,7 +764,7 @@ pub fn handle_array_iter(
 }
 
 /// String.iter() -> Iterator over characters
-pub fn handle_string_iter(
+pub fn handle_string_iter_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -773,7 +784,7 @@ pub fn handle_string_iter(
 }
 
 /// Range.iter() -> Iterator over range values
-pub fn handle_range_iter(
+pub fn handle_range_iter_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -802,8 +813,7 @@ pub fn v2_range_iter(
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    use std::mem::ManuallyDrop;
-    let receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
+        let receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
     let owned = (*receiver).clone();
     let result = ValueWord::from_iterator(Box::new(IteratorState {
         source: owned,
@@ -815,7 +825,7 @@ pub fn v2_range_iter(
 }
 
 /// HashMap.iter() -> Iterator over [key, value] pairs
-pub fn handle_hashmap_iter(
+pub fn handle_hashmap_iter_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -832,4 +842,184 @@ pub fn handle_hashmap_iter(
         done: false,
     }));
     Ok(result)
+}
+
+pub(crate) fn handle_map(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_map_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_filter(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_filter_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_take(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_take_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_skip(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_skip_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_flat_map(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_flat_map_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_enumerate(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_enumerate_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_chain(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_chain_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_collect(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_collect_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_for_each(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_for_each_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_reduce(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_reduce_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_count(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_count_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_any(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_any_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_all(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_all_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_find(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_find_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_array_iter(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_array_iter_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_string_iter(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_string_iter_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_range_iter(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_range_iter_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_hashmap_iter(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_hashmap_iter_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
 }

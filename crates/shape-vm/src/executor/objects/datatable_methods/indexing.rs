@@ -6,6 +6,7 @@ use shape_value::{HeapKind, NanTag, VMError, ValueWord};
 use std::sync::Arc;
 
 use super::common::{extract_array_value_nb, extract_dt_nb, extract_schema_id_nb};
+use std::mem::ManuallyDrop;
 
 /// Check if a ValueWord value is callable.
 fn is_callable_nb(nb: &ValueWord) -> bool {
@@ -40,7 +41,17 @@ fn nb_values_equal(a: &ValueWord, b: &ValueWord) -> bool {
 /// `dt.index_by("col")` or `dt.index_by(t => t.col)` — designate an index column.
 ///
 /// Returns an IndexedTable for time-series operations like resample and between.
-pub(crate) fn handle_index_by(
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
+}
+
+
+pub(crate) fn handle_index_by_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -125,4 +136,14 @@ fn validate_index_column(dt: &Arc<DataTable>, col_id: u32) -> Result<(), VMError
             dtype
         ))),
     }
+}
+
+pub(crate) fn handle_index_by(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_index_by_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
 }

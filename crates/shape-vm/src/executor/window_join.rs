@@ -283,10 +283,10 @@ impl VirtualMachine {
         ];
 
         let result = match join_type_str.as_str() {
-            "inner" => crate::executor::objects::datatable_methods::handle_inner_join(
+            "inner" => crate::executor::objects::datatable_methods::handle_inner_join_legacy(
                 self, join_args, None,
             )?,
-            "left" => crate::executor::objects::datatable_methods::handle_left_join(
+            "left" => crate::executor::objects::datatable_methods::handle_left_join_legacy(
                 self, join_args, None,
             )?,
             "right" => {
@@ -297,13 +297,13 @@ impl VirtualMachine {
                     args_nb[3].clone(),
                     args_nb[5].clone(),
                 ];
-                crate::executor::objects::datatable_methods::handle_left_join(
+                crate::executor::objects::datatable_methods::handle_left_join_legacy(
                     self,
                     swapped_args,
                     None,
                 )?
             }
-            "full" => crate::executor::objects::datatable_methods::handle_left_join(
+            "full" => crate::executor::objects::datatable_methods::handle_left_join_legacy(
                 self, join_args, None,
             )?,
             _ => {

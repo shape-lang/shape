@@ -9,6 +9,7 @@ use std::sync::Arc;
 use super::common::{
     extract_dt_nb, extract_schema_id_nb, typed_object_entries_nb_vm, typed_object_to_hashmap_nb_vm,
 };
+use std::mem::ManuallyDrop;
 
 /// Check if a ValueWord value is callable (Function, ModuleFunction, Closure, HostClosure).
 fn is_callable_nb(nb: &ValueWord) -> bool {
@@ -29,7 +30,17 @@ fn is_callable_nb(nb: &ValueWord) -> bool {
 ///
 /// Handler result: if Object with "state" key -> extract state + optional "result"; else treat as new state.
 /// Returns: { final_state, results, elements_processed, completed }
-pub(crate) fn handle_simulate(
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+fn args_to_vw(args: &[u64]) -> Vec<ValueWord> {
+    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
+}
+
+
+pub(crate) fn handle_simulate_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -253,4 +264,14 @@ pub(crate) fn handle_simulate(
             heap_mask,
         },
     ))
+}
+
+pub(crate) fn handle_simulate(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_simulate_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
 }

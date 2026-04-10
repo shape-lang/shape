@@ -276,7 +276,7 @@ pub fn handle_float_norm(
     Ok(ValueWord::from_f64(sum_sq.sqrt()))
 }
 
-pub fn handle_float_normalize(
+pub fn handle_float_normalize_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -294,7 +294,7 @@ pub fn handle_float_normalize(
     )))
 }
 
-pub fn handle_float_cumsum(
+pub fn handle_float_cumsum_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -309,7 +309,7 @@ pub fn handle_float_cumsum(
     Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
-pub fn handle_float_diff(
+pub fn handle_float_diff_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -327,7 +327,7 @@ pub fn handle_float_diff(
     Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
-pub fn handle_float_abs(
+pub fn handle_float_abs_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -340,7 +340,7 @@ pub fn handle_float_abs(
     Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
-pub fn handle_int_abs(
+pub fn handle_int_abs_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -350,7 +350,7 @@ pub fn handle_int_abs(
     Ok(ValueWord::from_int_array(Arc::new(result.into())))
 }
 
-pub fn handle_float_sqrt(
+pub fn handle_float_sqrt_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -363,7 +363,7 @@ pub fn handle_float_sqrt(
     Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
-pub fn handle_float_ln(
+pub fn handle_float_ln_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -376,7 +376,7 @@ pub fn handle_float_ln(
     Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
-pub fn handle_float_exp(
+pub fn handle_float_exp_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -409,7 +409,7 @@ pub fn handle_int_len(
     Ok(ValueWord::from_i64(len as i64))
 }
 
-pub fn handle_float_to_array(
+pub fn handle_float_to_array_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -420,7 +420,7 @@ pub fn handle_float_to_array(
     Ok(ValueWord::from_array(generic))
 }
 
-pub fn handle_int_to_array(
+pub fn handle_int_to_array_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -431,7 +431,7 @@ pub fn handle_int_to_array(
     Ok(ValueWord::from_array(generic))
 }
 
-pub fn handle_float_map(
+pub fn handle_float_map_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -465,7 +465,7 @@ pub fn handle_float_map(
     }
 }
 
-pub fn handle_int_map(
+pub fn handle_int_map_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -496,7 +496,7 @@ pub fn handle_int_map(
     }
 }
 
-pub fn handle_float_filter(
+pub fn handle_float_filter_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -522,7 +522,7 @@ pub fn handle_float_filter(
     Ok(ValueWord::from_float_array(Arc::new(result.into())))
 }
 
-pub fn handle_int_filter(
+pub fn handle_int_filter_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -548,7 +548,7 @@ pub fn handle_int_filter(
     Ok(ValueWord::from_int_array(Arc::new(result.into())))
 }
 
-pub fn handle_float_for_each(
+pub fn handle_float_for_each_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -565,7 +565,7 @@ pub fn handle_float_for_each(
     Ok(ValueWord::none())
 }
 
-pub fn handle_int_for_each(
+pub fn handle_int_for_each_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     mut ctx: Option<&mut ExecutionContext>,
@@ -593,7 +593,7 @@ pub fn handle_bool_len(
     Ok(ValueWord::from_i64(len as i64))
 }
 
-pub fn handle_bool_to_array(
+pub fn handle_bool_to_array_legacy(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -657,6 +657,10 @@ use std::mem::ManuallyDrop;
 #[inline]
 fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+fn args_to_vw(args: &[u64]) -> Vec<shape_value::ValueWord> {
+    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
 /// Helper: interpret `args[0]` as a raw pointer and try to build a
@@ -1060,4 +1064,174 @@ pub fn v2_bool_all(
         got: vw.type_name(),
     })?;
     Ok(ValueWord::from_bool(arr.iter().all(|&v| v != 0)).raw_bits())
+}
+
+pub(crate) fn handle_float_normalize(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_normalize_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_cumsum(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_cumsum_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_diff(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_diff_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_abs(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_abs_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_sqrt(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_sqrt_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_ln(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_ln_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_exp(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_exp_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_map(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_map_legacy(vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_filter(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_filter_legacy(vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_for_each(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_for_each_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_float_to_array(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_float_to_array_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_int_abs(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_int_abs_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_int_map(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_int_map_legacy(vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_int_filter(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_int_filter_legacy(vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_int_for_each(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_int_for_each_legacy(vm, vw_args, ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_int_to_array(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_int_to_array_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
+}
+
+pub(crate) fn handle_bool_to_array(
+    _vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_bool_to_array_legacy(_vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
 }

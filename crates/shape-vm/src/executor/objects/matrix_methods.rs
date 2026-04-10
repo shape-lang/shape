@@ -10,8 +10,8 @@ use shape_value::aligned_vec::AlignedVec;
 use shape_value::heap_value::MatrixData;
 use shape_value::typed_buffer::AlignedTypedBuffer;
 use shape_value::{VMError, ValueWord};
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
+use std::mem::ManuallyDrop;
 
 /// Borrow a `ValueWord` from a raw u64 without taking ownership.
 ///
@@ -22,6 +22,10 @@ use std::sync::Arc;
 #[inline]
 fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+fn args_to_vw(args: &[u64]) -> Vec<shape_value::ValueWord> {
+    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
 fn extract_matrix_vw(vw: &ManuallyDrop<ValueWord>) -> Result<&MatrixData, VMError> {
@@ -245,7 +249,7 @@ pub fn handle_flatten(
 }
 
 /// mat.map(fn) -> Matrix
-pub fn handle_map(
+pub fn handle_map_legacy(
     vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
@@ -677,4 +681,14 @@ pub fn v2_col_sum(
         result.push(sum);
     }
     Ok(ValueWord::from_float_array(Arc::new(AlignedTypedBuffer::from_aligned(result))).into_raw_bits())
+}
+
+pub(crate) fn handle_map(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let vw_args = args_to_vw(args);
+    let result = handle_map_legacy(vm, vw_args, _ctx)?;
+    Ok(result.into_raw_bits())
 }
