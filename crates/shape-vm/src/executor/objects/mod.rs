@@ -43,6 +43,9 @@ pub mod deque_methods;
 pub mod priority_queue_methods;
 pub mod set_methods;
 
+// Number method handlers (V2 native)
+pub mod number_methods;
+
 // String method handlers
 pub mod string_methods;
 
@@ -296,8 +299,14 @@ impl VirtualMachine {
 
         match receiver_nb.tag() {
             NanTag::I48 | NanTag::F64 => {
-                let result = self.handle_number_method(&method_name, args_nb)?;
-                self.push_vw(result)?;
+                if let Some(handler) =
+                    method_registry::NUMBER_METHODS.get(method_name.as_str())
+                {
+                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                } else {
+                    let result = self.handle_number_method(&method_name, args_nb)?;
+                    self.push_vw(result)?;
+                }
             }
             NanTag::Bool => {
                 let result = self.handle_bool_method(&method_name, args_nb)?;
@@ -339,8 +348,14 @@ impl VirtualMachine {
                     }
                 }
                 HeapKind::Decimal => {
-                    let result = self.handle_number_method(&method_name, args_nb)?;
-                    self.push_vw(result)?;
+                    if let Some(handler) =
+                        method_registry::NUMBER_METHODS.get(method_name.as_str())
+                    {
+                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    } else {
+                        let result = self.handle_number_method(&method_name, args_nb)?;
+                        self.push_vw(result)?;
+                    }
                 }
                 HeapKind::DataTable | HeapKind::TypedTable => {
                     let handler = method_registry::DATATABLE_METHODS
@@ -801,6 +816,96 @@ impl VirtualMachine {
                     ))
                 }
             }
+            "avg" | "mean" => {
+                if let Some(val) = v2::avg_elements(view) {
+                    self.push_vw(val)?;
+                    Ok(true)
+                } else {
+                    Err(VMError::RuntimeError(
+                        "avg() not supported on bool typed array".to_string(),
+                    ))
+                }
+            }
+            "min" => {
+                if let Some(val) = v2::min_elements(view) {
+                    self.push_vw(val)?;
+                    Ok(true)
+                } else {
+                    Err(VMError::RuntimeError(
+                        "min() not supported on bool typed array".to_string(),
+                    ))
+                }
+            }
+            "max" => {
+                if let Some(val) = v2::max_elements(view) {
+                    self.push_vw(val)?;
+                    Ok(true)
+                } else {
+                    Err(VMError::RuntimeError(
+                        "max() not supported on bool typed array".to_string(),
+                    ))
+                }
+            }
+            "variance" => {
+                if let Some(val) = v2::variance_elements(view) {
+                    self.push_vw(val)?;
+                    Ok(true)
+                } else {
+                    Err(VMError::RuntimeError(
+                        "variance() only supported on float typed arrays".to_string(),
+                    ))
+                }
+            }
+            "std" => {
+                if let Some(val) = v2::std_elements(view) {
+                    self.push_vw(val)?;
+                    Ok(true)
+                } else {
+                    Err(VMError::RuntimeError(
+                        "std() only supported on float typed arrays".to_string(),
+                    ))
+                }
+            }
+            "dot" => {
+                if args.len() < 2 {
+                    return Err(VMError::RuntimeError(
+                        "dot() requires a Vec<number> argument".to_string(),
+                    ));
+                }
+                let view_b = v2::as_v2_typed_array(&args[1]);
+                if let Some(vb) = &view_b {
+                    if view.len != vb.len {
+                        return Err(VMError::RuntimeError(format!(
+                            "Vec length mismatch in dot(): {} vs {}",
+                            view.len, vb.len
+                        )));
+                    }
+                    if let Some(val) = v2::dot_elements(view, vb) {
+                        self.push_vw(val)?;
+                        return Ok(true);
+                    }
+                }
+                // Fall through to legacy path
+                Ok(false)
+            }
+            "norm" => {
+                if let Some(val) = v2::norm_elements(view) {
+                    self.push_vw(val)?;
+                    Ok(true)
+                } else {
+                    Err(VMError::RuntimeError(
+                        "norm() only supported on float typed arrays".to_string(),
+                    ))
+                }
+            }
+            "count" => {
+                if let Some(val) = v2::count_true_elements(view) {
+                    self.push_vw(val)?;
+                    Ok(true)
+                } else {
+                    Ok(false) // fall through for non-bool
+                }
+            }
             "clone" => {
                 let new_ptr = v2::clone_array(view);
                 self.push_vw(ValueWord::from_native_ptr(new_ptr as usize))?;
@@ -995,7 +1100,13 @@ impl VirtualMachine {
         )))
     }
 
-    /// Handle Number/Int methods (toFixed, toString, etc.)
+    /// Handle Number/Int methods that remain on the legacy (Vec<ValueWord>) path.
+    ///
+    /// Simple numeric methods (floor, ceil, round, abs, sign, toInt, toNumber,
+    /// isNaN, isFinite) have been migrated to `MethodFnV2` in
+    /// `number_methods.rs` and dispatched via the `NUMBER_METHODS` PHF map.
+    /// This function handles the remaining methods that need Vec args or
+    /// produce heap-allocated results (strings).
     fn handle_number_method(
         &mut self,
         method: &str,
@@ -1050,56 +1161,6 @@ impl VirtualMachine {
                     ValueWord::from_string(Arc::new((number as i64).to_string()))
                 } else {
                     ValueWord::from_string(Arc::new(number.to_string()))
-                }
-            }
-            "toInt" | "to_int" => ValueWord::from_i64(number as i64),
-            "toNumber" | "to_number" => ValueWord::from_f64(number),
-            "floor" => {
-                if is_int {
-                    ValueWord::from_i64(number as i64)
-                } else {
-                    ValueWord::from_f64(number.floor())
-                }
-            }
-            "ceil" => {
-                if is_int {
-                    ValueWord::from_i64(number as i64)
-                } else {
-                    ValueWord::from_f64(number.ceil())
-                }
-            }
-            "round" => {
-                if is_int {
-                    ValueWord::from_i64(number as i64)
-                } else {
-                    ValueWord::from_f64(number.round())
-                }
-            }
-            "abs" => {
-                if is_int {
-                    ValueWord::from_i64((number as i64).abs())
-                } else {
-                    ValueWord::from_f64(number.abs())
-                }
-            }
-            "sign" => {
-                if is_int {
-                    let i = number as i64;
-                    ValueWord::from_i64(if i > 0 {
-                        1
-                    } else if i < 0 {
-                        -1
-                    } else {
-                        0
-                    })
-                } else {
-                    ValueWord::from_f64(if number > 0.0 {
-                        1.0
-                    } else if number < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    })
                 }
             }
             "clamp" => {

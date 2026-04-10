@@ -294,6 +294,300 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
     }
 }
 
+/// Compute the average (mean) of all elements of a numeric v2 typed array.
+/// Returns NaN for empty arrays.
+pub fn avg_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    if view.len == 0 {
+        return match view.elem_type {
+            V2ElemType::F64 | V2ElemType::I64 | V2ElemType::I32 => {
+                Some(ValueWord::from_f64(f64::NAN))
+            }
+            V2ElemType::Bool => None,
+        };
+    }
+    match view.elem_type {
+        V2ElemType::F64 => {
+            let mut s = 0.0_f64;
+            for i in 0..view.len {
+                s += unsafe {
+                    let arr = view.ptr as *const TypedArray<f64>;
+                    TypedArray::<f64>::get_unchecked(arr, i)
+                };
+            }
+            Some(ValueWord::from_f64(s / view.len as f64))
+        }
+        V2ElemType::I64 => {
+            let mut s = 0.0_f64;
+            for i in 0..view.len {
+                s += unsafe {
+                    let arr = view.ptr as *const TypedArray<i64>;
+                    TypedArray::<i64>::get_unchecked(arr, i) as f64
+                };
+            }
+            Some(ValueWord::from_f64(s / view.len as f64))
+        }
+        V2ElemType::I32 => {
+            let mut s = 0.0_f64;
+            for i in 0..view.len {
+                s += unsafe {
+                    let arr = view.ptr as *const TypedArray<i32>;
+                    TypedArray::<i32>::get_unchecked(arr, i) as f64
+                };
+            }
+            Some(ValueWord::from_f64(s / view.len as f64))
+        }
+        V2ElemType::Bool => None,
+    }
+}
+
+/// Compute the minimum element of a numeric v2 typed array.
+pub fn min_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    if view.len == 0 {
+        return match view.elem_type {
+            V2ElemType::F64 => Some(ValueWord::from_f64(f64::NAN)),
+            V2ElemType::I64 | V2ElemType::I32 => Some(ValueWord::none()),
+            V2ElemType::Bool => None,
+        };
+    }
+    match view.elem_type {
+        V2ElemType::F64 => {
+            let mut min = f64::INFINITY;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<f64>;
+                    TypedArray::<f64>::get_unchecked(arr, i)
+                };
+                if v < min {
+                    min = v;
+                }
+            }
+            Some(ValueWord::from_f64(min))
+        }
+        V2ElemType::I64 => {
+            let mut min = i64::MAX;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<i64>;
+                    TypedArray::<i64>::get_unchecked(arr, i)
+                };
+                if v < min {
+                    min = v;
+                }
+            }
+            Some(ValueWord::from_i64(min))
+        }
+        V2ElemType::I32 => {
+            let mut min = i32::MAX as i64;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<i32>;
+                    TypedArray::<i32>::get_unchecked(arr, i) as i64
+                };
+                if v < min {
+                    min = v;
+                }
+            }
+            Some(ValueWord::from_i64(min))
+        }
+        V2ElemType::Bool => None,
+    }
+}
+
+/// Compute the maximum element of a numeric v2 typed array.
+pub fn max_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    if view.len == 0 {
+        return match view.elem_type {
+            V2ElemType::F64 => Some(ValueWord::from_f64(f64::NAN)),
+            V2ElemType::I64 | V2ElemType::I32 => Some(ValueWord::none()),
+            V2ElemType::Bool => None,
+        };
+    }
+    match view.elem_type {
+        V2ElemType::F64 => {
+            let mut max = f64::NEG_INFINITY;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<f64>;
+                    TypedArray::<f64>::get_unchecked(arr, i)
+                };
+                if v > max {
+                    max = v;
+                }
+            }
+            Some(ValueWord::from_f64(max))
+        }
+        V2ElemType::I64 => {
+            let mut max = i64::MIN;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<i64>;
+                    TypedArray::<i64>::get_unchecked(arr, i)
+                };
+                if v > max {
+                    max = v;
+                }
+            }
+            Some(ValueWord::from_i64(max))
+        }
+        V2ElemType::I32 => {
+            let mut max = i32::MIN as i64;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<i32>;
+                    TypedArray::<i32>::get_unchecked(arr, i) as i64
+                };
+                if v > max {
+                    max = v;
+                }
+            }
+            Some(ValueWord::from_i64(max))
+        }
+        V2ElemType::Bool => None,
+    }
+}
+
+/// Compute the sample variance of a float v2 typed array.
+/// Returns NaN for arrays with fewer than 2 elements.
+pub fn variance_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    match view.elem_type {
+        V2ElemType::F64 => {
+            if view.len < 2 {
+                return Some(ValueWord::from_f64(f64::NAN));
+            }
+            let n = view.len as f64;
+            let mut sum = 0.0_f64;
+            for i in 0..view.len {
+                sum += unsafe {
+                    let arr = view.ptr as *const TypedArray<f64>;
+                    TypedArray::<f64>::get_unchecked(arr, i)
+                };
+            }
+            let mean = sum / n;
+            let mut var_sum = 0.0_f64;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<f64>;
+                    TypedArray::<f64>::get_unchecked(arr, i)
+                };
+                let d = v - mean;
+                var_sum += d * d;
+            }
+            Some(ValueWord::from_f64(var_sum / (n - 1.0)))
+        }
+        _ => None,
+    }
+}
+
+/// Compute the sample standard deviation of a float v2 typed array.
+pub fn std_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    variance_elements(view).map(|vw| {
+        let v = vw.as_f64().unwrap_or(f64::NAN);
+        ValueWord::from_f64(v.sqrt())
+    })
+}
+
+/// Compute the dot product of two float v2 typed arrays.
+pub fn dot_elements(
+    view_a: &V2TypedArrayView,
+    view_b: &V2TypedArrayView,
+) -> Option<ValueWord> {
+    if view_a.elem_type != V2ElemType::F64 || view_b.elem_type != V2ElemType::F64 {
+        return None;
+    }
+    if view_a.len != view_b.len {
+        return None; // caller should produce an error
+    }
+    let mut sum = 0.0_f64;
+    for i in 0..view_a.len {
+        let a = unsafe {
+            let arr = view_a.ptr as *const TypedArray<f64>;
+            TypedArray::<f64>::get_unchecked(arr, i)
+        };
+        let b = unsafe {
+            let arr = view_b.ptr as *const TypedArray<f64>;
+            TypedArray::<f64>::get_unchecked(arr, i)
+        };
+        sum += a * b;
+    }
+    Some(ValueWord::from_f64(sum))
+}
+
+/// Compute the Euclidean norm of a float v2 typed array.
+pub fn norm_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    match view.elem_type {
+        V2ElemType::F64 => {
+            let mut sum_sq = 0.0_f64;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<f64>;
+                    TypedArray::<f64>::get_unchecked(arr, i)
+                };
+                sum_sq += v * v;
+            }
+            Some(ValueWord::from_f64(sum_sq.sqrt()))
+        }
+        _ => None,
+    }
+}
+
+/// Count `true` values in a bool v2 typed array.
+pub fn count_true_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    match view.elem_type {
+        V2ElemType::Bool => {
+            let mut count = 0_i64;
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<u8>;
+                    TypedArray::<u8>::get_unchecked(arr, i)
+                };
+                if v != 0 {
+                    count += 1;
+                }
+            }
+            Some(ValueWord::from_i64(count))
+        }
+        _ => None,
+    }
+}
+
+/// Check if any element in a bool v2 typed array is true.
+pub fn any_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    match view.elem_type {
+        V2ElemType::Bool => {
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<u8>;
+                    TypedArray::<u8>::get_unchecked(arr, i)
+                };
+                if v != 0 {
+                    return Some(ValueWord::from_bool(true));
+                }
+            }
+            Some(ValueWord::from_bool(false))
+        }
+        _ => None,
+    }
+}
+
+/// Check if all elements in a bool v2 typed array are true.
+pub fn all_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
+    match view.elem_type {
+        V2ElemType::Bool => {
+            for i in 0..view.len {
+                let v = unsafe {
+                    let arr = view.ptr as *const TypedArray<u8>;
+                    TypedArray::<u8>::get_unchecked(arr, i)
+                };
+                if v == 0 {
+                    return Some(ValueWord::from_bool(false));
+                }
+            }
+            Some(ValueWord::from_bool(true))
+        }
+        _ => None,
+    }
+}
+
 /// Allocate a fresh v2 typed array, copy all elements from `view`, stamp
 /// elem_type, and return its raw pointer.
 pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {

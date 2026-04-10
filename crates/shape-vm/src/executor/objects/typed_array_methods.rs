@@ -640,3 +640,424 @@ pub fn handle_bool_all(
     })?;
     Ok(ValueWord::from_bool(arr.iter().all(|&v| v != 0)))
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MethodFnV2 wrappers — raw u64 in/out, zero Vec allocation
+// ═════════════════════════════════════════════════════════════════════════════
+
+use crate::executor::v2_handlers::v2_array_detect as v2;
+use std::mem::ManuallyDrop;
+
+/// Borrow a `ValueWord` from raw `u64` bits **without** taking ownership.
+///
+/// `dispatch_method_handler` already owns the `Vec<ValueWord>` that backs
+/// these bits. Constructing a second `ValueWord` via `from_raw_bits` would
+/// create a duplicate owner of the same `Arc<HeapValue>`, leading to a
+/// double-free on drop. `ManuallyDrop` suppresses the extra drop.
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
+/// Helper: interpret `args[0]` as a raw pointer and try to build a
+/// `V2TypedArrayView`. Falls back to the v1 `ValueWord` path when the
+/// receiver is not a v2 typed array (e.g. it's a NaN-boxed Arc-backed
+/// FloatArray/IntArray). The caller must handle `None` by re-dispatching
+/// through the legacy handler.
+#[inline]
+fn try_v2_view(args: &[u64]) -> Option<v2::V2TypedArrayView> {
+    let vw = borrow_vw(args[0]);
+    v2::as_v2_typed_array(&vw)
+}
+
+/// v2 len: works for all element types (float, int, bool).
+pub fn v2_len(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        return Ok(ValueWord::from_i64(view.len as i64).raw_bits());
+    }
+    // Fall back to v1 path
+    let vw = borrow_vw(args[0]);
+    let len = vw.typed_array_len().unwrap_or(0);
+    Ok(ValueWord::from_i64(len as i64).raw_bits())
+}
+
+/// v2 sum for float arrays.
+pub fn v2_float_sum(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::sum_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    // Fall back to v1 path
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let sum = float_array_sum(arr);
+    Ok(ValueWord::from_f64(sum).raw_bits())
+}
+
+/// v2 sum for int arrays.
+pub fn v2_int_sum(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::sum_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    // Fall back to v1 path
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<int>",
+        got: vw.type_name(),
+    })?;
+    let mut sum = 0i64;
+    for &v in arr.iter() {
+        sum = sum
+            .checked_add(v)
+            .ok_or_else(|| VMError::RuntimeError("Integer overflow in Vec<int>.sum()".into()))?;
+    }
+    Ok(ValueWord::from_i64(sum).raw_bits())
+}
+
+/// v2 avg/mean for float arrays.
+pub fn v2_float_avg(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::avg_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    if arr.is_empty() {
+        return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
+    }
+    let sum = float_array_sum(arr);
+    Ok(ValueWord::from_f64(sum / arr.len() as f64).raw_bits())
+}
+
+/// v2 avg/mean for int arrays.
+pub fn v2_int_avg(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::avg_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<int>",
+        got: vw.type_name(),
+    })?;
+    if arr.is_empty() {
+        return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
+    }
+    let sum: f64 = arr.iter().map(|&v| v as f64).sum();
+    Ok(ValueWord::from_f64(sum / arr.len() as f64).raw_bits())
+}
+
+/// v2 min for float arrays.
+pub fn v2_float_min(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::min_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    if arr.is_empty() {
+        return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
+    }
+    let mut min = f64::INFINITY;
+    for &v in arr.iter() {
+        if v < min {
+            min = v;
+        }
+    }
+    Ok(ValueWord::from_f64(min).raw_bits())
+}
+
+/// v2 min for int arrays.
+pub fn v2_int_min(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::min_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<int>",
+        got: vw.type_name(),
+    })?;
+    if arr.is_empty() {
+        return Ok(ValueWord::none().raw_bits());
+    }
+    let min = *arr.iter().min().unwrap();
+    Ok(ValueWord::from_i64(min).raw_bits())
+}
+
+/// v2 max for float arrays.
+pub fn v2_float_max(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::max_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    if arr.is_empty() {
+        return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
+    }
+    let mut max = f64::NEG_INFINITY;
+    for &v in arr.iter() {
+        if v > max {
+            max = v;
+        }
+    }
+    Ok(ValueWord::from_f64(max).raw_bits())
+}
+
+/// v2 max for int arrays.
+pub fn v2_int_max(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::max_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<int>",
+        got: vw.type_name(),
+    })?;
+    if arr.is_empty() {
+        return Ok(ValueWord::none().raw_bits());
+    }
+    let max = *arr.iter().max().unwrap();
+    Ok(ValueWord::from_i64(max).raw_bits())
+}
+
+/// v2 variance for float arrays.
+pub fn v2_float_variance(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::variance_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let variance = float_array_variance(arr);
+    Ok(ValueWord::from_f64(variance).raw_bits())
+}
+
+/// v2 std (standard deviation) for float arrays.
+pub fn v2_float_std(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::std_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let variance = float_array_variance(arr);
+    Ok(ValueWord::from_f64(variance.sqrt()).raw_bits())
+}
+
+/// v2 dot product for float arrays.
+pub fn v2_float_dot(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    // Try v2 path: both receiver and argument must be v2 typed arrays
+    let view_a = try_v2_view(args);
+    let view_b = if args.len() > 1 {
+        let vw_b = borrow_vw(args[1]);
+        v2::as_v2_typed_array(&vw_b)
+    } else {
+        None
+    };
+    if let (Some(va), Some(vb)) = (&view_a, &view_b) {
+        if va.len != vb.len {
+            return Err(VMError::RuntimeError(format!(
+                "Vec length mismatch in dot(): {} vs {}",
+                va.len, vb.len
+            )));
+        }
+        if let Some(result) = v2::dot_elements(va, vb) {
+            return Ok(result.raw_bits());
+        }
+    }
+    // Fall back to v1 path — use ManuallyDrop to avoid double-free
+    let vw0 = borrow_vw(args[0]);
+    let a = vw0.as_float_array().ok_or_else(|| VMError::RuntimeError("dot() requires a Vec<number> receiver".into()))?;
+    let vw1 = if args.len() > 1 { Some(borrow_vw(args[1])) } else { None };
+    let b = vw1
+        .as_ref()
+        .and_then(|nb| nb.as_float_array())
+        .ok_or_else(|| VMError::RuntimeError("dot() requires a Vec<number> argument".into()))?;
+    if a.len() != b.len() {
+        return Err(VMError::RuntimeError(format!(
+            "Vec length mismatch in dot(): {} vs {}",
+            a.len(),
+            b.len()
+        )));
+    }
+    let mut sum = 0.0f64;
+    let len = a.len();
+    if len >= SIMD_THRESHOLD {
+        let mut acc = f64x4::splat(0.0);
+        let chunks = len / 4;
+        for i in 0..chunks {
+            let idx = i * 4;
+            let va = f64x4::from(&a[idx..idx + 4]);
+            let vb = f64x4::from(&b[idx..idx + 4]);
+            acc += va * vb;
+        }
+        let parts = acc.to_array();
+        sum = parts[0] + parts[1] + parts[2] + parts[3];
+        for i in (chunks * 4)..len {
+            sum += a[i] * b[i];
+        }
+    } else {
+        for i in 0..len {
+            sum += a[i] * b[i];
+        }
+    }
+    Ok(ValueWord::from_f64(sum).raw_bits())
+}
+
+/// v2 norm for float arrays.
+pub fn v2_float_norm(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::norm_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let sum_sq: f64 = arr.iter().map(|&v| v * v).sum();
+    Ok(ValueWord::from_f64(sum_sq.sqrt()).raw_bits())
+}
+
+/// v2 bool count (count of true values).
+pub fn v2_bool_count(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::count_true_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_bool_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<bool>",
+        got: vw.type_name(),
+    })?;
+    let count = arr.iter().filter(|&&v| v != 0).count();
+    Ok(ValueWord::from_i64(count as i64).raw_bits())
+}
+
+/// v2 bool any.
+pub fn v2_bool_any(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::any_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_bool_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<bool>",
+        got: vw.type_name(),
+    })?;
+    Ok(ValueWord::from_bool(arr.iter().any(|&v| v != 0)).raw_bits())
+}
+
+/// v2 bool all.
+pub fn v2_bool_all(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if let Some(view) = try_v2_view(args) {
+        if let Some(result) = v2::all_elements(&view) {
+            return Ok(result.raw_bits());
+        }
+    }
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_bool_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<bool>",
+        got: vw.type_name(),
+    })?;
+    Ok(ValueWord::from_bool(arr.iter().all(|&v| v != 0)).raw_bits())
+}
