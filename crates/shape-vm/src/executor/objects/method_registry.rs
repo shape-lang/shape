@@ -251,23 +251,25 @@ pub static COLUMN_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Higher-order:** map, filter, forEach, reduce, groupBy
 /// **Convenience:** merge, getOrDefault, toArray
 pub static HASHMAP_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "get" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_get),
-    "set" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_set),
-    "has" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_has),
-    "delete" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_delete),
-    "keys" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_keys),
-    "values" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_values),
-    "entries" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_entries),
-    "len" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_len),
-    "length" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_len),
-    "isEmpty" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_is_empty),
+    // Non-closure methods — MethodFnV2
+    "get" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_get),
+    "set" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_set),
+    "has" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_has),
+    "delete" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_delete),
+    "keys" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_keys),
+    "values" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_values),
+    "entries" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_entries),
+    "len" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_len),
+    "length" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_len),
+    "isEmpty" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_is_empty),
+    "merge" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_merge),
+    "getOrDefault" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_get_or_default),
+    "toArray" => MethodHandler::Native(crate::executor::objects::hashmap_methods::v2_to_array),
+    // Closure-based — stay Legacy
     "map" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_map),
     "filter" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_filter),
     "forEach" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_for_each),
-    "merge" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_merge),
-    "getOrDefault" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_get_or_default),
     "reduce" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_reduce),
-    "toArray" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_to_array),
     "groupBy" => MethodHandler::Legacy(crate::executor::objects::hashmap_methods::handle_group_by),
 
     // Iterator

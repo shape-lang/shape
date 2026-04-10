@@ -558,6 +558,370 @@ pub fn handle_group_by(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MethodFnV2 wrappers — raw u64 in/out, zero Vec allocation
+// ═══════════════════════════════════════════════════════════════════════════
+
+use std::mem::ManuallyDrop;
+
+/// Borrow a ValueWord from raw u64 bits without taking ownership.
+///
+/// The returned `ManuallyDrop<ValueWord>` can be dereferenced to call any
+/// `&self` method on ValueWord, but its Drop impl will never run, avoiding
+/// double-free of the underlying Arc for heap-tagged values.
+#[inline]
+fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(unsafe { ValueWord::from_raw_bits(raw) })
+}
+
+/// Reconstruct an owned ValueWord from raw bits by cloning through a borrow.
+///
+/// This increments the Arc refcount so the caller gets an independently-owned
+/// value. Used by mutating methods (set, delete, merge) that need `&mut self`.
+#[inline]
+fn own_vw(raw: u64) -> ValueWord {
+    (*borrow_vw(raw)).clone()
+}
+
+/// HashMap.get(key) -> value | none
+pub fn v2_get(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let key = borrow_vw(args[1]);
+
+    if let Some(data) = receiver.as_hashmap_data() {
+        // Shape-guarded fast path for string keys
+        if let Some(ks) = key.as_str() {
+            if let Some(val) = data.shape_get(ks) {
+                return Ok(val.clone().into_raw_bits());
+            }
+        }
+        // Fallback: hash-based lookup
+        let hash = key.vw_hash();
+        let result = if let Some(bucket) = data.index.get(&hash) {
+            bucket_find(&data.keys, bucket, &key)
+                .map(|idx| data.values[idx].clone())
+                .unwrap_or_else(ValueWord::none)
+        } else {
+            ValueWord::none()
+        };
+        Ok(result.into_raw_bits())
+    } else {
+        Err(type_mismatch_error("get", "HashMap"))
+    }
+}
+
+/// HashMap.set(key, value) -> HashMap (returns new or mutated HashMap)
+pub fn v2_set(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let key = own_vw(args[1]);
+    let value = own_vw(args[2]);
+
+    // Try mutable fast-path via an owned clone.
+    let mut receiver = own_vw(args[0]);
+    if let Some(data) = receiver.as_hashmap_mut() {
+        let hash = key.vw_hash();
+        if let Some(bucket) = data.index.get(&hash) {
+            if let Some(idx) = bucket_find(&data.keys, bucket, &key) {
+                record_heap_write();
+                write_barrier_vw(&data.keys[idx], &key);
+                write_barrier_vw(&data.values[idx], &value);
+                data.keys[idx] = key;
+                data.values[idx] = value;
+                return Ok(receiver.into_raw_bits());
+            }
+        }
+        // New key: transition shape if string key, else drop to dictionary mode
+        if let Some(shape_id) = data.shape_id {
+            if let Some(ks) = key.as_str() {
+                let prop_hash = shape_value::hash_property_name(ks);
+                data.shape_id = shape_value::shape_transition(shape_id, prop_hash);
+            } else {
+                data.shape_id = None;
+            }
+        }
+        let idx = data.keys.len();
+        data.keys.push(key);
+        data.values.push(value);
+        data.index.entry(hash).or_default().push(idx);
+        return Ok(receiver.into_raw_bits());
+    }
+
+    // Slow path: clone everything.
+    let borrowed = borrow_vw(args[0]);
+    if let Some((old_keys, old_values, old_index)) = borrowed.as_hashmap() {
+        let mut keys = old_keys.clone();
+        let mut values = old_values.clone();
+        let mut index = old_index.clone();
+
+        let hash = key.vw_hash();
+        if let Some(bucket) = index.get(&hash) {
+            if let Some(idx) = bucket_find(&keys, bucket, &key) {
+                keys[idx] = key;
+                values[idx] = value;
+                return Ok(ValueWord::from_hashmap(keys, values, index).into_raw_bits());
+            }
+        }
+        let idx = keys.len();
+        keys.push(key);
+        values.push(value);
+        index.entry(hash).or_default().push(idx);
+        Ok(ValueWord::from_hashmap(keys, values, index).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("set", "HashMap"))
+    }
+}
+
+/// HashMap.has(key) -> bool
+pub fn v2_has(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let key = borrow_vw(args[1]);
+
+    if let Some((keys, _, index)) = receiver.as_hashmap() {
+        let hash = key.vw_hash();
+        let found = index
+            .get(&hash)
+            .map(|bucket| bucket_find(keys, bucket, &key).is_some())
+            .unwrap_or(false);
+        Ok(ValueWord::from_bool(found).raw_bits())
+    } else {
+        Err(type_mismatch_error("has", "HashMap"))
+    }
+}
+
+/// HashMap.delete(key) -> HashMap (returns new or mutated HashMap)
+pub fn v2_delete(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let key = own_vw(args[1]);
+    let hash = key.vw_hash();
+
+    // Mutable fast-path via owned clone
+    let mut receiver = own_vw(args[0]);
+    if let Some(data) = receiver.as_hashmap_mut() {
+        if let Some(bucket) = data.index.get(&hash).cloned() {
+            if let Some(idx) = bucket_find(&data.keys, &bucket, &key) {
+                data.shape_id = None;
+                let last = data.keys.len() - 1;
+                if idx != last {
+                    record_heap_write();
+                    write_barrier_vw(&data.keys[idx], &data.keys[last]);
+                    write_barrier_vw(&data.values[idx], &data.values[last]);
+                    data.keys.swap(idx, last);
+                    data.values.swap(idx, last);
+                    let swapped_hash = data.keys[idx].vw_hash();
+                    if let Some(b) = data.index.get_mut(&swapped_hash) {
+                        if let Some(pos) = b.iter().position(|&x| x == last) {
+                            b[pos] = idx;
+                        }
+                    }
+                }
+                data.keys.pop();
+                data.values.pop();
+                if let Some(b) = data.index.get_mut(&hash) {
+                    b.retain(|&x| x != last);
+                    if b.is_empty() {
+                        data.index.remove(&hash);
+                    }
+                }
+                return Ok(receiver.into_raw_bits());
+            }
+        }
+        return Ok(receiver.into_raw_bits());
+    }
+
+    // Slow path: clone without the deleted key
+    let borrowed = borrow_vw(args[0]);
+    if let Some((old_keys, old_values, old_index)) = borrowed.as_hashmap() {
+        if let Some(bucket) = old_index.get(&hash) {
+            if let Some(idx) = bucket_find(old_keys, bucket, &key) {
+                let keys: Vec<ValueWord> = old_keys
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != idx)
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                let values: Vec<ValueWord> = old_values
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != idx)
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                let index = HashMapData::rebuild_index(&keys);
+                return Ok(ValueWord::from_hashmap(keys, values, index).into_raw_bits());
+            }
+        }
+        Ok(own_vw(args[0]).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("delete", "HashMap"))
+    }
+}
+
+/// HashMap.keys() -> Array
+pub fn v2_keys(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    if let Some((keys, _, _)) = receiver.as_hashmap() {
+        let arr = shape_value::vmarray_from_value_words(keys.clone());
+        Ok(ValueWord::from_array(arr).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("keys", "HashMap"))
+    }
+}
+
+/// HashMap.values() -> Array
+pub fn v2_values(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    if let Some((_, values, _)) = receiver.as_hashmap() {
+        let arr = shape_value::vmarray_from_value_words(values.clone());
+        Ok(ValueWord::from_array(arr).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("values", "HashMap"))
+    }
+}
+
+/// HashMap.entries() -> Array of [key, value] pairs
+pub fn v2_entries(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    if let Some((keys, values, _)) = receiver.as_hashmap() {
+        let entries: Vec<ValueWord> = keys
+            .iter()
+            .zip(values.iter())
+            .map(|(k, v)| {
+                let pair = shape_value::vmarray_from_value_words(vec![k.clone(), v.clone()]);
+                ValueWord::from_array(pair)
+            })
+            .collect();
+        let arr = shape_value::vmarray_from_value_words(entries);
+        Ok(ValueWord::from_array(arr).into_raw_bits())
+    } else {
+        Err(type_mismatch_error("entries", "HashMap"))
+    }
+}
+
+/// HashMap.len() -> int
+pub fn v2_len(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    if let Some((keys, _, _)) = receiver.as_hashmap() {
+        Ok(ValueWord::from_i64(keys.len() as i64).raw_bits())
+    } else {
+        Err(type_mismatch_error("len", "HashMap"))
+    }
+}
+
+/// HashMap.isEmpty() -> bool
+pub fn v2_is_empty(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    if let Some((keys, _, _)) = receiver.as_hashmap() {
+        Ok(ValueWord::from_bool(keys.is_empty()).raw_bits())
+    } else {
+        Err(type_mismatch_error("isEmpty", "HashMap"))
+    }
+}
+
+/// HashMap.merge(other) -> HashMap (other wins on conflict)
+pub fn v2_merge(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let other = borrow_vw(args[1]);
+
+    let (base_keys, base_values, _) = receiver
+        .as_hashmap()
+        .ok_or_else(|| type_mismatch_error("merge", "HashMap"))?;
+    let (other_keys, other_values, _) = other
+        .as_hashmap()
+        .ok_or_else(|| VMError::RuntimeError("merge argument must be a HashMap".to_string()))?;
+
+    let mut keys = base_keys.clone();
+    let mut values = base_values.clone();
+    let mut index = HashMapData::rebuild_index(&keys);
+
+    for (ok, ov) in other_keys.iter().zip(other_values.iter()) {
+        let hash = ok.vw_hash();
+        if let Some(bucket) = index.get(&hash) {
+            if let Some(idx) = bucket_find(&keys, bucket, ok) {
+                keys[idx] = ok.clone();
+                values[idx] = ov.clone();
+                continue;
+            }
+        }
+        let idx = keys.len();
+        keys.push(ok.clone());
+        values.push(ov.clone());
+        index.entry(hash).or_default().push(idx);
+    }
+
+    Ok(ValueWord::from_hashmap(keys, values, index).into_raw_bits())
+}
+
+/// HashMap.getOrDefault(key, default) -> value
+pub fn v2_get_or_default(
+    _vm: &mut VirtualMachine,
+    args: &[u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let key = borrow_vw(args[1]);
+    let default = borrow_vw(args[2]);
+
+    if let Some((keys, values, index)) = receiver.as_hashmap() {
+        let hash = key.vw_hash();
+        let result = if let Some(bucket) = index.get(&hash) {
+            bucket_find(keys, bucket, &key)
+                .map(|idx| values[idx].clone())
+                .unwrap_or_else(|| (*default).clone())
+        } else {
+            (*default).clone()
+        };
+        Ok(result.into_raw_bits())
+    } else {
+        Err(type_mismatch_error("getOrDefault", "HashMap"))
+    }
+}
+
+/// HashMap.toArray() -> Array of [key, value] pairs (alias for entries)
+pub fn v2_to_array(
+    vm: &mut VirtualMachine,
+    args: &[u64],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    v2_entries(vm, args, ctx)
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
