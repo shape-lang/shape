@@ -83,7 +83,26 @@ use crate::{
 };
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
+use smallvec::SmallVec;
 use std::sync::Arc;
+
+/// Reinterpret a `&u64` as `&ValueWord` for read-only inspection.
+///
+/// # Safety
+/// `ValueWord` is `#[repr(transparent)]` over `u64`, so the layouts are identical.
+/// This does NOT create an owning ValueWord — no Drop will run through this reference.
+#[inline(always)]
+fn as_vw_ref(bits: &u64) -> &ValueWord {
+    // SAFETY: ValueWord is #[repr(transparent)] over u64
+    unsafe { &*(bits as *const u64 as *const ValueWord) }
+}
+
+/// Reinterpret a `&[u64]` as `&[ValueWord]` for read-only inspection of a slice.
+#[inline(always)]
+fn as_vw_slice(bits: &[u64]) -> &[ValueWord] {
+    // SAFETY: ValueWord is #[repr(transparent)] over u64
+    unsafe { std::slice::from_raw_parts(bits.as_ptr() as *const ValueWord, bits.len()) }
+}
 impl VirtualMachine {
     #[inline(always)]
     pub(in crate::executor) fn exec_objects(
@@ -154,10 +173,10 @@ impl VirtualMachine {
 
     // op_typed_merge_object moved to object_operations.rs
 
-    /// Dispatch a method handler on raw u64 args.
+    /// Dispatch a method handler on raw u64 args — zero-alloc for <=8 args.
     ///
-    /// Transfers ownership from `Vec<ValueWord>` to a raw `Vec<u64>` via
-    /// `into_raw_bits()` (which forgets each ValueWord — no refcount change).
+    /// `raw_args` is a stack-inline `SmallVec<[u64; 8]>` whose elements are
+    /// owned raw u64 bits (obtained via `pop_raw_u64` or `into_raw_bits`).
     /// The handler receives `&mut [u64]` as sole owner of the heap values.
     /// After the handler returns, we drop each raw arg to decrement refcounts.
     ///
@@ -169,11 +188,9 @@ impl VirtualMachine {
     fn dispatch_method_handler(
         &mut self,
         handler: &method_registry::MethodHandler,
-        args_nb: Vec<ValueWord>,
+        mut raw_args: SmallVec<[u64; 8]>,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        // Transfer ownership: into_raw_bits() forgets each ValueWord (no Drop).
-        let mut raw_args: Vec<u64> = args_nb.into_iter().map(|vw| vw.into_raw_bits()).collect();
         let result = handler(self, &mut raw_args, ctx)?;
         // Drop args: the handler may have updated pointers (e.g. after Arc::make_mut).
         for bits in raw_args {
@@ -242,20 +259,25 @@ impl VirtualMachine {
             }
         }
 
-        // Pop arguments in reverse order (they were pushed in order on stack)
-        let mut args_nb = Vec::with_capacity(arg_count + 1); // +1 for receiver
+        // Pop args as raw u64 directly — no ValueWord wrapping on the hot path.
+        let mut raw_args: SmallVec<[u64; 8]> = SmallVec::with_capacity(arg_count + 1);
         for _ in 0..arg_count {
-            args_nb.push(ValueWord::from_raw_bits(self.pop_raw_u64()?));
+            raw_args.push(self.pop_raw_u64()?);
         }
-        args_nb.reverse();
+        raw_args.reverse();
 
-        // Pop receiver (the object/series/array the method is called on)
-        let receiver_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-        let receiver_nb = if receiver_nb.is_ref() {
-            self.resolve_ref_value(&receiver_nb).unwrap_or(receiver_nb)
-        } else {
-            receiver_nb
-        };
+        // Pop receiver as raw u64
+        let mut receiver_bits = self.pop_raw_u64()?;
+
+        // Resolve refs on receiver (needs temporary ValueWord for ref resolution)
+        {
+            let receiver_ref = as_vw_ref(&receiver_bits);
+            if receiver_ref.is_ref() {
+                let receiver_vw = ValueWord::from_raw_bits(receiver_bits);
+                let resolved = self.resolve_ref_value(&receiver_vw).unwrap_or(receiver_vw);
+                receiver_bits = resolved.into_raw_bits();
+            }
+        }
 
         // Universal intrinsic methods available on all values.
         // Check BEFORE moving receiver into args (we need it for push_vw).
@@ -268,28 +290,33 @@ impl VirtualMachine {
                 });
             }
             // Reuse existing type resolution path (typed-object schema lookup included).
-            self.push_vw(receiver_nb)?;
+            self.push_vw(ValueWord::from_raw_bits(receiver_bits))?;
             let result = self.builtin_type_of(vec![])?;
             self.push_vw(result)?;
+            // Drop the popped args to release refcounts
+            for bits in raw_args {
+                drop(ValueWord::from_raw_bits(bits));
+            }
             return Ok(());
         }
 
         // Save receiver type info before moving it into args.
         use shape_value::NanTag;
         use shape_value::heap_value::HeapKind;
-        let receiver_tag = receiver_nb.tag();
-        let receiver_heap_kind = receiver_nb.heap_kind();
+        let receiver_tag = as_vw_ref(&receiver_bits).tag();
+        let receiver_heap_kind = as_vw_ref(&receiver_bits).heap_kind();
 
-        // Prepend receiver to args — MOVE, not clone.
+        // Prepend receiver to args — raw bits, no ValueWord clone.
         // This keeps the Arc refcount at 1, allowing mutating methods
         // (e.g. Set.add, Deque.pushBack) to succeed with Arc::get_mut().
-        args_nb.insert(0, receiver_nb);
+        raw_args.insert(0, receiver_bits);
 
         // v2 typed array method dispatch.
+        // Uses as_vw_ref for read-only inspection of the receiver.
         if let Some(view) =
-            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&args_nb[0])
+            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(as_vw_ref(&raw_args[0]))
         {
-            if self.dispatch_v2_typed_array_method(&method_name, &view, &args_nb)? {
+            if self.dispatch_v2_typed_array_method(&method_name, &view, &raw_args)? {
                 return Ok(());
             }
         }
@@ -302,7 +329,7 @@ impl VirtualMachine {
                 if let Some(hit) =
                     crate::executor::ic_fast_paths::method_ic_check(self, ic_ip, heap_kind, mid)
                 {
-                    self.dispatch_method_handler(&hit.handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(&hit.handler, raw_args, ctx)?;
                     return Ok(());
                 }
             }
@@ -319,7 +346,7 @@ impl VirtualMachine {
                             method_name
                         ))
                     })?;
-                self.dispatch_method_handler(handler, args_nb, ctx)?;
+                self.dispatch_method_handler(handler, raw_args, ctx)?;
             }
             NanTag::Bool => {
                 let handler = method_registry::BOOL_METHODS
@@ -330,7 +357,7 @@ impl VirtualMachine {
                             method_name
                         ))
                     })?;
-                self.dispatch_method_handler(handler, args_nb, ctx)?;
+                self.dispatch_method_handler(handler, raw_args, ctx)?;
             }
             NanTag::Heap => match receiver_heap_kind.unwrap() {
                 HeapKind::Array => {
@@ -350,7 +377,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::String => {
                     let handler = method_registry::STRING_METHODS
@@ -368,7 +395,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Decimal => {
                     let handler = method_registry::NUMBER_METHODS
@@ -379,7 +406,7 @@ impl VirtualMachine {
                                 method_name
                             ))
                         })?;
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::DataTable | HeapKind::TypedTable => {
                     let handler = method_registry::DATATABLE_METHODS
@@ -404,17 +431,17 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::IndexedTable => {
                     if let Some(handler) =
                         method_registry::INDEXED_TABLE_METHODS.get(method_name.as_str())
                     {
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else if let Some(handler) =
                         method_registry::DATATABLE_METHODS.get(method_name.as_str())
                     {
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on IndexedTable type",
@@ -438,7 +465,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::HashMap => {
                     let handler = method_registry::HASHMAP_METHODS
@@ -456,7 +483,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Set => {
                     let handler = method_registry::SET_METHODS
@@ -474,7 +501,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Deque => {
                     let handler = method_registry::DEQUE_METHODS
@@ -492,7 +519,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::PriorityQueue => {
                     let handler = method_registry::PRIORITY_QUEUE_METHODS
@@ -510,20 +537,22 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::FloatArray => {
                     if let Some(handler) =
                         method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str())
                     {
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else if let Some(handler) =
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
-                        // Fallback: promote to generic array for standard array methods
-                        args_nb[0] =
-                            ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        // Fallback: promote to generic array for standard array methods.
+                        // Drop old receiver, replace with promoted generic array.
+                        let old = ValueWord::from_raw_bits(raw_args[0]);
+                        raw_args[0] =
+                            ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on Vec<number> type",
@@ -533,7 +562,7 @@ impl VirtualMachine {
                 }
                 HeapKind::FloatArraySlice => {
                     // Materialize the slice as a FloatArray, then dispatch
-                    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) = args_nb[0].as_heap_ref() {
+                    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) = as_vw_ref(&raw_args[0]).as_heap_ref() {
                         let off = *offset as usize;
                         let slice_len = *len as usize;
                         let data = &parent.data[off..off + slice_len];
@@ -541,18 +570,21 @@ impl VirtualMachine {
                         for &v in data {
                             aligned.push(v);
                         }
-                        args_nb[0] = ValueWord::from_float_array(Arc::new(aligned.into()));
+                        // Drop old slice, replace with materialized float array
+                        drop(ValueWord::from_raw_bits(raw_args[0]));
+                        raw_args[0] = ValueWord::from_float_array(Arc::new(aligned.into())).into_raw_bits();
                     }
                     if let Some(handler) =
                         method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str())
                     {
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else if let Some(handler) =
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
-                        args_nb[0] =
-                            ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        let old = ValueWord::from_raw_bits(raw_args[0]);
+                        raw_args[0] =
+                            ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on Vec<number> type",
@@ -564,13 +596,14 @@ impl VirtualMachine {
                     if let Some(handler) =
                         method_registry::INT_ARRAY_METHODS.get(method_name.as_str())
                     {
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else if let Some(handler) =
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
-                        args_nb[0] =
-                            ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        let old = ValueWord::from_raw_bits(raw_args[0]);
+                        raw_args[0] =
+                            ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on Vec<int> type",
@@ -582,13 +615,14 @@ impl VirtualMachine {
                     if let Some(handler) =
                         method_registry::BOOL_ARRAY_METHODS.get(method_name.as_str())
                     {
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else if let Some(handler) =
                         method_registry::ARRAY_METHODS.get(method_name.as_str())
                     {
-                        args_nb[0] =
-                            ValueWord::from_array(args_nb[0].as_any_array().unwrap().to_generic());
-                        self.dispatch_method_handler(handler, args_nb, ctx)?;
+                        let old = ValueWord::from_raw_bits(raw_args[0]);
+                        raw_args[0] =
+                            ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                        self.dispatch_method_handler(handler, raw_args, ctx)?;
                     } else {
                         return Err(VMError::RuntimeError(format!(
                             "Unknown method '{}' on Vec<bool> type",
@@ -597,7 +631,7 @@ impl VirtualMachine {
                     }
                 }
                 HeapKind::TypedObject => {
-                    self.handle_typed_object_method_v2(&method_name, args_nb)?;
+                    self.handle_typed_object_method_v2(&method_name, &raw_args)?;
                 }
                 HeapKind::Content => {
                     let handler = method_registry::CONTENT_METHODS
@@ -608,7 +642,7 @@ impl VirtualMachine {
                                 method_name
                             ))
                         })?;
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Time => {
                     let handler = method_registry::DATETIME_METHODS
@@ -626,7 +660,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::TimeSpan => {
                     let handler = method_registry::TIMESPAN_METHODS
@@ -637,7 +671,7 @@ impl VirtualMachine {
                                 method_name
                             ))
                         })?;
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Instant => {
                     let handler = method_registry::INSTANT_METHODS
@@ -655,7 +689,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Iterator => {
                     let handler = method_registry::ITERATOR_METHODS
@@ -673,7 +707,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Range => {
                     let handler = method_registry::RANGE_METHODS
@@ -684,7 +718,7 @@ impl VirtualMachine {
                                 method_name
                             ))
                         })?;
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Matrix => {
                     let handler = method_registry::MATRIX_METHODS
@@ -702,7 +736,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Mutex => {
                     let handler = method_registry::MUTEX_METHODS
@@ -720,7 +754,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Atomic => {
                     let handler = method_registry::ATOMIC_METHODS
@@ -738,7 +772,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Lazy => {
                     let handler = method_registry::LAZY_METHODS
@@ -756,7 +790,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Channel => {
                     let handler = method_registry::CHANNEL_METHODS
@@ -774,7 +808,7 @@ impl VirtualMachine {
                         method_id.0 as u32,
                         handler,
                     );
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 HeapKind::Char => {
                     let handler = method_registry::CHAR_METHODS
@@ -785,13 +819,13 @@ impl VirtualMachine {
                                 method_name
                             ))
                         })?;
-                    self.dispatch_method_handler(handler, args_nb, ctx)?;
+                    self.dispatch_method_handler(handler, raw_args, ctx)?;
                 }
                 _ => {
                     return Err(VMError::RuntimeError(format!(
                         "Method '{}' not available on type '{}'",
                         method_name,
-                        args_nb[0].type_name()
+                        as_vw_ref(&raw_args[0]).type_name()
                     )));
                 }
             },
@@ -799,7 +833,7 @@ impl VirtualMachine {
                 return Err(VMError::RuntimeError(format!(
                     "Method '{}' not available on type '{}'",
                     method_name,
-                    args_nb[0].type_name()
+                    as_vw_ref(&raw_args[0]).type_name()
                 )));
             }
         }
@@ -807,14 +841,16 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// Handle char methods (is_alphabetic, to_uppercase, etc.)
     /// Dispatch a method call where the receiver is a v2 typed array.
     /// Returns Ok(true) if handled, Ok(false) to fall through to legacy path.
+    ///
+    /// `raw_args` contains raw u64 bits: `[receiver, arg1, ...]`.
+    /// Uses `as_vw_ref` / `as_vw_slice` for read-only ValueWord access.
     fn dispatch_v2_typed_array_method(
         &mut self,
         method: &str,
         view: &crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView,
-        args: &[ValueWord],
+        raw_args: &SmallVec<[u64; 8]>,
     ) -> Result<bool, VMError> {
         use crate::executor::v2_handlers::v2_array_detect as v2;
         match method {
@@ -905,12 +941,12 @@ impl VirtualMachine {
                 }
             }
             "dot" => {
-                if args.len() < 2 {
+                if raw_args.len() < 2 {
                     return Err(VMError::RuntimeError(
                         "dot() requires a Vec<number> argument".to_string(),
                     ));
                 }
-                let view_b = v2::as_v2_typed_array(&args[1]);
+                let view_b = v2::as_v2_typed_array(as_vw_ref(&raw_args[1]));
                 if let Some(vb) = &view_b {
                     if view.len != vb.len {
                         return Err(VMError::RuntimeError(format!(
@@ -950,14 +986,14 @@ impl VirtualMachine {
                 Ok(true)
             }
             "push" => {
-                if args.len() != 2 {
+                if raw_args.len() != 2 {
                     return Err(VMError::ArityMismatch {
                         function: "push".to_string(),
                         expected: 1,
-                        got: args.len().saturating_sub(1),
+                        got: raw_args.len().saturating_sub(1),
                     });
                 }
-                v2::push_element(view, &args[1])
+                v2::push_element(view, as_vw_ref(&raw_args[1]))
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?;
                 self.push_vw(ValueWord::none())?;
                 Ok(true)
@@ -969,13 +1005,19 @@ impl VirtualMachine {
             }
             "map" | "filter" | "reduce" | "fold" | "forEach" | "for_each" | "find"
             | "findIndex" | "find_index" | "some" | "every" | "any" | "all" => {
+                // Higher-order methods: materialize elements and fall back to generic array handler.
                 let mut elems: Vec<ValueWord> = Vec::with_capacity(view.len as usize);
                 for i in 0..view.len {
                     elems.push(v2::read_element(view, i).unwrap_or_else(ValueWord::none));
                 }
                 let legacy = ValueWord::from_array(std::sync::Arc::new(elems));
-                let mut new_args: Vec<ValueWord> = args.to_vec();
-                new_args[0] = legacy;
+                // Build a new SmallVec with the promoted receiver
+                let mut new_args: SmallVec<[u64; 8]> = SmallVec::with_capacity(raw_args.len());
+                new_args.push(legacy.into_raw_bits());
+                // Clone the remaining args (bump refcounts)
+                for bits in &raw_args[1..] {
+                    new_args.push(ValueWord::from_raw_bits(*bits).clone().into_raw_bits());
+                }
                 let handler = method_registry::ARRAY_METHODS.get(method).ok_or_else(|| {
                     VMError::RuntimeError(format!(
                         "Unknown method '{}' on v2 typed array",
@@ -992,16 +1034,20 @@ impl VirtualMachine {
     /// Handle TypedObject methods via direct schema-based access (v2 compatible).
     /// No HashMap conversion — reads/writes slots directly via schema field indices.
     /// Pushes result directly to stack.
+    ///
+    /// Takes raw u64 args; uses `as_vw_ref` / `as_vw_slice` for read-only access.
     fn handle_typed_object_method_v2(
         &mut self,
         method: &str,
-        args: Vec<ValueWord>,
+        raw_args: &SmallVec<[u64; 8]>,
     ) -> Result<(), VMError> {
         use crate::executor::objects::object_creation::read_slot_nb;
         use shape_value::heap_value::HeapValue;
 
+        let args_vw = as_vw_slice(raw_args.as_slice());
+
         // Extract TypedObject fields via HeapValue (no ValueWord materialization)
-        let (schema_id, slots, heap_mask) = match args[0].as_heap_ref() {
+        let (schema_id, slots, heap_mask) = match args_vw[0].as_heap_ref() {
             Some(HeapValue::TypedObject {
                 schema_id,
                 slots,
@@ -1010,7 +1056,7 @@ impl VirtualMachine {
             _ => {
                 return Err(VMError::TypeError {
                     expected: "TypedObject",
-                    got: args[0].type_name(),
+                    got: args_vw[0].type_name(),
                 });
             }
         };
@@ -1033,7 +1079,7 @@ impl VirtualMachine {
             && let Some(intrinsic_fn) = type_methods.get(method)
         {
             let intrinsic_fn = intrinsic_fn.clone();
-            let call_args_nb: Vec<ValueWord> = args[1..].to_vec();
+            let call_args_nb: Vec<ValueWord> = args_vw[1..].to_vec();
             let result_nb = self.invoke_module_fn(&intrinsic_fn, &call_args_nb)?;
             self.push_vw(result_nb)?;
             return Ok(());
@@ -1049,7 +1095,7 @@ impl VirtualMachine {
                 .or_else(|| self.function_name_index.get(&extend_name))
             {
                 let func_nb = ValueWord::from_function(func_id);
-                let result_nb = self.call_value_immediate_nb(&func_nb, &args, None)?;
+                let result_nb = self.call_value_immediate_nb(&func_nb, args_vw, None)?;
                 self.push_vw(result_nb)?;
                 return Ok(());
             }
@@ -1063,7 +1109,7 @@ impl VirtualMachine {
             {
                 if let Some(&func_id) = self.function_name_index.get(impl_func_name) {
                     let func_nb = ValueWord::from_function(func_id);
-                    let result_nb = self.call_value_immediate_nb(&func_nb, &args, None)?;
+                    let result_nb = self.call_value_immediate_nb(&func_nb, args_vw, None)?;
                     self.push_vw(result_nb)?;
                     return Ok(());
                 }
@@ -1085,7 +1131,7 @@ impl VirtualMachine {
                 if field_nb.is_function()
                     || matches!(field_nb.as_heap_ref(), Some(HeapValue::Closure { .. }))
                 {
-                    let call_args_nb: Vec<ValueWord> = args[1..].to_vec();
+                    let call_args_nb: Vec<ValueWord> = args_vw[1..].to_vec();
                     let result_nb = self.call_value_immediate_nb(&field_nb, &call_args_nb, None)?;
                     self.push_vw(result_nb)?;
                     return Ok(());

@@ -5673,6 +5673,7 @@ dependencies = [
  "shape-runtime",
  "shape-value",
  "shape-wire",
+ "smallvec",
  "target-lexicon 0.12.16",
  "tempfile",
  "thiserror 1.0.69",

@@ -45,6 +45,7 @@ libloading = "0.8"
 libffi = "3.2"
 unicode-segmentation = "1.11"
 unicode-normalization = "0.1"
+smallvec = "1"
 
 # JIT dependencies (optional)
 cranelift = { version = "0.110", optional = true }
