@@ -263,22 +263,19 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 }
 
 /// Set.add(item) -> Set [v2]
+///
+/// Always clones — v2 handlers cannot use `as_set_mut()` because the dispatch
+/// infrastructure doesn't propagate the updated heap pointer bits back to
+/// the caller's `args_nb`, causing use-after-free when `Arc::make_mut` reallocates.
 pub fn v2_add(
     _vm: &mut VirtualMachine,
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = borrow_vw(args[0]);
+    let receiver = borrow_vw(args[0]);
     let item_vw = borrow_vw(args[1]);
     let item = (*item_vw).clone();
 
-    // Mutable fast-path
-    if let Some(data) = receiver.as_set_mut() {
-        data.insert(item);
-        return Ok((*receiver).clone().into_raw_bits());
-    }
-
-    // Slow path: clone
     if let Some(set_data) = receiver.as_set() {
         let mut new_data = set_data.clone();
         new_data.insert(item);
@@ -305,19 +302,15 @@ pub fn v2_has(
 }
 
 /// Set.delete(item) -> Set [v2]
+/// Set.delete(item) -> Set [v2] — always clones (see v2_add comment)
 pub fn v2_delete(
     _vm: &mut VirtualMachine,
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = borrow_vw(args[0]);
+    let receiver = borrow_vw(args[0]);
     let item_vw = borrow_vw(args[1]);
     let item = (*item_vw).clone();
-
-    if let Some(data) = receiver.as_set_mut() {
-        data.remove(&item);
-        return Ok((*receiver).clone().into_raw_bits());
-    }
 
     if let Some(set_data) = receiver.as_set() {
         let mut new_data = set_data.clone();

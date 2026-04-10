@@ -282,9 +282,8 @@ pub static HASHMAP_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Higher-order:** forEach, map, filter
 /// **Set operations:** union, intersection, difference
 pub static SET_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    // Mutating — stay Legacy (Arc refcount sensitivity)
-    "add" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_add),
-    "delete" => MethodHandler::Legacy(crate::executor::objects::set_methods::handle_delete),
+    "add" => MethodHandler::Native(crate::executor::objects::set_methods::v2_add),
+    "delete" => MethodHandler::Native(crate::executor::objects::set_methods::v2_delete),
     // Read-only — MethodFnV2
     "has" => MethodHandler::Native(crate::executor::objects::set_methods::v2_has),
     "size" => MethodHandler::Native(crate::executor::objects::set_methods::v2_size),
@@ -308,11 +307,10 @@ pub static SET_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Info:** size, len, length, isEmpty
 /// **Conversion:** toArray
 pub static DEQUE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    // Mutating — stay Legacy (Arc refcount sensitivity)
-    "pushBack" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_push_back),
-    "pushFront" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_push_front),
-    "popBack" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_pop_back),
-    "popFront" => MethodHandler::Legacy(crate::executor::objects::deque_methods::handle_pop_front),
+    "pushBack" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_push_back),
+    "pushFront" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_push_front),
+    "popBack" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_pop_back),
+    "popFront" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_pop_front),
     // Read-only — MethodFnV2
     "peekBack" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_peek_back),
     "peekFront" => MethodHandler::Native(crate::executor::objects::deque_methods::v2_peek_front),
@@ -331,9 +329,8 @@ pub static DEQUE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Info:** size, len, length, isEmpty
 /// **Conversion:** toArray, toSortedArray
 pub static PRIORITY_QUEUE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    // Mutating — stay Legacy (Arc refcount sensitivity)
-    "push" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_push),
-    "pop" => MethodHandler::Legacy(crate::executor::objects::priority_queue_methods::handle_pop),
+    "push" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_push),
+    "pop" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_pop),
     // Read-only — MethodFnV2
     "peek" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_peek),
     "size" => MethodHandler::Native(crate::executor::objects::priority_queue_methods::v2_size),

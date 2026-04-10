@@ -140,21 +140,15 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-/// PriorityQueue.push(item) -> PriorityQueue [v2]
+/// PriorityQueue.push(item) -> PriorityQueue [v2] — always clones (see set_methods::v2_add)
 pub fn v2_push(
     _vm: &mut VirtualMachine,
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = borrow_vw(args[0]);
+    let receiver = borrow_vw(args[0]);
     let item_vw = borrow_vw(args[1]);
     let item = (*item_vw).clone();
-
-    if let Some(data) = receiver.as_priority_queue_mut() {
-        data.push(item);
-        return Ok((*receiver).clone().into_raw_bits());
-    }
-
     if let Some(pq_data) = receiver.as_priority_queue() {
         let mut new_data = pq_data.clone();
         new_data.push(item);
@@ -164,21 +158,13 @@ pub fn v2_push(
     }
 }
 
-/// PriorityQueue.pop() -> value [v2]
+/// PriorityQueue.pop() -> value [v2] — always clones
 pub fn v2_pop(
     _vm: &mut VirtualMachine,
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = borrow_vw(args[0]);
-
-    if let Some(data) = receiver.as_priority_queue_mut() {
-        return Ok(match data.pop() {
-            Some(item) => item.into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        });
-    }
-
+    let receiver = borrow_vw(args[0]);
     if let Some(pq_data) = receiver.as_priority_queue() {
         let mut new_data = pq_data.clone();
         Ok(match new_data.pop() {

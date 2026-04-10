@@ -214,21 +214,15 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-/// Deque.pushBack(item) -> Deque [v2]
+/// Deque.pushBack(item) -> Deque [v2] — always clones (see set_methods::v2_add)
 pub fn v2_push_back(
     _vm: &mut VirtualMachine,
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = borrow_vw(args[0]);
+    let receiver = borrow_vw(args[0]);
     let item_vw = borrow_vw(args[1]);
     let item = (*item_vw).clone();
-
-    if let Some(data) = receiver.as_deque_mut() {
-        data.items.push_back(item);
-        return Ok((*receiver).clone().into_raw_bits());
-    }
-
     if let Some(deque_data) = receiver.as_deque() {
         let mut new_data = deque_data.clone();
         new_data.items.push_back(item);
@@ -238,21 +232,15 @@ pub fn v2_push_back(
     }
 }
 
-/// Deque.pushFront(item) -> Deque [v2]
+/// Deque.pushFront(item) -> Deque [v2] — always clones
 pub fn v2_push_front(
     _vm: &mut VirtualMachine,
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = borrow_vw(args[0]);
+    let receiver = borrow_vw(args[0]);
     let item_vw = borrow_vw(args[1]);
     let item = (*item_vw).clone();
-
-    if let Some(data) = receiver.as_deque_mut() {
-        data.items.push_front(item);
-        return Ok((*receiver).clone().into_raw_bits());
-    }
-
     if let Some(deque_data) = receiver.as_deque() {
         let mut new_data = deque_data.clone();
         new_data.items.push_front(item);
@@ -262,21 +250,13 @@ pub fn v2_push_front(
     }
 }
 
-/// Deque.popBack() -> value [v2]
+/// Deque.popBack() -> value [v2] — always clones
 pub fn v2_pop_back(
     _vm: &mut VirtualMachine,
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = borrow_vw(args[0]);
-
-    if let Some(data) = receiver.as_deque_mut() {
-        return Ok(match data.items.pop_back() {
-            Some(item) => item.into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        });
-    }
-
+    let receiver = borrow_vw(args[0]);
     if let Some(deque_data) = receiver.as_deque() {
         let mut new_data = deque_data.clone();
         Ok(match new_data.items.pop_back() {
@@ -288,21 +268,13 @@ pub fn v2_pop_back(
     }
 }
 
-/// Deque.popFront() -> value [v2]
+/// Deque.popFront() -> value [v2] — always clones
 pub fn v2_pop_front(
     _vm: &mut VirtualMachine,
     args: &[u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let mut receiver = borrow_vw(args[0]);
-
-    if let Some(data) = receiver.as_deque_mut() {
-        return Ok(match data.items.pop_front() {
-            Some(item) => item.into_raw_bits(),
-            None => ValueWord::none().into_raw_bits(),
-        });
-    }
-
+    let receiver = borrow_vw(args[0]);
     if let Some(deque_data) = receiver.as_deque() {
         let mut new_data = deque_data.clone();
         Ok(match new_data.items.pop_front() {
