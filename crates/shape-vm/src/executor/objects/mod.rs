@@ -154,10 +154,7 @@ impl VirtualMachine {
 
     // op_typed_merge_object moved to object_operations.rs
 
-    /// Dispatch a `MethodHandler` (Legacy or Native), pushing the result onto the stack.
-    ///
-    /// - `Legacy`: calls the handler with `Vec<ValueWord>`, pushes `ValueWord` result.
-    /// - `Native`: converts args to raw `u64` slice, calls the handler, pushes raw `u64` result.
+    /// Dispatch a method handler, converting args to raw u64 slice and pushing result.
     #[inline]
     fn dispatch_method_handler(
         &mut self,
@@ -165,18 +162,9 @@ impl VirtualMachine {
         args_nb: Vec<ValueWord>,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        match handler {
-            method_registry::MethodHandler::Legacy(f) => {
-                let result = f(self, args_nb, ctx)?;
-                self.push_vw(result)?;
-            }
-            method_registry::MethodHandler::Native(f) => {
-                // Convert Vec<ValueWord> to &[u64] for native handlers.
-                let raw_args: Vec<u64> = args_nb.iter().map(|vw| vw.raw_bits()).collect();
-                let result = f(self, &raw_args, ctx)?;
-                self.push_raw_u64(result)?;
-            }
-        }
+        let raw_args: Vec<u64> = args_nb.iter().map(|vw| vw.raw_bits()).collect();
+        let result = handler(self, &raw_args, ctx)?;
+        self.push_raw_u64(result)?;
         Ok(())
     }
 

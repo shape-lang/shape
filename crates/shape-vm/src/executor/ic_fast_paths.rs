@@ -8,7 +8,7 @@
 //! IC state transitions: Uninitialized → Monomorphic → Polymorphic (2-4) → Megamorphic (>4)
 
 use crate::executor::VirtualMachine;
-use crate::executor::objects::method_registry::{MethodFn, MethodHandler};
+use crate::executor::objects::method_registry::{MethodFnV2, MethodHandler};
 use crate::feedback::{FeedbackSlot, ICState};
 #[cfg(test)]
 use shape_value::ValueWord;
@@ -24,12 +24,6 @@ pub(crate) struct MethodIcHit {
 }
 
 /// Check the method IC for a monomorphic hit.
-///
-/// If the feedback slot at `ip` is monomorphic and the receiver's `HeapKind`
-/// matches the cached entry, returns the cached handler
-/// so the caller can skip the PHF lookup.
-///
-/// Returns `None` on miss (uninitialized, polymorphic, megamorphic, or kind mismatch).
 #[inline]
 pub(crate) fn method_ic_check(
     vm: &VirtualMachine,
@@ -47,12 +41,9 @@ pub(crate) fn method_ic_check(
                 && entry.method_name_id == method_name_id
                 && entry.handler_ptr != 0
             {
-                // SAFETY: handler_ptr was stored from a valid MethodFn function pointer.
-                // During the v1→v2 migration, IC only caches Legacy handlers (MethodFn).
-                let handler: MethodFn = unsafe { std::mem::transmute(entry.handler_ptr) };
-                Some(MethodIcHit {
-                    handler: MethodHandler::Legacy(handler),
-                })
+                // SAFETY: handler_ptr was stored from a valid MethodFnV2 function pointer.
+                let handler: MethodFnV2 = unsafe { std::mem::transmute(entry.handler_ptr) };
+                Some(MethodIcHit { handler })
             } else {
                 None
             }
@@ -62,9 +53,6 @@ pub(crate) fn method_ic_check(
 }
 
 /// Record a method IC observation and store the handler pointer for future fast-path hits.
-///
-/// Currently only supports `Legacy` handlers (function pointer can be stored as usize).
-/// `Native` handlers are not IC-cached yet — they fall through to PHF lookup each time.
 #[inline]
 pub(crate) fn method_ic_record(
     vm: &mut VirtualMachine,
@@ -73,16 +61,8 @@ pub(crate) fn method_ic_record(
     method_name_id: u32,
     handler: &MethodHandler,
 ) {
-    match handler {
-        MethodHandler::Legacy(f) => {
-            if let Some(fv) = vm.current_feedback_vector() {
-                fv.record_method(ip, receiver_kind, method_name_id, *f as usize);
-            }
-        }
-        MethodHandler::Native(_) => {
-            // V2 native handlers are not IC-cached yet.
-            // They will be supported in a future phase.
-        }
+    if let Some(fv) = vm.current_feedback_vector() {
+        fv.record_method(ip, receiver_kind, method_name_id, *handler as usize);
     }
 }
 
@@ -317,21 +297,18 @@ mod tests {
         // Verify function pointer can be stored and recovered via transmute
         fn dummy_handler(
             _vm: &mut VirtualMachine,
-            _args: Vec<ValueWord>,
+            _args: &[u64],
             _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-        ) -> Result<ValueWord, shape_value::VMError> {
-            Ok(ValueWord::none())
+        ) -> Result<u64, shape_value::VMError> {
+            Ok(ValueWord::none().raw_bits())
         }
-        let ptr = dummy_handler as MethodFn as usize;
+        let ptr = dummy_handler as MethodFnV2 as usize;
         assert_ne!(ptr, 0);
-        let recovered: MethodFn = unsafe { std::mem::transmute(ptr) };
+        let recovered: MethodFnV2 = unsafe { std::mem::transmute(ptr) };
         assert_eq!(recovered as usize, ptr);
 
-        // Verify MethodHandler::Legacy roundtrip through IC
-        let handler = MethodHandler::Legacy(dummy_handler);
-        match handler {
-            MethodHandler::Legacy(f) => assert_eq!(f as usize, ptr),
-            MethodHandler::Native(_) => panic!("expected Legacy"),
-        }
+        // Verify MethodHandler (now a type alias for MethodFnV2) roundtrip
+        let handler: MethodHandler = dummy_handler;
+        assert_eq!(handler as usize, ptr);
     }
 }
