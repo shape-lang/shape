@@ -101,6 +101,18 @@ pub fn extract_instant(bits: u64) -> Option<&'static std::time::Instant> {
     }
 }
 
+/// Extract char from heap-tagged Char bits.
+/// Returns None if not a heap Char.
+#[inline]
+pub fn extract_char(bits: u64) -> Option<char> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Char(c) => Some(*c),
+            _ => None,
+        })
+    }
+}
+
 // ─── Error helpers ────────────────────────────────────────────────────────
 
 /// Get the type name string for error messages, without constructing ValueWord.

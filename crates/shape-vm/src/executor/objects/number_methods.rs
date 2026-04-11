@@ -7,18 +7,14 @@
 //! The helper `decode_number_receiver` centralises the int-vs-float branching
 //! so individual handlers stay small.
 
+use crate::executor::objects::raw_helpers::{
+    self, extract_bool, extract_char, extract_number_coerce, type_error,
+};
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::tags::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_INT};
 use shape_value::{VMError, ValueWord};
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
-
-/// Borrow a ValueWord from raw u64 bits without taking ownership.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
 
 /// Decoded receiver: the f64 value and whether the original was an inline i48.
 #[inline(always)]
@@ -29,16 +25,14 @@ fn decode_number_receiver(raw: u64) -> Result<(f64, bool), VMError> {
     } else if !is_tagged(raw) {
         Ok((f64::from_bits(raw), false))
     } else {
-        // Possibly a heap Decimal — use borrow_vw to avoid double-free
-        let vw = borrow_vw(raw);
-        if let Some(shape_value::HeapValue::Decimal(d)) = vw.as_heap_ref() {
+        // Possibly a heap Decimal — use extract_heap_ref to avoid constructing ValueWord
+        if let Some(shape_value::HeapValue::Decimal(d)) =
+            unsafe { raw_helpers::extract_heap_ref(raw) }
+        {
             use rust_decimal::prelude::ToPrimitive;
             Ok((d.to_f64().unwrap_or(f64::NAN), false))
         } else {
-            Err(VMError::TypeError {
-                expected: "number or int",
-                got: vw.type_name(),
-            })
+            Err(type_error("number or int", raw))
         }
     }
 }
@@ -195,8 +189,7 @@ pub fn number_to_fixed_v2(
 ) -> Result<u64, VMError> {
     let (val, _is_int) = decode_number_receiver(args[0])?;
     let decimals = if args.len() > 1 {
-        let vw = borrow_vw(args[1]);
-        vw.as_number_coerce()
+        extract_number_coerce(args[1])
             .ok_or_else(|| VMError::RuntimeError("Expected number for decimals".to_string()))?
             as i32
     } else {
@@ -233,26 +226,22 @@ pub fn number_clamp_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let (val, is_int) = decode_number_receiver(args[0])?;
-    let min_vw = borrow_vw(args.get(1).copied().ok_or_else(|| VMError::InvalidArgument {
+    let min_bits = args.get(1).copied().ok_or_else(|| VMError::InvalidArgument {
         function: "clamp".to_string(),
         message: "requires a min argument".to_string(),
-    })?);
-    let max_vw = borrow_vw(args.get(2).copied().ok_or_else(|| VMError::InvalidArgument {
+    })?;
+    let max_bits = args.get(2).copied().ok_or_else(|| VMError::InvalidArgument {
         function: "clamp".to_string(),
         message: "requires a max argument".to_string(),
-    })?);
-    let min_val = min_vw
-        .as_number_coerce()
-        .ok_or_else(|| VMError::InvalidArgument {
-            function: "clamp".to_string(),
-            message: "requires a min argument".to_string(),
-        })?;
-    let max_val = max_vw
-        .as_number_coerce()
-        .ok_or_else(|| VMError::InvalidArgument {
-            function: "clamp".to_string(),
-            message: "requires a max argument".to_string(),
-        })?;
+    })?;
+    let min_val = extract_number_coerce(min_bits).ok_or_else(|| VMError::InvalidArgument {
+        function: "clamp".to_string(),
+        message: "requires a min argument".to_string(),
+    })?;
+    let max_val = extract_number_coerce(max_bits).ok_or_else(|| VMError::InvalidArgument {
+        function: "clamp".to_string(),
+        message: "requires a max argument".to_string(),
+    })?;
     if is_int {
         let i = val as i64;
         let lo = min_val as i64;
@@ -273,11 +262,12 @@ pub fn bool_to_string_v2(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let b = vw.as_bool().ok_or_else(|| VMError::TypeError {
-        expected: "bool",
-        got: vw.type_name(),
-    })?;
+    // Bool is always inline-tagged, so extract_bool is safe if dispatch routed here.
+    // But guard with a type check for robustness.
+    if !is_tagged(args[0]) {
+        return Err(type_error("bool", args[0]));
+    }
+    let b = extract_bool(args[0]);
     Ok(ValueWord::from_string(Arc::new(b.to_string())).into_raw_bits())
 }
 
@@ -288,11 +278,7 @@ pub fn bool_to_string_v2(
 /// Helper to extract char from raw u64
 #[inline]
 fn decode_char_receiver(raw: u64) -> Result<char, VMError> {
-    let vw = borrow_vw(raw);
-    vw.as_char().ok_or_else(|| VMError::TypeError {
-        expected: "char",
-        got: vw.type_name(),
-    })
+    extract_char(raw).ok_or_else(|| type_error("char", raw))
 }
 
 pub fn char_is_alphabetic_v2(
