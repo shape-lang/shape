@@ -335,7 +335,37 @@ impl VirtualMachine {
             }
         }
 
-        // ValueWord tag/HeapKind dispatch — no to_vmvalue() needed
+        // Type-tagged fast dispatch: when the compiler resolved the receiver's
+        // ConcreteType at compile time, skip the NanTag/HeapKind cascade entirely.
+        if receiver_type_tag != 0xFF {
+            let phf_result = match receiver_type_tag {
+                0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 22 => // F64, I64, int widths, Decimal
+                    method_registry::NUMBER_METHODS.get(method_name.as_str()),
+                9 => // Bool
+                    method_registry::BOOL_METHODS.get(method_name.as_str()),
+                10 => // String
+                    method_registry::STRING_METHODS.get(method_name.as_str()),
+                12 => // Array — still needs HeapKind for FloatArray/IntArray/BoolArray specialization
+                    None, // fall through to legacy dispatch
+                13 => // HashMap
+                    method_registry::HASHMAP_METHODS.get(method_name.as_str()),
+                24 => // DateTime
+                    method_registry::DATETIME_METHODS.get(method_name.as_str()),
+                _ => None, // unknown or complex type — fall through
+            };
+            if let Some(handler) = phf_result {
+                crate::executor::ic_fast_paths::method_ic_record(
+                    self, self.ip,
+                    receiver_type_tag, method_id.0 as u32, handler,
+                );
+                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                return Ok(());
+            }
+            // Fall through to NanTag/HeapKind cascade for unresolved types
+        }
+
+        // Legacy NanTag/HeapKind dispatch — fallback when receiver_type_tag is 0xFF
+        // or for types that need HeapKind specialization (e.g. FloatArray vs IntArray).
         match receiver_tag {
             NanTag::I48 | NanTag::F64 => {
                 let handler = method_registry::NUMBER_METHODS
