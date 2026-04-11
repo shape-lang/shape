@@ -562,25 +562,14 @@ pub fn handle_group_by(
 // MethodFnV2 wrappers — raw u64 in/out, zero Vec allocation
 // ═══════════════════════════════════════════════════════════════════════════
 
-use std::mem::ManuallyDrop;
+use crate::executor::objects::raw_helpers;
 
-/// Borrow a ValueWord from raw u64 bits without taking ownership.
+/// Reconstruct an owned ValueWord from raw bits by cloning (incrementing refcount).
 ///
-/// The returned `ManuallyDrop<ValueWord>` can be dereferenced to call any
-/// `&self` method on ValueWord, but its Drop impl will never run, avoiding
-/// double-free of the underlying Arc for heap-tagged values.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(unsafe { ValueWord::from_raw_bits(raw) })
-}
-
-/// Reconstruct an owned ValueWord from raw bits by cloning through a borrow.
-///
-/// This increments the Arc refcount so the caller gets an independently-owned
-/// value. Used by mutating methods (set, delete, merge) that need `&mut self`.
+/// Used by mutating methods (set, delete, merge) that need `&mut self`.
 #[inline]
 fn own_vw(raw: u64) -> ValueWord {
-    (*borrow_vw(raw)).clone()
+    unsafe { ValueWord::clone_from_bits(raw) }
 }
 
 /// HashMap.get(key) -> value | none
@@ -589,17 +578,15 @@ pub fn v2_get(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let key = borrow_vw(args[1]);
-
-    if let Some(data) = receiver.as_hashmap_data() {
+    if let Some(data) = raw_helpers::extract_hashmap_data(args[0]) {
         // Shape-guarded fast path for string keys
-        if let Some(ks) = key.as_str() {
+        if let Some(ks) = raw_helpers::extract_str(args[1]) {
             if let Some(val) = data.shape_get(ks) {
                 return Ok(val.clone().into_raw_bits());
             }
         }
-        // Fallback: hash-based lookup
+        // Fallback: hash-based lookup with a borrowed key for hashing/equality
+        let key = own_vw(args[1]);
         let hash = key.vw_hash();
         let result = if let Some(bucket) = data.index.get(&hash) {
             bucket_find(&data.keys, bucket, &key)
@@ -654,8 +641,7 @@ pub fn v2_set(
     }
 
     // Slow path: clone everything.
-    let borrowed = borrow_vw(args[0]);
-    if let Some((old_keys, old_values, old_index)) = borrowed.as_hashmap() {
+    if let Some((old_keys, old_values, old_index)) = raw_helpers::extract_hashmap(args[0]) {
         let mut keys = old_keys.clone();
         let mut values = old_values.clone();
         let mut index = old_index.clone();
@@ -684,10 +670,8 @@ pub fn v2_has(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let key = borrow_vw(args[1]);
-
-    if let Some((keys, _, index)) = receiver.as_hashmap() {
+    if let Some((keys, _, index)) = raw_helpers::extract_hashmap(args[0]) {
+        let key = own_vw(args[1]);
         let hash = key.vw_hash();
         let found = index
             .get(&hash)
@@ -743,8 +727,7 @@ pub fn v2_delete(
     }
 
     // Slow path: clone without the deleted key
-    let borrowed = borrow_vw(args[0]);
-    if let Some((old_keys, old_values, old_index)) = borrowed.as_hashmap() {
+    if let Some((old_keys, old_values, old_index)) = raw_helpers::extract_hashmap(args[0]) {
         if let Some(bucket) = old_index.get(&hash) {
             if let Some(idx) = bucket_find(old_keys, bucket, &key) {
                 let keys: Vec<ValueWord> = old_keys
@@ -775,8 +758,7 @@ pub fn v2_keys(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    if let Some((keys, _, _)) = receiver.as_hashmap() {
+    if let Some((keys, _, _)) = raw_helpers::extract_hashmap(args[0]) {
         let arr = shape_value::vmarray_from_value_words(keys.clone());
         Ok(ValueWord::from_array(arr).into_raw_bits())
     } else {
@@ -790,8 +772,7 @@ pub fn v2_values(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    if let Some((_, values, _)) = receiver.as_hashmap() {
+    if let Some((_, values, _)) = raw_helpers::extract_hashmap(args[0]) {
         let arr = shape_value::vmarray_from_value_words(values.clone());
         Ok(ValueWord::from_array(arr).into_raw_bits())
     } else {
@@ -805,8 +786,7 @@ pub fn v2_entries(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    if let Some((keys, values, _)) = receiver.as_hashmap() {
+    if let Some((keys, values, _)) = raw_helpers::extract_hashmap(args[0]) {
         let entries: Vec<ValueWord> = keys
             .iter()
             .zip(values.iter())
@@ -828,8 +808,7 @@ pub fn v2_len(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    if let Some((keys, _, _)) = receiver.as_hashmap() {
+    if let Some((keys, _, _)) = raw_helpers::extract_hashmap(args[0]) {
         Ok(ValueWord::from_i64(keys.len() as i64).raw_bits())
     } else {
         Err(type_mismatch_error("len", "HashMap"))
@@ -842,8 +821,7 @@ pub fn v2_is_empty(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    if let Some((keys, _, _)) = receiver.as_hashmap() {
+    if let Some((keys, _, _)) = raw_helpers::extract_hashmap(args[0]) {
         Ok(ValueWord::from_bool(keys.is_empty()).raw_bits())
     } else {
         Err(type_mismatch_error("isEmpty", "HashMap"))
@@ -856,14 +834,9 @@ pub fn v2_merge(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let other = borrow_vw(args[1]);
-
-    let (base_keys, base_values, _) = receiver
-        .as_hashmap()
+    let (base_keys, base_values, _) = raw_helpers::extract_hashmap(args[0])
         .ok_or_else(|| type_mismatch_error("merge", "HashMap"))?;
-    let (other_keys, other_values, _) = other
-        .as_hashmap()
+    let (other_keys, other_values, _) = raw_helpers::extract_hashmap(args[1])
         .ok_or_else(|| VMError::RuntimeError("merge argument must be a HashMap".to_string()))?;
 
     let mut keys = base_keys.clone();
@@ -894,18 +867,15 @@ pub fn v2_get_or_default(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let key = borrow_vw(args[1]);
-    let default = borrow_vw(args[2]);
-
-    if let Some((keys, values, index)) = receiver.as_hashmap() {
+    if let Some((keys, values, index)) = raw_helpers::extract_hashmap(args[0]) {
+        let key = own_vw(args[1]);
         let hash = key.vw_hash();
         let result = if let Some(bucket) = index.get(&hash) {
             bucket_find(keys, bucket, &key)
                 .map(|idx| values[idx].clone())
-                .unwrap_or_else(|| (*default).clone())
+                .unwrap_or_else(|| own_vw(args[2]))
         } else {
-            (*default).clone()
+            own_vw(args[2])
         };
         Ok(result.into_raw_bits())
     } else {
