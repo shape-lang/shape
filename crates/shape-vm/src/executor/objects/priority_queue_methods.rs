@@ -133,12 +133,7 @@ pub fn handle_to_sorted_array(
 // V2 (Native) handlers — receive &[u64], return u64, no Vec allocation
 // ═══════════════════════════════════════════════════════════════════════════
 
-use std::mem::ManuallyDrop;
-
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
+use super::raw_helpers::extract_priority_queue;
 
 /// PriorityQueue.push(item) -> PriorityQueue [v2] — always clones (see set_methods::v2_add)
 pub fn v2_push(
@@ -146,10 +141,8 @@ pub fn v2_push(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let item_vw = borrow_vw(args[1]);
-    let item = (*item_vw).clone();
-    if let Some(pq_data) = receiver.as_priority_queue() {
+    let item = unsafe { ValueWord::clone_from_bits(args[1]) };
+    if let Some(pq_data) = extract_priority_queue(args[0]) {
         let mut new_data = pq_data.clone();
         new_data.push(item);
         Ok(ValueWord::from_priority_queue(new_data.items).into_raw_bits())
@@ -164,8 +157,7 @@ pub fn v2_pop(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    if let Some(pq_data) = receiver.as_priority_queue() {
+    if let Some(pq_data) = extract_priority_queue(args[0]) {
         let mut new_data = pq_data.clone();
         Ok(match new_data.pop() {
             Some(item) => item.into_raw_bits(),
@@ -182,8 +174,7 @@ pub fn v2_peek(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    if let Some(data) = vw.as_priority_queue() {
+    if let Some(data) = extract_priority_queue(args[0]) {
         Ok(match data.peek() {
             Some(item) => item.clone().into_raw_bits(),
             None => ValueWord::none().into_raw_bits(),
@@ -199,8 +190,7 @@ pub fn v2_size(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    if let Some(data) = vw.as_priority_queue() {
+    if let Some(data) = extract_priority_queue(args[0]) {
         Ok(ValueWord::from_i64(data.items.len() as i64).into_raw_bits())
     } else {
         Err(type_mismatch_error("size", "PriorityQueue"))
@@ -213,8 +203,7 @@ pub fn v2_is_empty(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    if let Some(data) = vw.as_priority_queue() {
+    if let Some(data) = extract_priority_queue(args[0]) {
         Ok(ValueWord::from_bool(data.items.is_empty()).into_raw_bits())
     } else {
         Err(type_mismatch_error("isEmpty", "PriorityQueue"))
@@ -227,8 +216,7 @@ pub fn v2_to_array(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    if let Some(data) = vw.as_priority_queue() {
+    if let Some(data) = extract_priority_queue(args[0]) {
         let arr: Vec<ValueWord> = data.items.clone();
         Ok(ValueWord::from_array(Arc::new(arr)).into_raw_bits())
     } else {
@@ -242,8 +230,7 @@ pub fn v2_to_sorted_array(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    if let Some(data) = vw.as_priority_queue() {
+    if let Some(data) = extract_priority_queue(args[0]) {
         let mut pq = data.clone();
         let mut sorted = Vec::with_capacity(pq.items.len());
         while let Some(item) = pq.pop() {

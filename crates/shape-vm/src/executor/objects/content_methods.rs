@@ -10,16 +10,22 @@ use crate::executor::VirtualMachine;
 use shape_value::content::{Color, ContentNode, NamedColor};
 use shape_value::{VMError, ValueWord};
 
+use super::raw_helpers::{extract_content, extract_number_coerce, extract_str};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // V2 (MethodFnV2) Content handlers
 // ═══════════════════════════════════════════════════════════════════════════
 
-use std::mem::ManuallyDrop;
-
-/// Borrow a ValueWord from raw u64 bits without taking ownership.
+/// Get a ContentNode from raw bits, falling back to a plain text node.
 #[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+fn content_or_plain(bits: u64) -> ContentNode {
+    if let Some(node) = extract_content(bits) {
+        node.clone()
+    } else {
+        // Fall back to Display formatting of the value
+        let vw = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(bits));
+        ContentNode::plain(format!("{}", *vw))
+    }
 }
 
 pub fn v2_content_bold(
@@ -27,11 +33,7 @@ pub fn v2_content_bold(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let node = vw
-        .as_content()
-        .cloned()
-        .unwrap_or_else(|| ContentNode::plain(format!("{}", *vw)));
+    let node = content_or_plain(args[0]);
     Ok(ValueWord::from_content(node.with_bold()).into_raw_bits())
 }
 
@@ -40,11 +42,7 @@ pub fn v2_content_italic(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let node = vw
-        .as_content()
-        .cloned()
-        .unwrap_or_else(|| ContentNode::plain(format!("{}", *vw)));
+    let node = content_or_plain(args[0]);
     Ok(ValueWord::from_content(node.with_italic()).into_raw_bits())
 }
 
@@ -53,11 +51,7 @@ pub fn v2_content_underline(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let node = vw
-        .as_content()
-        .cloned()
-        .unwrap_or_else(|| ContentNode::plain(format!("{}", *vw)));
+    let node = content_or_plain(args[0]);
     Ok(ValueWord::from_content(node.with_underline()).into_raw_bits())
 }
 
@@ -66,11 +60,7 @@ pub fn v2_content_dim(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let node = vw
-        .as_content()
-        .cloned()
-        .unwrap_or_else(|| ContentNode::plain(format!("{}", *vw)));
+    let node = content_or_plain(args[0]);
     Ok(ValueWord::from_content(node.with_dim()).into_raw_bits())
 }
 
@@ -79,11 +69,7 @@ pub fn v2_content_fg(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let node = vw
-        .as_content()
-        .cloned()
-        .unwrap_or_else(|| ContentNode::plain(format!("{}", *vw)));
+    let node = content_or_plain(args[0]);
     let color = parse_color_arg_v2(args, 1, "fg")?;
     Ok(ValueWord::from_content(node.with_fg(color)).into_raw_bits())
 }
@@ -93,11 +79,7 @@ pub fn v2_content_bg(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let node = vw
-        .as_content()
-        .cloned()
-        .unwrap_or_else(|| ContentNode::plain(format!("{}", *vw)));
+    let node = content_or_plain(args[0]);
     let color = parse_color_arg_v2(args, 1, "bg")?;
     Ok(ValueWord::from_content(node.with_bg(color)).into_raw_bits())
 }
@@ -107,11 +89,7 @@ pub fn v2_content_to_string(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let node = vw
-        .as_content()
-        .cloned()
-        .unwrap_or_else(|| ContentNode::plain(format!("{}", *vw)));
+    let node = content_or_plain(args[0]);
     let text = format!("{}", node);
     Ok(ValueWord::from_string(std::sync::Arc::new(text)).into_raw_bits())
 }
@@ -126,9 +104,11 @@ macro_rules! content_runtime_method {
             args: &mut [u64],
             _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
         ) -> Result<u64, VMError> {
-            let receiver = (*borrow_vw(args[0])).clone();
-            let method_args: Vec<ValueWord> =
-                args[1..].iter().map(|&r| (*borrow_vw(r)).clone()).collect();
+            let receiver = unsafe { ValueWord::clone_from_bits(args[0]) };
+            let method_args: Vec<ValueWord> = args[1..]
+                .iter()
+                .map(|&r| unsafe { ValueWord::clone_from_bits(r) })
+                .collect();
             match shape_runtime::content_methods::call_content_method(
                 $method_name,
                 receiver,
@@ -168,9 +148,8 @@ fn parse_color_arg_v2(
         )));
     }
 
-    let vw = borrow_vw(args[start_idx]);
     // String color name
-    if let Some(name) = vw.as_str() {
+    if let Some(name) = extract_str(args[start_idx]) {
         return match name.to_lowercase().as_str() {
             "red" => Ok(Color::Named(NamedColor::Red)),
             "green" => Ok(Color::Named(NamedColor::Green)),
@@ -189,17 +168,14 @@ fn parse_color_arg_v2(
 
     // RGB as three numeric args
     if args.len() >= start_idx + 3 {
-        let r = borrow_vw(args[start_idx])
-            .as_number_coerce()
+        let r = extract_number_coerce(args[start_idx])
             .ok_or_else(|| VMError::RuntimeError("RGB red component must be numeric".to_string()))?
             as u8;
-        let g = borrow_vw(args[start_idx + 1])
-            .as_number_coerce()
+        let g = extract_number_coerce(args[start_idx + 1])
             .ok_or_else(|| {
                 VMError::RuntimeError("RGB green component must be numeric".to_string())
             })? as u8;
-        let b = borrow_vw(args[start_idx + 2])
-            .as_number_coerce()
+        let b = extract_number_coerce(args[start_idx + 2])
             .ok_or_else(|| {
                 VMError::RuntimeError("RGB blue component must be numeric".to_string())
             })? as u8;
@@ -211,4 +187,3 @@ fn parse_color_arg_v2(
         method_name
     )))
 }
-

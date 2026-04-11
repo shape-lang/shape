@@ -11,31 +11,10 @@ use shape_value::heap_value::MatrixData;
 use shape_value::typed_buffer::AlignedTypedBuffer;
 use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
-use std::mem::ManuallyDrop;
 
-/// Borrow a `ValueWord` from a raw u64 without taking ownership.
-///
-/// The caller holds args by `&[u64]` — the underlying `Arc<HeapValue>` is
-/// still owned by the VM stack/register file. Constructing a `ValueWord`
-/// via `from_raw_bits` would create a second owner of the same Arc, causing
-/// a double-free on drop. `ManuallyDrop` suppresses the extra drop.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
+use super::raw_helpers::{extract_matrix, extract_matrix_arc, extract_number_coerce};
 
-fn args_to_vw(args: &mut [u64]) -> Vec<shape_value::ValueWord> {
-    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
-}
-
-fn extract_matrix_vw(vw: &ManuallyDrop<ValueWord>) -> Result<&MatrixData, VMError> {
-    vw.as_matrix().ok_or_else(|| VMError::TypeError {
-        expected: "Matrix",
-        got: vw.type_name(),
-    })
-}
-
-fn extract_matrix(nb: &ValueWord) -> Result<&MatrixData, VMError> {
+fn extract_matrix_nb(nb: &ValueWord) -> Result<&MatrixData, VMError> {
     nb.as_matrix().ok_or_else(|| VMError::TypeError {
         expected: "Matrix",
         got: nb.type_name(),
@@ -48,7 +27,7 @@ pub fn handle_transpose(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let result = matrix_kernels::matrix_transpose(m);
     Ok(ValueWord::from_matrix(std::sync::Arc::new(result)))
 }
@@ -59,7 +38,7 @@ pub fn handle_inverse(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let result = matrix_kernels::matrix_inverse(m).map_err(|e| VMError::RuntimeError(e))?;
     Ok(ValueWord::from_matrix(std::sync::Arc::new(result)))
 }
@@ -70,7 +49,7 @@ pub fn handle_determinant(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let result = matrix_kernels::matrix_determinant(m).map_err(|e| VMError::RuntimeError(e))?;
     Ok(ValueWord::from_f64(result))
 }
@@ -81,7 +60,7 @@ pub fn handle_trace(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let result = matrix_kernels::matrix_trace(m).map_err(|e| VMError::RuntimeError(e))?;
     Ok(ValueWord::from_f64(result))
 }
@@ -92,7 +71,7 @@ pub fn handle_shape(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let (rows, cols) = m.shape();
     let pair = vec![
         ValueWord::from_i64(rows as i64),
@@ -107,7 +86,7 @@ pub fn handle_reshape(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let new_rows = args
         .get(1)
         .and_then(|nb| nb.as_number_coerce())
@@ -147,7 +126,7 @@ pub fn handle_row(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let i = args
         .get(1)
         .and_then(|nb| nb.as_number_coerce())
@@ -187,7 +166,7 @@ pub fn handle_col(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let j = args
         .get(1)
         .and_then(|nb| nb.as_number_coerce())
@@ -220,7 +199,7 @@ pub fn handle_diag(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let n = m.rows.min(m.cols) as usize;
     let cols = m.cols as usize;
     let mut diag = AlignedVec::with_capacity(n);
@@ -238,7 +217,7 @@ pub fn handle_flatten(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let mut flat = AlignedVec::with_capacity(m.data.len());
     for &v in m.data.iter() {
         flat.push(v);
@@ -259,7 +238,7 @@ pub fn handle_map_legacy(
             "Matrix.map requires a function argument".to_string(),
         ));
     }
-    let m = extract_matrix(&args[0])?.clone();
+    let m = extract_matrix_nb(&args[0])?.clone();
     let callback = args[1].clone();
 
     let mut result = AlignedVec::with_capacity(m.data.len());
@@ -282,7 +261,7 @@ pub fn handle_sum(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let sum: f64 = m.data.iter().sum();
     Ok(ValueWord::from_f64(sum))
 }
@@ -293,7 +272,7 @@ pub fn handle_min(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     if m.data.is_empty() {
         return Ok(ValueWord::none());
     }
@@ -307,7 +286,7 @@ pub fn handle_max(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     if m.data.is_empty() {
         return Ok(ValueWord::none());
     }
@@ -321,7 +300,7 @@ pub fn handle_mean(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     if m.data.is_empty() {
         return Ok(ValueWord::none());
     }
@@ -335,7 +314,7 @@ pub fn handle_row_sum(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let mut result = AlignedVec::with_capacity(m.rows as usize);
     for i in 0..m.rows as usize {
         let sum: f64 = m.row_slice(i as u32).iter().sum();
@@ -352,7 +331,7 @@ pub fn handle_col_sum(
     args: Vec<ValueWord>,
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<ValueWord, VMError> {
-    let m = extract_matrix(&args[0])?;
+    let m = extract_matrix_nb(&args[0])?;
     let rows = m.rows as usize;
     let cols = m.cols as usize;
     let mut result = AlignedVec::with_capacity(cols);
@@ -378,8 +357,10 @@ pub fn v2_transpose(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let result = matrix_kernels::matrix_transpose(m);
     Ok(ValueWord::from_matrix(Arc::new(result)).into_raw_bits())
 }
@@ -390,8 +371,10 @@ pub fn v2_inverse(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let result = matrix_kernels::matrix_inverse(m).map_err(|e| VMError::RuntimeError(e))?;
     Ok(ValueWord::from_matrix(Arc::new(result)).into_raw_bits())
 }
@@ -402,8 +385,10 @@ pub fn v2_determinant(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let result = matrix_kernels::matrix_determinant(m).map_err(|e| VMError::RuntimeError(e))?;
     Ok(ValueWord::from_f64(result).into_raw_bits())
 }
@@ -414,8 +399,10 @@ pub fn v2_trace(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let result = matrix_kernels::matrix_trace(m).map_err(|e| VMError::RuntimeError(e))?;
     Ok(ValueWord::from_f64(result).into_raw_bits())
 }
@@ -426,8 +413,10 @@ pub fn v2_shape(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let (rows, cols) = m.shape();
     let pair = vec![
         ValueWord::from_i64(rows as i64),
@@ -442,20 +431,20 @@ pub fn v2_reshape(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
 
-    let rows_vw = args.get(1).map(|&r| borrow_vw(r));
-    let new_rows = rows_vw
-        .as_ref()
-        .and_then(|nb| nb.as_number_coerce())
+    let new_rows = args
+        .get(1)
+        .and_then(|&r| extract_number_coerce(r))
         .ok_or_else(|| VMError::RuntimeError("reshape requires rows argument".to_string()))?
         as u32;
 
-    let cols_vw = args.get(2).map(|&r| borrow_vw(r));
-    let new_cols = cols_vw
-        .as_ref()
-        .and_then(|nb| nb.as_number_coerce())
+    let new_cols = args
+        .get(2)
+        .and_then(|&r| extract_number_coerce(r))
         .ok_or_else(|| VMError::RuntimeError("reshape requires cols argument".to_string()))?
         as u32;
 
@@ -485,13 +474,14 @@ pub fn v2_row(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
 
-    let idx_vw = args.get(1).map(|&r| borrow_vw(r));
-    let i = idx_vw
-        .as_ref()
-        .and_then(|nb| nb.as_number_coerce())
+    let i = args
+        .get(1)
+        .and_then(|&r| extract_number_coerce(r))
         .ok_or_else(|| VMError::RuntimeError("row requires an index argument".to_string()))?
         as i64;
 
@@ -506,10 +496,8 @@ pub fn v2_row(
     }
 
     // Extract the Arc<MatrixData> from the receiver HeapValue
-    let parent_arc = match vw.as_heap_ref() {
-        Some(shape_value::heap_value::HeapValue::Matrix(arc)) => arc.clone(),
-        _ => unreachable!("extract_matrix_vw succeeded so this must be Matrix"),
-    };
+    let parent_arc = extract_matrix_arc(args[0])
+        .expect("extract_matrix succeeded so this must be Matrix");
 
     let offset = actual as u32 * cols;
     let len = cols;
@@ -529,13 +517,14 @@ pub fn v2_col(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
 
-    let idx_vw = args.get(1).map(|&r| borrow_vw(r));
-    let j = idx_vw
-        .as_ref()
-        .and_then(|nb| nb.as_number_coerce())
+    let j = args
+        .get(1)
+        .and_then(|&r| extract_number_coerce(r))
         .ok_or_else(|| VMError::RuntimeError("col requires an index argument".to_string()))?
         as i64;
 
@@ -563,8 +552,10 @@ pub fn v2_diag(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let n = m.rows.min(m.cols) as usize;
     let cols = m.cols as usize;
     let mut diag = AlignedVec::with_capacity(n);
@@ -580,8 +571,10 @@ pub fn v2_flatten(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let mut flat = AlignedVec::with_capacity(m.data.len());
     for &v in m.data.iter() {
         flat.push(v);
@@ -595,8 +588,10 @@ pub fn v2_sum(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let sum: f64 = m.data.iter().sum();
     Ok(ValueWord::from_f64(sum).into_raw_bits())
 }
@@ -607,8 +602,10 @@ pub fn v2_min(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     if m.data.is_empty() {
         return Ok(ValueWord::none().into_raw_bits());
     }
@@ -622,8 +619,10 @@ pub fn v2_max(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     if m.data.is_empty() {
         return Ok(ValueWord::none().into_raw_bits());
     }
@@ -637,8 +636,10 @@ pub fn v2_mean(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     if m.data.is_empty() {
         return Ok(ValueWord::none().into_raw_bits());
     }
@@ -652,8 +653,10 @@ pub fn v2_row_sum(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let mut result = AlignedVec::with_capacity(m.rows as usize);
     for i in 0..m.rows as usize {
         let sum: f64 = m.row_slice(i as u32).iter().sum();
@@ -668,8 +671,10 @@ pub fn v2_col_sum(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let m = extract_matrix_vw(&vw)?;
+    let m = extract_matrix(args[0]).ok_or_else(|| VMError::TypeError {
+        expected: "Matrix",
+        got: super::raw_helpers::type_name_from_bits(args[0]),
+    })?;
     let rows = m.rows as usize;
     let cols = m.cols as usize;
     let mut result = AlignedVec::with_capacity(cols);
@@ -688,7 +693,10 @@ pub(crate) fn handle_map(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
+    let vw_args: Vec<ValueWord> = args
+        .iter()
+        .map(|&raw| unsafe { ValueWord::clone_from_bits(raw) })
+        .collect();
     let result = handle_map_legacy(vm, vw_args, _ctx)?;
     Ok(result.into_raw_bits())
 }

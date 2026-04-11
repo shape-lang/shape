@@ -255,12 +255,8 @@ pub fn handle_difference(
 // V2 (Native) handlers — receive &[u64], return u64, no Vec allocation
 // ═══════════════════════════════════════════════════════════════════════════
 
+use super::raw_helpers::extract_set;
 use std::mem::ManuallyDrop;
-
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
 
 /// Set.add(item) -> Set [v2]
 ///
@@ -273,7 +269,7 @@ pub fn v2_add(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let mut receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
-    let item = (*borrow_vw(args[1])).clone();
+    let item = unsafe { ValueWord::clone_from_bits(args[1]) };
 
     // In-place fast path: mutate directly when we're the sole owner
     if let Some(data) = receiver.as_set_mut() {
@@ -284,7 +280,7 @@ pub fn v2_add(
     }
 
     // COW slow path: clone the set data
-    if let Some(set_data) = receiver.as_set() {
+    if let Some(set_data) = extract_set(args[0]) {
         let mut new_data = set_data.clone();
         new_data.insert(item);
         Ok(ValueWord::from_set(new_data.items).into_raw_bits())
@@ -299,9 +295,8 @@ pub fn v2_has(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let item = borrow_vw(args[1]);
-    if let Some(data) = receiver.as_set() {
+    let item = ManuallyDrop::new(ValueWord::from_raw_bits(args[1]));
+    if let Some(data) = extract_set(args[0]) {
         Ok(ValueWord::from_bool(data.contains(&*item)).into_raw_bits())
     } else {
         Err(type_mismatch_error("has", "Set"))
@@ -315,7 +310,7 @@ pub fn v2_delete(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let mut receiver = ManuallyDrop::new(ValueWord::from_raw_bits(args[0]));
-    let item = (*borrow_vw(args[1])).clone();
+    let item = unsafe { ValueWord::clone_from_bits(args[1]) };
 
     if let Some(data) = receiver.as_set_mut() {
         data.remove(&item);
@@ -323,7 +318,7 @@ pub fn v2_delete(
         return Ok((*receiver).clone().into_raw_bits());
     }
 
-    if let Some(set_data) = receiver.as_set() {
+    if let Some(set_data) = extract_set(args[0]) {
         let mut new_data = set_data.clone();
         new_data.remove(&item);
         Ok(ValueWord::from_set(new_data.items).into_raw_bits())
@@ -338,8 +333,7 @@ pub fn v2_size(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    if let Some(data) = vw.as_set() {
+    if let Some(data) = extract_set(args[0]) {
         Ok(ValueWord::from_i64(data.items.len() as i64).into_raw_bits())
     } else {
         Err(type_mismatch_error("size", "Set"))
@@ -352,8 +346,7 @@ pub fn v2_is_empty(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    if let Some(data) = vw.as_set() {
+    if let Some(data) = extract_set(args[0]) {
         Ok(ValueWord::from_bool(data.items.is_empty()).into_raw_bits())
     } else {
         Err(type_mismatch_error("isEmpty", "Set"))
@@ -366,8 +359,7 @@ pub fn v2_to_array(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    if let Some(data) = vw.as_set() {
+    if let Some(data) = extract_set(args[0]) {
         let arr: Vec<ValueWord> = data.items.clone();
         Ok(ValueWord::from_array(Arc::new(arr)).into_raw_bits())
     } else {
@@ -381,13 +373,8 @@ pub fn v2_union(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let a_vw = borrow_vw(args[0]);
-    let b_vw = borrow_vw(args[1]);
-    let a = a_vw
-        .as_set()
-        .ok_or_else(|| type_mismatch_error("union", "Set"))?;
-    let b = b_vw
-        .as_set()
+    let a = extract_set(args[0]).ok_or_else(|| type_mismatch_error("union", "Set"))?;
+    let b = extract_set(args[1])
         .ok_or_else(|| VMError::RuntimeError("Set.union requires a Set argument".to_string()))?;
 
     let mut result = a.clone();
@@ -403,12 +390,8 @@ pub fn v2_intersection(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let a_vw = borrow_vw(args[0]);
-    let b_vw = borrow_vw(args[1]);
-    let a = a_vw
-        .as_set()
-        .ok_or_else(|| type_mismatch_error("intersection", "Set"))?;
-    let b = b_vw.as_set().ok_or_else(|| {
+    let a = extract_set(args[0]).ok_or_else(|| type_mismatch_error("intersection", "Set"))?;
+    let b = extract_set(args[1]).ok_or_else(|| {
         VMError::RuntimeError("Set.intersection requires a Set argument".to_string())
     })?;
 
@@ -427,12 +410,8 @@ pub fn v2_difference(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let a_vw = borrow_vw(args[0]);
-    let b_vw = borrow_vw(args[1]);
-    let a = a_vw
-        .as_set()
-        .ok_or_else(|| type_mismatch_error("difference", "Set"))?;
-    let b = b_vw.as_set().ok_or_else(|| {
+    let a = extract_set(args[0]).ok_or_else(|| type_mismatch_error("difference", "Set"))?;
+    let b = extract_set(args[1]).ok_or_else(|| {
         VMError::RuntimeError("Set.difference requires a Set argument".to_string())
     })?;
 
@@ -451,8 +430,8 @@ pub fn v2_for_each(
     args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = (*borrow_vw(args[0])).clone();
-    let callback = (*borrow_vw(args[1])).clone();
+    let receiver = unsafe { ValueWord::clone_from_bits(args[0]) };
+    let callback = unsafe { ValueWord::clone_from_bits(args[1]) };
 
     if let Some(data) = receiver.as_set() {
         let items = data.items.clone();
@@ -471,8 +450,8 @@ pub fn v2_map(
     args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = (*borrow_vw(args[0])).clone();
-    let callback = (*borrow_vw(args[1])).clone();
+    let receiver = unsafe { ValueWord::clone_from_bits(args[0]) };
+    let callback = unsafe { ValueWord::clone_from_bits(args[1]) };
 
     if let Some(data) = receiver.as_set() {
         let items = data.items.clone();
@@ -494,8 +473,8 @@ pub fn v2_filter(
     args: &mut [u64],
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let receiver = (*borrow_vw(args[0])).clone();
-    let callback = (*borrow_vw(args[1])).clone();
+    let receiver = unsafe { ValueWord::clone_from_bits(args[0]) };
+    let callback = unsafe { ValueWord::clone_from_bits(args[1]) };
 
     if let Some(data) = receiver.as_set() {
         let items = data.items.clone();

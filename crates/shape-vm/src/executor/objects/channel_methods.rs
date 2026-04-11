@@ -8,18 +8,8 @@ use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
-use std::mem::ManuallyDrop;
 
-/// Borrow a `ValueWord` from raw u64 bits without taking ownership.
-///
-/// The returned `ManuallyDrop<ValueWord>` prevents the destructor from running,
-/// so the caller's raw bits remain valid. This is safe because `ValueWord` is
-/// `#[repr(transparent)]` over `u64`.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    // SAFETY: ValueWord is repr(transparent) over u64.
-    ManuallyDrop::new(unsafe { std::mem::transmute::<u64, ValueWord>(raw) })
-}
+use super::raw_helpers::extract_heap_ref;
 
 /// Transfer ownership of a `ValueWord` into raw u64 bits.
 ///
@@ -211,15 +201,13 @@ pub fn v2_channel_send(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
     let value = if args.len() > 1 {
         // SAFETY: clone_from_bits increments refcount for heap values.
         unsafe { ValueWord::clone_from_bits(args[1]) }
     } else {
         ValueWord::none()
     };
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("send()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => match data.as_ref() {
@@ -249,9 +237,7 @@ pub fn v2_channel_recv(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("recv()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => match data.as_ref() {
@@ -278,9 +264,7 @@ pub fn v2_channel_try_recv(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("try_recv()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => match data.as_ref() {
@@ -307,9 +291,7 @@ pub fn v2_channel_close(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("close()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => {
@@ -328,9 +310,7 @@ pub fn v2_channel_is_closed(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("is_closed()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => Ok(into_raw(ValueWord::from_bool(data.is_closed()))),
@@ -346,9 +326,7 @@ pub fn v2_channel_is_sender(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("is_sender()", "channel"))?;
     match heap {
         HeapValue::Channel(data) => Ok(into_raw(ValueWord::from_bool(data.is_sender()))),

@@ -14,15 +14,6 @@ use shape_value::{VMError, ValueWord};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
-/// Borrow a `ValueWord` from raw u64 bits without taking ownership.
-///
-/// The returned `ManuallyDrop<ValueWord>` prevents the Drop impl from running,
-/// which is essential because the caller (the VM stack) still owns the heap data.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
-
 /// Extract the Arrow column array from the DataTable.
 fn get_arrow_col(table: &DataTable, col_id: u32) -> Result<&dyn Array, VMError> {
     let batch = table.inner();
@@ -240,13 +231,20 @@ fn arrow_array_to_nanboxed(col: &dyn Array) -> Result<Vec<ValueWord>, VMError> {
 // V2 (MethodFnV2) handlers — raw u64 ABI, no Vec allocation
 // =============================================================================
 
+/// Borrow a ValueWord from raw bits for column extraction.
+/// Column methods require `&ValueWord` for `extract_col_nb`, so we use ManuallyDrop inline.
+#[inline]
+fn borrow_col_vw(raw: u64) -> ManuallyDrop<ValueWord> {
+    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
+}
+
 /// `col.len()` — number of rows (v2).
 pub fn v2_len(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
     Ok(ValueWord::from_i64(col.len() as i64).raw_bits())
@@ -258,7 +256,7 @@ pub fn v2_sum(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     let result: f64 = values.iter().sum();
@@ -271,7 +269,7 @@ pub fn v2_mean(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     if values.is_empty() {
@@ -287,7 +285,7 @@ pub fn v2_min(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     let result = values.iter().copied().reduce(f64::min);
@@ -303,7 +301,7 @@ pub fn v2_max(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     let result = values.iter().copied().reduce(f64::max);
@@ -319,7 +317,7 @@ pub fn v2_std(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     if values.len() < 2 {
@@ -337,7 +335,7 @@ pub fn v2_first(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
     if col.is_empty() {
@@ -352,7 +350,7 @@ pub fn v2_last(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
     if col.is_empty() {
@@ -367,7 +365,7 @@ pub fn v2_to_array(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
     let nb_values = arrow_array_to_nanboxed(col)?;
@@ -380,7 +378,7 @@ pub fn v2_abs(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
+    let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     let result: Vec<ValueWord> = values

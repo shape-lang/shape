@@ -11,19 +11,9 @@ use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
-use std::mem::ManuallyDrop;
 use std::sync::atomic::Ordering;
 
-/// Borrow a `ValueWord` from raw u64 bits without taking ownership.
-///
-/// The returned `ManuallyDrop<ValueWord>` prevents the destructor from running,
-/// so the caller's raw bits remain valid. This is safe because `ValueWord` is
-/// `#[repr(transparent)]` over `u64`.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    // SAFETY: ValueWord is repr(transparent) over u64.
-    ManuallyDrop::new(unsafe { std::mem::transmute::<u64, ValueWord>(raw) })
-}
+use super::raw_helpers::{extract_heap_ref, extract_number_coerce};
 
 /// Transfer ownership of a `ValueWord` into raw u64 bits.
 ///
@@ -303,9 +293,7 @@ pub fn v2_mutex_lock(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("lock()", "mutex"))?;
     match heap {
         HeapValue::Mutex(data) => {
@@ -325,9 +313,7 @@ pub fn v2_mutex_try_lock(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("try_lock()", "mutex"))?;
     match heap {
         HeapValue::Mutex(data) => match data.inner.try_lock() {
@@ -344,15 +330,13 @@ pub fn v2_mutex_set(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
     let new_value = if args.len() > 1 {
         // SAFETY: clone_from_bits increments refcount for heap values.
         unsafe { ValueWord::clone_from_bits(args[1]) }
     } else {
         ValueWord::none()
     };
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("set()", "mutex"))?;
     match heap {
         HeapValue::Mutex(data) => {
@@ -375,9 +359,7 @@ pub fn v2_atomic_load(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("load()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
@@ -394,15 +376,12 @@ pub fn v2_atomic_store(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
     let new_val = if args.len() > 1 {
-        let arg_vw = borrow_vw(args[1]);
-        arg_vw.as_i64().unwrap_or(0)
+        extract_number_coerce(args[1]).map(|n| n as i64).unwrap_or(0)
     } else {
         0
     };
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("store()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
@@ -419,15 +398,12 @@ pub fn v2_atomic_fetch_add(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
     let delta = if args.len() > 1 {
-        let arg_vw = borrow_vw(args[1]);
-        arg_vw.as_i64().unwrap_or(0)
+        extract_number_coerce(args[1]).map(|n| n as i64).unwrap_or(0)
     } else {
         0
     };
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("fetch_add()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
@@ -444,15 +420,12 @@ pub fn v2_atomic_fetch_sub(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
     let delta = if args.len() > 1 {
-        let arg_vw = borrow_vw(args[1]);
-        arg_vw.as_i64().unwrap_or(0)
+        extract_number_coerce(args[1]).map(|n| n as i64).unwrap_or(0)
     } else {
         0
     };
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("fetch_sub()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
@@ -469,21 +442,17 @@ pub fn v2_atomic_compare_exchange(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
     let expected = if args.len() > 1 {
-        let arg_vw = borrow_vw(args[1]);
-        arg_vw.as_i64().unwrap_or(0)
+        extract_number_coerce(args[1]).map(|n| n as i64).unwrap_or(0)
     } else {
         0
     };
     let new_val = if args.len() > 2 {
-        let arg_vw = borrow_vw(args[2]);
-        arg_vw.as_i64().unwrap_or(0)
+        extract_number_coerce(args[2]).map(|n| n as i64).unwrap_or(0)
     } else {
         0
     };
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("compare_exchange()", "atomic"))?;
     match heap {
         HeapValue::Atomic(data) => {
@@ -509,9 +478,7 @@ pub fn v2_lazy_get(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("get()", "lazy"))?;
     match heap {
         HeapValue::Lazy(data) => {
@@ -565,9 +532,7 @@ pub fn v2_lazy_is_initialized(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw = borrow_vw(args[0]);
-    let heap = vw
-        .as_heap_ref()
+    let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("is_initialized()", "lazy"))?;
     match heap {
         HeapValue::Lazy(data) => {
