@@ -5,31 +5,19 @@
 //!
 //! The receiver (DateTime) is always `args[0]`.
 
+use super::raw_helpers;
 use crate::executor::VirtualMachine;
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike};
 use shape_runtime::context::ExecutionContext;
+use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord};
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
-
-/// Reconstruct a `ValueWord` from raw bits WITHOUT taking ownership.
-/// The caller must NOT drop the returned value (ManuallyDrop enforces this).
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
 
 /// Helper: extract DateTime<FixedOffset> from the receiver (args[0]).
 #[inline]
 fn recv_dt_v2(args: &[u64]) -> Result<&DateTime<FixedOffset>, VMError> {
-    let vw = borrow_vw(args[0]);
-    // SAFETY: the borrow lives as long as the ManuallyDrop, which lives for the
-    // duration of the handler call.  The raw bits in args[0] are not freed.
-    let ptr = vw.as_datetime().ok_or_else(|| VMError::TypeError {
-        expected: "datetime",
-        got: vw.type_name(),
-    })? as *const DateTime<FixedOffset>;
-    Ok(unsafe { &*ptr })
+    raw_helpers::extract_datetime(args[0])
+        .ok_or_else(|| raw_helpers::type_error("datetime", args[0]))
 }
 
 // ===== Component access (return int) =====
@@ -163,11 +151,8 @@ pub fn v2_format(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let fmt = vw1.as_str().ok_or_else(|| VMError::TypeError {
-        expected: "string",
-        got: vw1.type_name(),
-    })?;
+    let fmt = raw_helpers::extract_str(args[1])
+        .ok_or_else(|| raw_helpers::type_error("string", args[1]))?;
     let formatted = dt.format(fmt).to_string();
     Ok(ValueWord::from_string(Arc::new(formatted)).into_raw_bits())
 }
@@ -216,11 +201,8 @@ pub fn v2_diff(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let other = vw1.as_datetime().ok_or_else(|| VMError::TypeError {
-        expected: "datetime",
-        got: vw1.type_name(),
-    })?;
+    let other = raw_helpers::extract_datetime(args[1])
+        .ok_or_else(|| raw_helpers::type_error("datetime", args[1]))?;
 
     let duration = *dt - *other;
     let total_millis = duration.num_milliseconds();
@@ -277,11 +259,8 @@ pub fn v2_to_timezone(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let tz_name = vw1.as_str().ok_or_else(|| VMError::TypeError {
-        expected: "string",
-        got: vw1.type_name(),
-    })?;
+    let tz_name = raw_helpers::extract_str(args[1])
+        .ok_or_else(|| raw_helpers::type_error("string", args[1]))?;
     let tz: chrono_tz::Tz = tz_name
         .parse()
         .map_err(|_| VMError::RuntimeError(format!("Unknown timezone: '{}'", tz_name)))?;
@@ -345,17 +324,19 @@ pub fn v2_add(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let rhs = borrow_vw(args[1]);
-    if let Some(dur) = rhs.as_timespan() {
-        let result = dt
-            .checked_add_signed(dur)
-            .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
-        Ok(ValueWord::from_time(result).into_raw_bits())
-    } else {
-        Err(VMError::TypeError {
+    let rhs_hv = unsafe { raw_helpers::extract_heap_ref(args[1]) }
+        .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan", args[1]))?;
+    match rhs_hv {
+        HeapValue::TimeSpan(dur) => {
+            let result = dt
+                .checked_add_signed(*dur)
+                .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
+            Ok(ValueWord::from_time(result).into_raw_bits())
+        }
+        _ => Err(VMError::TypeError {
             expected: "Duration/TimeSpan",
-            got: rhs.type_name(),
-        })
+            got: raw_helpers::type_name_from_bits(args[1]),
+        }),
     }
 }
 
@@ -366,20 +347,23 @@ pub fn v2_sub(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let rhs = borrow_vw(args[1]);
-    if let Some(dur) = rhs.as_timespan() {
-        let result = dt
-            .checked_sub_signed(dur)
-            .ok_or_else(|| VMError::RuntimeError("DateTime overflow in sub".to_string()))?;
-        Ok(ValueWord::from_time(result).into_raw_bits())
-    } else if let Some(other_dt) = rhs.as_datetime() {
-        let diff = *dt - *other_dt;
-        Ok(ValueWord::from_timespan(diff).into_raw_bits())
-    } else {
-        Err(VMError::TypeError {
+    let rhs_hv = unsafe { raw_helpers::extract_heap_ref(args[1]) }
+        .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan or DateTime", args[1]))?;
+    match rhs_hv {
+        HeapValue::TimeSpan(dur) => {
+            let result = dt
+                .checked_sub_signed(*dur)
+                .ok_or_else(|| VMError::RuntimeError("DateTime overflow in sub".to_string()))?;
+            Ok(ValueWord::from_time(result).into_raw_bits())
+        }
+        HeapValue::Time(other_dt) => {
+            let diff = *dt - *other_dt;
+            Ok(ValueWord::from_timespan(diff).into_raw_bits())
+        }
+        _ => Err(VMError::TypeError {
             expected: "Duration/TimeSpan or DateTime",
-            got: rhs.type_name(),
-        })
+            got: raw_helpers::type_name_from_bits(args[1]),
+        }),
     }
 }
 
@@ -391,11 +375,8 @@ pub fn v2_add_days(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let n = vw1.as_number_coerce().ok_or_else(|| VMError::TypeError {
-        expected: "number",
-        got: vw1.type_name(),
-    })? as i64;
+    let n = raw_helpers::extract_number_coerce(args[1])
+        .ok_or_else(|| raw_helpers::type_error("number", args[1]))? as i64;
     let result = dt
         .checked_add_signed(chrono::Duration::days(n))
         .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add_days".to_string()))?;
@@ -408,11 +389,8 @@ pub fn v2_add_hours(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let n = vw1.as_number_coerce().ok_or_else(|| VMError::TypeError {
-        expected: "number",
-        got: vw1.type_name(),
-    })? as i64;
+    let n = raw_helpers::extract_number_coerce(args[1])
+        .ok_or_else(|| raw_helpers::type_error("number", args[1]))? as i64;
     let result = dt
         .checked_add_signed(chrono::Duration::hours(n))
         .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add_hours".to_string()))?;
@@ -425,11 +403,8 @@ pub fn v2_add_minutes(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let n = vw1.as_number_coerce().ok_or_else(|| VMError::TypeError {
-        expected: "number",
-        got: vw1.type_name(),
-    })? as i64;
+    let n = raw_helpers::extract_number_coerce(args[1])
+        .ok_or_else(|| raw_helpers::type_error("number", args[1]))? as i64;
     let result = dt
         .checked_add_signed(chrono::Duration::minutes(n))
         .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add_minutes".to_string()))?;
@@ -442,11 +417,8 @@ pub fn v2_add_seconds(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let n = vw1.as_number_coerce().ok_or_else(|| VMError::TypeError {
-        expected: "number",
-        got: vw1.type_name(),
-    })? as i64;
+    let n = raw_helpers::extract_number_coerce(args[1])
+        .ok_or_else(|| raw_helpers::type_error("number", args[1]))? as i64;
     let result = dt
         .checked_add_signed(chrono::Duration::seconds(n))
         .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add_seconds".to_string()))?;
@@ -459,11 +431,8 @@ pub fn v2_add_months(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let n = vw1.as_number_coerce().ok_or_else(|| VMError::TypeError {
-        expected: "number",
-        got: vw1.type_name(),
-    })? as i32;
+    let n = raw_helpers::extract_number_coerce(args[1])
+        .ok_or_else(|| raw_helpers::type_error("number", args[1]))? as i32;
 
     let total_months = dt.year() * 12 + dt.month() as i32 - 1 + n;
     let new_year = total_months.div_euclid(12);
@@ -494,11 +463,8 @@ pub fn v2_is_before(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let other = vw1.as_datetime().ok_or_else(|| VMError::TypeError {
-        expected: "datetime",
-        got: vw1.type_name(),
-    })?;
+    let other = raw_helpers::extract_datetime(args[1])
+        .ok_or_else(|| raw_helpers::type_error("datetime", args[1]))?;
     Ok(ValueWord::from_bool(dt < other).into_raw_bits())
 }
 
@@ -508,11 +474,8 @@ pub fn v2_is_after(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let other = vw1.as_datetime().ok_or_else(|| VMError::TypeError {
-        expected: "datetime",
-        got: vw1.type_name(),
-    })?;
+    let other = raw_helpers::extract_datetime(args[1])
+        .ok_or_else(|| raw_helpers::type_error("datetime", args[1]))?;
     Ok(ValueWord::from_bool(dt > other).into_raw_bits())
 }
 
@@ -522,11 +485,8 @@ pub fn v2_is_same_day(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let dt = recv_dt_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let other = vw1.as_datetime().ok_or_else(|| VMError::TypeError {
-        expected: "datetime",
-        got: vw1.type_name(),
-    })?;
+    let other = raw_helpers::extract_datetime(args[1])
+        .ok_or_else(|| raw_helpers::type_error("datetime", args[1]))?;
     Ok(ValueWord::from_bool(
         dt.year() == other.year() && dt.month() == other.month() && dt.day() == other.day(),
     )
@@ -541,27 +501,36 @@ pub fn v2_timespan_add(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw0 = borrow_vw(args[0]);
-    let dur = vw0.as_timespan().ok_or_else(|| VMError::TypeError {
-        expected: "Duration/TimeSpan",
-        got: vw0.type_name(),
-    })?;
-    let rhs = borrow_vw(args[1]);
-    if let Some(other_dur) = rhs.as_timespan() {
-        let result = dur
-            .checked_add(&other_dur)
-            .ok_or_else(|| VMError::RuntimeError("Duration overflow in add".to_string()))?;
-        Ok(ValueWord::from_timespan(result).into_raw_bits())
-    } else if let Some(dt) = rhs.as_datetime() {
-        let result = dt
-            .checked_add_signed(dur)
-            .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
-        Ok(ValueWord::from_time(result).into_raw_bits())
-    } else {
-        Err(VMError::TypeError {
+    let recv_hv = unsafe { raw_helpers::extract_heap_ref(args[0]) }
+        .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan", args[0]))?;
+    let dur = match recv_hv {
+        HeapValue::TimeSpan(ts) => *ts,
+        _ => {
+            return Err(VMError::TypeError {
+                expected: "Duration/TimeSpan",
+                got: raw_helpers::type_name_from_bits(args[0]),
+            })
+        }
+    };
+    let rhs_hv = unsafe { raw_helpers::extract_heap_ref(args[1]) }
+        .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan or DateTime", args[1]))?;
+    match rhs_hv {
+        HeapValue::TimeSpan(other_dur) => {
+            let result = dur
+                .checked_add(other_dur)
+                .ok_or_else(|| VMError::RuntimeError("Duration overflow in add".to_string()))?;
+            Ok(ValueWord::from_timespan(result).into_raw_bits())
+        }
+        HeapValue::Time(dt) => {
+            let result = dt
+                .checked_add_signed(dur)
+                .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
+            Ok(ValueWord::from_time(result).into_raw_bits())
+        }
+        _ => Err(VMError::TypeError {
             expected: "Duration/TimeSpan or DateTime",
-            got: rhs.type_name(),
-        })
+            got: raw_helpers::type_name_from_bits(args[1]),
+        }),
     }
 }
 
@@ -571,22 +540,30 @@ pub fn v2_timespan_sub(
     args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
-    let vw0 = borrow_vw(args[0]);
-    let dur = vw0.as_timespan().ok_or_else(|| VMError::TypeError {
-        expected: "Duration/TimeSpan",
-        got: vw0.type_name(),
-    })?;
-    let rhs = borrow_vw(args[1]);
-    if let Some(other_dur) = rhs.as_timespan() {
-        let result = dur
-            .checked_sub(&other_dur)
-            .ok_or_else(|| VMError::RuntimeError("Duration overflow in sub".to_string()))?;
-        Ok(ValueWord::from_timespan(result).into_raw_bits())
-    } else {
-        Err(VMError::TypeError {
+    let recv_hv = unsafe { raw_helpers::extract_heap_ref(args[0]) }
+        .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan", args[0]))?;
+    let dur = match recv_hv {
+        HeapValue::TimeSpan(ts) => *ts,
+        _ => {
+            return Err(VMError::TypeError {
+                expected: "Duration/TimeSpan",
+                got: raw_helpers::type_name_from_bits(args[0]),
+            })
+        }
+    };
+    let rhs_hv = unsafe { raw_helpers::extract_heap_ref(args[1]) }
+        .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan", args[1]))?;
+    match rhs_hv {
+        HeapValue::TimeSpan(other_dur) => {
+            let result = dur
+                .checked_sub(other_dur)
+                .ok_or_else(|| VMError::RuntimeError("Duration overflow in sub".to_string()))?;
+            Ok(ValueWord::from_timespan(result).into_raw_bits())
+        }
+        _ => Err(VMError::TypeError {
             expected: "Duration/TimeSpan",
-            got: rhs.type_name(),
-        })
+            got: raw_helpers::type_name_from_bits(args[1]),
+        }),
     }
 }
 

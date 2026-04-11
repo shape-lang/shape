@@ -2,27 +2,16 @@
 //!
 //! Methods: elapsed, elapsed_ms, elapsed_us, elapsed_ns, duration_since, to_string
 
+use super::raw_helpers;
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{VMError, ValueWord};
-use std::mem::ManuallyDrop;
-
-/// Reconstruct a `ValueWord` from raw bits WITHOUT taking ownership.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
 
 /// Extract the receiver Instant from args[0].
+#[inline]
 fn recv_instant_v2(args: &[u64]) -> Result<&std::time::Instant, VMError> {
-    let vw = borrow_vw(args[0]);
-    let ptr = vw
-        .as_instant()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "instant",
-            got: vw.type_name(),
-        })? as *const std::time::Instant;
-    Ok(unsafe { &*ptr })
+    raw_helpers::extract_instant(args[0])
+        .ok_or_else(|| raw_helpers::type_error("instant", args[0]))
 }
 
 /// .elapsed() -> number (seconds as f64)
@@ -76,11 +65,8 @@ pub fn v2_duration_since(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<u64, VMError> {
     let this = recv_instant_v2(args)?;
-    let vw1 = borrow_vw(args[1]);
-    let other = vw1.as_instant().ok_or_else(|| VMError::TypeError {
-        expected: "instant",
-        got: vw1.type_name(),
-    })?;
+    let other = raw_helpers::extract_instant(args[1])
+        .ok_or_else(|| raw_helpers::type_error("instant", args[1]))?;
     let ms = this.duration_since(*other).as_secs_f64() * 1000.0;
     Ok(ValueWord::from_f64(ms).into_raw_bits())
 }
