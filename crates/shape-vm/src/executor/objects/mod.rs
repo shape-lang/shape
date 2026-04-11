@@ -4,6 +4,8 @@
 
 // PHF method registry
 pub mod method_registry;
+// Raw u64 extraction helpers (v2 — no ValueWord)
+pub mod raw_helpers;
 
 // Property access operations (GetProp, SetProp, Length)
 pub mod property_access;
