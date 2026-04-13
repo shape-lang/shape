@@ -451,6 +451,209 @@ impl VirtualMachine {
         self.pop_vw()
     }
 
+    // ─── Raw u64 call API (v2) ─────────────────────────────────────────────
+
+    /// Raw-bits closure/function call: dispatches on NanTag/HeapKind.
+    ///
+    /// v2 equivalent of `call_value_immediate_nb` — callers pass raw `u64`
+    /// NaN-boxed bits instead of constructing `ValueWord` values.
+    pub fn call_value_immediate_raw(
+        &mut self,
+        callee_bits: u64,
+        args: &[u64],
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<u64, VMError> {
+        use super::objects::raw_helpers;
+        use shape_value::tags::{TAG_FUNCTION, TAG_HEAP, TAG_MODULE_FN, get_payload, get_tag, is_tagged};
+
+        let target_depth = self.call_stack.len();
+
+        if !is_tagged(callee_bits) {
+            return Err(VMError::InvalidCall);
+        }
+
+        let tag = get_tag(callee_bits);
+        match tag {
+            TAG_FUNCTION => {
+                let func_id = get_payload(callee_bits) as u16;
+                self.call_function_with_raw_args(func_id, args)?;
+            }
+            TAG_MODULE_FN => {
+                let callee_vw = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(callee_bits));
+                let func_id = callee_vw.as_module_function().ok_or(VMError::InvalidCall)?;
+                let module_fn =
+                    self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Module function ID {} not found in registry",
+                            func_id
+                        ))
+                    })?;
+                let args_vec: Vec<ValueWord> = args
+                    .iter()
+                    .map(|&bits| {
+                        let tmp = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(bits));
+                        (*tmp).clone()
+                    })
+                    .collect();
+                let result_nb = self.invoke_module_fn(&module_fn, &args_vec)?;
+                return Ok(result_nb.into_raw_bits());
+            }
+            TAG_HEAP => {
+                if let Some((function_id, upvalues)) =
+                    raw_helpers::extract_closure_info(callee_bits)
+                {
+                    self.call_closure_with_raw_args(function_id, upvalues, args)?;
+                } else if let Some(result) =
+                    raw_helpers::try_call_host_closure(callee_bits, args)
+                {
+                    return result;
+                } else {
+                    return Err(VMError::InvalidCall);
+                }
+            }
+            _ => return Err(VMError::InvalidCall),
+        }
+
+        self.execute_until_call_depth(target_depth, ctx)?;
+        self.pop_raw_u64()
+    }
+
+    /// Set up a function call frame from raw u64 args.
+    pub(crate) fn call_function_with_raw_args(
+        &mut self,
+        func_id: u16,
+        args: &[u64],
+    ) -> Result<(), VMError> {
+        use super::objects::raw_helpers::clone_raw_bits;
+
+        let function = self
+            .program
+            .functions
+            .get(func_id as usize)
+            .ok_or(VMError::InvalidCall)?;
+
+        if self.call_stack.len() >= self.config.max_call_depth {
+            return Err(VMError::StackOverflow);
+        }
+
+        let locals_count = function.locals_count as usize;
+        let param_count = function.arity as usize;
+        let entry_point = function.entry_point;
+        let ref_params = function.ref_params.clone();
+
+        let ref_shadow_count = ref_params
+            .iter()
+            .enumerate()
+            .filter(|&(i, &is_ref)| is_ref && i < param_count && i < locals_count)
+            .count();
+
+        let bp = self.sp;
+        let total_slots = locals_count + ref_shadow_count;
+        let needed = bp + total_slots;
+        if needed > self.stack.len() {
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+        }
+
+        for i in 0..param_count {
+            if i < locals_count {
+                let bits = args.get(i).copied().unwrap_or(Self::NONE_BITS);
+                let cloned = clone_raw_bits(bits);
+                self.stack[bp + i] = cloned;
+            }
+        }
+
+        let mut shadow_idx = 0;
+        for (i, &is_ref) in ref_params.iter().enumerate() {
+            if is_ref && i < param_count && i < locals_count {
+                let shadow_slot = bp + locals_count + shadow_idx;
+                let val_bits = self.stack[bp + i];
+                self.stack[shadow_slot] = val_bits;
+                self.stack[bp + i] = ValueWord::from_ref(shadow_slot).into_raw_bits();
+                shadow_idx += 1;
+            }
+        }
+
+        self.sp = needed;
+
+        let blob_hash = self.blob_hash_for_function(func_id);
+        self.call_stack.push(CallFrame {
+            return_ip: self.ip,
+            base_pointer: bp,
+            locals_count: total_slots,
+            function_id: Some(func_id),
+            upvalues: None,
+            blob_hash,
+        });
+        self.ip = entry_point;
+        Ok(())
+    }
+
+    /// Set up a closure call frame from raw u64 args.
+    pub(crate) fn call_closure_with_raw_args(
+        &mut self,
+        func_id: u16,
+        upvalues: &[Upvalue],
+        args: &[u64],
+    ) -> Result<(), VMError> {
+        use super::objects::raw_helpers::clone_raw_bits;
+
+        let function = self
+            .program
+            .functions
+            .get(func_id as usize)
+            .ok_or(VMError::InvalidCall)?;
+
+        if self.call_stack.len() >= self.config.max_call_depth {
+            return Err(VMError::StackOverflow);
+        }
+
+        let locals_count = function.locals_count as usize;
+        let captures_count = function.captures_count as usize;
+        let arity = function.arity as usize;
+        let entry_point = function.entry_point;
+
+        let bp = self.sp;
+        let needed = bp + locals_count;
+        if needed > self.stack.len() {
+            self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+        }
+
+        for (i, upvalue) in upvalues.iter().enumerate() {
+            if i < locals_count {
+                self.stack_write_vw(bp + i, upvalue.get());
+            }
+        }
+
+        for (i, &arg_bits) in args.iter().enumerate() {
+            let local_idx = captures_count + i;
+            if local_idx < locals_count {
+                let cloned = clone_raw_bits(arg_bits);
+                let old = self.stack[bp + local_idx];
+                drop(ValueWord::from_raw_bits(old));
+                self.stack[bp + local_idx] = cloned;
+            }
+        }
+
+        for i in (captures_count + args.len())..arity.min(locals_count) {
+            self.stack[bp + i] = Self::NONE_BITS;
+        }
+
+        self.sp = needed;
+
+        let blob_hash = self.blob_hash_for_function(func_id);
+        self.call_stack.push(CallFrame {
+            return_ip: self.ip,
+            base_pointer: bp,
+            locals_count,
+            function_id: Some(func_id),
+            upvalues: Some(upvalues.to_vec()),
+            blob_hash,
+        });
+
+        self.ip = entry_point;
+        Ok(())
+    }
+
     /// Fast-path function call: reads `arg_count` arguments directly from the
     /// value stack instead of collecting them into a temporary `Vec`.
     ///

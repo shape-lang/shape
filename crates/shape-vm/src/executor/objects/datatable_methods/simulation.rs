@@ -2,26 +2,15 @@
 
 use crate::executor::VirtualMachine;
 use crate::executor::objects::object_creation::nb_to_slot_with_field_type;
+use crate::executor::objects::raw_helpers;
 use shape_runtime::type_schema::FieldType;
-use shape_value::{HeapKind, NanTag, VMError, ValueWord};
+use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
 
 use super::common::{
     extract_dt_nb, extract_schema_id_nb, typed_object_entries_nb_vm, typed_object_to_hashmap_nb_vm,
 };
 use std::mem::ManuallyDrop;
-
-/// Check if a ValueWord value is callable (Function, ModuleFunction, Closure, HostClosure).
-fn is_callable_nb(nb: &ValueWord) -> bool {
-    match nb.tag() {
-        NanTag::Function | NanTag::ModuleFunction => true,
-        NanTag::Heap => matches!(
-            nb.heap_kind(),
-            Some(HeapKind::Closure | HeapKind::HostClosure)
-        ),
-        _ => false,
-    }
-}
 
 /// `dt.simulate(handler, config?)` — unified simulation method on DataTable.
 ///
@@ -35,29 +24,31 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
-    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
-}
-
-
-pub(crate) fn handle_simulate_legacy(
+pub(crate) fn handle_simulate(
     vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let dt = extract_dt_nb(&args[0])?;
-    let schema_id = extract_schema_id_nb(&args[0]);
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let dt = extract_dt_nb(&receiver)?;
+    let schema_id = extract_schema_id_nb(&receiver);
 
     // Require handler function
-    let handler_nb = args.get(1).filter(|nb| is_callable_nb(nb)).ok_or_else(|| {
+    let handler_bits = *args.get(1).ok_or_else(|| {
         VMError::RuntimeError(
             "simulate() requires a handler function as first argument".to_string(),
         )
     })?;
+    if !raw_helpers::is_callable_raw(handler_bits) {
+        return Err(VMError::RuntimeError(
+            "simulate() requires a handler function as first argument".to_string(),
+        ));
+    }
 
     // Parse optional config as ValueWord object.
-    let config = args
-        .get(2)
+    let config_nb = args.get(2).map(|&r| borrow_vw(r));
+    let config = config_nb
+        .as_ref()
         .map(|nb| typed_object_to_hashmap_nb_vm(vm, nb))
         .transpose()?;
 
@@ -113,15 +104,11 @@ pub(crate) fn handle_simulate_legacy(
     } else {
         Vec::new()
     };
-    let mut event_log: Vec<ValueWord> = if collect_event_log {
-        Vec::new()
-    } else {
-        Vec::new()
-    };
-    let mut handler_args: Vec<ValueWord> = Vec::with_capacity(3);
+    let mut event_log: Vec<ValueWord> = Vec::new();
+    let mut handler_arg_bits: Vec<u64> = Vec::with_capacity(3);
 
     for row_idx in 0..row_count {
-        handler_args.clear();
+        handler_arg_bits.clear();
         if let Some(ref tables) = correlated_tables {
             // Correlated mode: build ctx TypedObject with row + named RowViews
             let mut ctx_values: Vec<ValueWord> = Vec::with_capacity(1 + tables.len());
@@ -153,24 +140,26 @@ pub(crate) fn handle_simulate_legacy(
                     heap_mask |= 1u64 << i;
                 }
             }
-            handler_args.push(ValueWord::from_heap_value(
+            let ctx_obj = ValueWord::from_heap_value(
                 shape_value::heap_value::HeapValue::TypedObject {
                     schema_id: sid as u64,
                     slots: slots.into_boxed_slice(),
                     heap_mask,
                 },
-            ));
-            handler_args.push(state.clone());
-            handler_args.push(ValueWord::from_i64(row_idx as i64));
+            );
+            handler_arg_bits.push(ctx_obj.into_raw_bits());
+            handler_arg_bits.push(state.clone().into_raw_bits());
+            handler_arg_bits.push(ValueWord::from_i64(row_idx as i64).into_raw_bits());
         } else {
             // Single mode: handler(row, state, idx)
-            let row_view = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx);
-            handler_args.push(row_view);
-            handler_args.push(state.clone());
-            handler_args.push(ValueWord::from_i64(row_idx as i64));
+            let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
+            handler_arg_bits.push(rv_bits);
+            handler_arg_bits.push(state.clone().into_raw_bits());
+            handler_arg_bits.push(ValueWord::from_i64(row_idx as i64).into_raw_bits());
         };
 
-        let result = vm.call_value_immediate_nb(handler_nb, &handler_args, ctx.as_deref_mut())?;
+        let result_bits = vm.call_value_immediate_raw(handler_bits, &handler_arg_bits, ctx.as_deref_mut())?;
+        let result = ValueWord::from_raw_bits(result_bits);
 
         // Interpret result: if object with "state" key -> extract state + optional "result"/"event_type"
         let result_map = typed_object_to_hashmap_nb_vm(vm, &result)
@@ -263,15 +252,5 @@ pub(crate) fn handle_simulate_legacy(
             slots: slots.into_boxed_slice(),
             heap_mask,
         },
-    ))
-}
-
-pub(crate) fn handle_simulate(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_simulate_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
+    ).into_raw_bits())
 }

@@ -5,22 +5,10 @@
 use crate::executor::objects::object_creation::read_slot_nb;
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use shape_value::datatable::DataTable;
-use shape_value::{HeapKind, NanTag, VMError, ValueWord};
+use shape_value::{VMError, ValueWord};
 use std::sync::Arc;
 
 use crate::executor::VirtualMachine;
-
-/// Check if a ValueWord value is callable (Function, ModuleFunction, Closure, HostClosure).
-pub(crate) fn is_callable_nb(nb: &ValueWord) -> bool {
-    match nb.tag() {
-        NanTag::Function | NanTag::ModuleFunction => true,
-        NanTag::Heap => matches!(
-            nb.heap_kind(),
-            Some(HeapKind::Closure | HeapKind::HostClosure)
-        ),
-        _ => false,
-    }
-}
 
 /// Extract DataTable reference from a ValueWord value.
 /// Handles DataTable, TypedTable, and IndexedTable HeapValue variants.
@@ -223,20 +211,22 @@ pub(in crate::executor::objects) fn extract_array_value_nb(
 pub(crate) fn collect_closure_numbers_nb(
     vm: &mut VirtualMachine,
     dt: &Arc<DataTable>,
-    function: &ValueWord,
+    callee_bits: u64,
     ctx: &mut Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<Vec<f64>, VMError> {
+    use super::super::raw_helpers;
     let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
     let row_count = dt.row_count();
     let mut values = Vec::with_capacity(row_count);
     for row_idx in 0..row_count {
-        let row_view = ValueWord::from_row_view(schema_id, dt.clone(), row_idx);
-        let result = vm.call_value_immediate_nb(function, &[row_view], ctx.as_deref_mut())?;
-        if let Some(n) = result.as_number_coerce() {
+        let rv_bits = ValueWord::from_row_view(schema_id, dt.clone(), row_idx).into_raw_bits();
+        let result_bits = vm.call_value_immediate_raw(callee_bits, &[rv_bits], ctx.as_deref_mut())?;
+        if let Some(n) = raw_helpers::extract_number_coerce(result_bits) {
             values.push(n);
-        } else if result.is_none() {
+        } else if result_bits == ValueWord::none().into_raw_bits() {
             // skip nulls
         } else {
+            let result = ValueWord::from_raw_bits(result_bits);
             return Err(VMError::RuntimeError(format!(
                 "aggregation closure must return a number, got {}",
                 result.type_name()

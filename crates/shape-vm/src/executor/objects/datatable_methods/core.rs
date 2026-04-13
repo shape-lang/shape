@@ -246,8 +246,7 @@ pub(crate) fn handle_select(
     let receiver = borrow_vw(args[0]);
     let dt = extract_dt_nb(&receiver)?;
     if let Some(&raw1) = args.get(1) {
-        let func_nb = borrow_vw(raw1);
-        if super::common::is_callable_nb(&func_nb) {
+        if super::super::raw_helpers::is_callable_raw(raw1) {
             let dt = dt.clone();
             let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
             let dt_arc = Arc::new(dt.as_ref().clone());
@@ -258,9 +257,9 @@ pub(crate) fn handle_select(
             }
             let mut rows: Vec<ValueWord> = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
-                let row_view = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx);
-                let result = vm.call_value_immediate_nb(&func_nb, &[row_view], ctx.as_deref_mut())?;
-                rows.push(result);
+                let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
+                let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
+                rows.push(ValueWord::from_raw_bits(result_bits));
             }
             return Ok(super::common::build_datatable_from_objects_nb(vm, &rows)?.into_raw_bits());
         }

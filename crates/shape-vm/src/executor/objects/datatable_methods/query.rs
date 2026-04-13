@@ -2,6 +2,7 @@
 
 use crate::executor::VirtualMachine;
 use crate::executor::objects::object_creation::nb_to_slot_with_field_type;
+use crate::executor::objects::raw_helpers;
 use arrow_array::BooleanArray;
 use arrow_ord::sort::sort_to_indices;
 use arrow_select::filter::filter_record_batch;
@@ -13,32 +14,28 @@ use std::sync::Arc;
 
 use super::common::{
     apply_comparison_nb, array_values_equal, build_datatable_from_objects_nb, cmp_nb_values,
-    extract_array_value_nb, extract_dt_nb, is_callable_nb, wrap_result_table_nb,
+    extract_array_value_nb, extract_dt_nb, wrap_result_table_nb,
 };
 use std::mem::ManuallyDrop;
 
-/// `dt.filter("col", "op", value)` — filter rows using Arrow compute kernels (string path).
-/// `dt.filter(row => bool)` — filter rows using closure (closure path).
 #[inline]
 fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
-    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
-}
-
-
-pub(crate) fn handle_filter_legacy(
+/// `dt.filter("col", "op", value)` — filter rows using Arrow compute kernels (string path).
+/// `dt.filter(row => bool)` — filter rows using closure (closure path).
+pub(crate) fn handle_filter(
     vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let dt = extract_dt_nb(&args[0])?;
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let dt = extract_dt_nb(&receiver)?;
 
     // Closure path: dt.filter(row => row.price > 100)
-    if let Some(func_nb) = args.get(1) {
-        if is_callable_nb(func_nb) {
+    if let Some(&raw1) = args.get(1) {
+        if raw_helpers::is_callable_raw(raw1) {
             let dt = dt.clone();
             let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
             let dt_arc = Arc::new(dt.as_ref().clone());
@@ -46,10 +43,9 @@ pub(crate) fn handle_filter_legacy(
 
             let mut keep = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
-                let row_view = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx);
-                let result =
-                    vm.call_value_immediate_nb(func_nb, &[row_view], ctx.as_deref_mut())?;
-                keep.push(result.is_truthy());
+                let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
+                let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
+                keep.push(raw_helpers::is_truthy_raw(result_bits));
             }
 
             let mask = BooleanArray::from(keep);
@@ -59,24 +55,27 @@ pub(crate) fn handle_filter_legacy(
             if let Some(idx_name) = dt_arc.index_col() {
                 new_dt = new_dt.with_index_col(idx_name.to_string());
             }
-            return Ok(wrap_result_table_nb(&args[0], new_dt));
+            return Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits());
         }
     }
 
     // String path: dt.filter("col", "op", value)
-    let col_name = args
-        .get(1)
+    let arg1 = args.get(1).map(|&r| borrow_vw(r));
+    let col_name = arg1
+        .as_ref()
         .and_then(|nb| nb.as_str().map(|s| s.to_string()))
         .ok_or_else(|| {
             VMError::RuntimeError("filter() requires a string column name argument".to_string())
         })?;
-    let op = args
-        .get(2)
+    let arg2 = args.get(2).map(|&r| borrow_vw(r));
+    let op = arg2
+        .as_ref()
         .and_then(|nb| nb.as_str().map(|s| s.to_string()))
         .ok_or_else(|| {
             VMError::RuntimeError("filter() requires an operator string argument".to_string())
         })?;
-    let value = args.get(3).ok_or_else(|| {
+    let arg3 = args.get(3).map(|&r| borrow_vw(r));
+    let value = arg3.as_ref().ok_or_else(|| {
         VMError::RuntimeError("filter() requires a comparison value as third argument".to_string())
     })?;
 
@@ -94,25 +93,26 @@ pub(crate) fn handle_filter_legacy(
     if let Some(idx_name) = dt.index_col() {
         new_dt = new_dt.with_index_col(idx_name.to_string());
     }
-    Ok(wrap_result_table_nb(&args[0], new_dt))
+    Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits())
 }
 
 /// `dt.orderBy("col", "asc"|"desc")` — sort by column with direction (string path).
 /// `dt.orderBy(row => row.field, "asc"|"desc")` — sort by closure key (closure path).
-pub(crate) fn handle_order_by_legacy(
+pub(crate) fn handle_order_by(
     vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let dt = extract_dt_nb(&args[0])?;
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let dt = extract_dt_nb(&receiver)?;
 
     // Closure path: dt.orderBy(row => row.price, "desc")
-    if let Some(func_nb) = args.get(1) {
-        if is_callable_nb(func_nb) {
+    if let Some(&raw1) = args.get(1) {
+        if raw_helpers::is_callable_raw(raw1) {
             let dt = dt.clone();
             let descending = args
                 .get(2)
-                .and_then(|nb| nb.as_str())
+                .and_then(|&r| raw_helpers::extract_str(r))
                 .map(|s| s == "desc")
                 .unwrap_or(false);
             let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
@@ -121,9 +121,9 @@ pub(crate) fn handle_order_by_legacy(
 
             let mut keys: Vec<(usize, ValueWord)> = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
-                let row_view = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx);
-                let key = vm.call_value_immediate_nb(func_nb, &[row_view], ctx.as_deref_mut())?;
-                keys.push((row_idx, key));
+                let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
+                let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
+                keys.push((row_idx, ValueWord::from_raw_bits(result_bits)));
             }
 
             keys.sort_by(|a, b| {
@@ -148,20 +148,21 @@ pub(crate) fn handle_order_by_legacy(
             if let Some(idx_name) = dt_arc.index_col() {
                 new_dt = new_dt.with_index_col(idx_name.to_string());
             }
-            return Ok(wrap_result_table_nb(&args[0], new_dt));
+            return Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits());
         }
     }
 
     // String path: dt.orderBy("col", "asc"|"desc")
-    let col_name = args
-        .get(1)
+    let arg1 = args.get(1).map(|&r| borrow_vw(r));
+    let col_name = arg1
+        .as_ref()
         .and_then(|nb| nb.as_str().map(|s| s.to_string()))
         .ok_or_else(|| {
             VMError::RuntimeError("orderBy() requires a string column name argument".to_string())
         })?;
     let descending = args
         .get(2)
-        .and_then(|nb| nb.as_str())
+        .and_then(|&r| raw_helpers::extract_str(r))
         .map(|s| s == "desc")
         .unwrap_or(false);
     let batch = dt.inner();
@@ -192,37 +193,38 @@ pub(crate) fn handle_order_by_legacy(
     if let Some(idx_name) = dt.index_col() {
         new_dt = new_dt.with_index_col(idx_name.to_string());
     }
-    Ok(wrap_result_table_nb(&args[0], new_dt))
+    Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits())
 }
 
 /// `dt.group_by("col")` — group rows by column value (string path).
 /// `dt.group_by(row => row.field)` — group rows by closure key (closure path).
 ///
 /// Returns Array of {key: value, group: DataTable} objects.
-pub(crate) fn handle_group_by_legacy(
+pub(crate) fn handle_group_by(
     vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let dt = extract_dt_nb(&args[0])?;
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let dt = extract_dt_nb(&receiver)?;
 
     // Closure path: dt.group_by(row => row.symbol)
-    if let Some(func_nb) = args.get(1) {
-        if is_callable_nb(func_nb) {
+    if let Some(&raw1) = args.get(1) {
+        if raw_helpers::is_callable_raw(raw1) {
             let dt = dt.clone();
             let schema_id = dt.schema_id().map(|id| id as u64).unwrap_or(0);
             let dt_arc = Arc::new(dt.as_ref().clone());
             let row_count = dt_arc.row_count();
 
             if row_count == 0 {
-                return Ok(ValueWord::from_array(Arc::new(Vec::<ValueWord>::new())));
+                return Ok(ValueWord::from_array(Arc::new(Vec::<ValueWord>::new())).into_raw_bits());
             }
 
             let mut key_row_pairs: Vec<(ValueWord, usize)> = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
-                let row_view = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx);
-                let key = vm.call_value_immediate_nb(func_nb, &[row_view], ctx.as_deref_mut())?;
-                key_row_pairs.push((key, row_idx));
+                let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
+                let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
+                key_row_pairs.push((ValueWord::from_raw_bits(result_bits), row_idx));
             }
 
             key_row_pairs.sort_by(|a, b| cmp_nb_values(&a.0, &b.0));
@@ -281,12 +283,13 @@ pub(crate) fn handle_group_by_legacy(
                 }
             }
 
-            return Ok(ValueWord::from_array(Arc::new(groups)));
+            return Ok(ValueWord::from_array(Arc::new(groups)).into_raw_bits());
         }
     }
 
-    let col_name = args
-        .get(1)
+    let arg1 = args.get(1).map(|&r| borrow_vw(r));
+    let col_name = arg1
+        .as_ref()
         .and_then(|nb| nb.as_str().map(|s| s.to_string()))
         .ok_or_else(|| {
             VMError::RuntimeError("group_by() requires a string column name argument".to_string())
@@ -315,7 +318,7 @@ pub(crate) fn handle_group_by_legacy(
 
     let row_count = sorted_dt.row_count();
     if row_count == 0 {
-        return Ok(ValueWord::from_array(Arc::new(Vec::new())));
+        return Ok(ValueWord::from_array(Arc::new(Vec::new())).into_raw_bits());
     }
 
     let mut groups: Vec<ValueWord> = Vec::new();
@@ -353,21 +356,22 @@ pub(crate) fn handle_group_by_legacy(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(groups)))
+    Ok(ValueWord::from_array(Arc::new(groups)).into_raw_bits())
 }
 
 /// `dt.forEach(fn)` — iterate rows as RowView values, calling closure for each.
-pub(crate) fn handle_for_each_legacy(
+pub(crate) fn handle_for_each(
     vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let dt = extract_dt_nb(&args[0])?.clone();
-    let func_nb = args.get(1).ok_or_else(|| {
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let dt = extract_dt_nb(&receiver)?.clone();
+    let raw1 = *args.get(1).ok_or_else(|| {
         VMError::RuntimeError("forEach() requires a function argument".to_string())
     })?;
 
-    if !is_callable_nb(func_nb) {
+    if !raw_helpers::is_callable_raw(raw1) {
         return Err(VMError::RuntimeError(
             "forEach() second argument must be a function".to_string(),
         ));
@@ -377,25 +381,26 @@ pub(crate) fn handle_for_each_legacy(
     let dt_arc = Arc::new(dt.as_ref().clone());
 
     for row_idx in 0..dt_arc.row_count() {
-        let row_view = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx);
-        vm.call_value_immediate_nb(func_nb, &[row_view], ctx.as_deref_mut())?;
+        let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
+        vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
     }
 
-    Ok(ValueWord::none())
+    Ok(ValueWord::none().into_raw_bits())
 }
 
 /// `dt.map(fn)` — transform each row via closure, producing a new DataTable.
-pub(crate) fn handle_map_legacy(
+pub(crate) fn handle_map(
     vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let dt = extract_dt_nb(&args[0])?.clone();
-    let func_nb = args
-        .get(1)
-        .ok_or_else(|| VMError::RuntimeError("map() requires a function argument".to_string()))?;
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let dt = extract_dt_nb(&receiver)?.clone();
+    let raw1 = *args.get(1).ok_or_else(|| {
+        VMError::RuntimeError("map() requires a function argument".to_string())
+    })?;
 
-    if !is_callable_nb(func_nb) {
+    if !raw_helpers::is_callable_raw(raw1) {
         return Err(VMError::RuntimeError(
             "map() second argument must be a function".to_string(),
         ));
@@ -408,65 +413,15 @@ pub(crate) fn handle_map_legacy(
     if row_count == 0 {
         return Ok(ValueWord::from_datatable(Arc::new(DataTable::new(
             arrow_array::RecordBatch::new_empty(dt_arc.inner().schema()),
-        ))));
+        ))).into_raw_bits());
     }
 
     let mut rows: Vec<ValueWord> = Vec::with_capacity(row_count);
     for row_idx in 0..row_count {
-        let row_view = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx);
-        let result = vm.call_value_immediate_nb(func_nb, &[row_view], ctx.as_deref_mut())?;
-        rows.push(result);
+        let rv_bits = ValueWord::from_row_view(schema_id, dt_arc.clone(), row_idx).into_raw_bits();
+        let result_bits = vm.call_value_immediate_raw(raw1, &[rv_bits], ctx.as_deref_mut())?;
+        rows.push(ValueWord::from_raw_bits(result_bits));
     }
 
-    build_datatable_from_objects_nb(vm, &rows)
-}
-
-pub(crate) fn handle_filter(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_filter_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_order_by(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_order_by_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_group_by(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_group_by_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_for_each(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_for_each_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_map(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_map_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
+    Ok(build_datatable_from_objects_nb(vm, &rows)?.into_raw_bits())
 }

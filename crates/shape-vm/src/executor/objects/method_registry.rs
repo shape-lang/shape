@@ -479,7 +479,7 @@ pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map!
     "norm" => crate::executor::objects::typed_array_methods::v2_float_norm,
     "len" => crate::executor::objects::typed_array_methods::v2_len,
     "length" => crate::executor::objects::typed_array_methods::v2_len,
-    // Transforms — still Legacy (require VM callback invocation or produce arrays)
+    // Transforms — MethodFnV2 (native v2, no legacy delegation)
     "normalize" => crate::executor::objects::typed_array_methods::handle_float_normalize,
     "cumsum" => crate::executor::objects::typed_array_methods::handle_float_cumsum,
     "diff" => crate::executor::objects::typed_array_methods::handle_float_diff,
@@ -507,7 +507,7 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "max" => crate::executor::objects::typed_array_methods::v2_int_max,
     "len" => crate::executor::objects::typed_array_methods::v2_len,
     "length" => crate::executor::objects::typed_array_methods::v2_len,
-    // Transforms — still Legacy
+    // Transforms — MethodFnV2 (native v2, no legacy delegation)
     "abs" => crate::executor::objects::typed_array_methods::handle_int_abs,
     "map" => crate::executor::objects::typed_array_methods::handle_int_map,
     "filter" => crate::executor::objects::typed_array_methods::handle_int_filter,
@@ -526,7 +526,7 @@ pub static BOOL_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! 
     "count" => crate::executor::objects::typed_array_methods::v2_bool_count,
     "any" => crate::executor::objects::typed_array_methods::v2_bool_any,
     "all" => crate::executor::objects::typed_array_methods::v2_bool_all,
-    // Still Legacy
+    // MethodFnV2 (native v2, no legacy delegation)
     "toArray" => crate::executor::objects::typed_array_methods::handle_bool_to_array,
 };
 

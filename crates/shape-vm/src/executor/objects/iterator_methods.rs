@@ -13,6 +13,7 @@ use shape_value::heap_value::{HeapValue, IteratorState, IteratorTransform};
 use shape_value::{HeapKind, NanTag, VMError, ValueWord};
 use std::sync::Arc;
 use std::mem::ManuallyDrop;
+use super::raw_helpers;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -27,21 +28,6 @@ fn is_callable(nb: &ValueWord) -> bool {
         ),
         _ => false,
     }
-}
-
-/// Extract the IteratorState from the receiver (args[0]).
-fn require_iterator(args: &[ValueWord]) -> Result<&IteratorState, VMError> {
-    args.first()
-        .and_then(|nb| nb.as_iterator())
-        .ok_or_else(|| VMError::TypeError {
-            expected: "iterator",
-            got: args.first().map(|a| a.type_name()).unwrap_or("none"),
-        })
-}
-
-/// Clone the IteratorState from the receiver, returning a boxed owned copy.
-fn clone_iterator_state(args: &[ValueWord]) -> Result<IteratorState, VMError> {
-    Ok(require_iterator(args)?.clone())
 }
 
 /// Create a new Iterator ValueWord by appending a transform to the existing iterator state.
@@ -185,15 +171,18 @@ fn advance_iterator(
         for transform in &state.transforms {
             match transform {
                 IteratorTransform::Map(func) => {
-                    current = vm.call_value_immediate_nb(func, &[current], ctx.as_deref_mut())?;
+                    let result_bits = vm.call_value_immediate_raw(func.raw_bits(), &[current.into_raw_bits()], ctx.as_deref_mut())?;
+                    current = ValueWord::from_raw_bits(result_bits);
                 }
                 IteratorTransform::Filter(predicate) => {
-                    let keep = vm.call_value_immediate_nb(
-                        predicate,
-                        &[current.clone()],
+                    let result_bits = vm.call_value_immediate_raw(
+                        predicate.raw_bits(),
+                        &[current.raw_bits()],
                         ctx.as_deref_mut(),
                     )?;
-                    if !keep.is_truthy() {
+                    let truthy = raw_helpers::is_truthy_raw(result_bits);
+                    drop(ValueWord::from_raw_bits(result_bits));
+                    if !truthy {
                         continue 'outer;
                     }
                 }
@@ -201,7 +190,8 @@ fn advance_iterator(
                     // Handled at the iterator level, not per-element
                 }
                 IteratorTransform::FlatMap(func) => {
-                    current = vm.call_value_immediate_nb(func, &[current], ctx.as_deref_mut())?;
+                    let result_bits = vm.call_value_immediate_raw(func.raw_bits(), &[current.into_raw_bits()], ctx.as_deref_mut())?;
+                    current = ValueWord::from_raw_bits(result_bits);
                 }
             }
         }
@@ -324,12 +314,14 @@ fn collect_all(
                     IteratorTransform::Filter(predicate) => {
                         let mut filtered = Vec::new();
                         for elem in raw {
-                            let keep = vm.call_value_immediate_nb(
-                                predicate,
-                                &[elem.clone()],
+                            let result_bits = vm.call_value_immediate_raw(
+                                predicate.raw_bits(),
+                                &[elem.raw_bits()],
                                 ctx.as_deref_mut(),
                             )?;
-                            if keep.is_truthy() {
+                            let truthy = raw_helpers::is_truthy_raw(result_bits);
+                            drop(ValueWord::from_raw_bits(result_bits));
+                            if truthy {
                                 filtered.push(elem);
                             }
                         }
@@ -338,17 +330,18 @@ fn collect_all(
                     IteratorTransform::Map(func) => {
                         let mut mapped = Vec::with_capacity(raw.len());
                         for elem in raw {
-                            let result =
-                                vm.call_value_immediate_nb(func, &[elem], ctx.as_deref_mut())?;
-                            mapped.push(result);
+                            let result_bits =
+                                vm.call_value_immediate_raw(func.raw_bits(), &[elem.into_raw_bits()], ctx.as_deref_mut())?;
+                            mapped.push(ValueWord::from_raw_bits(result_bits));
                         }
                         raw = mapped;
                     }
                     IteratorTransform::FlatMap(func) => {
                         let mut flat = Vec::new();
                         for elem in raw {
-                            let result =
-                                vm.call_value_immediate_nb(func, &[elem], ctx.as_deref_mut())?;
+                            let result_bits =
+                                vm.call_value_immediate_raw(func.raw_bits(), &[elem.into_raw_bits()], ctx.as_deref_mut())?;
+                            let result = ValueWord::from_raw_bits(result_bits);
                             if let Some(inner_view) = result.as_any_array() {
                                 let inner = inner_view.to_generic();
                                 flat.extend_from_slice(&inner);
@@ -393,416 +386,6 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
 }
 
-fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
-    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
-}
-
-
-pub fn handle_map_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.map() requires a function argument".to_string(),
-        ));
-    }
-    let state = require_iterator(&args)?;
-    if !is_callable(&args[1]) {
-        return Err(VMError::RuntimeError(
-            "Iterator.map() argument must be a function".to_string(),
-        ));
-    }
-    let result = with_transform(state, IteratorTransform::Map(args[1].clone()));
-    Ok(result)
-}
-
-/// Iterator.filter(fn) -> Iterator
-pub fn handle_filter_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.filter() requires a predicate argument".to_string(),
-        ));
-    }
-    let state = require_iterator(&args)?;
-    if !is_callable(&args[1]) {
-        return Err(VMError::RuntimeError(
-            "Iterator.filter() argument must be a function".to_string(),
-        ));
-    }
-    let result = with_transform(state, IteratorTransform::Filter(args[1].clone()));
-    Ok(result)
-}
-
-/// Iterator.take(n) -> Iterator
-pub fn handle_take_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.take() requires a number argument".to_string(),
-        ));
-    }
-    let state = require_iterator(&args)?;
-    let n = args[1].as_number_coerce().ok_or_else(|| {
-        VMError::RuntimeError("Iterator.take() argument must be a number".to_string())
-    })? as usize;
-    let result = with_transform(state, IteratorTransform::Take(n));
-    Ok(result)
-}
-
-/// Iterator.skip(n) -> Iterator
-pub fn handle_skip_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.skip() requires a number argument".to_string(),
-        ));
-    }
-    let state = require_iterator(&args)?;
-    let n = args[1].as_number_coerce().ok_or_else(|| {
-        VMError::RuntimeError("Iterator.skip() argument must be a number".to_string())
-    })? as usize;
-    let result = with_transform(state, IteratorTransform::Skip(n));
-    Ok(result)
-}
-
-/// Iterator.flatMap(fn) -> Iterator
-pub fn handle_flat_map_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.flatMap() requires a function argument".to_string(),
-        ));
-    }
-    let state = require_iterator(&args)?;
-    if !is_callable(&args[1]) {
-        return Err(VMError::RuntimeError(
-            "Iterator.flatMap() argument must be a function".to_string(),
-        ));
-    }
-    let result = with_transform(state, IteratorTransform::FlatMap(args[1].clone()));
-    Ok(result)
-}
-
-/// Iterator.enumerate() -> Iterator that yields [index, value] pairs
-/// Implemented by wrapping source into an array of [idx, val] pairs via map.
-/// Since we don't have a stateful index counter in the transform chain,
-/// we collect the source and re-wrap as an indexed array iterator.
-pub fn handle_enumerate_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let mut state = clone_iterator_state(&args)?;
-    let elements = collect_all(vm, &mut state, &mut ctx)?;
-    let pairs: Vec<ValueWord> = elements
-        .into_iter()
-        .enumerate()
-        .map(|(i, v)| ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(i as i64), v])))
-        .collect();
-    let new_state = IteratorState {
-        source: ValueWord::from_array(Arc::new(pairs)),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    };
-    Ok(ValueWord::from_iterator(Box::new(new_state)))
-}
-
-/// Iterator.chain(other) -> Iterator that concatenates two iterators
-pub fn handle_chain_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.chain() requires another iterator argument".to_string(),
-        ));
-    }
-    // Collect both iterators into arrays and create a new iterator over the concatenation
-    let mut state1 = clone_iterator_state(&args)?;
-    let elems1 = collect_all(vm, &mut state1, &mut ctx)?;
-
-    // The second argument may be an iterator or an array
-    let elems2 = if let Some(it2) = args[1].as_iterator() {
-        let mut state2 = it2.clone();
-        collect_all(vm, &mut state2, &mut ctx)?
-    } else if let Some(view) = args[1].as_any_array() {
-        let generic = view.to_generic();
-        (*generic).clone()
-    } else {
-        return Err(VMError::RuntimeError(
-            "Iterator.chain() argument must be an iterator or array".to_string(),
-        ));
-    };
-
-    let mut combined = elems1;
-    combined.extend(elems2);
-
-    let new_state = IteratorState {
-        source: ValueWord::from_array(Arc::new(combined)),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    };
-    Ok(ValueWord::from_iterator(Box::new(new_state)))
-}
-
-// ── Terminal operations (consume the iterator) ─────────────────────────────
-
-/// Iterator.collect() / Iterator.toArray() -> Array
-pub fn handle_collect_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let mut state = clone_iterator_state(&args)?;
-    let results = collect_all(vm, &mut state, &mut ctx)?;
-    Ok(ValueWord::from_array(Arc::new(results)))
-}
-
-/// Iterator.forEach(fn) -> none
-pub fn handle_for_each_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.forEach() requires a function argument".to_string(),
-        ));
-    }
-    if !is_callable(&args[1]) {
-        return Err(VMError::RuntimeError(
-            "Iterator.forEach() argument must be a function".to_string(),
-        ));
-    }
-    let func = args[1].clone();
-    let mut state = clone_iterator_state(&args)?;
-    let elements = collect_all(vm, &mut state, &mut ctx)?;
-    for elem in elements {
-        vm.call_value_immediate_nb(&func, &[elem], ctx.as_deref_mut())?;
-    }
-    Ok(ValueWord::none())
-}
-
-/// Iterator.reduce(fn, init) -> value
-pub fn handle_reduce_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 3 {
-        return Err(VMError::RuntimeError(
-            "Iterator.reduce() requires a function and initial value".to_string(),
-        ));
-    }
-    if !is_callable(&args[1]) {
-        return Err(VMError::RuntimeError(
-            "Iterator.reduce() first argument must be a function".to_string(),
-        ));
-    }
-    let func = args[1].clone();
-    let mut accumulator = args[2].clone();
-    let mut state = clone_iterator_state(&args)?;
-    let elements = collect_all(vm, &mut state, &mut ctx)?;
-    for elem in elements {
-        accumulator =
-            vm.call_value_immediate_nb(&func, &[accumulator, elem], ctx.as_deref_mut())?;
-    }
-    Ok(accumulator)
-}
-
-/// Iterator.count() -> int
-pub fn handle_count_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let mut state = clone_iterator_state(&args)?;
-    let elements = collect_all(vm, &mut state, &mut ctx)?;
-    Ok(ValueWord::from_i64(elements.len() as i64))
-}
-
-/// Iterator.any(fn) -> bool (short-circuits on first truthy)
-pub fn handle_any_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.any() requires a predicate function".to_string(),
-        ));
-    }
-    if !is_callable(&args[1]) {
-        return Err(VMError::RuntimeError(
-            "Iterator.any() argument must be a function".to_string(),
-        ));
-    }
-    let predicate = args[1].clone();
-    let mut state = clone_iterator_state(&args)?;
-    loop {
-        match advance_iterator(vm, &mut state, &mut ctx)? {
-            Some(val) => {
-                let result = vm.call_value_immediate_nb(&predicate, &[val], ctx.as_deref_mut())?;
-                if result.is_truthy() {
-                    return Ok(ValueWord::from_bool(true));
-                }
-            }
-            std::option::Option::None => break,
-        }
-    }
-    Ok(ValueWord::from_bool(false))
-}
-
-/// Iterator.all(fn) -> bool (short-circuits on first falsy)
-pub fn handle_all_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.all() requires a predicate function".to_string(),
-        ));
-    }
-    if !is_callable(&args[1]) {
-        return Err(VMError::RuntimeError(
-            "Iterator.all() argument must be a function".to_string(),
-        ));
-    }
-    let predicate = args[1].clone();
-    let mut state = clone_iterator_state(&args)?;
-    loop {
-        match advance_iterator(vm, &mut state, &mut ctx)? {
-            Some(val) => {
-                let result = vm.call_value_immediate_nb(&predicate, &[val], ctx.as_deref_mut())?;
-                if !result.is_truthy() {
-                    return Ok(ValueWord::from_bool(false));
-                }
-            }
-            std::option::Option::None => break,
-        }
-    }
-    Ok(ValueWord::from_bool(true))
-}
-
-/// Iterator.find(fn) -> value | none (short-circuits on first match)
-pub fn handle_find_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Iterator.find() requires a predicate function".to_string(),
-        ));
-    }
-    if !is_callable(&args[1]) {
-        return Err(VMError::RuntimeError(
-            "Iterator.find() argument must be a function".to_string(),
-        ));
-    }
-    let predicate = args[1].clone();
-    let mut state = clone_iterator_state(&args)?;
-    loop {
-        match advance_iterator(vm, &mut state, &mut ctx)? {
-            Some(val) => {
-                let result =
-                    vm.call_value_immediate_nb(&predicate, &[val.clone()], ctx.as_deref_mut())?;
-                if result.is_truthy() {
-                    return Ok(val);
-                }
-            }
-            std::option::Option::None => break,
-        }
-    }
-    Ok(ValueWord::none())
-}
-
-// ── .iter() builders for source types (I-Sprint 3) ─────────────────────────
-
-/// Create an Iterator from an Array source.
-pub fn make_array_iterator(source: ValueWord) -> ValueWord {
-    ValueWord::from_iterator(Box::new(IteratorState {
-        source,
-        position: 0,
-        transforms: vec![],
-        done: false,
-    }))
-}
-
-/// Array.iter() -> Iterator
-pub fn handle_array_iter_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "iter() requires a receiver".to_string(),
-        ));
-    }
-    let result = make_array_iterator(args[0].clone());
-    Ok(result)
-}
-
-/// String.iter() -> Iterator over characters
-pub fn handle_string_iter_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "iter() requires a receiver".to_string(),
-        ));
-    }
-    let result = ValueWord::from_iterator(Box::new(IteratorState {
-        source: args[0].clone(),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    }));
-    Ok(result)
-}
-
-/// Range.iter() -> Iterator over range values
-pub fn handle_range_iter_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "iter() requires a receiver".to_string(),
-        ));
-    }
-    let result = ValueWord::from_iterator(Box::new(IteratorState {
-        source: args[0].clone(),
-        position: 0,
-        transforms: vec![],
-        done: false,
-    }));
-    Ok(result)
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // V2 (MethodFnV2) iter handlers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -824,202 +407,527 @@ pub fn v2_range_iter(
     Ok(result.into_raw_bits())
 }
 
-/// HashMap.iter() -> Iterator over [key, value] pairs
-pub fn handle_hashmap_iter_legacy(
+// ── V2 Iterator method handlers ──────────────────────────────────────────
+// True v2 implementations: work directly with raw u64 bits, no legacy delegation.
+
+/// Iterator.map(fn) -> Iterator (v2 native)
+pub(crate) fn handle_map(
     _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
+    args: &mut [u64],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.map() requires a function argument".to_string(),
+        ));
+    }
+    let receiver = borrow_vw(args[0]);
+    let state = receiver.as_iterator().ok_or_else(|| VMError::TypeError {
+        expected: "iterator",
+        got: receiver.type_name(),
+    })?;
+    let closure_vw = borrow_vw(args[1]);
+    if !is_callable(&closure_vw) {
+        return Err(VMError::RuntimeError(
+            "Iterator.map() argument must be a function".to_string(),
+        ));
+    }
+    let result = with_transform(state, IteratorTransform::Map((*closure_vw).clone()));
+    Ok(result.into_raw_bits())
+}
+
+/// Iterator.filter(fn) -> Iterator (v2 native)
+pub(crate) fn handle_filter(
+    _vm: &mut VirtualMachine,
+    args: &mut [u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.filter() requires a predicate argument".to_string(),
+        ));
+    }
+    let receiver = borrow_vw(args[0]);
+    let state = receiver.as_iterator().ok_or_else(|| VMError::TypeError {
+        expected: "iterator",
+        got: receiver.type_name(),
+    })?;
+    let closure_vw = borrow_vw(args[1]);
+    if !is_callable(&closure_vw) {
+        return Err(VMError::RuntimeError(
+            "Iterator.filter() argument must be a function".to_string(),
+        ));
+    }
+    let result = with_transform(state, IteratorTransform::Filter((*closure_vw).clone()));
+    Ok(result.into_raw_bits())
+}
+
+/// Iterator.take(n) -> Iterator (v2 native)
+pub(crate) fn handle_take(
+    _vm: &mut VirtualMachine,
+    args: &mut [u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.take() requires a number argument".to_string(),
+        ));
+    }
+    let receiver = borrow_vw(args[0]);
+    let state = receiver.as_iterator().ok_or_else(|| VMError::TypeError {
+        expected: "iterator",
+        got: receiver.type_name(),
+    })?;
+    let n_vw = borrow_vw(args[1]);
+    let n = n_vw.as_number_coerce().ok_or_else(|| {
+        VMError::RuntimeError("Iterator.take() argument must be a number".to_string())
+    })? as usize;
+    let result = with_transform(state, IteratorTransform::Take(n));
+    Ok(result.into_raw_bits())
+}
+
+/// Iterator.skip(n) -> Iterator (v2 native)
+pub(crate) fn handle_skip(
+    _vm: &mut VirtualMachine,
+    args: &mut [u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.skip() requires a number argument".to_string(),
+        ));
+    }
+    let receiver = borrow_vw(args[0]);
+    let state = receiver.as_iterator().ok_or_else(|| VMError::TypeError {
+        expected: "iterator",
+        got: receiver.type_name(),
+    })?;
+    let n_vw = borrow_vw(args[1]);
+    let n = n_vw.as_number_coerce().ok_or_else(|| {
+        VMError::RuntimeError("Iterator.skip() argument must be a number".to_string())
+    })? as usize;
+    let result = with_transform(state, IteratorTransform::Skip(n));
+    Ok(result.into_raw_bits())
+}
+
+/// Iterator.flatMap(fn) -> Iterator (v2 native)
+pub(crate) fn handle_flat_map(
+    _vm: &mut VirtualMachine,
+    args: &mut [u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.flatMap() requires a function argument".to_string(),
+        ));
+    }
+    let receiver = borrow_vw(args[0]);
+    let state = receiver.as_iterator().ok_or_else(|| VMError::TypeError {
+        expected: "iterator",
+        got: receiver.type_name(),
+    })?;
+    let closure_vw = borrow_vw(args[1]);
+    if !is_callable(&closure_vw) {
+        return Err(VMError::RuntimeError(
+            "Iterator.flatMap() argument must be a function".to_string(),
+        ));
+    }
+    let result = with_transform(state, IteratorTransform::FlatMap((*closure_vw).clone()));
+    Ok(result.into_raw_bits())
+}
+
+/// Iterator.enumerate() -> Iterator that yields [index, value] pairs (v2 native)
+pub(crate) fn handle_enumerate(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    let elements = collect_all(vm, &mut state, &mut ctx)?;
+    let pairs: Vec<ValueWord> = elements
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(i as i64), v])))
+        .collect();
+    let new_state = IteratorState {
+        source: ValueWord::from_array(Arc::new(pairs)),
+        position: 0,
+        transforms: vec![],
+        done: false,
+    };
+    Ok(ValueWord::from_iterator(Box::new(new_state)).into_raw_bits())
+}
+
+/// Iterator.chain(other) -> Iterator that concatenates two iterators (v2 native)
+pub(crate) fn handle_chain(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.chain() requires another iterator argument".to_string(),
+        ));
+    }
+    // Collect elements from the receiver iterator
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state1 = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    let elems1 = collect_all(vm, &mut state1, &mut ctx)?;
+
+    // The second argument may be an iterator or an array
+    let arg1_vw = borrow_vw(args[1]);
+    let elems2 = if let Some(it2) = arg1_vw.as_iterator() {
+        let mut state2 = it2.clone();
+        collect_all(vm, &mut state2, &mut ctx)?
+    } else if let Some(view) = arg1_vw.as_any_array() {
+        let generic = view.to_generic();
+        (*generic).clone()
+    } else {
+        return Err(VMError::RuntimeError(
+            "Iterator.chain() argument must be an iterator or array".to_string(),
+        ));
+    };
+
+    let mut combined = elems1;
+    combined.extend(elems2);
+
+    let new_state = IteratorState {
+        source: ValueWord::from_array(Arc::new(combined)),
+        position: 0,
+        transforms: vec![],
+        done: false,
+    };
+    Ok(ValueWord::from_iterator(Box::new(new_state)).into_raw_bits())
+}
+
+/// Iterator.collect() / Iterator.toArray() -> Array (v2 native)
+pub(crate) fn handle_collect(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    let results = collect_all(vm, &mut state, &mut ctx)?;
+    Ok(ValueWord::from_array(Arc::new(results)).into_raw_bits())
+}
+
+/// Iterator.forEach(fn) -> none (v2 native)
+pub(crate) fn handle_for_each(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.forEach() requires a function argument".to_string(),
+        ));
+    }
+    let func = borrow_vw(args[1]);
+    if !is_callable(&func) {
+        return Err(VMError::RuntimeError(
+            "Iterator.forEach() argument must be a function".to_string(),
+        ));
+    }
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    let elements = collect_all(vm, &mut state, &mut ctx)?;
+    for elem in elements {
+        let result_bits = vm.call_value_immediate_raw(args[1], &[elem.raw_bits()], ctx.as_deref_mut())?;
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::none().into_raw_bits())
+}
+
+/// Iterator.reduce(fn, init) -> value (v2 native)
+pub(crate) fn handle_reduce(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 3 {
+        return Err(VMError::RuntimeError(
+            "Iterator.reduce() requires a function and initial value".to_string(),
+        ));
+    }
+    let func = borrow_vw(args[1]);
+    if !is_callable(&func) {
+        return Err(VMError::RuntimeError(
+            "Iterator.reduce() first argument must be a function".to_string(),
+        ));
+    }
+    let mut acc_bits = raw_helpers::clone_raw_bits(args[2]);
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    let elements = collect_all(vm, &mut state, &mut ctx)?;
+    for elem in elements {
+        let new_acc = vm.call_value_immediate_raw(
+            args[1],
+            &[acc_bits, elem.into_raw_bits()],
+            ctx.as_deref_mut(),
+        )?;
+        drop(ValueWord::from_raw_bits(acc_bits));
+        acc_bits = new_acc;
+    }
+    Ok(acc_bits)
+}
+
+/// Iterator.count() -> int (v2 native)
+pub(crate) fn handle_count(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    let elements = collect_all(vm, &mut state, &mut ctx)?;
+    Ok(ValueWord::from_i64(elements.len() as i64).into_raw_bits())
+}
+
+/// Iterator.any(fn) -> bool (v2 native, short-circuits on first truthy)
+pub(crate) fn handle_any(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.any() requires a predicate function".to_string(),
+        ));
+    }
+    let predicate = borrow_vw(args[1]);
+    if !is_callable(&predicate) {
+        return Err(VMError::RuntimeError(
+            "Iterator.any() argument must be a function".to_string(),
+        ));
+    }
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    loop {
+        match advance_iterator(vm, &mut state, &mut ctx)? {
+            Some(val) => {
+                let result_bits =
+                    vm.call_value_immediate_raw(args[1], &[val.raw_bits()], ctx.as_deref_mut())?;
+                let truthy = raw_helpers::is_truthy_raw(result_bits);
+                drop(ValueWord::from_raw_bits(result_bits));
+                if truthy {
+                    return Ok(ValueWord::from_bool(true).into_raw_bits());
+                }
+            }
+            None => break,
+        }
+    }
+    Ok(ValueWord::from_bool(false).into_raw_bits())
+}
+
+/// Iterator.all(fn) -> bool (v2 native, short-circuits on first falsy)
+pub(crate) fn handle_all(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.all() requires a predicate function".to_string(),
+        ));
+    }
+    let predicate = borrow_vw(args[1]);
+    if !is_callable(&predicate) {
+        return Err(VMError::RuntimeError(
+            "Iterator.all() argument must be a function".to_string(),
+        ));
+    }
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    loop {
+        match advance_iterator(vm, &mut state, &mut ctx)? {
+            Some(val) => {
+                let result_bits =
+                    vm.call_value_immediate_raw(args[1], &[val.raw_bits()], ctx.as_deref_mut())?;
+                let truthy = raw_helpers::is_truthy_raw(result_bits);
+                drop(ValueWord::from_raw_bits(result_bits));
+                if !truthy {
+                    return Ok(ValueWord::from_bool(false).into_raw_bits());
+                }
+            }
+            None => break,
+        }
+    }
+    Ok(ValueWord::from_bool(true).into_raw_bits())
+}
+
+/// Iterator.find(fn) -> value | none (v2 native, short-circuits on first match)
+pub(crate) fn handle_find(
+    vm: &mut VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Iterator.find() requires a predicate function".to_string(),
+        ));
+    }
+    let predicate = borrow_vw(args[1]);
+    if !is_callable(&predicate) {
+        return Err(VMError::RuntimeError(
+            "Iterator.find() argument must be a function".to_string(),
+        ));
+    }
+    let receiver_vw = (*borrow_vw(args[0])).clone();
+    let mut state = receiver_vw
+        .as_iterator()
+        .ok_or_else(|| VMError::TypeError {
+            expected: "iterator",
+            got: receiver_vw.type_name(),
+        })?
+        .clone();
+    loop {
+        match advance_iterator(vm, &mut state, &mut ctx)? {
+            Some(val) => {
+                let val_bits_clone = raw_helpers::clone_raw_bits(val.raw_bits());
+                let result_bits =
+                    vm.call_value_immediate_raw(args[1], &[val_bits_clone], ctx.as_deref_mut())?;
+                let truthy = raw_helpers::is_truthy_raw(result_bits);
+                drop(ValueWord::from_raw_bits(result_bits));
+                if truthy {
+                    return Ok(val.into_raw_bits());
+                }
+            }
+            None => break,
+        }
+    }
+    Ok(ValueWord::none().into_raw_bits())
+}
+
+/// Array.iter() -> Iterator (v2 native)
+pub(crate) fn handle_array_iter(
+    _vm: &mut VirtualMachine,
+    args: &mut [u64],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
     if args.is_empty() {
         return Err(VMError::RuntimeError(
             "iter() requires a receiver".to_string(),
         ));
     }
+    let receiver = (*borrow_vw(args[0])).clone();
     let result = ValueWord::from_iterator(Box::new(IteratorState {
-        source: args[0].clone(),
+        source: receiver,
         position: 0,
         transforms: vec![],
         done: false,
     }));
-    Ok(result)
-}
-
-pub(crate) fn handle_map(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_map_legacy(_vm, vw_args, _ctx)?;
     Ok(result.into_raw_bits())
 }
 
-pub(crate) fn handle_filter(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_filter_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_take(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_take_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_skip(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_skip_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_flat_map(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_flat_map_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_enumerate(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_enumerate_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_chain(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_chain_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_collect(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_collect_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_for_each(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_for_each_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_reduce(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_reduce_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_count(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_count_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_any(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_any_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_all(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_all_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_find(
-    vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_find_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
-}
-
-pub(crate) fn handle_array_iter(
-    _vm: &mut crate::executor::VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_array_iter_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
-}
-
+/// String.iter() -> Iterator over characters (v2 native)
 pub(crate) fn handle_string_iter(
-    _vm: &mut crate::executor::VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_string_iter_legacy(_vm, vw_args, _ctx)?;
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(
+            "iter() requires a receiver".to_string(),
+        ));
+    }
+    let receiver = (*borrow_vw(args[0])).clone();
+    let result = ValueWord::from_iterator(Box::new(IteratorState {
+        source: receiver,
+        position: 0,
+        transforms: vec![],
+        done: false,
+    }));
     Ok(result.into_raw_bits())
 }
 
+/// Range.iter() -> Iterator over range values (v2 native)
 pub(crate) fn handle_range_iter(
-    _vm: &mut crate::executor::VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_range_iter_legacy(_vm, vw_args, _ctx)?;
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(
+            "iter() requires a receiver".to_string(),
+        ));
+    }
+    let receiver = (*borrow_vw(args[0])).clone();
+    let result = ValueWord::from_iterator(Box::new(IteratorState {
+        source: receiver,
+        position: 0,
+        transforms: vec![],
+        done: false,
+    }));
     Ok(result.into_raw_bits())
 }
 
+/// HashMap.iter() -> Iterator over [key, value] pairs (v2 native)
 pub(crate) fn handle_hashmap_iter(
-    _vm: &mut crate::executor::VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_hashmap_iter_legacy(_vm, vw_args, _ctx)?;
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<u64, VMError> {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(
+            "iter() requires a receiver".to_string(),
+        ));
+    }
+    let receiver = (*borrow_vw(args[0])).clone();
+    let result = ValueWord::from_iterator(Box::new(IteratorState {
+        source: receiver,
+        position: 0,
+        transforms: vec![],
+        done: false,
+    }));
     Ok(result.into_raw_bits())
 }

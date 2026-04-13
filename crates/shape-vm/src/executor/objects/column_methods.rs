@@ -42,148 +42,6 @@ fn col_as_f64(table: &DataTable, col_id: u32) -> Result<Vec<f64>, VMError> {
     }
 }
 
-// =============================================================================
-// Method handlers
-// =============================================================================
-
-/// `col.len()` — number of rows.
-pub(crate) fn handle_len(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let col = get_arrow_col(table, col_id)?;
-    Ok(ValueWord::from_i64(col.len() as i64))
-}
-
-/// `col.sum()` — sum of numeric column.
-pub(crate) fn handle_sum(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let values = col_as_f64(table, col_id)?;
-    let result: f64 = values.iter().sum();
-    Ok(ValueWord::from_f64(result))
-}
-
-/// `col.mean()` — arithmetic mean of numeric column.
-pub(crate) fn handle_mean(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let values = col_as_f64(table, col_id)?;
-    if values.is_empty() {
-        return Ok(ValueWord::none());
-    }
-    let sum: f64 = values.iter().sum();
-    Ok(ValueWord::from_f64(sum / values.len() as f64))
-}
-
-/// `col.min()` — minimum value.
-pub(crate) fn handle_min(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let values = col_as_f64(table, col_id)?;
-    let result = values.iter().copied().reduce(f64::min);
-    Ok(result
-        .map(ValueWord::from_f64)
-        .unwrap_or_else(ValueWord::none))
-}
-
-/// `col.max()` — maximum value.
-pub(crate) fn handle_max(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let values = col_as_f64(table, col_id)?;
-    let result = values.iter().copied().reduce(f64::max);
-    Ok(result
-        .map(ValueWord::from_f64)
-        .unwrap_or_else(ValueWord::none))
-}
-
-/// `col.std()` — standard deviation.
-pub(crate) fn handle_std(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let values = col_as_f64(table, col_id)?;
-    if values.len() < 2 {
-        return Ok(ValueWord::none());
-    }
-    let mean: f64 = values.iter().sum::<f64>() / values.len() as f64;
-    let variance: f64 =
-        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
-    Ok(ValueWord::from_f64(variance.sqrt()))
-}
-
-/// `col.first()` — first non-null value.
-pub(crate) fn handle_first(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let col = get_arrow_col(table, col_id)?;
-    if col.is_empty() {
-        return Ok(ValueWord::none());
-    }
-    Ok(arrow_value_to_nb(col, 0))
-}
-
-/// `col.last()` — last non-null value.
-pub(crate) fn handle_last(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let col = get_arrow_col(table, col_id)?;
-    if col.is_empty() {
-        return Ok(ValueWord::none());
-    }
-    Ok(arrow_value_to_nb(col, col.len() - 1))
-}
-
-/// `col.abs()` — element-wise absolute value, returns Array.
-pub(crate) fn handle_abs(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let values = col_as_f64(table, col_id)?;
-    let result: Vec<ValueWord> = values
-        .iter()
-        .map(|v| ValueWord::from_f64(v.abs()))
-        .collect();
-    Ok(ValueWord::from_array(Arc::new(result)))
-}
-
-/// `col.toArray()` — convert column to a ValueWord Array.
-pub(crate) fn handle_to_array(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (table, col_id) = extract_col_nb(&args[0])?;
-    let col = get_arrow_col(table, col_id)?;
-    let nb_values = arrow_array_to_nanboxed(col)?;
-    Ok(ValueWord::from_array(Arc::new(nb_values)))
-}
-
 /// Convert a single Arrow value at index to ValueWord.
 fn arrow_value_to_nb(col: &dyn Array, idx: usize) -> ValueWord {
     if col.is_null(idx) {
@@ -247,7 +105,7 @@ pub fn v2_len(
     let vw = borrow_col_vw(args[0]);
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
-    Ok(ValueWord::from_i64(col.len() as i64).raw_bits())
+    Ok(ValueWord::from_i64(col.len() as i64).into_raw_bits())
 }
 
 /// `col.sum()` — sum of numeric column (v2).
@@ -260,7 +118,7 @@ pub fn v2_sum(
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     let result: f64 = values.iter().sum();
-    Ok(ValueWord::from_f64(result).raw_bits())
+    Ok(ValueWord::from_f64(result).into_raw_bits())
 }
 
 /// `col.mean()` — arithmetic mean of numeric column (v2).
@@ -273,10 +131,10 @@ pub fn v2_mean(
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     if values.is_empty() {
-        return Ok(ValueWord::none().raw_bits());
+        return Ok(ValueWord::none().into_raw_bits());
     }
     let sum: f64 = values.iter().sum();
-    Ok(ValueWord::from_f64(sum / values.len() as f64).raw_bits())
+    Ok(ValueWord::from_f64(sum / values.len() as f64).into_raw_bits())
 }
 
 /// `col.min()` — minimum value (v2).
@@ -292,7 +150,7 @@ pub fn v2_min(
     Ok(result
         .map(ValueWord::from_f64)
         .unwrap_or_else(ValueWord::none)
-        .raw_bits())
+        .into_raw_bits())
 }
 
 /// `col.max()` — maximum value (v2).
@@ -308,7 +166,7 @@ pub fn v2_max(
     Ok(result
         .map(ValueWord::from_f64)
         .unwrap_or_else(ValueWord::none)
-        .raw_bits())
+        .into_raw_bits())
 }
 
 /// `col.std()` — standard deviation (v2).
@@ -321,12 +179,12 @@ pub fn v2_std(
     let (table, col_id) = extract_col_nb(&vw)?;
     let values = col_as_f64(table, col_id)?;
     if values.len() < 2 {
-        return Ok(ValueWord::none().raw_bits());
+        return Ok(ValueWord::none().into_raw_bits());
     }
     let mean: f64 = values.iter().sum::<f64>() / values.len() as f64;
     let variance: f64 =
         values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
-    Ok(ValueWord::from_f64(variance.sqrt()).raw_bits())
+    Ok(ValueWord::from_f64(variance.sqrt()).into_raw_bits())
 }
 
 /// `col.first()` — first non-null value (v2).
@@ -339,9 +197,9 @@ pub fn v2_first(
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
     if col.is_empty() {
-        return Ok(ValueWord::none().raw_bits());
+        return Ok(ValueWord::none().into_raw_bits());
     }
-    Ok(arrow_value_to_nb(col, 0).raw_bits())
+    Ok(arrow_value_to_nb(col, 0).into_raw_bits())
 }
 
 /// `col.last()` — last non-null value (v2).
@@ -354,9 +212,9 @@ pub fn v2_last(
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
     if col.is_empty() {
-        return Ok(ValueWord::none().raw_bits());
+        return Ok(ValueWord::none().into_raw_bits());
     }
-    Ok(arrow_value_to_nb(col, col.len() - 1).raw_bits())
+    Ok(arrow_value_to_nb(col, col.len() - 1).into_raw_bits())
 }
 
 /// `col.toArray()` — convert column to a ValueWord Array (v2).
@@ -369,7 +227,7 @@ pub fn v2_to_array(
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
     let nb_values = arrow_array_to_nanboxed(col)?;
-    Ok(ValueWord::from_array(Arc::new(nb_values)).raw_bits())
+    Ok(ValueWord::from_array(Arc::new(nb_values)).into_raw_bits())
 }
 
 /// `col.abs()` — element-wise absolute value, returns Array (v2).
@@ -385,12 +243,8 @@ pub fn v2_abs(
         .iter()
         .map(|v| ValueWord::from_f64(v.abs()))
         .collect();
-    Ok(ValueWord::from_array(Arc::new(result)).raw_bits())
+    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
 }
-
-// =============================================================================
-// Helpers
-// =============================================================================
 
 // =============================================================================
 // Tests
@@ -418,15 +272,17 @@ mod tests {
         VirtualMachine::new(VMConfig::default())
     }
 
-    fn make_column_ref(table: &Arc<DataTable>, col_id: u32) -> Vec<ValueWord> {
-        vec![ValueWord::from_column_ref(0, table.clone(), col_id)]
+    fn make_column_vw(table: &Arc<DataTable>, col_id: u32) -> ValueWord {
+        ValueWord::from_column_ref(0, table.clone(), col_id)
     }
 
     #[test]
     fn test_column_len() {
         let table = make_test_table();
         let mut vm = make_vm();
-        let result = handle_len(&mut vm, make_column_ref(&table, 0), None).unwrap();
+        let col = make_column_vw(&table, 0);
+        let mut args = [col.raw_bits()];
+        let result = ValueWord::from_raw_bits(v2_len(&mut vm, &mut args, None).unwrap());
         assert_eq!(result, ValueWord::from_i64(5));
     }
 
@@ -434,7 +290,9 @@ mod tests {
     fn test_column_sum() {
         let table = make_test_table();
         let mut vm = make_vm();
-        let result = handle_sum(&mut vm, make_column_ref(&table, 0), None).unwrap();
+        let col = make_column_vw(&table, 0);
+        let mut args = [col.raw_bits()];
+        let result = ValueWord::from_raw_bits(v2_sum(&mut vm, &mut args, None).unwrap());
         assert_eq!(result, ValueWord::from_f64(150.0));
     }
 
@@ -442,7 +300,9 @@ mod tests {
     fn test_column_mean() {
         let table = make_test_table();
         let mut vm = make_vm();
-        let result = handle_mean(&mut vm, make_column_ref(&table, 0), None).unwrap();
+        let col = make_column_vw(&table, 0);
+        let mut args = [col.raw_bits()];
+        let result = ValueWord::from_raw_bits(v2_mean(&mut vm, &mut args, None).unwrap());
         assert_eq!(result, ValueWord::from_f64(30.0));
     }
 
@@ -450,9 +310,12 @@ mod tests {
     fn test_column_min_max() {
         let table = make_test_table();
         let mut vm = make_vm();
-        let min_result = handle_min(&mut vm, make_column_ref(&table, 0), None).unwrap();
+        let col = make_column_vw(&table, 0);
+        let mut args = [col.raw_bits()];
+        let min_result = ValueWord::from_raw_bits(v2_min(&mut vm, &mut args, None).unwrap());
         assert_eq!(min_result, ValueWord::from_f64(10.0));
-        let max_result = handle_max(&mut vm, make_column_ref(&table, 0), None).unwrap();
+        let mut args = [col.raw_bits()];
+        let max_result = ValueWord::from_raw_bits(v2_max(&mut vm, &mut args, None).unwrap());
         assert_eq!(max_result, ValueWord::from_f64(50.0));
     }
 
@@ -460,9 +323,12 @@ mod tests {
     fn test_column_first_last() {
         let table = make_test_table();
         let mut vm = make_vm();
-        let first_result = handle_first(&mut vm, make_column_ref(&table, 0), None).unwrap();
+        let col = make_column_vw(&table, 0);
+        let mut args = [col.raw_bits()];
+        let first_result = ValueWord::from_raw_bits(v2_first(&mut vm, &mut args, None).unwrap());
         assert_eq!(first_result, ValueWord::from_f64(10.0));
-        let last_result = handle_last(&mut vm, make_column_ref(&table, 0), None).unwrap();
+        let mut args = [col.raw_bits()];
+        let last_result = ValueWord::from_raw_bits(v2_last(&mut vm, &mut args, None).unwrap());
         assert_eq!(last_result, ValueWord::from_f64(50.0));
     }
 
@@ -470,7 +336,9 @@ mod tests {
     fn test_column_to_array() {
         let table = make_test_table();
         let mut vm = make_vm();
-        let result = handle_to_array(&mut vm, make_column_ref(&table, 0), None).unwrap();
+        let col = make_column_vw(&table, 0);
+        let mut args = [col.raw_bits()];
+        let result = ValueWord::from_raw_bits(v2_to_array(&mut vm, &mut args, None).unwrap());
         if let Some(arr) = result.to_generic_array() {
             assert_eq!(arr.len(), 5);
             assert_eq!(arr[0].clone(), ValueWord::from_f64(10.0));
@@ -484,7 +352,9 @@ mod tests {
     fn test_column_i64_sum() {
         let table = make_test_table();
         let mut vm = make_vm();
-        let result = handle_sum(&mut vm, make_column_ref(&table, 1), None).unwrap();
+        let col = make_column_vw(&table, 1);
+        let mut args = [col.raw_bits()];
+        let result = ValueWord::from_raw_bits(v2_sum(&mut vm, &mut args, None).unwrap());
         assert_eq!(result, ValueWord::from_f64(1500.0));
     }
 }

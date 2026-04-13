@@ -42,8 +42,8 @@ pub(crate) fn handle_sum(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Opt
         let func_nb = borrow_vw(raw1);
         if is_callable_nb(&func_nb) {
             let dt_arc = Arc::new(dt.as_ref().clone());
-            let owned_func = (*func_nb).clone();
-            let values = collect_closure_numbers_nb(vm, &dt_arc, &owned_func, &mut ctx)?;
+            let callee_bits = raw1;
+            let values = collect_closure_numbers_nb(vm, &dt_arc, callee_bits, &mut ctx)?;
             let sum: f64 = values.iter().sum();
             return Ok(ValueWord::from_f64(sum).into_raw_bits());
         }
@@ -65,8 +65,8 @@ pub(crate) fn handle_mean(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Op
         let func_nb = borrow_vw(raw1);
         if is_callable_nb(&func_nb) {
             let dt_arc = Arc::new(dt.as_ref().clone());
-            let owned_func = (*func_nb).clone();
-            let values = collect_closure_numbers_nb(vm, &dt_arc, &owned_func, &mut ctx)?;
+            let callee_bits = raw1;
+            let values = collect_closure_numbers_nb(vm, &dt_arc, callee_bits, &mut ctx)?;
             if values.is_empty() { return Ok(ValueWord::none().into_raw_bits()); }
             let sum: f64 = values.iter().sum();
             return Ok(ValueWord::from_f64(sum / values.len() as f64).into_raw_bits());
@@ -93,8 +93,8 @@ pub(crate) fn handle_min(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Opt
         let func_nb = borrow_vw(raw1);
         if is_callable_nb(&func_nb) {
             let dt_arc = Arc::new(dt.as_ref().clone());
-            let owned_func = (*func_nb).clone();
-            let values = collect_closure_numbers_nb(vm, &dt_arc, &owned_func, &mut ctx)?;
+            let callee_bits = raw1;
+            let values = collect_closure_numbers_nb(vm, &dt_arc, callee_bits, &mut ctx)?;
             if values.is_empty() { return Ok(ValueWord::none().into_raw_bits()); }
             let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
             return Ok(ValueWord::from_f64(min).into_raw_bits());
@@ -116,8 +116,8 @@ pub(crate) fn handle_max(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Opt
         let func_nb = borrow_vw(raw1);
         if is_callable_nb(&func_nb) {
             let dt_arc = Arc::new(dt.as_ref().clone());
-            let owned_func = (*func_nb).clone();
-            let values = collect_closure_numbers_nb(vm, &dt_arc, &owned_func, &mut ctx)?;
+            let callee_bits = raw1;
+            let values = collect_closure_numbers_nb(vm, &dt_arc, callee_bits, &mut ctx)?;
             if values.is_empty() { return Ok(ValueWord::none().into_raw_bits()); }
             let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             return Ok(ValueWord::from_f64(max).into_raw_bits());

@@ -99,12 +99,6 @@ fn as_vw_ref(bits: &u64) -> &ValueWord {
     unsafe { &*(bits as *const u64 as *const ValueWord) }
 }
 
-/// Reinterpret a `&[u64]` as `&[ValueWord]` for read-only inspection of a slice.
-#[inline(always)]
-fn as_vw_slice(bits: &[u64]) -> &[ValueWord] {
-    // SAFETY: ValueWord is #[repr(transparent)] over u64
-    unsafe { std::slice::from_raw_parts(bits.as_ptr() as *const ValueWord, bits.len()) }
-}
 impl VirtualMachine {
     #[inline(always)]
     pub(in crate::executor) fn exec_objects(
@@ -877,7 +871,7 @@ impl VirtualMachine {
     /// Returns Ok(true) if handled, Ok(false) to fall through to legacy path.
     ///
     /// `raw_args` contains raw u64 bits: `[receiver, arg1, ...]`.
-    /// Uses `as_vw_ref` / `as_vw_slice` for read-only ValueWord access.
+    /// Uses `as_vw_ref` for read-only ValueWord access.
     fn dispatch_v2_typed_array_method(
         &mut self,
         method: &str,
@@ -1067,7 +1061,7 @@ impl VirtualMachine {
     /// No HashMap conversion — reads/writes slots directly via schema field indices.
     /// Pushes result directly to stack.
     ///
-    /// Takes raw u64 args; uses `as_vw_ref` / `as_vw_slice` for read-only access.
+    /// Takes raw u64 args; uses `as_vw_ref` for read-only inspection.
     fn handle_typed_object_method_v2(
         &mut self,
         method: &str,
@@ -1076,10 +1070,10 @@ impl VirtualMachine {
         use crate::executor::objects::object_creation::read_slot_nb;
         use shape_value::heap_value::HeapValue;
 
-        let args_vw = as_vw_slice(raw_args.as_slice());
+        let receiver_ref = as_vw_ref(&raw_args[0]);
 
         // Extract TypedObject fields via HeapValue (no ValueWord materialization)
-        let (schema_id, slots, heap_mask) = match args_vw[0].as_heap_ref() {
+        let (schema_id, slots, heap_mask) = match receiver_ref.as_heap_ref() {
             Some(HeapValue::TypedObject {
                 schema_id,
                 slots,
@@ -1088,7 +1082,7 @@ impl VirtualMachine {
             _ => {
                 return Err(VMError::TypeError {
                     expected: "TypedObject",
-                    got: args_vw[0].type_name(),
+                    got: receiver_ref.type_name(),
                 });
             }
         };
@@ -1111,7 +1105,15 @@ impl VirtualMachine {
             && let Some(intrinsic_fn) = type_methods.get(method)
         {
             let intrinsic_fn = intrinsic_fn.clone();
-            let call_args_nb: Vec<ValueWord> = args_vw[1..].to_vec();
+            // invoke_module_fn requires &[ValueWord]; clone from raw bits
+            // without taking ownership (ManuallyDrop prevents double-drop).
+            let call_args_nb: Vec<ValueWord> = raw_args[1..]
+                .iter()
+                .map(|&bits| {
+                    let tmp = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(bits));
+                    (*tmp).clone()
+                })
+                .collect();
             let result_nb = self.invoke_module_fn(&intrinsic_fn, &call_args_nb)?;
             self.push_vw(result_nb)?;
             return Ok(());
@@ -1126,9 +1128,10 @@ impl VirtualMachine {
                 .get(&ufcs_name)
                 .or_else(|| self.function_name_index.get(&extend_name))
             {
-                let func_nb = ValueWord::from_function(func_id);
-                let result_nb = self.call_value_immediate_nb(&func_nb, args_vw, None)?;
-                self.push_vw(result_nb)?;
+                let func_bits = ValueWord::from_function(func_id).into_raw_bits();
+                let result_bits =
+                    self.call_value_immediate_raw(func_bits, raw_args.as_slice(), None)?;
+                self.push_raw_u64(result_bits)?;
                 return Ok(());
             }
 
@@ -1140,9 +1143,10 @@ impl VirtualMachine {
                 .find_default_trait_impl_for_type_method(type_name, method)
             {
                 if let Some(&func_id) = self.function_name_index.get(impl_func_name) {
-                    let func_nb = ValueWord::from_function(func_id);
-                    let result_nb = self.call_value_immediate_nb(&func_nb, args_vw, None)?;
-                    self.push_vw(result_nb)?;
+                    let func_bits = ValueWord::from_function(func_id).into_raw_bits();
+                    let result_bits =
+                        self.call_value_immediate_raw(func_bits, raw_args.as_slice(), None)?;
+                    self.push_raw_u64(result_bits)?;
                     return Ok(());
                 }
             }
@@ -1163,9 +1167,10 @@ impl VirtualMachine {
                 if field_nb.is_function()
                     || matches!(field_nb.as_heap_ref(), Some(HeapValue::Closure { .. }))
                 {
-                    let call_args_nb: Vec<ValueWord> = args_vw[1..].to_vec();
-                    let result_nb = self.call_value_immediate_nb(&field_nb, &call_args_nb, None)?;
-                    self.push_vw(result_nb)?;
+                    let callee_bits = field_nb.into_raw_bits();
+                    let result_bits =
+                        self.call_value_immediate_raw(callee_bits, &raw_args[1..], None)?;
+                    self.push_raw_u64(result_bits)?;
                     return Ok(());
                 }
             }

@@ -19,41 +19,9 @@ use std::mem::ManuallyDrop;
 // between
 // =============================================================================
 
-/// `indexed.between(start, end)` — filter rows where index is in [start, end].
 #[inline]
 fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
-
-fn args_to_vw(args: &mut [u64]) -> Vec<ValueWord> {
-    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
-}
-
-
-pub(crate) fn handle_between_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (schema_id, table, index_col) = extract_indexed_table_nb(&args[0])?;
-    let start_nb = args.get(1).ok_or_else(|| {
-        VMError::RuntimeError("between() requires start value as first argument".to_string())
-    })?;
-    let end_nb = args.get(2).ok_or_else(|| {
-        VMError::RuntimeError("between() requires end value as second argument".to_string())
-    })?;
-
-    let col = table.inner().column(index_col as usize);
-    let mask = build_between_mask_nb(col.as_ref(), start_nb, end_nb)?;
-
-    let filtered = filter_record_batch(table.inner(), &mask)
-        .map_err(|e| VMError::RuntimeError(format!("between() filter failed: {}", e)))?;
-
-    Ok(ValueWord::from_indexed_table(
-        schema_id,
-        Arc::new(DataTable::new(filtered)),
-        index_col,
-    ))
 }
 
 /// Build a boolean mask for values in [start, end] using ValueWord bounds.
@@ -101,171 +69,6 @@ fn build_between_mask_nb(
 // =============================================================================
 // resample
 // =============================================================================
-
-/// `indexed.resample(interval, { col: "agg_fn", ... })` — bucket by interval, aggregate.
-///
-/// The interval is a numeric bucket size in the same units as the index column.
-/// The aggregation spec maps output column names to aggregation functions:
-/// - `"sum"`, `"mean"`, `"min"`, `"max"`, `"count"`, `"first"`, `"last"`
-/// - Or `["agg_fn", "source_col"]` for explicit source column
-pub(crate) fn handle_resample_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let (schema_id, table, index_col) = extract_indexed_table_nb(&args[0])?;
-
-    // Parse interval (bucket size as number)
-    let interval = args
-        .get(1)
-        .and_then(|nb| nb.as_number_coerce())
-        .ok_or_else(|| {
-            VMError::RuntimeError(
-                "resample() requires a numeric interval as first argument".to_string(),
-            )
-        })?;
-
-    if interval <= 0.0 {
-        return Err(VMError::RuntimeError(
-            "resample() interval must be positive".to_string(),
-        ));
-    }
-
-    // Parse aggregation spec
-    let arg2_nb = args.get(2).ok_or_else(|| {
-        VMError::RuntimeError(
-            "resample() requires an aggregation spec object as second argument, \
-             e.g. { close: \"last\", volume: \"sum\" }"
-                .to_string(),
-        )
-    })?;
-    let agg_spec = match arg2_nb.as_heap_ref() {
-        Some(HeapValue::TypedObject {
-            schema_id,
-            slots,
-            heap_mask,
-        }) => {
-            let mut map = HashMap::new();
-            if let Some(schema) = vm.lookup_schema(*schema_id as u32) {
-                for field_def in &schema.fields {
-                    let idx = field_def.index as usize;
-                    if idx < slots.len() && *heap_mask & (1u64 << idx) != 0 {
-                        map.insert(field_def.name.clone(), slots[idx].as_heap_nb());
-                    }
-                }
-            } else if let Some(decoded) =
-                shape_runtime::type_schema::typed_object_to_hashmap_nb(arg2_nb)
-            {
-                map.extend(decoded);
-            }
-            map
-        }
-        _ => {
-            return Err(VMError::RuntimeError(
-                "resample() requires an aggregation spec object as second argument, \
-                 e.g. { close: \"last\", volume: \"sum\" }"
-                    .to_string(),
-            ));
-        }
-    };
-
-    // Get index column as f64 values
-    let col = table.inner().column(index_col as usize);
-    let index_values = column_to_f64(col.as_ref())?;
-
-    if index_values.is_empty() {
-        return Ok(ValueWord::from_indexed_table(
-            schema_id,
-            table.clone(),
-            index_col,
-        ));
-    }
-
-    // Find min and max of index
-    let min_val = index_values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_val = index_values
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    // Compute bucket boundaries
-    let mut buckets: Vec<(f64, f64)> = Vec::new();
-    let mut start = (min_val / interval).floor() * interval;
-    while start <= max_val {
-        let end = start + interval;
-        buckets.push((start, end));
-        start = end;
-    }
-
-    // Sort agg keys for deterministic output
-    let mut spec_keys: Vec<String> = agg_spec.keys().cloned().collect();
-    spec_keys.sort();
-
-    // Collect results per bucket
-    let mut bucket_starts: Vec<f64> = Vec::new();
-    let mut agg_results: HashMap<String, Vec<ValueWord>> = HashMap::new();
-    for key in &spec_keys {
-        agg_results.insert(key.clone(), Vec::new());
-    }
-
-    for (bucket_start, bucket_end) in &buckets {
-        // Build mask for rows in this bucket
-        let mask: Vec<bool> = index_values
-            .iter()
-            .map(|v| *v >= *bucket_start && *v < *bucket_end)
-            .collect();
-
-        // Skip empty buckets
-        if !mask.iter().any(|&b| b) {
-            continue;
-        }
-
-        bucket_starts.push(*bucket_start);
-
-        let bool_mask = BooleanArray::from(mask);
-        let bucket_batch = filter_record_batch(table.inner(), &bool_mask)
-            .map_err(|e| VMError::RuntimeError(format!("resample() filter failed: {}", e)))?;
-        let bucket_dt = DataTable::new(bucket_batch);
-
-        // Compute aggregation for each output column
-        for key in &spec_keys {
-            let spec = &agg_spec[key];
-            let (agg_fn, source_col) = super::datatable_methods::parse_agg_spec_nb(spec, key)?;
-            let value =
-                super::datatable_methods::compute_aggregation(&bucket_dt, &agg_fn, &source_col)?;
-            agg_results.get_mut(key).unwrap().push(value);
-        }
-    }
-
-    // Build result DataTable
-    let index_col_name = table
-        .column_names()
-        .get(index_col as usize)
-        .cloned()
-        .unwrap_or_else(|| format!("col_{}", index_col));
-
-    let mut fields = vec![Field::new(&index_col_name, DataType::Float64, false)];
-    let mut columns: Vec<arrow_array::ArrayRef> =
-        vec![Arc::new(Float64Array::from(bucket_starts)) as arrow_array::ArrayRef];
-
-    for key in &spec_keys {
-        let values = &agg_results[key];
-        let (field, col) = nanboxed_to_arrow_column(key, values)?;
-        fields.push(field);
-        columns.push(col);
-    }
-
-    let result_schema = Schema::new(fields);
-    let batch = arrow_array::RecordBatch::try_new(Arc::new(result_schema), columns)
-        .map_err(|e| VMError::RuntimeError(format!("resample() result build failed: {}", e)))?;
-
-    // Result is an IndexedTable with index column at position 0
-    Ok(ValueWord::from_indexed_table(
-        schema_id,
-        Arc::new(DataTable::new(batch)),
-        0,
-    ))
-}
 
 // =============================================================================
 // Helpers
@@ -466,22 +269,188 @@ mod tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// V2 handlers (native u64 ABI — no legacy delegation)
+// ---------------------------------------------------------------------------
+
+use crate::executor::objects::raw_helpers;
+
+/// `indexed.between(start, end)` — filter rows where index is in [start, end] (v2).
 pub(crate) fn handle_between(
-    _vm: &mut crate::executor::VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_between_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let (schema_id, table, index_col) = extract_indexed_table_nb(&receiver)?;
+
+    let start_nb = borrow_vw(args[1]);
+    let end_nb = borrow_vw(args[2]);
+
+    let col = table.inner().column(index_col as usize);
+    let mask = build_between_mask_nb(col.as_ref(), &start_nb, &end_nb)?;
+
+    let filtered = filter_record_batch(table.inner(), &mask)
+        .map_err(|e| VMError::RuntimeError(format!("between() filter failed: {}", e)))?;
+
+    Ok(ValueWord::from_indexed_table(
+        schema_id,
+        Arc::new(DataTable::new(filtered)),
+        index_col,
+    )
+    .into_raw_bits())
 }
 
+/// `indexed.resample(interval, { col: "agg_fn", ... })` — bucket by interval, aggregate (v2).
 pub(crate) fn handle_resample(
-    vm: &mut crate::executor::VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_resample_legacy(vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+) -> Result<u64, VMError> {
+    let receiver = borrow_vw(args[0]);
+    let (schema_id, table, index_col) = extract_indexed_table_nb(&receiver)?;
+
+    // Parse interval (bucket size as number)
+    let interval = raw_helpers::extract_number_coerce(args[1]).ok_or_else(|| {
+        VMError::RuntimeError(
+            "resample() requires a numeric interval as first argument".to_string(),
+        )
+    })?;
+
+    if interval <= 0.0 {
+        return Err(VMError::RuntimeError(
+            "resample() interval must be positive".to_string(),
+        ));
+    }
+
+    // Parse aggregation spec
+    let arg2_nb = borrow_vw(args[2]);
+    let agg_spec = match arg2_nb.as_heap_ref() {
+        Some(HeapValue::TypedObject {
+            schema_id,
+            slots,
+            heap_mask,
+        }) => {
+            let mut map = HashMap::new();
+            if let Some(schema) = vm.lookup_schema(*schema_id as u32) {
+                for field_def in &schema.fields {
+                    let idx = field_def.index as usize;
+                    if idx < slots.len() && *heap_mask & (1u64 << idx) != 0 {
+                        map.insert(field_def.name.clone(), slots[idx].as_heap_nb());
+                    }
+                }
+            } else if let Some(decoded) =
+                shape_runtime::type_schema::typed_object_to_hashmap_nb(&arg2_nb)
+            {
+                map.extend(decoded);
+            }
+            map
+        }
+        _ => {
+            return Err(VMError::RuntimeError(
+                "resample() requires an aggregation spec object as second argument, \
+                 e.g. { close: \"last\", volume: \"sum\" }"
+                    .to_string(),
+            ));
+        }
+    };
+
+    // Get index column as f64 values
+    let col = table.inner().column(index_col as usize);
+    let index_values = column_to_f64(col.as_ref())?;
+
+    if index_values.is_empty() {
+        return Ok(ValueWord::from_indexed_table(
+            schema_id,
+            table.clone(),
+            index_col,
+        )
+        .into_raw_bits());
+    }
+
+    // Find min and max of index
+    let min_val = index_values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max_val = index_values
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    // Compute bucket boundaries
+    let mut buckets: Vec<(f64, f64)> = Vec::new();
+    let mut start = (min_val / interval).floor() * interval;
+    while start <= max_val {
+        let end = start + interval;
+        buckets.push((start, end));
+        start = end;
+    }
+
+    // Sort agg keys for deterministic output
+    let mut spec_keys: Vec<String> = agg_spec.keys().cloned().collect();
+    spec_keys.sort();
+
+    // Collect results per bucket
+    let mut bucket_starts: Vec<f64> = Vec::new();
+    let mut agg_results: HashMap<String, Vec<ValueWord>> = HashMap::new();
+    for key in &spec_keys {
+        agg_results.insert(key.clone(), Vec::new());
+    }
+
+    for (bucket_start, bucket_end) in &buckets {
+        // Build mask for rows in this bucket
+        let mask: Vec<bool> = index_values
+            .iter()
+            .map(|v| *v >= *bucket_start && *v < *bucket_end)
+            .collect();
+
+        // Skip empty buckets
+        if !mask.iter().any(|&b| b) {
+            continue;
+        }
+
+        bucket_starts.push(*bucket_start);
+
+        let bool_mask = BooleanArray::from(mask);
+        let bucket_batch = filter_record_batch(table.inner(), &bool_mask)
+            .map_err(|e| VMError::RuntimeError(format!("resample() filter failed: {}", e)))?;
+        let bucket_dt = DataTable::new(bucket_batch);
+
+        // Compute aggregation for each output column
+        for key in &spec_keys {
+            let spec = &agg_spec[key];
+            let (agg_fn, source_col) = super::datatable_methods::parse_agg_spec_nb(spec, key)?;
+            let value =
+                super::datatable_methods::compute_aggregation(&bucket_dt, &agg_fn, &source_col)?;
+            agg_results.get_mut(key).unwrap().push(value);
+        }
+    }
+
+    // Build result DataTable
+    let index_col_name = table
+        .column_names()
+        .get(index_col as usize)
+        .cloned()
+        .unwrap_or_else(|| format!("col_{}", index_col));
+
+    let mut fields = vec![Field::new(&index_col_name, DataType::Float64, false)];
+    let mut columns: Vec<arrow_array::ArrayRef> =
+        vec![Arc::new(Float64Array::from(bucket_starts)) as arrow_array::ArrayRef];
+
+    for key in &spec_keys {
+        let values = &agg_results[key];
+        let (field, col) = nanboxed_to_arrow_column(key, values)?;
+        fields.push(field);
+        columns.push(col);
+    }
+
+    let result_schema = Schema::new(fields);
+    let batch = arrow_array::RecordBatch::try_new(Arc::new(result_schema), columns)
+        .map_err(|e| VMError::RuntimeError(format!("resample() result build failed: {}", e)))?;
+
+    // Result is an IndexedTable with index column at position 0
+    Ok(ValueWord::from_indexed_table(
+        schema_id,
+        Arc::new(DataTable::new(batch)),
+        0,
+    )
+    .into_raw_bits())
 }

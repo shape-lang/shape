@@ -49,7 +49,6 @@ pub(crate) use self::query::{
 
 // Join methods
 pub(crate) use self::joins::{handle_inner_join, handle_left_join};
-pub(crate) use self::joins::{handle_inner_join_legacy, handle_left_join_legacy};
 
 // Indexing methods
 pub(crate) use self::indexing::handle_index_by;

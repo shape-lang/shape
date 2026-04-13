@@ -278,3 +278,120 @@ pub fn type_error(expected: &'static str, bits: u64) -> VMError {
         got: type_name_from_bits(bits),
     }
 }
+
+// ─── Callable inspection ────────────────────────────────────────────────
+
+/// Check if raw u64 bits represent a callable value (function, module function,
+/// closure, or host closure).
+#[inline]
+pub fn is_callable_raw(bits: u64) -> bool {
+    use shape_value::tags::{TAG_FUNCTION, TAG_MODULE_FN};
+
+    if !is_tagged(bits) {
+        return false;
+    }
+
+    let tag = get_tag(bits);
+    match tag {
+        TAG_FUNCTION | TAG_MODULE_FN => true,
+        TAG_HEAP => unsafe {
+            extract_heap_ref(bits)
+                .map(|hv| matches!(hv, HeapValue::Closure { .. } | HeapValue::HostClosure(..)))
+                .unwrap_or(false)
+        },
+        _ => false,
+    }
+}
+
+/// Check truthiness of raw u64 bits without taking ownership.
+#[inline]
+pub fn is_truthy_raw(bits: u64) -> bool {
+    let vw = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(bits));
+    vw.is_truthy()
+}
+
+// ─── Clone / ownership helpers ───────────────────────────────────────────
+
+/// Clone raw u64 bits, bumping Arc refcount for heap-tagged values.
+///
+/// For inline values the bits are simply copied. For heap-tagged values,
+/// the underlying Arc refcount is incremented.
+#[inline(always)]
+pub fn clone_raw_bits(bits: u64) -> u64 {
+    if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
+        let ptr = get_payload(bits) as *const HeapValue;
+        if !ptr.is_null() {
+            unsafe { std::sync::Arc::increment_strong_count(ptr) };
+        }
+    }
+    bits
+}
+
+// ─── Closure / callable inspection from raw bits ─────────────────────────
+
+/// Extract closure info (function_id, upvalues) from raw heap-tagged bits.
+/// Returns borrowed references — no Vec clone.
+#[inline]
+pub fn extract_closure_info(bits: u64) -> Option<(u16, &'static [shape_value::Upvalue])> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Closure {
+                function_id,
+                upvalues,
+            } => Some((*function_id, upvalues.as_slice())),
+            _ => None,
+        })
+    }
+}
+
+/// Check if raw bits represent a HostClosure, and if so call it with raw args.
+/// Returns None if the bits are not a HostClosure.
+#[inline]
+pub fn try_call_host_closure(bits: u64, args: &[u64]) -> Option<Result<u64, VMError>> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::HostClosure(callable) => {
+                let args_vec: Vec<ValueWord> = args
+                    .iter()
+                    .map(|&b| {
+                        let tmp = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(b));
+                        (*tmp).clone()
+                    })
+                    .collect();
+                let result = callable
+                    .call(&args_vec)
+                    .map(|vw| vw.into_raw_bits())
+                    .map_err(VMError::RuntimeError);
+                Some(result)
+            }
+            _ => None,
+        })
+    }
+}
+
+/// Get the arity of a callable from raw u64 bits.
+#[inline]
+pub fn callable_arity_raw(
+    program: &crate::bytecode::BytecodeProgram,
+    callee_bits: u64,
+) -> Option<u16> {
+    use shape_value::tags::{TAG_FUNCTION, TAG_MODULE_FN};
+
+    if !is_tagged(callee_bits) {
+        return None;
+    }
+
+    let tag = get_tag(callee_bits);
+    match tag {
+        TAG_FUNCTION => {
+            let func_id = get_payload(callee_bits) as u16;
+            program.functions.get(func_id as usize).map(|f| f.arity)
+        }
+        TAG_HEAP => {
+            extract_closure_info(callee_bits)
+                .and_then(|(fid, _)| program.functions.get(fid as usize).map(|f| f.arity))
+        }
+        TAG_MODULE_FN => None,
+        _ => None,
+    }
+}

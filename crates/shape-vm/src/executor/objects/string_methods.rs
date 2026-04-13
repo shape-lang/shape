@@ -1,7 +1,6 @@
 //! String operations
 //!
-//! Handles: split, join, contains, substring, replace
-//! Plus v2 (MethodFnV2) handlers for all non-closure string methods.
+//! V2 (MethodFnV2) handlers for all string methods.
 
 use crate::executor::VirtualMachine;
 use crate::executor::objects::raw_helpers;
@@ -84,11 +83,10 @@ pub fn v2_string_to_string(
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
-    // Identity: return the receiver unchanged
     Ok(args[0])
 }
 
-/// startsWith / starts_with — args[1] is the prefix
+/// startsWith / starts_with
 pub fn v2_string_starts_with(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -103,7 +101,7 @@ pub fn v2_string_starts_with(
     Ok(ValueWord::from_bool(s.starts_with(prefix)).raw_bits())
 }
 
-/// endsWith / ends_with — args[1] is the suffix
+/// endsWith / ends_with
 pub fn v2_string_ends_with(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -118,7 +116,7 @@ pub fn v2_string_ends_with(
     Ok(ValueWord::from_bool(s.ends_with(suffix)).raw_bits())
 }
 
-/// contains — args[1] is the needle
+/// contains
 pub fn v2_string_contains(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -133,7 +131,7 @@ pub fn v2_string_contains(
     Ok(ValueWord::from_bool(s.contains(needle)).raw_bits())
 }
 
-/// indexOf / index_of — args[1] is the needle
+/// indexOf / index_of
 pub fn v2_string_index_of(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -146,17 +144,13 @@ pub fn v2_string_index_of(
         message: "requires a string argument".to_string(),
     })?;
     let result = match s.find(needle) {
-        Some(pos) => {
-            // Return char index, not byte index
-            let char_idx = s[..pos].chars().count() as i64;
-            char_idx
-        }
+        Some(pos) => { s[..pos].chars().count() as i64 }
         None => -1,
     };
     Ok(ValueWord::from_i64(result).raw_bits())
 }
 
-/// repeat — args[1] is count
+/// repeat
 pub fn v2_string_repeat(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -165,13 +159,12 @@ pub fn v2_string_repeat(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let count = raw_helpers::extract_number_coerce(args[1]).ok_or_else(|| VMError::InvalidArgument {
-        function: "repeat".to_string(),
-        message: "requires a count argument".to_string(),
+        function: "repeat".to_string(), message: "requires a count argument".to_string(),
     })? as usize;
     Ok(ValueWord::from_string(Arc::new(s.repeat(count))).raw_bits())
 }
 
-/// charAt / char_at — args[1] is index
+/// charAt / char_at
 pub fn v2_string_char_at(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -180,13 +173,9 @@ pub fn v2_string_char_at(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let index = raw_helpers::extract_number_coerce(args[1]).ok_or_else(|| VMError::InvalidArgument {
-        function: "charAt".to_string(),
-        message: "requires an index argument".to_string(),
+        function: "charAt".to_string(), message: "requires an index argument".to_string(),
     })? as usize;
-    let result = match s.chars().nth(index) {
-        Some(c) => ValueWord::from_char(c),
-        None => ValueWord::none(),
-    };
+    let result = match s.chars().nth(index) { Some(c) => ValueWord::from_char(c), None => ValueWord::none() };
     Ok(result.raw_bits())
 }
 
@@ -198,8 +187,7 @@ pub fn v2_string_reverse(
 ) -> Result<u64, VMError> {
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
-    let reversed: String = s.chars().rev().collect();
-    Ok(ValueWord::from_string(Arc::new(reversed)).raw_bits())
+    Ok(ValueWord::from_string(Arc::new(s.chars().rev().collect::<String>())).raw_bits())
 }
 
 /// isDigit / is_digit
@@ -243,10 +231,7 @@ pub fn v2_string_to_int(
 ) -> Result<u64, VMError> {
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
-    let trimmed = s.trim();
-    let parsed: i64 = trimmed.parse().map_err(|_| {
-        VMError::RuntimeError(format!("Cannot convert '{}' to int", s))
-    })?;
+    let parsed: i64 = s.trim().parse().map_err(|_| VMError::RuntimeError(format!("Cannot convert '{}' to int", s)))?;
     Ok(ValueWord::from_i64(parsed).raw_bits())
 }
 
@@ -258,14 +243,11 @@ pub fn v2_string_to_number(
 ) -> Result<u64, VMError> {
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
-    let trimmed = s.trim();
-    let parsed: f64 = trimmed.parse().map_err(|_| {
-        VMError::RuntimeError(format!("Cannot convert '{}' to number", s))
-    })?;
+    let parsed: f64 = s.trim().parse().map_err(|_| VMError::RuntimeError(format!("Cannot convert '{}' to number", s)))?;
     Ok(ValueWord::from_f64(parsed).raw_bits())
 }
 
-/// codePointAt / code_point_at — args[1] is index
+/// codePointAt / code_point_at
 pub fn v2_string_code_point_at(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -274,13 +256,9 @@ pub fn v2_string_code_point_at(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let index = raw_helpers::extract_number_coerce(args[1]).ok_or_else(|| VMError::InvalidArgument {
-        function: "codePointAt".to_string(),
-        message: "requires an index argument".to_string(),
+        function: "codePointAt".to_string(), message: "requires an index argument".to_string(),
     })? as usize;
-    let result = match s.chars().nth(index) {
-        Some(c) => c as u32 as i64,
-        None => -1,
-    };
+    let result = match s.chars().nth(index) { Some(c) => c as u32 as i64, None => -1 };
     Ok(ValueWord::from_i64(result).raw_bits())
 }
 
@@ -293,11 +271,10 @@ pub fn v2_string_grapheme_len(
     use unicode_segmentation::UnicodeSegmentation;
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
-    let count = s.graphemes(true).count();
-    Ok(ValueWord::from_i64(count as i64).raw_bits())
+    Ok(ValueWord::from_i64(s.graphemes(true).count() as i64).raw_bits())
 }
 
-/// padStart / pad_start — args[1] is target_len, args[2] is optional fill
+/// padStart / pad_start
 pub fn v2_string_pad_start(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -306,16 +283,9 @@ pub fn v2_string_pad_start(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let target_len = raw_helpers::extract_number_coerce(args[1]).ok_or_else(|| VMError::InvalidArgument {
-        function: "padStart".to_string(),
-        message: "requires a length argument".to_string(),
+        function: "padStart".to_string(), message: "requires a length argument".to_string(),
     })? as usize;
-    let fill = if args.len() > 2 {
-        raw_helpers::extract_str(args[2])
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| " ".to_string())
-    } else {
-        " ".to_string()
-    };
+    let fill = if args.len() > 2 { raw_helpers::extract_str(args[2]).map(|s| s.to_string()).unwrap_or_else(|| " ".to_string()) } else { " ".to_string() };
     let char_count = s.chars().count();
     if char_count >= target_len {
         Ok(ValueWord::from_string(Arc::new(s.to_string())).raw_bits())
@@ -323,15 +293,13 @@ pub fn v2_string_pad_start(
         let pad_needed = target_len - char_count;
         let fill_chars: Vec<char> = fill.chars().collect();
         let mut padding = String::with_capacity(pad_needed + s.len());
-        for i in 0..pad_needed {
-            padding.push(fill_chars[i % fill_chars.len()]);
-        }
+        for i in 0..pad_needed { padding.push(fill_chars[i % fill_chars.len()]); }
         padding.push_str(s);
         Ok(ValueWord::from_string(Arc::new(padding)).raw_bits())
     }
 }
 
-/// padEnd / pad_end — args[1] is target_len, args[2] is optional fill
+/// padEnd / pad_end
 pub fn v2_string_pad_end(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -340,16 +308,9 @@ pub fn v2_string_pad_end(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let target_len = raw_helpers::extract_number_coerce(args[1]).ok_or_else(|| VMError::InvalidArgument {
-        function: "padEnd".to_string(),
-        message: "requires a length argument".to_string(),
+        function: "padEnd".to_string(), message: "requires a length argument".to_string(),
     })? as usize;
-    let fill = if args.len() > 2 {
-        raw_helpers::extract_str(args[2])
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| " ".to_string())
-    } else {
-        " ".to_string()
-    };
+    let fill = if args.len() > 2 { raw_helpers::extract_str(args[2]).map(|s| s.to_string()).unwrap_or_else(|| " ".to_string()) } else { " ".to_string() };
     let char_count = s.chars().count();
     if char_count >= target_len {
         Ok(ValueWord::from_string(Arc::new(s.to_string())).raw_bits())
@@ -357,14 +318,12 @@ pub fn v2_string_pad_end(
         let pad_needed = target_len - char_count;
         let fill_chars: Vec<char> = fill.chars().collect();
         let mut result = s.to_string();
-        for i in 0..pad_needed {
-            result.push(fill_chars[i % fill_chars.len()]);
-        }
+        for i in 0..pad_needed { result.push(fill_chars[i % fill_chars.len()]); }
         Ok(ValueWord::from_string(Arc::new(result)).raw_bits())
     }
 }
 
-/// split — args[1] is delimiter
+/// split
 pub fn v2_string_split(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -373,17 +332,13 @@ pub fn v2_string_split(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let sep = raw_helpers::extract_str(args[1]).ok_or_else(|| VMError::InvalidArgument {
-        function: "split".to_string(),
-        message: "requires a separator argument".to_string(),
+        function: "split".to_string(), message: "requires a separator argument".to_string(),
     })?;
-    let parts: Vec<ValueWord> = s
-        .split(sep)
-        .map(|part| ValueWord::from_string(Arc::new(part.to_string())))
-        .collect();
+    let parts: Vec<ValueWord> = s.split(sep).map(|part| ValueWord::from_string(Arc::new(part.to_string()))).collect();
     Ok(ValueWord::from_array(Arc::new(parts)).raw_bits())
 }
 
-/// replace — args[1] is from, args[2] is to
+/// replace
 pub fn v2_string_replace(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -392,18 +347,15 @@ pub fn v2_string_replace(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let old = raw_helpers::extract_str(args[1]).ok_or_else(|| VMError::InvalidArgument {
-        function: "replace".to_string(),
-        message: "requires an old argument".to_string(),
+        function: "replace".to_string(), message: "requires an old argument".to_string(),
     })?;
     let new = raw_helpers::extract_str(args[2]).ok_or_else(|| VMError::InvalidArgument {
-        function: "replace".to_string(),
-        message: "requires a new argument".to_string(),
+        function: "replace".to_string(), message: "requires a new argument".to_string(),
     })?;
-    let result = s.replace(old, new);
-    Ok(ValueWord::from_string(Arc::new(result)).raw_bits())
+    Ok(ValueWord::from_string(Arc::new(s.replace(old, new))).raw_bits())
 }
 
-/// substring — args[1] is start, args[2] is optional end
+/// substring
 pub fn v2_string_substring(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -411,16 +363,9 @@ pub fn v2_string_substring(
 ) -> Result<u64, VMError> {
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
-    let start = raw_helpers::extract_number_coerce(args[1]).ok_or_else(|| VMError::TypeError {
-        expected: "number",
-        got: "other",
-    })? as usize;
-
+    let start = raw_helpers::extract_number_coerce(args[1]).ok_or_else(|| VMError::TypeError { expected: "number", got: "other" })? as usize;
     let result = if args.len() > 2 {
-        let end = raw_helpers::extract_number_coerce(args[2]).ok_or_else(|| VMError::TypeError {
-            expected: "number",
-            got: "other",
-        })? as usize;
+        let end = raw_helpers::extract_number_coerce(args[2]).ok_or_else(|| VMError::TypeError { expected: "number", got: "other" })? as usize;
         let chars: Vec<char> = s.chars().collect();
         let end = end.min(chars.len());
         let start = start.min(end);
@@ -430,52 +375,34 @@ pub fn v2_string_substring(
         let start = start.min(chars.len());
         chars[start..].iter().collect::<String>()
     };
-
     Ok(ValueWord::from_string(Arc::new(result)).raw_bits())
 }
 
-/// join — receiver (args[0]) is an array, args[1] is optional separator
+/// join
 pub fn v2_string_join(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, VMError> {
     let arr = raw_helpers::extract_any_array(args[0])
-        .ok_or_else(|| raw_helpers::type_error("array", args[0]))?
-        .to_generic();
-
+        .ok_or_else(|| raw_helpers::type_error("array", args[0]))?.to_generic();
     let sep = raw_helpers::extract_str(args[1])
         .ok_or_else(|| raw_helpers::type_error("string", args[1]))?;
-
-    let strings: Result<Vec<String>, VMError> = arr
-        .iter()
-        .map(|nb| {
-            if let Some(s) = nb.as_str() {
-                Ok(s.to_string())
-            } else if let Some(n) = nb.as_f64() {
-                Ok(n.to_string())
-            } else if let Some(i) = nb.as_i64() {
-                Ok(i.to_string())
-            } else if let Some(b) = nb.as_bool() {
-                Ok(b.to_string())
-            } else {
-                Err(VMError::InvalidArgument {
-                    function: "join".to_string(),
-                    message: format!("cannot join non-stringable value: {}", nb.type_name()),
-                })
-            }
-        })
-        .collect();
-
-    let result = strings?.join(sep);
-    Ok(ValueWord::from_string(Arc::new(result)).raw_bits())
+    let strings: Result<Vec<String>, VMError> = arr.iter().map(|nb| {
+        if let Some(s) = nb.as_str() { Ok(s.to_string()) }
+        else if let Some(n) = nb.as_f64() { Ok(n.to_string()) }
+        else if let Some(i) = nb.as_i64() { Ok(i.to_string()) }
+        else if let Some(b) = nb.as_bool() { Ok(b.to_string()) }
+        else { Err(VMError::InvalidArgument { function: "join".to_string(), message: format!("cannot join non-stringable value: {}", nb.type_name()) }) }
+    }).collect();
+    Ok(ValueWord::from_string(Arc::new(strings?.join(sep))).raw_bits())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // V2 string methods: graphemes, normalize, iter
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// graphemes — returns array of grapheme clusters
+/// graphemes
 pub fn v2_string_graphemes(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -484,14 +411,11 @@ pub fn v2_string_graphemes(
     use unicode_segmentation::UnicodeSegmentation;
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
-    let clusters: Vec<ValueWord> = s
-        .graphemes(true)
-        .map(|g| ValueWord::from_string(Arc::new(g.to_string())))
-        .collect();
+    let clusters: Vec<ValueWord> = s.graphemes(true).map(|g| ValueWord::from_string(Arc::new(g.to_string()))).collect();
     Ok(ValueWord::from_array(Arc::new(clusters)).into_raw_bits())
 }
 
-/// normalize — Unicode normalization (NFC, NFD, NFKC, NFKD)
+/// normalize
 pub fn v2_string_normalize(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -501,32 +425,20 @@ pub fn v2_string_normalize(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let form_bits = args.get(1).copied().ok_or_else(|| VMError::InvalidArgument {
-        function: "normalize".to_string(),
-        message: "requires a form argument (\"NFC\", \"NFD\", \"NFKC\", or \"NFKD\")".to_string(),
+        function: "normalize".to_string(), message: "requires a form argument (\"NFC\", \"NFD\", \"NFKC\", or \"NFKD\")".to_string(),
     })?;
     let form = raw_helpers::extract_str(form_bits).ok_or_else(|| VMError::InvalidArgument {
-        function: "normalize".to_string(),
-        message: "requires a form argument (\"NFC\", \"NFD\", \"NFKC\", or \"NFKD\")".to_string(),
+        function: "normalize".to_string(), message: "requires a form argument (\"NFC\", \"NFD\", \"NFKC\", or \"NFKD\")".to_string(),
     })?;
     let normalized: String = match form {
-        "NFC" => s.nfc().collect(),
-        "NFD" => s.nfd().collect(),
-        "NFKC" => s.nfkc().collect(),
-        "NFKD" => s.nfkd().collect(),
-        _ => {
-            return Err(VMError::InvalidArgument {
-                function: "normalize".to_string(),
-                message: format!(
-                    "unknown normalization form '{}', expected NFC/NFD/NFKC/NFKD",
-                    form
-                ),
-            });
-        }
+        "NFC" => s.nfc().collect(), "NFD" => s.nfd().collect(),
+        "NFKC" => s.nfkc().collect(), "NFKD" => s.nfkd().collect(),
+        _ => return Err(VMError::InvalidArgument { function: "normalize".to_string(), message: format!("unknown normalization form '{}', expected NFC/NFD/NFKC/NFKD", form) }),
     };
     Ok(ValueWord::from_string(Arc::new(normalized)).into_raw_bits())
 }
 
-/// iter — returns an Iterator over chars of the string
+/// iter
 pub fn v2_string_iter(
     _vm: &mut VirtualMachine,
     args: &mut [u64],
@@ -534,219 +446,7 @@ pub fn v2_string_iter(
 ) -> Result<u64, VMError> {
     use shape_value::heap_value::IteratorState;
     let receiver = unsafe { ValueWord::clone_from_bits(args[0]) };
-    let result = ValueWord::from_iterator(Box::new(IteratorState {
-        source: receiver,
-        position: 0,
-        transforms: vec![],
-        done: false,
-    }));
-    Ok(result.into_raw_bits())
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Legacy MethodFn string handlers (kept for backward compatibility)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Handle split(separator) - Split string into array
-pub(crate) fn handle_split(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let string_val = args
-        .get(0)
-        .ok_or(VMError::StackUnderflow)?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-    let sep = args
-        .get(1)
-        .ok_or_else(|| VMError::InvalidArgument {
-            function: "split".to_string(),
-            message: "requires a separator argument".to_string(),
-        })?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-
-    let parts: Vec<ValueWord> = string_val
-        .split(sep)
-        .map(|s| ValueWord::from_string(Arc::new(s.to_string())))
-        .collect();
-
-    Ok(ValueWord::from_array(Arc::new(parts)))
-}
-
-/// Handle join(array, separator) - Join array into string
-/// Note: This is implemented as a string method but takes an array as the receiver
-pub(crate) fn handle_join(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let receiver = args.get(0).ok_or(VMError::StackUnderflow)?;
-    let arr = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    let sep = args
-        .get(1)
-        .ok_or_else(|| VMError::InvalidArgument {
-            function: "join".to_string(),
-            message: "requires a separator argument".to_string(),
-        })?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-
-    let strings: Result<Vec<String>, VMError> = arr
-        .iter()
-        .map(|nb| {
-            if let Some(s) = nb.as_str() {
-                Ok(s.to_string())
-            } else if let Some(n) = nb.as_f64() {
-                Ok(n.to_string())
-            } else if let Some(i) = nb.as_i64() {
-                Ok(i.to_string())
-            } else if let Some(b) = nb.as_bool() {
-                Ok(b.to_string())
-            } else {
-                Err(VMError::InvalidArgument {
-                    function: "join".to_string(),
-                    message: format!("cannot join non-stringable value: {}", nb.type_name()),
-                })
-            }
-        })
-        .collect();
-
-    let result = strings?.join(sep);
-    Ok(ValueWord::from_string(Arc::new(result)))
-}
-
-/// Handle contains(substring) - Check if string contains substring
-pub(crate) fn handle_contains(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let string_val = args
-        .get(0)
-        .ok_or(VMError::StackUnderflow)?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-    let substr = args
-        .get(1)
-        .ok_or_else(|| VMError::InvalidArgument {
-            function: "contains".to_string(),
-            message: "requires a substring argument".to_string(),
-        })?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-
-    let result = string_val.contains(substr);
-    Ok(ValueWord::from_bool(result))
-}
-
-/// Handle substring(start, end) - Extract substring
-pub(crate) fn handle_substring(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let string_val = args
-        .get(0)
-        .ok_or(VMError::StackUnderflow)?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-    let start = args
-        .get(1)
-        .ok_or_else(|| VMError::InvalidArgument {
-            function: "substring".to_string(),
-            message: "requires a start argument".to_string(),
-        })?
-        .as_number_coerce()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "number",
-            got: "other",
-        })? as usize;
-
-    // Optional end parameter
-    let result = if let Some(end_nb) = args.get(2) {
-        let end = end_nb
-            .as_number_coerce()
-            .ok_or_else(|| VMError::TypeError {
-                expected: "number",
-                got: "other",
-            })? as usize;
-        let chars: Vec<char> = string_val.chars().collect();
-        let end = end.min(chars.len());
-        let start = start.min(end);
-        chars[start..end].iter().collect::<String>()
-    } else {
-        let chars: Vec<char> = string_val.chars().collect();
-        let start = start.min(chars.len());
-        chars[start..].iter().collect::<String>()
-    };
-
-    Ok(ValueWord::from_string(Arc::new(result)))
-}
-
-/// Handle replace(old, new) - Replace all occurrences of substring
-pub(crate) fn handle_replace(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let string_val = args
-        .get(0)
-        .ok_or(VMError::StackUnderflow)?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-    let old = args
-        .get(1)
-        .ok_or_else(|| VMError::InvalidArgument {
-            function: "replace".to_string(),
-            message: "requires an old argument".to_string(),
-        })?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-    let new = args
-        .get(2)
-        .ok_or_else(|| VMError::InvalidArgument {
-            function: "replace".to_string(),
-            message: "requires a new argument".to_string(),
-        })?
-        .as_str()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "string",
-            got: "other",
-        })?;
-
-    let result = string_val.replace(old, new);
-    Ok(ValueWord::from_string(Arc::new(result)))
+    Ok(ValueWord::from_iterator(Box::new(IteratorState {
+        source: receiver, position: 0, transforms: vec![], done: false,
+    })).into_raw_bits())
 }

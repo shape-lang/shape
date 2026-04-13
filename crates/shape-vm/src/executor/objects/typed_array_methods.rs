@@ -29,26 +29,6 @@ fn extract_int_array(args: &[ValueWord]) -> Result<&Arc<TypedBuffer<i64>>, VMErr
     })
 }
 
-/// Get the arity (parameter count) of a callable ValueWord value.
-/// Returns None for host closures or module functions (arity unknown at runtime).
-fn callable_arity(vm: &VirtualMachine, callee: &ValueWord) -> Option<u16> {
-    use shape_value::{NanTag, heap_value::HeapKind};
-    match callee.tag() {
-        NanTag::Function => {
-            let func_id = callee.as_function()?;
-            vm.program.functions.get(func_id as usize).map(|f| f.arity)
-        }
-        NanTag::Heap => match callee.heap_kind() {
-            Some(HeapKind::Closure) => {
-                let (func_id, _) = callee.as_closure()?;
-                vm.program.functions.get(func_id as usize).map(|f| f.arity)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 // ===== Aggregations =====
 
 /// Compute the sum of a float array. Shared by `handle_float_sum` and other
@@ -276,119 +256,6 @@ pub fn handle_float_norm(
     Ok(ValueWord::from_f64(sum_sq.sqrt()))
 }
 
-pub fn handle_float_normalize_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let sum_sq: f64 = arr.iter().map(|&v| v * v).sum();
-    let norm = sum_sq.sqrt();
-    if norm == 0.0 {
-        return Ok(ValueWord::from_float_array(Arc::clone(arr)));
-    }
-    let inv_norm = 1.0 / norm;
-    let result = shape_runtime::intrinsics::vector::simd_vec_scale_f64(arr.as_slice(), inv_norm);
-    Ok(ValueWord::from_float_array(Arc::new(
-        AlignedTypedBuffer::from(result),
-    )))
-}
-
-pub fn handle_float_cumsum_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let mut result = AlignedVec::with_capacity(arr.len());
-    let mut acc = 0.0f64;
-    for &v in arr.iter() {
-        acc += v;
-        result.push(acc);
-    }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())))
-}
-
-pub fn handle_float_diff_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    if arr.len() < 2 {
-        return Ok(ValueWord::from_float_array(Arc::new(
-            AlignedTypedBuffer::new(),
-        )));
-    }
-    let mut result = AlignedVec::with_capacity(arr.len() - 1);
-    for i in 1..arr.len() {
-        result.push(arr[i] - arr[i - 1]);
-    }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())))
-}
-
-pub fn handle_float_abs_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let mut result = AlignedVec::with_capacity(arr.len());
-    for &v in arr.iter() {
-        result.push(v.abs());
-    }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())))
-}
-
-pub fn handle_int_abs_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_int_array(&args)?;
-    let result: Vec<i64> = arr.iter().map(|&v| v.abs()).collect();
-    Ok(ValueWord::from_int_array(Arc::new(result.into())))
-}
-
-pub fn handle_float_sqrt_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let mut result = AlignedVec::with_capacity(arr.len());
-    for &v in arr.iter() {
-        result.push(v.sqrt());
-    }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())))
-}
-
-pub fn handle_float_ln_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let mut result = AlignedVec::with_capacity(arr.len());
-    for &v in arr.iter() {
-        result.push(v.ln());
-    }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())))
-}
-
-pub fn handle_float_exp_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let mut result = AlignedVec::with_capacity(arr.len());
-    for &v in arr.iter() {
-        result.push(v.exp());
-    }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())))
-}
-
 // ===== Standard collection methods =====
 
 pub fn handle_float_len(
@@ -409,179 +276,6 @@ pub fn handle_int_len(
     Ok(ValueWord::from_i64(len as i64))
 }
 
-pub fn handle_float_to_array_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let generic = args[0]
-        .to_generic_array()
-        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    Ok(ValueWord::from_array(generic))
-}
-
-pub fn handle_int_to_array_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let generic = args[0]
-        .to_generic_array()
-        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    Ok(ValueWord::from_array(generic))
-}
-
-pub fn handle_float_map_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let callback = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| VMError::RuntimeError("map() requires a callback".into()))?;
-    let cb_arity = callable_arity(vm, &callback).unwrap_or(1);
-    let mut result = Vec::with_capacity(arr.len());
-    for (i, &v) in arr.iter().enumerate() {
-        let elem_nb = ValueWord::from_f64(v);
-        let mapped = if cb_arity >= 2 {
-            vm.call_value_immediate_nb(&callback, &[elem_nb, ValueWord::from_i64(i as i64)], None)?
-        } else {
-            vm.call_value_immediate_nb(&callback, &[elem_nb], None)?
-        };
-        result.push(mapped);
-    }
-    // Check if result is all-float for typed array output
-    let all_float = result.iter().all(|nb| nb.as_f64().is_some());
-    if all_float {
-        let mut typed = AlignedVec::with_capacity(result.len());
-        for nb in &result {
-            typed.push(nb.as_f64().unwrap());
-        }
-        Ok(ValueWord::from_float_array(Arc::new(typed.into())))
-    } else {
-        Ok(ValueWord::from_array(Arc::new(result)))
-    }
-}
-
-pub fn handle_int_map_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_int_array(&args)?;
-    let callback = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| VMError::RuntimeError("map() requires a callback".into()))?;
-    let cb_arity = callable_arity(vm, &callback).unwrap_or(1);
-    let mut result = Vec::with_capacity(arr.len());
-    for (i, &v) in arr.iter().enumerate() {
-        let elem_nb = ValueWord::from_i64(v);
-        let mapped = if cb_arity >= 2 {
-            vm.call_value_immediate_nb(&callback, &[elem_nb, ValueWord::from_i64(i as i64)], None)?
-        } else {
-            vm.call_value_immediate_nb(&callback, &[elem_nb], None)?
-        };
-        result.push(mapped);
-    }
-    // Check if result is all-int for typed array output
-    let all_int = result.iter().all(|nb| nb.as_i64().is_some());
-    if all_int {
-        let typed: Vec<i64> = result.iter().map(|nb| nb.as_i64().unwrap()).collect();
-        Ok(ValueWord::from_int_array(Arc::new(typed.into())))
-    } else {
-        Ok(ValueWord::from_array(Arc::new(result)))
-    }
-}
-
-pub fn handle_float_filter_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let callback = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| VMError::RuntimeError("filter() requires a callback".into()))?;
-    let cb_arity = callable_arity(vm, &callback).unwrap_or(1);
-    let mut result = AlignedVec::with_capacity(arr.len());
-    for (i, &v) in arr.iter().enumerate() {
-        let elem_nb = ValueWord::from_f64(v);
-        let keep = if cb_arity >= 2 {
-            vm.call_value_immediate_nb(&callback, &[elem_nb, ValueWord::from_i64(i as i64)], None)?
-        } else {
-            vm.call_value_immediate_nb(&callback, &[elem_nb], None)?
-        };
-        if keep.is_truthy() {
-            result.push(v);
-        }
-    }
-    Ok(ValueWord::from_float_array(Arc::new(result.into())))
-}
-
-pub fn handle_int_filter_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_int_array(&args)?;
-    let callback = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| VMError::RuntimeError("filter() requires a callback".into()))?;
-    let cb_arity = callable_arity(vm, &callback).unwrap_or(1);
-    let mut result = Vec::with_capacity(arr.len());
-    for (i, &v) in arr.iter().enumerate() {
-        let elem_nb = ValueWord::from_i64(v);
-        let keep = if cb_arity >= 2 {
-            vm.call_value_immediate_nb(&callback, &[elem_nb, ValueWord::from_i64(i as i64)], None)?
-        } else {
-            vm.call_value_immediate_nb(&callback, &[elem_nb], None)?
-        };
-        if keep.is_truthy() {
-            result.push(v);
-        }
-    }
-    Ok(ValueWord::from_int_array(Arc::new(result.into())))
-}
-
-pub fn handle_float_for_each_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_float_array(&args)?;
-    let callback = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| VMError::RuntimeError("forEach() requires a callback".into()))?;
-    for &v in arr.iter() {
-        let elem_nb = ValueWord::from_f64(v);
-        let _ = vm.call_value_immediate_nb(&callback, &[elem_nb], ctx.as_deref_mut())?;
-    }
-    Ok(ValueWord::none())
-}
-
-pub fn handle_int_for_each_legacy(
-    vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    mut ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let arr = extract_int_array(&args)?;
-    let callback = args
-        .get(1)
-        .cloned()
-        .ok_or_else(|| VMError::RuntimeError("forEach() requires a callback".into()))?;
-    for &v in arr.iter() {
-        let elem_nb = ValueWord::from_i64(v);
-        let _ = vm.call_value_immediate_nb(&callback, &[elem_nb], ctx.as_deref_mut())?;
-    }
-    Ok(ValueWord::none())
-}
-
 // ===== BoolArray methods =====
 
 pub fn handle_bool_len(
@@ -591,17 +285,6 @@ pub fn handle_bool_len(
 ) -> Result<ValueWord, VMError> {
     let len = args[0].typed_array_len().unwrap_or(0);
     Ok(ValueWord::from_i64(len as i64))
-}
-
-pub fn handle_bool_to_array_legacy(
-    _vm: &mut VirtualMachine,
-    args: Vec<ValueWord>,
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<ValueWord, VMError> {
-    let generic = args[0]
-        .to_generic_array()
-        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
-    Ok(ValueWord::from_array(generic))
 }
 
 pub fn handle_bool_count_true(
@@ -645,6 +328,7 @@ pub fn handle_bool_all(
 // MethodFnV2 wrappers — raw u64 in/out, zero Vec allocation
 // ═════════════════════════════════════════════════════════════════════════════
 
+use super::raw_helpers;
 use crate::executor::v2_handlers::v2_array_detect as v2;
 use std::mem::ManuallyDrop;
 
@@ -657,10 +341,6 @@ use std::mem::ManuallyDrop;
 #[inline]
 fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
     ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
-
-fn args_to_vw(args: &mut [u64]) -> Vec<shape_value::ValueWord> {
-    args.iter().map(|&raw| (*borrow_vw(raw)).clone()).collect()
 }
 
 /// Helper: interpret `args[0]` as a raw pointer and try to build a
@@ -1066,172 +746,377 @@ pub fn v2_bool_all(
     Ok(ValueWord::from_bool(arr.iter().all(|&v| v != 0)).raw_bits())
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Native v2 implementations — direct raw u64 extraction, no legacy delegation
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// v2 normalize: L2-normalize a float array (divide each element by L2 norm).
 pub(crate) fn handle_float_normalize(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_normalize_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let sum_sq: f64 = arr.iter().map(|&v| v * v).sum();
+    let norm = sum_sq.sqrt();
+    if norm == 0.0 {
+        return Ok(ValueWord::from_float_array(Arc::clone(arr)).into_raw_bits());
+    }
+    let inv_norm = 1.0 / norm;
+    let result = shape_runtime::intrinsics::vector::simd_vec_scale_f64(arr.as_slice(), inv_norm);
+    Ok(ValueWord::from_float_array(Arc::new(AlignedTypedBuffer::from(result))).into_raw_bits())
 }
 
+/// v2 cumsum: cumulative sum of a float array.
 pub(crate) fn handle_float_cumsum(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_cumsum_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let mut result = AlignedVec::with_capacity(arr.len());
+    let mut acc = 0.0f64;
+    for &v in arr.iter() {
+        acc += v;
+        result.push(acc);
+    }
+    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 diff: consecutive differences of a float array.
 pub(crate) fn handle_float_diff(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_diff_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    if arr.len() < 2 {
+        return Ok(
+            ValueWord::from_float_array(Arc::new(AlignedTypedBuffer::new())).into_raw_bits()
+        );
+    }
+    let mut result = AlignedVec::with_capacity(arr.len() - 1);
+    for i in 1..arr.len() {
+        result.push(arr[i] - arr[i - 1]);
+    }
+    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 abs: element-wise absolute value of a float array.
 pub(crate) fn handle_float_abs(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_abs_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let mut result = AlignedVec::with_capacity(arr.len());
+    for &v in arr.iter() {
+        result.push(v.abs());
+    }
+    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 sqrt: element-wise square root of a float array.
 pub(crate) fn handle_float_sqrt(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_sqrt_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let mut result = AlignedVec::with_capacity(arr.len());
+    for &v in arr.iter() {
+        result.push(v.sqrt());
+    }
+    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 ln: element-wise natural logarithm of a float array.
 pub(crate) fn handle_float_ln(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_ln_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let mut result = AlignedVec::with_capacity(arr.len());
+    for &v in arr.iter() {
+        result.push(v.ln());
+    }
+    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 exp: element-wise exponential of a float array.
 pub(crate) fn handle_float_exp(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_exp_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<number>",
+        got: vw.type_name(),
+    })?;
+    let mut result = AlignedVec::with_capacity(arr.len());
+    for &v in arr.iter() {
+        result.push(v.exp());
+    }
+    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 map for float arrays: apply a callback to each element.
 pub(crate) fn handle_float_map(
     vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_map_legacy(vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<f64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<number>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    let mut result = Vec::with_capacity(arr_clone.len());
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = f64::to_bits(v);
+        let mapped_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        result.push(ValueWord::from_raw_bits(mapped_bits));
+    }
+    let all_float = result.iter().all(|nb| nb.as_f64().is_some());
+    if all_float {
+        let mut typed = AlignedVec::with_capacity(result.len());
+        for nb in &result {
+            typed.push(nb.as_f64().unwrap());
+        }
+        Ok(ValueWord::from_float_array(Arc::new(typed.into())).into_raw_bits())
+    } else {
+        Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    }
 }
 
+/// v2 filter for float arrays: keep elements where callback returns truthy.
 pub(crate) fn handle_float_filter(
     vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_filter_legacy(vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<f64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<number>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    let mut result = AlignedVec::with_capacity(arr_clone.len());
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = f64::to_bits(v);
+        let keep_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        if raw_helpers::is_truthy_raw(keep_bits) {
+            result.push(v);
+        }
+        drop(ValueWord::from_raw_bits(keep_bits));
+    }
+    Ok(ValueWord::from_float_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 forEach for float arrays: call callback on each element, return none.
 pub(crate) fn handle_float_for_each(
     vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_for_each_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
+    let arr_clone: Vec<f64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<number>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    for &v in &arr_clone {
+        let elem_bits = f64::to_bits(v);
+        let result_bits = vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?;
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::none().into_raw_bits())
 }
 
+/// v2 toArray for float arrays: convert typed array to generic Array.
 pub(crate) fn handle_float_to_array(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_float_to_array_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let generic = vw
+        .to_generic_array()
+        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
+    Ok(ValueWord::from_array(generic).into_raw_bits())
 }
 
+/// v2 abs for int arrays: element-wise absolute value.
 pub(crate) fn handle_int_abs(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_int_abs_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+        expected: "Vec<int>",
+        got: vw.type_name(),
+    })?;
+    let result: Vec<i64> = arr.iter().map(|&v| v.abs()).collect();
+    Ok(ValueWord::from_int_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 map for int arrays: apply a callback to each element.
 pub(crate) fn handle_int_map(
     vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_int_map_legacy(vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<i64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<int>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    let mut result = Vec::with_capacity(arr_clone.len());
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        let mapped_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        result.push(ValueWord::from_raw_bits(mapped_bits));
+    }
+    let all_int = result.iter().all(|nb| nb.as_i64().is_some());
+    if all_int {
+        let typed: Vec<i64> = result.iter().map(|nb| nb.as_i64().unwrap()).collect();
+        Ok(ValueWord::from_int_array(Arc::new(typed.into())).into_raw_bits())
+    } else {
+        Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    }
 }
 
+/// v2 filter for int arrays: keep elements where callback returns truthy.
 pub(crate) fn handle_int_filter(
     vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_int_filter_legacy(vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<i64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<int>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    let mut result = Vec::with_capacity(arr_clone.len());
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        let keep_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        if raw_helpers::is_truthy_raw(keep_bits) {
+            result.push(v);
+        }
+        drop(ValueWord::from_raw_bits(keep_bits));
+    }
+    Ok(ValueWord::from_int_array(Arc::new(result.into())).into_raw_bits())
 }
 
+/// v2 forEach for int arrays: call callback on each element, return none.
 pub(crate) fn handle_int_for_each(
     vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_int_for_each_legacy(vm, vw_args, ctx)?;
-    Ok(result.into_raw_bits())
+    let arr_clone: Vec<i64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<int>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    for &v in &arr_clone {
+        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        let result_bits = vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?;
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::none().into_raw_bits())
 }
 
+/// v2 toArray for int arrays: convert typed array to generic Array.
 pub(crate) fn handle_int_to_array(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_int_to_array_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let generic = vw
+        .to_generic_array()
+        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
+    Ok(ValueWord::from_array(generic).into_raw_bits())
 }
 
+/// v2 toArray for bool arrays: convert typed array to generic Array.
 pub(crate) fn handle_bool_to_array(
     _vm: &mut crate::executor::VirtualMachine,
     args: &mut [u64],
     _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
 ) -> Result<u64, shape_value::VMError> {
-    let vw_args = args_to_vw(args);
-    let result = handle_bool_to_array_legacy(_vm, vw_args, _ctx)?;
-    Ok(result.into_raw_bits())
+    let vw = borrow_vw(args[0]);
+    let generic = vw
+        .to_generic_array()
+        .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
+    Ok(ValueWord::from_array(generic).into_raw_bits())
 }

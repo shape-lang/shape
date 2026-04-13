@@ -274,37 +274,37 @@ impl VirtualMachine {
 
         let join_type_str = args_nb[2].as_str().unwrap_or("inner").to_string();
 
-        let join_args: Vec<ValueWord> = vec![
-            args_nb[0].clone(), // left table
-            args_nb[1].clone(), // right table
-            args_nb[3].clone(), // left key fn
-            args_nb[4].clone(), // right key fn
-            args_nb[5].clone(), // result selector
+        let mut raw_args: Vec<u64> = vec![
+            args_nb[0].clone().into_raw_bits(), // left table
+            args_nb[1].clone().into_raw_bits(), // right table
+            args_nb[3].clone().into_raw_bits(), // left key fn
+            args_nb[4].clone().into_raw_bits(), // right key fn
+            args_nb[5].clone().into_raw_bits(), // result selector
         ];
 
-        let result = match join_type_str.as_str() {
-            "inner" => crate::executor::objects::datatable_methods::handle_inner_join_legacy(
-                self, join_args, None,
+        let result_bits = match join_type_str.as_str() {
+            "inner" => crate::executor::objects::datatable_methods::handle_inner_join(
+                self, &mut raw_args, None,
             )?,
-            "left" => crate::executor::objects::datatable_methods::handle_left_join_legacy(
-                self, join_args, None,
+            "left" => crate::executor::objects::datatable_methods::handle_left_join(
+                self, &mut raw_args, None,
             )?,
             "right" => {
-                let swapped_args: Vec<ValueWord> = vec![
-                    args_nb[1].clone(),
-                    args_nb[0].clone(),
-                    args_nb[4].clone(),
-                    args_nb[3].clone(),
-                    args_nb[5].clone(),
+                let mut swapped_args: Vec<u64> = vec![
+                    args_nb[1].clone().into_raw_bits(),
+                    args_nb[0].clone().into_raw_bits(),
+                    args_nb[4].clone().into_raw_bits(),
+                    args_nb[3].clone().into_raw_bits(),
+                    args_nb[5].clone().into_raw_bits(),
                 ];
-                crate::executor::objects::datatable_methods::handle_left_join_legacy(
+                crate::executor::objects::datatable_methods::handle_left_join(
                     self,
-                    swapped_args,
+                    &mut swapped_args,
                     None,
                 )?
             }
-            "full" => crate::executor::objects::datatable_methods::handle_left_join_legacy(
-                self, join_args, None,
+            "full" => crate::executor::objects::datatable_methods::handle_left_join(
+                self, &mut raw_args, None,
             )?,
             _ => {
                 return Err(VMError::RuntimeError(format!(
@@ -313,7 +313,7 @@ impl VirtualMachine {
                 )));
             }
         };
-        self.push_vw(result)?;
+        self.push_vw(ValueWord::from_raw_bits(result_bits))?;
         Ok(())
     }
 
