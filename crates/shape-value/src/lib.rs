@@ -43,6 +43,10 @@ pub mod tags {
         TAG_HEAP, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_REF,
         // Inline helpers
         make_tagged, is_tagged, is_number, get_tag, get_payload, sign_extend_i48,
+        // Dual-heap ownership flag
+        HEAP_OWNED_BIT, HEAP_PTR_MASK,
+        is_heap_owned, is_heap_shared, get_heap_ptr,
+        vw_heap_box_owned,
         // Unified heap object discrimination
         UNIFIED_HEAP_FLAG, UNIFIED_PTR_MASK,
         is_unified_heap, unified_heap_ptr, unified_heap_kind, make_unified_heap,

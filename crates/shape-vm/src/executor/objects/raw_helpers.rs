@@ -52,7 +52,7 @@ pub fn extract_bool(bits: u64) -> bool {
 #[inline(always)]
 pub fn extract_heap_ptr(bits: u64) -> Option<*const HeapValue> {
     if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
-        let ptr = get_payload(bits) as *const HeapValue;
+        let ptr = (get_payload(bits) & shape_value::tags::HEAP_PTR_MASK) as *const HeapValue;
         if !ptr.is_null() {
             return Some(ptr);
         }
@@ -538,32 +538,49 @@ pub fn is_truthy_raw(bits: u64) -> bool {
 
 // ─── Clone / ownership helpers ───────────────────────────────────────────
 
-/// Clone raw u64 bits, bumping Arc refcount for heap-tagged values.
+/// Clone raw u64 bits, handling both owned (Box) and shared (Arc) heap values.
 ///
-/// For inline values the bits are simply copied. For heap-tagged values,
-/// the underlying Arc refcount is incremented.
+/// For inline values the bits are simply copied. For shared heap-tagged values,
+/// the underlying Arc refcount is incremented. For owned heap-tagged values,
+/// the HeapValue is deep-cloned into a new owned allocation.
 #[inline(always)]
 pub fn clone_raw_bits(bits: u64) -> u64 {
     if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
-        let ptr = get_payload(bits) as *const HeapValue;
+        let payload = get_payload(bits);
+        let ptr = (payload & shape_value::tags::HEAP_PTR_MASK) as *const HeapValue;
         if !ptr.is_null() {
-            unsafe { std::sync::Arc::increment_strong_count(ptr) };
+            if (payload & shape_value::tags::HEAP_OWNED_BIT) != 0 {
+                // Owned (Box-backed): deep clone into a new owned allocation
+                let hv = unsafe { &*ptr };
+                return shape_value::tags::vw_heap_box_owned(hv.clone());
+            } else {
+                // Shared (Arc-backed): cheap refcount bump
+                unsafe { std::sync::Arc::increment_strong_count(ptr) };
+            }
         }
     }
     bits
 }
 
-/// Drop raw u64 bits, decrementing Arc refcount for heap-tagged values.
+/// Drop raw u64 bits, handling both owned (Box) and shared (Arc) heap values.
 ///
-/// For inline values this is a no-op. For heap-tagged values,
+/// For inline values this is a no-op. For owned heap-tagged values,
+/// the Box is immediately freed. For shared heap-tagged values,
 /// the underlying Arc refcount is decremented (and if it reaches zero,
 /// the HeapValue is freed).
 #[inline(always)]
 pub fn drop_raw_bits(bits: u64) {
     if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
-        let ptr = get_payload(bits) as *const HeapValue;
+        let payload = get_payload(bits);
+        let ptr = (payload & shape_value::tags::HEAP_PTR_MASK) as *mut HeapValue;
         if !ptr.is_null() {
-            unsafe { std::sync::Arc::decrement_strong_count(ptr) };
+            if (payload & shape_value::tags::HEAP_OWNED_BIT) != 0 {
+                // Owned (Box-backed): immediate free, no atomic ops
+                unsafe { drop(Box::from_raw(ptr)); }
+            } else {
+                // Shared (Arc-backed): decrement refcount
+                unsafe { std::sync::Arc::decrement_strong_count(ptr as *const HeapValue); }
+            }
         }
     }
 }

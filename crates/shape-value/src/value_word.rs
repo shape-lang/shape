@@ -154,6 +154,38 @@ pub fn sign_extend_i48(bits: u64) -> i64 {
     shifted >> 16
 }
 
+// ===== Dual-heap ownership flag (bit 0 of heap pointer payload) =====
+//
+// Both `Arc::into_raw` and `Box::into_raw` return pointers aligned to at least
+// 8 bytes (HeapValue contains Arc<String> etc.), so the lowest 3 bits are always
+// 0. We use bit 0 as the ownership flag:
+//   ptr & 1 == 0  → Shared (Arc-backed, current default)
+//   ptr & 1 == 1  → Owned (Box-backed, no refcount)
+
+/// Bit 0 of heap pointer payload: 1 = owned (Box), 0 = shared (Arc).
+pub const HEAP_OWNED_BIT: u64 = 1;
+
+/// Mask to strip the owned bit from a heap pointer payload.
+pub const HEAP_PTR_MASK: u64 = !HEAP_OWNED_BIT;
+
+/// Check if a heap-tagged value is owned (Box-backed).
+#[inline(always)]
+pub fn is_heap_owned(bits: u64) -> bool {
+    is_tagged(bits) && get_tag(bits) == TAG_HEAP && (get_payload(bits) & HEAP_OWNED_BIT) != 0
+}
+
+/// Check if a heap-tagged value is shared (Arc-backed).
+#[inline(always)]
+pub fn is_heap_shared(bits: u64) -> bool {
+    is_tagged(bits) && get_tag(bits) == TAG_HEAP && (get_payload(bits) & HEAP_OWNED_BIT) == 0
+}
+
+/// Extract the raw pointer from heap-tagged bits, stripping the owned bit.
+#[inline(always)]
+pub fn get_heap_ptr(bits: u64) -> *const HeapValue {
+    (get_payload(bits) & HEAP_PTR_MASK) as *const HeapValue
+}
+
 // ===== Unified heap object discrimination =====
 
 pub const UNIFIED_HEAP_FLAG: u64 = 1 << 47;
@@ -331,6 +363,18 @@ pub(crate) fn vw_heap_box(v: HeapValue) -> ValueWord {
     let ptr = heap.alloc(v) as u64;
     debug_assert!(ptr & !PAYLOAD_MASK == 0, "GC pointer exceeds 48 bits");
     make_tagged(TAG_HEAP, ptr & PAYLOAD_MASK)
+}
+
+/// Heap-box a HeapValue as uniquely owned (Box, no refcount).
+/// Use for values proven to have a single owner by the compiler.
+/// Not yet used as the default — available for Phase 3 integration.
+#[inline]
+#[cfg(not(feature = "gc"))]
+pub fn vw_heap_box_owned(v: HeapValue) -> ValueWord {
+    let ptr = Box::into_raw(Box::new(v));
+    let addr = ptr as u64;
+    debug_assert!(addr & !PAYLOAD_MASK == 0, "pointer exceeds 48 bits");
+    make_tagged(TAG_HEAP, (addr & PAYLOAD_MASK) | HEAP_OWNED_BIT)
 }
 
 // ---------------------------------------------------------------------------
@@ -954,8 +998,16 @@ impl ValueWordExt for u64 {
     #[cfg(not(feature = "gc"))]
     unsafe fn clone_from_bits(bits: u64) -> ValueWord {
         if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
-            let ptr = get_payload(bits) as *const HeapValue;
-            Arc::increment_strong_count(ptr);
+            let payload = get_payload(bits);
+            let ptr = (payload & HEAP_PTR_MASK) as *const HeapValue;
+            if (payload & HEAP_OWNED_BIT) != 0 {
+                // Owned (Box-backed): deep clone into a new owned allocation
+                let hv = unsafe { &*ptr };
+                return vw_heap_box_owned(hv.clone());
+            } else {
+                // Shared (Arc-backed): cheap refcount bump
+                unsafe { Arc::increment_strong_count(ptr) };
+            }
         }
         bits
     }
@@ -1130,7 +1182,7 @@ impl ValueWordExt for u64 {
     #[inline]
     fn as_heap_ref(&self) -> Option<&HeapValue> {
         if is_tagged(*self) && get_tag(*self) == TAG_HEAP {
-            Some(unsafe { &*(get_payload(*self) as *const HeapValue) })
+            Some(unsafe { &*((get_payload(*self) & HEAP_PTR_MASK) as *const HeapValue) })
         } else { None }
     }
 
@@ -1139,13 +1191,21 @@ impl ValueWordExt for u64 {
     #[cfg(not(feature = "gc"))]
     fn as_heap_mut(&mut self) -> Option<&mut HeapValue> {
         if is_tagged(*self) && get_tag(*self) == TAG_HEAP {
-            let ptr = get_payload(*self) as *const HeapValue;
-            let mut arc = unsafe { Arc::from_raw(ptr) };
-            Arc::make_mut(&mut arc);
-            let new_ptr = Arc::into_raw(arc) as u64;
-            *self = make_tagged(TAG_HEAP, new_ptr & PAYLOAD_MASK);
-            let final_ptr = get_payload(*self) as *mut HeapValue;
-            Some(unsafe { &mut *final_ptr })
+            let payload = get_payload(*self);
+            if (payload & HEAP_OWNED_BIT) != 0 {
+                // Owned (Box-backed): already uniquely owned, mutate in place
+                let ptr = (payload & HEAP_PTR_MASK) as *mut HeapValue;
+                Some(unsafe { &mut *ptr })
+            } else {
+                // Shared (Arc-backed): clone-on-write via Arc::make_mut
+                let ptr = (payload & HEAP_PTR_MASK) as *const HeapValue;
+                let mut arc = unsafe { Arc::from_raw(ptr) };
+                Arc::make_mut(&mut arc);
+                let new_ptr = Arc::into_raw(arc) as u64;
+                *self = make_tagged(TAG_HEAP, new_ptr & PAYLOAD_MASK);
+                let final_ptr = (get_payload(*self) & HEAP_PTR_MASK) as *mut HeapValue;
+                Some(unsafe { &mut *final_ptr })
+            }
         } else {
             None
         }
@@ -1155,7 +1215,7 @@ impl ValueWordExt for u64 {
     #[cfg(feature = "gc")]
     fn as_heap_mut(&mut self) -> Option<&mut HeapValue> {
         if is_tagged(*self) && get_tag(*self) == TAG_HEAP {
-            let ptr = get_payload(*self) as *mut HeapValue;
+            let ptr = (get_payload(*self) & HEAP_PTR_MASK) as *mut HeapValue;
             Some(unsafe { &mut *ptr })
         } else {
             None
@@ -1172,7 +1232,7 @@ impl ValueWordExt for u64 {
         }
         let tag = get_tag(*self);
         if tag == TAG_HEAP {
-            let ptr = get_payload(*self) as *const HeapValue;
+            let ptr = (get_payload(*self) & HEAP_PTR_MASK) as *const HeapValue;
             return unsafe { (*ptr).is_truthy() };
         }
         nan_tag_is_truthy(tag, get_payload(*self))
@@ -1486,8 +1546,8 @@ impl ValueWordExt for u64 {
         }
         // Same tag, different bits — for heap values, compare HeapValue
         if tag_a == TAG_HEAP {
-            let ptr_a = get_payload(*self) as *const HeapValue;
-            let ptr_b = get_payload(*other) as *const HeapValue;
+            let ptr_a = (get_payload(*self) & HEAP_PTR_MASK) as *const HeapValue;
+            let ptr_b = (get_payload(*other) & HEAP_PTR_MASK) as *const HeapValue;
             return unsafe { (*ptr_a).equals(&*ptr_b) };
         }
         // For other same-tag inline values with different bits, not equal
@@ -1640,7 +1700,7 @@ impl ValueWordExt for u64 {
         }
         let tag = get_tag(*self);
         if tag == TAG_HEAP {
-            let ptr = get_payload(*self) as *const HeapValue;
+            let ptr = (get_payload(*self) & HEAP_PTR_MASK) as *const HeapValue;
             return unsafe { (*ptr).type_name() };
         }
         nan_tag_type_name(tag)
@@ -1866,7 +1926,7 @@ impl std::fmt::Debug for ValueWordDisplay {
         } else if let Some(target) = self.0.as_ref_target() {
             write!(f, "ValueWord(Ref({:?}))", target)
         } else if self.0.is_heap() {
-            let ptr = get_payload(self.0) as *const HeapValue;
+            let ptr = (get_payload(self.0) & HEAP_PTR_MASK) as *const HeapValue;
             let hv = unsafe { &*ptr };
             write!(f, "ValueWord(heap: {:?})", hv)
         } else {
@@ -2782,5 +2842,84 @@ mod tests {
             HEAP_KIND_FLOAT_ARRAY_SLICE,
             HeapKind::FloatArraySlice as u8
         );
+    }
+
+    // ===== Owned heap allocation (dual-heap) =====
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_owned_heap_allocation() {
+        let owned = vw_heap_box_owned(HeapValue::String(Arc::new("owned".to_string())));
+        assert!(is_heap_owned(owned));
+        assert!(!is_heap_shared(owned));
+        assert!(owned.is_heap());
+        assert_eq!(owned.as_str(), Some("owned"));
+
+        // Clone an owned value produces a new owned allocation
+        let cloned = unsafe { ValueWord::clone_from_bits(owned) };
+        assert!(is_heap_owned(cloned));
+        assert_eq!(cloned.as_str(), Some("owned"));
+
+        // The two values are equal but backed by different allocations
+        assert!(owned.vw_equals(&cloned));
+
+        // Shared (Arc) path still works as before
+        let shared = vw_heap_box(HeapValue::String(Arc::new("shared".to_string())));
+        assert!(!is_heap_owned(shared));
+        assert!(is_heap_shared(shared));
+        assert_eq!(shared.as_str(), Some("shared"));
+
+        // Clone shared bumps refcount (returns same bits)
+        let shared_clone = unsafe { ValueWord::clone_from_bits(shared) };
+        assert_eq!(shared, shared_clone); // same bits = same Arc
+        assert_eq!(shared_clone.as_str(), Some("shared"));
+
+        // Drop all (no double-free, no leak)
+        // For owned: Box dealloc; for shared: Arc decrement
+        unsafe {
+            ValueWord::clone_from_bits(owned); // bump then drop via scope
+            ValueWord::clone_from_bits(cloned);
+            ValueWord::clone_from_bits(shared);
+            ValueWord::clone_from_bits(shared_clone);
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_owned_heap_get_heap_ptr() {
+        let owned = vw_heap_box_owned(HeapValue::String(Arc::new("test".to_string())));
+        let ptr = get_heap_ptr(owned);
+        assert!(!ptr.is_null());
+        // The pointer should be valid and readable
+        let hv = unsafe { &*ptr };
+        match hv {
+            HeapValue::String(s) => assert_eq!(s.as_str(), "test"),
+            _ => panic!("expected String variant"),
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_owned_heap_as_heap_mut() {
+        let mut owned = vw_heap_box_owned(HeapValue::BigInt(42));
+        assert!(is_heap_owned(owned));
+        // as_heap_mut on owned should give direct mutable access (no Arc clone-on-write)
+        if let Some(hv) = owned.as_heap_mut() {
+            if let HeapValue::BigInt(v) = hv {
+                *v = 99;
+            } else {
+                panic!("expected BigInt");
+            }
+        } else {
+            panic!("expected heap value");
+        }
+        // Value is still owned after mutation
+        assert!(is_heap_owned(owned));
+        // Mutation was applied
+        if let Some(HeapValue::BigInt(v)) = owned.as_heap_ref() {
+            assert_eq!(*v, 99);
+        } else {
+            panic!("expected BigInt(99)");
+        }
     }
 }
