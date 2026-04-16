@@ -1530,4 +1530,121 @@ mod tests {
     // The full v2 transition requires the stack representation to change
     // from Vec<ValueWord> to a raw u64 slab, at which point these opcodes
     // become zero-overhead register moves.
+
+    // ===== PromoteToOwned tests =====
+
+    #[test]
+    fn test_promote_to_owned_string_becomes_owned() {
+        // Push a string (Arc-backed heap), promote to owned, store, load back.
+        // The value should still be a readable string.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::String("hello".to_string()));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::simple(OpCode::PromoteToOwned),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+        let result = run_program(program);
+        assert_eq!(
+            result.as_str().map(|s| s.to_string()),
+            Some("hello".to_string()),
+            "string value should survive PromoteToOwned"
+        );
+    }
+
+    #[test]
+    fn test_promote_to_owned_int_is_noop() {
+        // Inline int (i48) should pass through PromoteToOwned unchanged.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Int(42));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::simple(OpCode::PromoteToOwned),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+        let result = run_program(program);
+        assert_eq!(result.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_promote_to_owned_float_is_noop() {
+        // Float (inline f64) should pass through PromoteToOwned unchanged.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Number(3.14));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::simple(OpCode::PromoteToOwned),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+        let result = run_program(program);
+        assert_eq!(result.as_f64(), Some(3.14));
+    }
+
+    #[test]
+    fn test_promote_to_owned_bool_is_noop() {
+        // Bool (inline) should pass through PromoteToOwned unchanged.
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::Bool(true));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::simple(OpCode::PromoteToOwned),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+        let result = run_program(program);
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_promote_to_owned_null_is_noop() {
+        // Null should pass through PromoteToOwned unchanged.
+        let mut program = BytecodeProgram::default();
+        program.instructions = vec![
+            Instruction::simple(OpCode::PushNull),
+            Instruction::simple(OpCode::PromoteToOwned),
+            Instruction::simple(OpCode::Halt),
+        ];
+        let result = run_program(program);
+        assert!(result.is_none(), "null should survive PromoteToOwned");
+    }
+
+    #[test]
+    #[cfg(not(feature = "gc"))]
+    fn test_promote_to_owned_sets_owned_bit() {
+        // After PromoteToOwned, a freshly allocated string should have the owned bit set.
+        use crate::executor::VMConfig;
+        let mut program = BytecodeProgram::default();
+        let c0 = program.add_constant(Constant::String("owned_test".to_string()));
+        program.instructions = vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
+            Instruction::simple(OpCode::PromoteToOwned),
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::Halt),
+        ];
+        program.top_level_locals_count = 1;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        let result = vm.execute(None).unwrap();
+        assert!(
+            shape_value::tags::is_heap_owned(result),
+            "string after PromoteToOwned should have owned bit set"
+        );
+        assert_eq!(
+            result.as_str().map(|s| s.to_string()),
+            Some("owned_test".to_string()),
+        );
+    }
 }

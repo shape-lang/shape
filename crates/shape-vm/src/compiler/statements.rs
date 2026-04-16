@@ -4364,6 +4364,42 @@ impl BytecodeCompiler {
                         }
                     }
 
+                    // Phase 3: Emit PromoteToOwned before StoreLocal for uniquely-owned
+                    // let bindings. This converts freshly-allocated Arc<HeapValue> (refcount 1)
+                    // to Box<HeapValue>, eliminating atomic refcount overhead for the lifetime
+                    // of the binding. Only applies to immutable `let` / `const` bindings with
+                    // Direct storage class (not `var` or `let mut`).
+                    if let Some(name) = var_decl.pattern.as_identifier() {
+                        let is_immutable_let = (var_decl.kind == VarKind::Let && !var_decl.is_mut)
+                            || var_decl.kind == VarKind::Const;
+                        if is_immutable_let {
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                let should_promote = self
+                                    .mir_storage_class_for_slot(local_idx)
+                                    .map_or(false, |sc| {
+                                        matches!(
+                                            sc,
+                                            crate::type_tracking::BindingStorageClass::Direct
+                                        )
+                                    });
+                                if should_promote {
+                                    // The last instruction should be StoreLocal(local_idx).
+                                    // Insert PromoteToOwned just before it.
+                                    let instr_count = self.program.instructions.len();
+                                    if instr_count > 0 {
+                                        let last = self.program.instructions[instr_count - 1];
+                                        if last.opcode == OpCode::StoreLocal {
+                                            // Remove the StoreLocal, emit PromoteToOwned, re-emit StoreLocal.
+                                            self.program.instructions.pop();
+                                            self.emit(Instruction::simple(OpCode::PromoteToOwned));
+                                            self.emit(last);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     for (binding_name, _) in var_decl.pattern.get_bindings() {
                         if let Some(local_idx) = self.resolve_local(&binding_name) {
                             if var_decl.kind == VarKind::Const {

@@ -666,6 +666,10 @@ define_opcodes! {
     /// Store local with Drop semantics — drops the old value before storing.
     /// Respects ownership: if old value is uniquely owned, frees immediately.
     StoreLocalDrop = 0x106, Variable, pops: 1, pushes: 0;
+    /// Promote top-of-stack from shared (Arc) to owned (Box) allocation if
+    /// the refcount is 1.  No-op for inline values or already-owned values.
+    /// Used by the compiler before StoreLocal for uniquely-owned let bindings.
+    PromoteToOwned = 0x107, Stack, pops: 0, pushes: 0;
 
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
