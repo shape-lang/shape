@@ -90,7 +90,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let idx = *id as usize;
                 if idx < self.strings.len() {
                     let s = self.strings[idx].clone();
-                    let boxed = crate::nan_boxing::box_string(s);
+                    let boxed = crate::ffi::value_ffi::box_string(s);
                     Ok(self.builder.ins().iconst(types::I64, boxed as i64))
                 } else {
                     Ok(self
@@ -101,7 +101,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             MirConstant::Str(s) => {
                 // String literal carried in MIR — NaN-box at compile time.
-                let boxed = crate::nan_boxing::box_string(s.clone());
+                let boxed = crate::ffi::value_ffi::box_string(s.clone());
                 Ok(self.builder.ins().iconst(types::I64, boxed as i64))
             }
             MirConstant::Function(name) => {
@@ -115,7 +115,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             MirConstant::Method(name) => {
                 // Method name for dispatch — NaN-box the string at compile time.
-                let boxed = crate::nan_boxing::box_string(name.clone());
+                let boxed = crate::ffi::value_ffi::box_string(name.clone());
                 Ok(self.builder.ins().iconst(types::I64, boxed as i64))
             }
             MirConstant::ClosurePlaceholder => {

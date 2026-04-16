@@ -4,7 +4,8 @@
 
 use super::super::context::JITContext;
 use super::super::ffi::object::conversion::{jit_bits_to_nanboxed_with_ctx, nanboxed_to_jit_bits};
-use super::super::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use shape_value::{ValueWord, ValueWordExt};
 
 fn jit_to_nb(bits: u64, ctx: *mut JITContext) -> ValueWord {

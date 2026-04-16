@@ -2,7 +2,8 @@
 //!
 //! Contains the runtime context and data structures used by JIT-compiled code.
 
-use super::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 // ============================================================================
 // JITContext Field Offsets for Direct Memory Access
@@ -401,7 +402,8 @@ impl JITDuration {
     }
 
     pub fn box_duration(duration: Box<JITDuration>) -> u64 {
-        use crate::nan_boxing::{HK_DURATION, jit_box};
+        use crate::ffi::jit_kinds::jit_box;
+        use crate::ffi::value_ffi::HK_DURATION;
         jit_box(HK_DURATION, *duration)
     }
 }
@@ -420,7 +422,8 @@ impl JITRange {
     }
 
     pub fn box_range(range: Box<JITRange>) -> u64 {
-        use crate::nan_boxing::{HK_RANGE, jit_box};
+        use crate::ffi::jit_kinds::jit_box;
+        use crate::ffi::value_ffi::HK_RANGE;
         jit_box(HK_RANGE, *range)
     }
 }
@@ -461,7 +464,7 @@ impl JITSignalBuilder {
     }
 
     pub fn box_builder(builder: Box<JITSignalBuilder>) -> u64 {
-        use crate::nan_boxing::{HK_JIT_SIGNAL_BUILDER, jit_box};
+        use crate::ffi::jit_kinds::{HK_JIT_SIGNAL_BUILDER, jit_box};
         jit_box(HK_JIT_SIGNAL_BUILDER, *builder)
     }
 }
@@ -480,7 +483,8 @@ pub struct JITDataReference {
 
 impl JITDataReference {
     pub fn box_data_ref(data_ref: Box<JITDataReference>) -> u64 {
-        use crate::nan_boxing::{HK_DATA_REFERENCE, jit_box};
+        use crate::ffi::jit_kinds::jit_box;
+        use crate::ffi::value_ffi::HK_DATA_REFERENCE;
         jit_box(HK_DATA_REFERENCE, *data_ref)
     }
 }

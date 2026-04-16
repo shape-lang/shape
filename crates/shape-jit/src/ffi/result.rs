@@ -2,7 +2,7 @@
 //   Category A (NaN-boxed returns): 5 sites
 //     box_ok, box_err, box_some — jit_make_ok, jit_make_err, jit_make_some
 //     (these use sub-tag encoding, not jit_box — allocation via Box::into_raw
-//      in the Ok/Err/Some wrapper fns in nan_boxing.rs)
+//      in the Ok/Err/Some wrapper fns in value_ffi.rs)
 //   Category B (intermediate/consumed): 0 sites
 //   Category C (heap islands): 0 sites
 //!
@@ -10,7 +10,8 @@
 //!
 //! Functions for creating and manipulating Result types (Ok/Err) in JIT-compiled code.
 
-use super::super::nan_boxing::*;
+use super::jit_kinds::*;
+use super::value_ffi::*;
 
 // ============================================================================
 // Result Type Creation
@@ -19,7 +20,7 @@ use super::super::nan_boxing::*;
 /// Create an Ok result wrapping the inner value
 pub extern "C" fn jit_make_ok(inner_bits: u64) -> u64 {
     if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
-        let kind = super::super::nan_boxing::heap_kind(inner_bits);
+        let kind = super::value_ffi::heap_kind(inner_bits);
         eprintln!("[make_ok] inner={:#x} inner_kind={:?}", inner_bits, kind);
     }
     box_ok(inner_bits)

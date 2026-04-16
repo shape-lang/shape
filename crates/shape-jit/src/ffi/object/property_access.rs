@@ -16,7 +16,8 @@ use shape_value::ValueWordExt;
 
 use super::super::super::context::{JITDataReference, JITDuration};
 use super::super::super::jit_array::JitArray;
-use super::super::super::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 // ============================================================================
 // Property Access (multi-type)

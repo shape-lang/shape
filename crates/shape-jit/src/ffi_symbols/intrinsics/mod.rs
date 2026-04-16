@@ -4,10 +4,8 @@
 
 use crate::context::JITContext;
 use crate::jit_array::JitArray;
-use crate::nan_boxing::*;
-
-// extract_column and box_column_result are imported via `use crate::nan_boxing::*`
-// from the shared definitions in nan_boxing.rs.
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 /// Intrinsic sum: compute sum of all values in a column.
 pub extern "C" fn jit_intrinsic_sum(series_bits: u64) -> u64 {

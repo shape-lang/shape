@@ -12,7 +12,8 @@
 
 use crate::context::JITContext;
 use crate::jit_array::JitArray;
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use shape_runtime::context::ExecutionContext;
 use std::collections::HashMap;
 use shape_value::ValueWordExt;
@@ -241,12 +242,12 @@ fn dispatch_method_via_trampoline(
                 "has" => {
                     if let Some(key) = args_vw.first() {
                         if hm.find_key(key).is_some() {
-                            crate::nan_boxing::TAG_BOOL_TRUE
+                            crate::ffi::value_ffi::TAG_BOOL_TRUE
                         } else {
-                            crate::nan_boxing::TAG_BOOL_FALSE
+                            crate::ffi::value_ffi::TAG_BOOL_FALSE
                         }
                     } else {
-                        crate::nan_boxing::TAG_BOOL_FALSE
+                        crate::ffi::value_ffi::TAG_BOOL_FALSE
                     }
                 }
                 "keys" => {
@@ -260,7 +261,7 @@ fn dispatch_method_via_trampoline(
                     ))
                 }
                 "length" | "len" | "size" => {
-                    crate::nan_boxing::box_number(hm.keys.len() as f64)
+                    crate::ffi::value_ffi::box_number(hm.keys.len() as f64)
                 }
                 _ => TAG_NULL,
             };

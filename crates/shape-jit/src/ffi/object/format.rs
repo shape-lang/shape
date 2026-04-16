@@ -9,7 +9,8 @@
 //! Functions for formatting strings with template substitution.
 
 use super::super::super::context::JITContext;
-use super::super::super::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 // ============================================================================
 // String Formatting

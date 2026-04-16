@@ -10,7 +10,8 @@
 //! Column indices are resolved at compile time from field names.
 
 use super::super::context::JITContext;
-use super::super::nan_boxing::*;
+use super::jit_kinds::*;
+use super::value_ffi::*;
 use shape_value::ValueWordExt;
 
 // ============================================================================

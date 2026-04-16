@@ -9,7 +9,8 @@
 //! Functions for type checking and conversion in JIT-compiled code.
 
 use super::super::jit_array::JitArray;
-use super::super::nan_boxing::*;
+use super::jit_kinds::*;
+use super::value_ffi::*;
 
 // ============================================================================
 // Type Checking

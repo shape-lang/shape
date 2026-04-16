@@ -93,7 +93,7 @@ pub fn unregister_async_task_fns() {
 pub extern "C" fn jit_spawn_task(_ctx: *mut JITContext, callable_bits: u64) -> u64 {
     let f = SPAWN_TASK_FN.load(std::sync::atomic::Ordering::Acquire);
     if f.is_null() {
-        return crate::nan_boxing::TAG_NULL;
+        return crate::ffi::value_ffi::TAG_NULL;
     }
     let spawn: fn(u64) -> u64 = unsafe { std::mem::transmute(f) };
     spawn(callable_bits)
@@ -112,7 +112,7 @@ pub extern "C" fn jit_spawn_task(_ctx: *mut JITContext, callable_bits: u64) -> u
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_join_init(ctx: *mut JITContext, packed: u16) -> u64 {
     if ctx.is_null() {
-        return crate::nan_boxing::TAG_NULL;
+        return crate::ffi::value_ffi::TAG_NULL;
     }
 
     let ctx = unsafe { &mut *ctx };
@@ -124,7 +124,7 @@ pub extern "C" fn jit_join_init(ctx: *mut JITContext, packed: u16) -> u64 {
     let mut task_ids = Vec::with_capacity(arity);
     for _ in 0..arity {
         if ctx.stack_ptr == 0 {
-            return crate::nan_boxing::TAG_NULL;
+            return crate::ffi::value_ffi::TAG_NULL;
         }
         ctx.stack_ptr -= 1;
         let bits = ctx.stack[ctx.stack_ptr];
@@ -132,7 +132,7 @@ pub extern "C" fn jit_join_init(ctx: *mut JITContext, packed: u16) -> u64 {
         if let Some(id) = vw.as_future() {
             task_ids.push(id);
         } else {
-            return crate::nan_boxing::TAG_NULL;
+            return crate::ffi::value_ffi::TAG_NULL;
         }
     }
     // Reverse so task_ids[0] corresponds to the first branch
@@ -161,7 +161,7 @@ pub extern "C" fn jit_join_init(ctx: *mut JITContext, packed: u16) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_join_await(ctx: *mut JITContext, task_group_bits: u64) -> u64 {
     if ctx.is_null() {
-        return crate::nan_boxing::TAG_NULL;
+        return crate::ffi::value_ffi::TAG_NULL;
     }
 
     let ctx = unsafe { &mut *ctx };
@@ -176,7 +176,7 @@ pub extern "C" fn jit_join_await(ctx: *mut JITContext, task_group_bits: u64) -> 
     // Signal suspension — the JIT execution loop checks this and exits
     ctx.suspension_state = SUSPENSION_ASYNC_WAIT;
 
-    crate::nan_boxing::TAG_NULL
+    crate::ffi::value_ffi::TAG_NULL
 }
 
 /// Cancel a running task by its future ID.
@@ -248,7 +248,7 @@ mod tests {
         let mut ctx = JITContext::default();
         // No trampoline registered — should return TAG_NULL
         let result = jit_spawn_task(&mut ctx, 0);
-        assert_eq!(result, crate::nan_boxing::TAG_NULL);
+        assert_eq!(result, crate::ffi::value_ffi::TAG_NULL);
     }
 
     #[test]
@@ -257,7 +257,7 @@ mod tests {
         // kind=0 (All), arity=0
         let result = jit_join_init(&mut ctx, 0);
         // Should succeed with an empty TaskGroup
-        assert_ne!(result, crate::nan_boxing::TAG_NULL);
+        assert_ne!(result, crate::ffi::value_ffi::TAG_NULL);
     }
 
     #[test]
@@ -274,7 +274,7 @@ mod tests {
         let tg_bits = crate::ffi::object::conversion::nanboxed_to_jit_bits(&tg);
 
         let result = jit_join_await(&mut ctx, tg_bits);
-        assert_eq!(result, crate::nan_boxing::TAG_NULL);
+        assert_eq!(result, crate::ffi::value_ffi::TAG_NULL);
         assert_eq!(ctx.suspension_state, SUSPENSION_ASYNC_WAIT);
         // Task group should be on the stack
         assert!(ctx.stack_ptr > 0);

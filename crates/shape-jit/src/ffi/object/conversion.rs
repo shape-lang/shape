@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use super::super::super::context::JITDuration;
 use super::super::super::jit_array::{ArrayElementKind, JitArray};
-use super::super::super::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use shape_value::ValueWordExt;
 
 // Thread-local accumulator for unified heap refs whose refcount was bumped

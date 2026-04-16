@@ -12,7 +12,8 @@ use std::collections::HashMap;
 
 use super::super::super::context::JITContext;
 use super::super::super::jit_array::JitArray;
-use super::super::super::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 // ============================================================================
 // Object Creation and Manipulation

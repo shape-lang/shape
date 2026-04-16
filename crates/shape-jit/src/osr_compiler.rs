@@ -379,7 +379,7 @@ pub fn compile_osr_loop(
                 OpCode::PushNull => {
                     let null = builder
                         .ins()
-                        .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64);
+                        .iconst(types::I64, crate::ffi::value_ffi::TAG_NULL as i64);
                     stack_push!(builder, null, stack_depth);
                 }
 
@@ -390,7 +390,7 @@ pub fn compile_osr_loop(
                         // in a future pass.
                         let null = builder
                             .ins()
-                            .iconst(types::I64, crate::nan_boxing::TAG_NULL as i64);
+                            .iconst(types::I64, crate::ffi::value_ffi::TAG_NULL as i64);
                         stack_push!(builder, null, stack_depth);
                     }
                 }

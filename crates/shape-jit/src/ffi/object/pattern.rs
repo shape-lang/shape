@@ -10,7 +10,8 @@
 
 use std::collections::HashMap;
 
-use super::super::super::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 // ============================================================================
 // Pattern Matching Helpers

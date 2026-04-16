@@ -16,7 +16,7 @@
 //! cargo test -p shape-jit -- differential_fuzz --ignored --nocapture
 //! ```
 
-use shape_jit::nan_boxing::TAG_NULL;
+use shape_jit::ffi::value_ffi::TAG_NULL;
 use shape_jit::{JITCompiler, JITConfig, JITContext};
 use shape_value::{ScalarKind, TypedScalar, ValueWordExt, ValueWordScalarExt};
 use shape_vm::bytecode::{BytecodeProgram, Constant, DebugInfo, Instruction, OpCode, Operand};

@@ -9,7 +9,8 @@ use cranelift::prelude::*;
 
 use super::MirToIR;
 // v2-boundary: inline array access still uses NaN-boxed heap pointer layout
-use crate::nan_boxing::{UNIFIED_PTR_MASK, JIT_ALLOC_DATA_OFFSET};
+use crate::ffi::jit_kinds::JIT_ALLOC_DATA_OFFSET;
+use shape_value::tags::UNIFIED_PTR_MASK;
 use shape_vm::mir::types::*;
 
 /// Byte offset of the `data` field within `UnifiedValue<T>` (kind u16 + flags u8 + _reserved u8 + refcount u32 = 8).
@@ -183,7 +184,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     // v2-boundary: get_prop/set_prop FFI uses NaN-boxed string keys
     fn field_idx_to_boxed_key(&self, field_idx: &FieldIdx) -> Option<u64> {
         let name = self.mir.field_name_table.get(field_idx)?;
-        Some(crate::nan_boxing::box_string(name.clone()))
+        Some(crate::ffi::value_ffi::box_string(name.clone()))
     }
 
     // ── Place resolution ─────────────────────────────────────────────────
@@ -411,7 +412,7 @@ mod tests {
 
         // Fill the UnifiedValue fields:
         //   kind (u16) at offset 0
-        unsafe { *(uv_ptr as *mut u16) = crate::nan_boxing::HK_TYPED_OBJECT };
+        unsafe { *(uv_ptr as *mut u16) = crate::ffi::value_ffi::HK_TYPED_OBJECT };
         //   refcount (u32) at offset 4
         unsafe { *(uv_ptr.add(4) as *mut u32) = 1 };
         //   data (*const u8) at offset 8
@@ -495,14 +496,14 @@ mod tests {
 
             // Write test values to TypedObject fields (NaN-boxed numbers)
             let field_base = to_ptr.add(8) as *mut u64; // past 8-byte header
-            *field_base = crate::nan_boxing::box_number(100.0); // field[0] at offset 0
-            *field_base.add(1) = crate::nan_boxing::box_number(200.0); // field[1] at offset 8
-            *field_base.add(2) = crate::nan_boxing::box_number(300.0); // field[2] at offset 16
+            *field_base = crate::ffi::value_ffi::box_number(100.0); // field[0] at offset 0
+            *field_base.add(1) = crate::ffi::value_ffi::box_number(200.0); // field[1] at offset 8
+            *field_base.add(2) = crate::ffi::value_ffi::box_number(300.0); // field[2] at offset 16
 
             let func: unsafe fn(u64) -> u64 = std::mem::transmute(code_ptr);
             let result = func(bits);
             assert_eq!(
-                crate::nan_boxing::unbox_number(result),
+                crate::ffi::value_ffi::unbox_number(result),
                 200.0,
                 "inline_typed_field_get should load the second field (byte_off=8)"
             );
@@ -574,13 +575,13 @@ mod tests {
             let (bits, to_ptr, uv_ptr) = make_test_typed_object(2);
 
             let func: unsafe fn(u64, u64) = std::mem::transmute(code_ptr);
-            func(bits, crate::nan_boxing::box_number(999.0));
+            func(bits, crate::ffi::value_ffi::box_number(999.0));
 
             // Verify the value was written to the correct location
             let field_base = to_ptr.add(8) as *const u64;
             let stored = *field_base;
             assert_eq!(
-                crate::nan_boxing::unbox_number(stored),
+                crate::ffi::value_ffi::unbox_number(stored),
                 999.0,
                 "inline_typed_field_set should store to the first field (byte_off=0)"
             );
@@ -594,7 +595,7 @@ mod tests {
     fn constants_match_struct_layouts() {
         assert_eq!(
             UNIFIED_VALUE_DATA_OFFSET as usize,
-            std::mem::offset_of!(crate::nan_boxing::UnifiedValue::<*const u8>, data),
+            std::mem::offset_of!(crate::ffi::jit_kinds::UnifiedValue::<*const u8>, data),
             "UNIFIED_VALUE_DATA_OFFSET must match UnifiedValue<*const u8>::data offset"
         );
         assert_eq!(

@@ -3,7 +3,8 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 
 use super::{TYPED_OBJECT_ALIGNMENT, TYPED_OBJECT_HEADER_SIZE, TypedObject};
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use shape_runtime::type_schema::{SchemaId, TypeSchema};
 
 impl TypedObject {
@@ -87,11 +88,11 @@ pub extern "C" fn jit_typed_object_alloc(schema_id: u32, data_size: u64) -> u64 
     } else {
         let result = box_typed_object(ptr as *const u8);
         if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
-            let payload = (result & crate::nan_boxing::PAYLOAD_MASK) as *const u8;
+            let payload = (result & shape_value::tags::PAYLOAD_MASK) as *const u8;
             let first2 = unsafe { *(payload as *const u16) };
-            let kind = unsafe { crate::nan_boxing::heap_kind(result) };
+            let kind = unsafe { crate::ffi::value_ffi::heap_kind(result) };
             eprintln!("[alloc] schema={} result={:#x} payload={:?} first2={} kind={:?} HK_TYPED_OBJECT={}",
-                schema_id, result, payload, first2, kind, crate::nan_boxing::HK_TYPED_OBJECT);
+                schema_id, result, payload, first2, kind, crate::ffi::value_ffi::HK_TYPED_OBJECT);
         }
         result
     }

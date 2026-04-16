@@ -6,7 +6,8 @@
 //!
 //! Time method implementations for JIT
 
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use chrono::{Datelike, TimeZone, Timelike, Utc};
 
 /// Call a method on a time value

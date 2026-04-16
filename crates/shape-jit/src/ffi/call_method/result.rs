@@ -5,7 +5,7 @@
 //!
 //! Result type method implementations for JIT
 
-use crate::nan_boxing::*;
+use crate::ffi::value_ffi::*;
 
 /// Call a method on a Result type (Ok/Err)
 #[inline(always)]

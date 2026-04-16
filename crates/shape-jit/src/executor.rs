@@ -186,7 +186,7 @@ impl JITExecutor {
         let raw_result = if jit_ctx.stack_ptr > 0 {
             jit_ctx.stack[0]
         } else {
-            crate::nan_boxing::TAG_NULL
+            crate::ffi::value_ffi::TAG_NULL
         };
 
         // Check for errors
@@ -280,8 +280,9 @@ impl JITExecutor {
     }
 
     fn nan_boxed_to_wire(&self, bits: u64) -> WireValue {
-        use crate::nan_boxing::{
-            HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number, jit_unbox,
+        use crate::ffi::jit_kinds::jit_unbox;
+        use crate::ffi::value_ffi::{
+            HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number,
             unbox_number,
         };
         use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};

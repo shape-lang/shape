@@ -17,7 +17,8 @@
 //! Series arithmetic (+, -, *, /) uses SIMD-accelerated operations from
 //! shape-runtime for high performance vectorized computation.
 
-use super::super::nan_boxing::*;
+use super::jit_kinds::*;
+use super::value_ffi::*;
 use shape_value::ValueWordExt;
 
 // SIMD threshold - use SIMD for arrays >= this size

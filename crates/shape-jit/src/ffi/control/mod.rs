@@ -15,7 +15,8 @@
 use crate::context::{JITClosure, JITContext};
 use crate::ffi::object::conversion::{jit_bits_to_nanboxed_with_ctx, nanboxed_to_jit_bits};
 use crate::jit_array::JitArray;
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use shape_runtime::module_exports::RawCallableInvoker;
 use shape_value::{ValueWord, ValueWordExt};
 use std::ffi::c_void;

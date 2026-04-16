@@ -7,7 +7,8 @@
 //!
 //! # Module Structure
 //!
-//! - `nan_boxing` - NaN-boxing constants and helper functions for type tagging
+//! - `ffi::jit_kinds` - JIT-specific heap kinds and allocation types
+//! - `ffi::value_ffi` - NaN-boxing value encoding/decoding helpers
 //! - `context` - JITContext, JITDataFrame, and related structures
 //! - `ffi` - FFI functions called from JIT-compiled code
 //! - `loop_analysis` - Loop analysis for JIT optimization
@@ -30,7 +31,6 @@ pub mod jit_cache;
 pub mod jit_matrix;
 pub mod loop_analysis;
 pub mod mixed_table;
-pub mod nan_boxing;
 pub mod mir_compiler;
 mod numeric_compiler;
 mod optimizer;
@@ -41,7 +41,8 @@ pub mod worker;
 pub use context::*;
 pub use error::JitError;
 pub use executor::JITExecutor;
-pub use nan_boxing::*;
+pub use ffi::jit_kinds::*;
+pub use ffi::value_ffi::*;
 
 pub use shape_ast as ast;
 pub use shape_runtime as runtime;

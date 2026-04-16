@@ -103,7 +103,7 @@ pub use super::context::JITConfig;
 mod tests {
     use super::*;
     use crate::JITContext;
-    use crate::nan_boxing::{is_number, unbox_number};
+    use crate::ffi::value_ffi::{is_number, unbox_number};
     use shape_vm::bytecode::{BytecodeProgram, Constant, Instruction, OpCode, Operand};
     use shape_vm::type_tracking::StorageHint;
 
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_inline_array_access() {
-        use crate::nan_boxing::{is_number, unbox_number};
+        use crate::ffi::value_ffi::{is_number, unbox_number};
 
         // Bytecode: create [10, 20, 30], access element at index 1 → expect 20.0
         let program = BytecodeProgram {
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_inline_array_negative_index() {
-        use crate::nan_boxing::{is_number, unbox_number};
+        use crate::ffi::value_ffi::{is_number, unbox_number};
 
         // Bytecode: create [10, 20, 30], access arr[-1] → expect 30.0
         let program = BytecodeProgram {
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_reference_deref_store_load() {
-        use crate::nan_boxing::{is_number, unbox_number};
+        use crate::ffi::value_ffi::{is_number, unbox_number};
 
         // Bytecode: let x = 42; let ref = &x; *ref = 100; return *ref → expect 100.0
         let program = BytecodeProgram {
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_set_index_ref() {
-        use crate::nan_boxing::{is_number, unbox_number};
+        use crate::ffi::value_ffi::{is_number, unbox_number};
 
         // Bytecode:
         // let arr = [10, 20, 30]
@@ -701,7 +701,7 @@ mod tests {
     fn test_jit_array_info_ffi() {
         use crate::ffi::array::jit_array_info;
         use crate::jit_array::JitArray;
-        use crate::nan_boxing::{TAG_NULL, box_number};
+        use crate::ffi::value_ffi::{TAG_NULL, box_number};
 
         // Create a JitArray via heap_box (UnifiedArray self-boxing)
         let elements = vec![box_number(10.0), box_number(20.0), box_number(30.0)];
@@ -719,9 +719,9 @@ mod tests {
         // Verify we can read elements through the returned pointer
         unsafe {
             let data = info.data_ptr as *const u64;
-            assert_eq!(crate::nan_boxing::unbox_number(*data.add(0)), 10.0);
-            assert_eq!(crate::nan_boxing::unbox_number(*data.add(1)), 20.0);
-            assert_eq!(crate::nan_boxing::unbox_number(*data.add(2)), 30.0);
+            assert_eq!(crate::ffi::value_ffi::unbox_number(*data.add(0)), 10.0);
+            assert_eq!(crate::ffi::value_ffi::unbox_number(*data.add(1)), 20.0);
+            assert_eq!(crate::ffi::value_ffi::unbox_number(*data.add(2)), 30.0);
         }
 
         // Null/invalid inputs should return zeroes
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_width_aware_u8_comparison_uses_unsigned_ordering() {
-        use crate::nan_boxing::TAG_BOOL_FALSE;
+        use crate::ffi::value_ffi::TAG_BOOL_FALSE;
 
         let program = BytecodeProgram {
             instructions: vec![
@@ -826,7 +826,7 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_width_aware_i16_signed_comparison() {
-        use crate::nan_boxing::TAG_BOOL_TRUE;
+        use crate::ffi::value_ffi::TAG_BOOL_TRUE;
 
         let program = BytecodeProgram {
             instructions: vec![
@@ -849,7 +849,7 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_width_aware_u16_unsigned_comparison() {
-        use crate::nan_boxing::TAG_BOOL_TRUE;
+        use crate::ffi::value_ffi::TAG_BOOL_TRUE;
 
         let program = BytecodeProgram {
             instructions: vec![
@@ -1297,7 +1297,7 @@ mod tests {
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_nested_loop_module_binding_array() {
         use crate::jit_array::JitArray;
-        use crate::nan_boxing::box_number;
+        use crate::ffi::value_ffi::box_number;
 
         // Create a pre-populated array of 10 elements
         let elements: Vec<u64> = (0..10).map(|i| box_number(i as f64)).collect();

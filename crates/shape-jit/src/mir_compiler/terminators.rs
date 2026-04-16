@@ -165,7 +165,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
 
                     // v2-boundary: method name pushed as NaN-boxed string to ctx.stack
-                    let method_str_bits = crate::nan_boxing::box_string(method_name.clone());
+                    let method_str_bits = crate::ffi::value_ffi::box_string(method_name.clone());
                     let method_val = self.builder.ins().iconst(types::I64, method_str_bits as i64);
                     let method_slot_idx = self.builder.ins().iadd_imm(old_sp, args.len() as i64);
                     let method_byte_off = self.builder.ins().ishl_imm(method_slot_idx, 3);

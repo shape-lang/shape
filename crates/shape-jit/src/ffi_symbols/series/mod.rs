@@ -2,7 +2,7 @@
 // Series/Column Builtin Functions (shift, fillna, rolling, cumulative)
 // ============================================================================
 
-use crate::nan_boxing::{
+use crate::ffi::value_ffi::{
     TAG_NULL, box_column_result, extract_column, is_number, unbox_number,
 };
 

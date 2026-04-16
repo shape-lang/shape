@@ -10,7 +10,8 @@
 //! Array method implementations for JIT
 
 use crate::jit_array::JitArray;
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 /// Call a method on an array value
 #[inline(always)]

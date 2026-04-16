@@ -10,7 +10,8 @@
 //! Functions for creating closures with captured values.
 
 use super::super::super::context::{JITClosure, JITContext};
-use super::super::super::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 // ============================================================================
 // Closure Creation

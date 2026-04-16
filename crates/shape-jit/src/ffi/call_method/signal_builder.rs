@@ -7,7 +7,8 @@
 //! SignalBuilder method implementations for JIT
 
 use crate::context::JITSignalBuilder;
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use std::collections::HashMap;
 
 /// Call a method on a SignalBuilder value

@@ -9,7 +9,8 @@
 //! path remains.
 
 use crate::jit_array::JitArray;
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 // ============================================================================
 // v2 Array Operations (f64-typed)

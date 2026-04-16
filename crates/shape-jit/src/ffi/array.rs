@@ -10,7 +10,8 @@
 
 use super::super::context::JITContext;
 use super::super::jit_array::JitArray;
-use super::super::nan_boxing::*;
+use super::jit_kinds::*;
+use super::value_ffi::*;
 
 // ============================================================================
 // Helper Functions

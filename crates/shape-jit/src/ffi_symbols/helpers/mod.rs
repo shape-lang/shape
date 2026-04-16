@@ -4,7 +4,8 @@
 
 use crate::context::JITContext;
 use shape_value::ValueWordExt;
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 /// Evaluate DateTimeExpr to Time value
 /// Takes the boxed DateTimeExpr pointer and returns a boxed Time value

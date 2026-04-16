@@ -10,7 +10,8 @@ mod tests {
     use crate::compiler::JITCompiler;
     use crate::context::{JITConfig, JITContext, JittedStrategyFn};
     use crate::ffi::data::jit_get_field_typed;
-    use crate::nan_boxing::*;
+    use crate::ffi::jit_kinds::*;
+    use crate::ffi::value_ffi::*;
     use shape_runtime::type_schema::{FieldType, TypeSchema};
     use shape_vm::bytecode::{BytecodeProgram, Instruction, OpCode, Operand};
     use std::alloc::{Layout, dealloc};

@@ -1,7 +1,8 @@
 //! TypedObject merge and conversion operations
 
 use super::{TYPED_OBJECT_HEADER_SIZE, TypedObject};
-use crate::nan_boxing::*;
+use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 
 // ============================================================================
 // FFI Functions for JIT

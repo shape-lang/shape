@@ -9,7 +9,7 @@
 
 use super::super::context::JITContext;
 use crate::ffi::object::conversion::{jit_bits_to_nanboxed, nanboxed_to_jit_bits};
-use crate::nan_boxing::TAG_NULL;
+use crate::ffi::value_ffi::TAG_NULL;
 
 /// Static trampoline function pointer for generic builtin dispatch.
 ///

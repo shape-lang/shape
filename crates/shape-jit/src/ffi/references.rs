@@ -11,7 +11,8 @@
 //! when a `&array[index] = value` pattern is compiled.
 
 use super::super::jit_array::JitArray;
-use super::super::nan_boxing::*;
+use super::jit_kinds::*;
+use super::value_ffi::*;
 
 /// Set an array element through a reference pointer.
 ///
