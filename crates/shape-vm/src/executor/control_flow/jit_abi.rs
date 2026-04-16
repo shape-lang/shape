@@ -99,8 +99,8 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
             }
         }
 
-        // String, NanBoxed, Unknown, or anything else: NaN-boxed passthrough
-        SlotKind::String | SlotKind::NanBoxed | SlotKind::Unknown => vw.raw_bits(),
+        // String, Dynamic, Unknown, or anything else: dynamic passthrough
+        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => vw.raw_bits(),
     }
 }
 
@@ -160,8 +160,8 @@ pub fn unmarshal_jit_result(bits: u64, kind: SlotKind) -> ValueWord {
         // Bool return: 0 → false, nonzero → true
         SlotKind::Bool => ValueWord::from_bool(bits != 0),
 
-        // NaN-boxed passthrough: String, NanBoxed, Unknown
-        SlotKind::String | SlotKind::NanBoxed | SlotKind::Unknown => unsafe {
+        // Dynamic passthrough: String, Dynamic, Unknown
+        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => unsafe {
             std::mem::transmute::<u64, ValueWord>(bits)
         },
     }

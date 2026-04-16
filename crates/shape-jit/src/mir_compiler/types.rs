@@ -55,7 +55,7 @@ pub(crate) fn cranelift_type_for_slot(kind: SlotKind) -> cranelift::prelude::Typ
         SlotKind::Int32 | SlotKind::UInt32 => types::I32,
         SlotKind::Int8 | SlotKind::UInt8 | SlotKind::Bool => types::I8,
         SlotKind::Int16 | SlotKind::UInt16 => types::I16,
-        // Int64, UInt64, Unknown, NanBoxed, String, Nullable*, IntSize, UIntSize
+        // Int64, UInt64, Unknown, Dynamic, String, Nullable*, IntSize, UIntSize
         _ => types::I64,
     }
 }

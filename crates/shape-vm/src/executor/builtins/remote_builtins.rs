@@ -469,7 +469,7 @@ fn serializable_to_nb(sv: &shape_runtime::snapshot::SerializableVMValue) -> Valu
 /// remote.__call(addr, fn_ref, args) -> Result<_, string>
 ///
 /// Ships a function call to a remote `shape serve` node. The function is
-/// identified by its ID (NanBoxed Function value), and arguments are
+/// identified by its ID (ValueWord Function value), and arguments are
 /// serialized via the wire protocol.
 ///
 /// This is the low-level transport used by the `@remote` annotation.

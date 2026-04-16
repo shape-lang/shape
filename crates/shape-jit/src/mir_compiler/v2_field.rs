@@ -77,7 +77,7 @@ pub fn cranelift_type_for_slot(kind: SlotKind) -> types::Type {
         | SlotKind::NullableUIntSize => types::I64, // pointer-width
 
         // Boxed/pointer-sized values
-        SlotKind::String | SlotKind::NanBoxed | SlotKind::Unknown => types::I64,
+        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => types::I64,
     }
 }
 
@@ -103,7 +103,7 @@ pub fn slot_byte_width(kind: SlotKind) -> u32 {
         | SlotKind::NullableIntSize
         | SlotKind::UIntSize
         | SlotKind::NullableUIntSize => 8,
-        SlotKind::String | SlotKind::NanBoxed | SlotKind::Unknown => 8,
+        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => 8,
     }
 }
 
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(cranelift_type_for_slot(SlotKind::Int16), types::I16);
         assert_eq!(cranelift_type_for_slot(SlotKind::Bool), types::I8);
         assert_eq!(cranelift_type_for_slot(SlotKind::Int8), types::I8);
-        assert_eq!(cranelift_type_for_slot(SlotKind::NanBoxed), types::I64);
+        assert_eq!(cranelift_type_for_slot(SlotKind::Dynamic), types::I64);
         assert_eq!(cranelift_type_for_slot(SlotKind::String), types::I64);
     }
 

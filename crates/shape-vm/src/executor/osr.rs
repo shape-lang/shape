@@ -312,7 +312,7 @@ impl VirtualMachine {
                     .local_kinds
                     .get(j)
                     .copied()
-                    .unwrap_or(SlotKind::NanBoxed);
+                    .unwrap_or(SlotKind::Dynamic);
                 let src_idx = LOCALS_U64_OFFSET + ctx_pos as usize;
                 let dst_idx = current_bp + bc_idx as usize;
                 if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
@@ -611,7 +611,7 @@ mod tests {
         let info = DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0)],
-            local_kinds: vec![SlotKind::NanBoxed],
+            local_kinds: vec![SlotKind::Dynamic],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),
@@ -627,7 +627,7 @@ mod tests {
         let info = DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0), (1, 1)],
-            local_kinds: vec![SlotKind::NanBoxed, SlotKind::Int64],
+            local_kinds: vec![SlotKind::Dynamic, SlotKind::Int64],
             stack_depth: 1,
             innermost_function_id: Some(3),
             inline_frames: vec![InlineFrameInfo {
@@ -655,7 +655,7 @@ mod tests {
         let info = DeoptInfo {
             resume_ip: 5,
             local_mapping: vec![(0, 0), (1, 1), (2, 2)],
-            local_kinds: vec![SlotKind::NanBoxed, SlotKind::Int64, SlotKind::Float64],
+            local_kinds: vec![SlotKind::Dynamic, SlotKind::Int64, SlotKind::Float64],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),
@@ -682,7 +682,7 @@ mod tests {
         let deopt_info = DeoptInfo {
             resume_ip: 45,
             local_mapping: vec![(20, 0), (21, 1)],
-            local_kinds: vec![SlotKind::NanBoxed, SlotKind::NanBoxed],
+            local_kinds: vec![SlotKind::Dynamic, SlotKind::Dynamic],
             stack_depth: 0,
             innermost_function_id: Some(2),
             inline_frames: vec![
@@ -690,14 +690,14 @@ mod tests {
                     function_id: 0,
                     resume_ip: 5, // A's CallValue(B) at IP=5
                     local_mapping: vec![(0, 0), (1, 1)],
-                    local_kinds: vec![SlotKind::NanBoxed, SlotKind::NanBoxed],
+                    local_kinds: vec![SlotKind::Dynamic, SlotKind::Dynamic],
                     stack_depth: 0,
                 },
                 InlineFrameInfo {
                     function_id: 1,
                     resume_ip: 25, // B's CallValue(C) at IP=25
                     local_mapping: vec![(10, 0)],
-                    local_kinds: vec![SlotKind::NanBoxed],
+                    local_kinds: vec![SlotKind::Dynamic],
                     stack_depth: 0,
                 },
             ],

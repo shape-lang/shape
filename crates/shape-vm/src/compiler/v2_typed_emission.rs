@@ -120,7 +120,7 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
 /// The mapping mirrors [`should_use_typed_array`]: only the four element
 /// types backed by typed array opcodes today (`Float64`/`Int64`/`Int32`/
 /// `Bool`) return `Some`. Anything else (`String`, sized ints other than
-/// i32/i64, nullable variants, `NanBoxed`/`Unknown`) falls back to the
+/// i32/i64, nullable variants, `Dynamic`/`Unknown`) falls back to the
 /// legacy NaN-boxed `NewArray` path.
 #[inline]
 pub fn should_use_typed_array_from_slot_kind(
@@ -361,10 +361,10 @@ mod tests {
     }
 
     #[test]
-    fn test_slot_kind_nan_boxed_falls_back() {
+    fn test_slot_kind_dynamic_falls_back() {
         use crate::type_tracking::SlotKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::NanBoxed),
+            should_use_typed_array_from_slot_kind(SlotKind::Dynamic),
             None
         );
     }

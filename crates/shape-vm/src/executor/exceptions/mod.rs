@@ -20,7 +20,7 @@ use crate::executor::objects::raw_helpers;
 // =========================================================================
 
 /// Convert a ValueWord value to a (ValueSlot, is_heap) pair for TypedObject storage.
-/// Stores raw NanBoxed tag bits for inline types (lossless round-trip via
+/// Stores raw ValueWord tag bits for inline types (lossless round-trip via
 /// `ValueSlot::as_value_word`). Heap types are stored as heap-allocated HeapValue pointers.
 fn nb_to_slot(nb: &ValueWord) -> (ValueSlot, bool) {
     ValueSlot::from_value_word(nb)

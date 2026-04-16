@@ -54,7 +54,7 @@ pub struct TypedFunctionSignature {
 
 impl TypedFunctionSignature {
     /// Returns true when every parameter *and* the return type are
-    /// `SlotKind::Unknown` (or NanBoxed), meaning this signature carries no
+    /// `SlotKind::Unknown` (or Dynamic), meaning this signature carries no
     /// more information than the v1 ABI and can be compiled with the legacy
     /// uniform-I64 path.
     pub fn is_fully_untyped(&self) -> bool {
@@ -66,7 +66,7 @@ impl TypedFunctionSignature {
 /// True when a slot kind would produce the same representation as the v1
 /// NaN-boxed ABI (I64 GPR).
 fn is_untyped_slot(kind: SlotKind) -> bool {
-    matches!(kind, SlotKind::Unknown | SlotKind::NanBoxed)
+    matches!(kind, SlotKind::Unknown | SlotKind::Dynamic)
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ fn is_untyped_slot(kind: SlotKind) -> bool {
 /// - Floating-point kinds -> `F64` (passed in XMM registers on x86-64)
 /// - Integer kinds -> `I64`, `I32`, `I16`, or `I8` depending on width
 /// - Bool -> `I8`
-/// - String / Unknown / NanBoxed -> `I64` (NaN-boxed fallback)
+/// - String / Unknown / Dynamic -> `I64` (dynamic fallback)
 pub fn slot_kind_to_clif_type(kind: SlotKind) -> types::Type {
     match kind {
         // --- floating point ---
@@ -114,8 +114,8 @@ pub fn slot_kind_to_clif_type(kind: SlotKind) -> types::Type {
         // --- boolean ---
         SlotKind::Bool => types::I8,
 
-        // --- fallback (NaN-boxed) ---
-        SlotKind::String | SlotKind::NanBoxed | SlotKind::Unknown => types::I64,
+        // --- fallback (dynamic) ---
+        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => types::I64,
     }
 }
 

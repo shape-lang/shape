@@ -31,7 +31,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// - Float64 → F64
     /// - Int32/UInt32 → I32
     /// - Bool/Int8/UInt8 → I8
-    /// - Unknown/NanBoxed/Int64/String/etc → I64 (NaN-boxed)
+    /// - Unknown/Dynamic/Int64/String/etc → I64 (dynamic)
     ///
     /// Variables are declared but NOT initialized here — initialization
     /// happens in initialize_locals() after switching to the entry block.

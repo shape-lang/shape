@@ -138,7 +138,7 @@ fn infer_from_tracked_types(elements: &[Expr], type_tracker: &TypeTracker) -> Op
 
     for elem in elements {
         let elem_kind = expr_storage_hint(elem, type_tracker)?;
-        if elem_kind == SlotKind::Unknown || elem_kind == SlotKind::NanBoxed {
+        if elem_kind == SlotKind::Unknown || elem_kind == SlotKind::Dynamic {
             return None;
         }
 

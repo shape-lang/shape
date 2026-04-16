@@ -114,12 +114,12 @@ pub enum SlotKind {
     Bool,
     /// String reference
     String,
-    /// NaN-boxed value: the raw u64 bits are a valid NaN-boxed interpreter value.
+    /// Dynamically-typed value: the raw u64 bits are a valid interpreter value.
     /// Used for boxed locals and operand stack entries in precise deopt metadata.
     /// The VM unmarshals these via direct transmute (zero-cost passthrough).
-    NanBoxed,
-    /// Type not determined at compile time (falls back to NaN-boxed dispatch).
-    /// Should NOT appear in precise deopt metadata — use NanBoxed instead.
+    Dynamic,
+    /// Type not determined at compile time (falls back to dynamic dispatch).
+    /// Should NOT appear in precise deopt metadata — use Dynamic instead.
     /// Reserved for truly uninitialized/unresolved slots.
     Unknown,
 }

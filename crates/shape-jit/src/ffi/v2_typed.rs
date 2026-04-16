@@ -221,7 +221,7 @@ pub const V2_TYPE_TAG_NANBOXED: i8 = 0;
 /// Print a value with a known type tag, avoiding NaN-box format detection.
 ///
 /// When `type_tag` identifies a known type, the value bits are interpreted
-/// directly as that type. When `type_tag` is 0 (NanBoxed), falls back to
+/// directly as that type. When `type_tag` is 0 (Dynamic), falls back to
 /// the standard NaN-boxed format detection.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_print_typed(value_bits: u64, type_tag: i8) {

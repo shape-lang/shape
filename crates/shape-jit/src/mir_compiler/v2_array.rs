@@ -46,7 +46,7 @@ const LEN_OFFSET: i32 = 16;
 /// Return the (Cranelift IR type, element byte size) for a given `SlotKind`.
 ///
 /// Panics on slot kinds that do not map to a scalar element type (e.g.
-/// `String`, `NanBoxed`, `Unknown`).
+/// `String`, `Dynamic`, `Unknown`).
 fn elem_type_info(kind: SlotKind) -> (types::Type, i64) {
     match kind {
         SlotKind::Float64 | SlotKind::NullableFloat64 => (types::F64, 8),

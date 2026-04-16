@@ -11,7 +11,7 @@ use shape_value::{VMError, ValueWord, ValueWordExt};
 
 #[test]
 fn trusted_int_overflow_add_promotes_to_float() {
-    // i48 max is 2^47 - 1 = 140737488355327 (NanBoxed uses 48-bit ints)
+    // i48 max is 2^47 - 1 = 140737488355327 (ValueWord uses 48-bit ints)
     // Use a value large enough that addition overflows the i64 checked_add
     // and falls back to f64 promotion.
     let source = r#"
