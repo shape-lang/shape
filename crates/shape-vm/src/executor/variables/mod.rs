@@ -100,11 +100,11 @@ impl VirtualMachine {
                         let offset = *row_index * cols;
                         if *row_index < mat_arc.rows {
                             return Ok(ValueWord::from_heap_value(
-                                HeapValue::FloatArraySlice {
+                                HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice {
                                     parent: mat_arc,
                                     offset,
                                     len: cols,
-                                },
+                                }),
                             ));
                         }
                         return Err(VMError::RuntimeError(format!(
@@ -309,7 +309,7 @@ impl VirtualMachine {
         })?;
 
         match heap {
-            HeapValue::Matrix(arc) => {
+            HeapValue::TypedArray(shape_value::TypedArrayData::Matrix(arc)) => {
                 let mat = Arc::make_mut(arc);
                 let cols = mat.cols as i64;
                 let actual_col = if col_idx < 0 { cols + col_idx } else { col_idx };

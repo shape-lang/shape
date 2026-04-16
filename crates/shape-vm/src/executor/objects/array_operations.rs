@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_value::nanboxed::RefTarget;
-use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt};
+use shape_value::{HeapValue, TypedArrayData, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -242,7 +242,7 @@ impl VirtualMachine {
                         Arc::make_mut(arc_vec).push(value);
                         return Ok(());
                     }
-                    HeapValue::IntArray(arc_vec) => {
+                    HeapValue::TypedArray(TypedArrayData::I64(arc_vec)) => {
                         if let Some(i) = value.as_i64() {
                             Arc::make_mut(arc_vec).push(i);
                             return Ok(());
@@ -256,7 +256,7 @@ impl VirtualMachine {
                         *heap_val = HeapValue::Array(Arc::new(generic));
                         return Ok(());
                     }
-                    HeapValue::FloatArray(arc_vec) => {
+                    HeapValue::TypedArray(TypedArrayData::F64(arc_vec)) => {
                         if let Some(f) = value.as_f64() {
                             Arc::make_mut(arc_vec).push(f);
                             return Ok(());
@@ -270,7 +270,7 @@ impl VirtualMachine {
                         *heap_val = HeapValue::Array(Arc::new(generic));
                         return Ok(());
                     }
-                    HeapValue::BoolArray(arc_vec) => {
+                    HeapValue::TypedArray(TypedArrayData::Bool(arc_vec)) => {
                         if let Some(b) = value.as_bool() {
                             Arc::make_mut(arc_vec).push(if b { 1 } else { 0 });
                             return Ok(());
@@ -388,7 +388,7 @@ impl VirtualMachine {
 
                 self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
-            Some(HeapValue::IntArray(arr)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::I64(arr))) => {
                 let len = arr.len() as i32;
                 let actual_start = if start < 0 {
                     (len + start).max(0) as usize
@@ -413,7 +413,7 @@ impl VirtualMachine {
 
                 self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
-            Some(HeapValue::FloatArray(arr)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::F64(arr))) => {
                 let len = arr.len() as i32;
                 let actual_start = if start < 0 {
                     (len + start).max(0) as usize
@@ -438,7 +438,7 @@ impl VirtualMachine {
 
                 self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
-            Some(HeapValue::FloatArraySlice { parent, offset, len: slice_len }) => {
+            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len: slice_len })) => {
                 let total = *slice_len as usize;
                 let off = *offset as usize;
                 let data = &parent.data[off..off + total];
@@ -466,7 +466,7 @@ impl VirtualMachine {
 
                 self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
-            Some(HeapValue::BoolArray(arr)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::Bool(arr))) => {
                 let len = arr.len() as i32;
                 let actual_start = if start < 0 {
                     (len + start).max(0) as usize

@@ -715,7 +715,7 @@ fn test_wrap_type_annotation_opcode() {
     // Verify result is a TypeAnnotatedValue
     if let Some(hv) = result.as_heap_ref() {
         match hv {
-            shape_value::heap_value::HeapValue::TypeAnnotatedValue { type_name, value } => {
+            shape_value::heap_value::HeapValue::Rare(shape_value::RareHeapData::TypeAnnotatedValue { type_name, value }) => {
                 assert_eq!(type_name, "Currency");
                 assert_eq!(value.as_f64().unwrap(), 123.0);
             }
@@ -746,7 +746,7 @@ fn test_wrap_type_annotation_with_string() {
     // Verify result is wrapped with the correct type name
     if let Some(hv) = result.as_heap_ref() {
         match hv {
-            shape_value::heap_value::HeapValue::TypeAnnotatedValue { type_name, value } => {
+            shape_value::heap_value::HeapValue::Rare(shape_value::RareHeapData::TypeAnnotatedValue { type_name, value }) => {
                 assert_eq!(type_name, "Greeting");
                 assert_eq!(value.as_str().unwrap(), "hello");
             }
@@ -781,7 +781,7 @@ fn test_type_annotated_value_in_variable() {
     // Verify the loaded variable is still wrapped
     if let Some(hv) = result.as_heap_ref() {
         match hv {
-            shape_value::heap_value::HeapValue::TypeAnnotatedValue { type_name, value } => {
+            shape_value::heap_value::HeapValue::Rare(shape_value::RareHeapData::TypeAnnotatedValue { type_name, value }) => {
                 assert_eq!(type_name, "Currency");
                 assert_eq!(value.to_number().unwrap(), 123.0);
             }
@@ -809,7 +809,7 @@ fn test_type_annotated_value_to_string() {
     // Verify the underlying value is a number with the correct value
     if let Some(hv) = wrapped.as_heap_ref() {
         match hv {
-            shape_value::heap_value::HeapValue::TypeAnnotatedValue { type_name, value } => {
+            shape_value::heap_value::HeapValue::Rare(shape_value::RareHeapData::TypeAnnotatedValue { type_name, value }) => {
                 assert_eq!(type_name, "Currency");
                 assert_eq!(value.to_number().unwrap(), 123.0);
             }
@@ -887,7 +887,7 @@ fn test_multiple_type_annotations() {
     // Verify x has Currency annotation
     if let Some(hv) = result.as_heap_ref() {
         match hv {
-            shape_value::heap_value::HeapValue::TypeAnnotatedValue { type_name, value } => {
+            shape_value::heap_value::HeapValue::Rare(shape_value::RareHeapData::TypeAnnotatedValue { type_name, value }) => {
                 assert_eq!(type_name, "Currency");
                 assert_eq!(value.to_number().unwrap(), 100.0);
             }

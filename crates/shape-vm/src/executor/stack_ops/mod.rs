@@ -114,7 +114,7 @@ impl VirtualMachine {
             // For remaining complex types, construct HeapValue directly (no ValueWord)
             use shape_value::heap_value::HeapValue;
             let heap_val = match constant {
-                crate::bytecode::Constant::Timeframe(tf) => HeapValue::Timeframe(*tf),
+                crate::bytecode::Constant::Timeframe(tf) => HeapValue::Temporal(shape_value::TemporalData::Timeframe(*tf)),
                 crate::bytecode::Constant::Duration(duration) => {
                     // Convert AST Duration to chrono::Duration (TimeSpan) so it
                     // participates in DateTime arithmetic (Time +/- TimeSpan).
@@ -122,19 +122,19 @@ impl VirtualMachine {
                         crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(
                             duration,
                         );
-                    HeapValue::TimeSpan(chrono_dur)
+                    HeapValue::Temporal(shape_value::TemporalData::TimeSpan(chrono_dur))
                 }
                 crate::bytecode::Constant::TimeReference(time_ref) => {
-                    HeapValue::TimeReference(Box::new(time_ref.clone()))
+                    HeapValue::Temporal(shape_value::TemporalData::TimeReference(Box::new(time_ref.clone())))
                 }
                 crate::bytecode::Constant::DateTimeExpr(expr) => {
-                    HeapValue::DateTimeExpr(Box::new(expr.clone()))
+                    HeapValue::Temporal(shape_value::TemporalData::DateTimeExpr(Box::new(expr.clone())))
                 }
                 crate::bytecode::Constant::DataDateTimeRef(expr) => {
-                    HeapValue::DataDateTimeRef(Box::new(expr.clone()))
+                    HeapValue::Temporal(shape_value::TemporalData::DataDateTimeRef(Box::new(expr.clone())))
                 }
                 crate::bytecode::Constant::TypeAnnotation(type_annotation) => {
-                    HeapValue::TypeAnnotation(Box::new(type_annotation.clone()))
+                    HeapValue::Rare(shape_value::RareHeapData::TypeAnnotation(Box::new(type_annotation.clone())))
                 }
                 crate::bytecode::Constant::Value(val) => {
                     return self.push_raw_u64(val.clone());

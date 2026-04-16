@@ -328,11 +328,11 @@ fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVM
                     end: end.as_ref().map(|e| Box::new(nb_to_serializable(e))),
                     inclusive: *inclusive,
                 },
-                Some(HeapValue::IntArray(buf)) => {
+                Some(HeapValue::TypedArray(shape_value::TypedArrayData::I64(buf))) => {
                     let items: Vec<_> = buf.iter().map(|&v| SerializableVMValue::Int(v)).collect();
                     SerializableVMValue::Array(items)
                 }
-                Some(HeapValue::FloatArray(buf)) => {
+                Some(HeapValue::TypedArray(shape_value::TypedArrayData::F64(buf))) => {
                     let items: Vec<_> = buf
                         .as_slice()
                         .iter()
@@ -340,7 +340,7 @@ fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVM
                         .collect();
                     SerializableVMValue::Array(items)
                 }
-                Some(HeapValue::FloatArraySlice { parent, offset, len }) => {
+                Some(HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice { parent, offset, len })) => {
                     let off = *offset as usize;
                     let slice_len = *len as usize;
                     let items: Vec<_> = parent.data[off..off + slice_len]
@@ -349,7 +349,7 @@ fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVM
                         .collect();
                     SerializableVMValue::Array(items)
                 }
-                Some(HeapValue::BoolArray(buf)) => {
+                Some(HeapValue::TypedArray(shape_value::TypedArrayData::Bool(buf))) => {
                     let items: Vec<_> = buf
                         .iter()
                         .map(|&v| SerializableVMValue::Bool(v != 0))

@@ -166,11 +166,11 @@ pub fn v2_row(
     let offset = actual as u32 * cols;
     let len = cols;
     Ok(ValueWord::from_heap_value(
-        shape_value::heap_value::HeapValue::FloatArraySlice {
+        shape_value::heap_value::HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice {
             parent: parent_arc,
             offset,
             len,
-        },
+        }),
     )
     .into_raw_bits())
 }

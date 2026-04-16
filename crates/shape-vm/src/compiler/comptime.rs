@@ -842,7 +842,7 @@ pub(crate) fn nb_to_literal(nb: &ValueWord) -> shape_ast::ast::Literal {
             } else if let Some(d) = nb.as_decimal() {
                 Literal::Decimal(d)
             // cold-path: as_heap_ref retained — comptime literal conversion
-            } else if let Some(HeapValue::TypeAnnotation(ann)) = nb.as_heap_ref() { // cold-path
+            } else if let Some(HeapValue::Rare(shape_value::RareHeapData::TypeAnnotation(ann))) = nb.as_heap_ref() { // cold-path
                 // Comptime substitution currently supports literal splicing only.
                 // Preserve type-query usefulness by materializing canonical type text.
                 Literal::String(annotation_to_string(ann))
@@ -928,10 +928,10 @@ fn nb_to_expr(nb: &ValueWord, span: Span) -> std::result::Result<Expr, String> {
     // cold-path: as_heap_ref retained — comptime literal error reporting
     if let Some(heap) = nb.as_heap_ref() { // cold-path
         return Err(match heap {
-            HeapValue::DataTable(_) | HeapValue::TypedTable { .. } => {
+            HeapValue::DataTable(_) | HeapValue::TableView(shape_value::TableViewData::TypedTable { .. }) => {
                 "table values are not valid comptime literals".to_string()
             }
-            HeapValue::ColumnRef { .. } | HeapValue::RowView { .. } => {
+            HeapValue::TableView(shape_value::TableViewData::ColumnRef { .. }) | HeapValue::TableView(shape_value::TableViewData::RowView { .. }) => {
                 "row/column view values are not valid comptime literals".to_string()
             }
             HeapValue::Closure { .. } | HeapValue::HostClosure(_) => {

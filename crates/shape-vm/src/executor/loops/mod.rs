@@ -7,7 +7,7 @@ use crate::{
     executor::{LoopContext, VirtualMachine},
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{TypedArrayData, TableViewData, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -125,10 +125,10 @@ impl VirtualMachine {
         // cold-path: as_heap_ref retained — multi-variant iteration done check
         let done = match iter.as_heap_ref() { // cold-path
             Some(HeapValue::Array(arr)) => idx < 0 || idx as usize >= arr.len(),
-            Some(HeapValue::IntArray(arr)) => idx < 0 || idx as usize >= arr.len(),
-            Some(HeapValue::FloatArray(arr)) => idx < 0 || idx as usize >= arr.len(),
-            Some(HeapValue::FloatArraySlice { len, .. }) => idx < 0 || idx as usize >= *len as usize,
-            Some(HeapValue::BoolArray(arr)) => idx < 0 || idx as usize >= arr.len(),
+            Some(HeapValue::TypedArray(TypedArrayData::I64(arr))) => idx < 0 || idx as usize >= arr.len(),
+            Some(HeapValue::TypedArray(TypedArrayData::F64(arr))) => idx < 0 || idx as usize >= arr.len(),
+            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { len, .. })) => idx < 0 || idx as usize >= *len as usize,
+            Some(HeapValue::TypedArray(TypedArrayData::Bool(arr))) => idx < 0 || idx as usize >= arr.len(),
             Some(HeapValue::String(s)) => idx < 0 || idx as usize >= s.len(),
             Some(HeapValue::Range {
                 start,
@@ -148,7 +148,7 @@ impl VirtualMachine {
                 count <= 0 || idx >= count
             }
             Some(HeapValue::DataTable(dt)) => idx < 0 || idx as usize >= dt.row_count(),
-            Some(HeapValue::TypedTable { table, .. }) => {
+            Some(HeapValue::TableView(TableViewData::TypedTable { table, .. })) => {
                 idx < 0 || idx as usize >= table.row_count()
             }
             Some(HeapValue::Iterator(state)) => {
@@ -221,21 +221,21 @@ impl VirtualMachine {
                         .unwrap_or_else(ValueWord::none)
                 }
             }
-            Some(HeapValue::IntArray(arr)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::I64(arr))) => {
                 if idx < 0 || idx as usize >= arr.len() {
                     ValueWord::none()
                 } else {
                     ValueWord::from_i64(arr[idx as usize])
                 }
             }
-            Some(HeapValue::FloatArray(arr)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::F64(arr))) => {
                 if idx < 0 || idx as usize >= arr.len() {
                     ValueWord::none()
                 } else {
                     ValueWord::from_f64(arr[idx as usize])
                 }
             }
-            Some(HeapValue::FloatArraySlice { parent, offset, len }) => {
+            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len })) => {
                 let slice_len = *len as usize;
                 if idx < 0 || idx as usize >= slice_len {
                     ValueWord::none()
@@ -244,7 +244,7 @@ impl VirtualMachine {
                     ValueWord::from_f64(parent.data[off + idx as usize])
                 }
             }
-            Some(HeapValue::BoolArray(arr)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::Bool(arr))) => {
                 if idx < 0 || idx as usize >= arr.len() {
                     ValueWord::none()
                 } else {
@@ -289,7 +289,7 @@ impl VirtualMachine {
                     ValueWord::from_row_view(0, dt.clone(), idx as usize)
                 }
             }
-            Some(HeapValue::TypedTable { schema_id, table }) => {
+            Some(HeapValue::TableView(TableViewData::TypedTable { schema_id, table })) => {
                 if idx < 0 || idx as usize >= table.row_count() {
                     ValueWord::none()
                 } else {

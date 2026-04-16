@@ -902,6 +902,368 @@ impl ChannelData {
     }
 }
 
+// ── Wrapper enums for HeapValue variant consolidation ──────────────────────
+
+/// Typed array data — consolidates IntArray, FloatArray, BoolArray, Matrix,
+/// I8Array..F32Array, and FloatArraySlice into a single HeapValue variant.
+#[derive(Debug, Clone)]
+pub enum TypedArrayData {
+    I64(Arc<crate::typed_buffer::TypedBuffer<i64>>),
+    F64(Arc<crate::typed_buffer::AlignedTypedBuffer>),
+    Bool(Arc<crate::typed_buffer::TypedBuffer<u8>>),
+    Matrix(Arc<MatrixData>),
+    I8(Arc<crate::typed_buffer::TypedBuffer<i8>>),
+    I16(Arc<crate::typed_buffer::TypedBuffer<i16>>),
+    I32(Arc<crate::typed_buffer::TypedBuffer<i32>>),
+    U8(Arc<crate::typed_buffer::TypedBuffer<u8>>),
+    U16(Arc<crate::typed_buffer::TypedBuffer<u16>>),
+    U32(Arc<crate::typed_buffer::TypedBuffer<u32>>),
+    U64(Arc<crate::typed_buffer::TypedBuffer<u64>>),
+    F32(Arc<crate::typed_buffer::TypedBuffer<f32>>),
+    FloatSlice { parent: Arc<MatrixData>, offset: u32, len: u32 },
+}
+
+impl TypedArrayData {
+    #[inline]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            TypedArrayData::I64(_) => "Vec<int>",
+            TypedArrayData::F64(_) => "Vec<number>",
+            TypedArrayData::Bool(_) => "Vec<bool>",
+            TypedArrayData::Matrix(_) => "Mat<number>",
+            TypedArrayData::I8(_) => "Vec<i8>",
+            TypedArrayData::I16(_) => "Vec<i16>",
+            TypedArrayData::I32(_) => "Vec<i32>",
+            TypedArrayData::U8(_) => "Vec<u8>",
+            TypedArrayData::U16(_) => "Vec<u16>",
+            TypedArrayData::U32(_) => "Vec<u32>",
+            TypedArrayData::U64(_) => "Vec<u64>",
+            TypedArrayData::F32(_) => "Vec<f32>",
+            TypedArrayData::FloatSlice { .. } => "Vec<number>",
+        }
+    }
+
+    #[inline]
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            TypedArrayData::I64(a) => !a.is_empty(),
+            TypedArrayData::F64(a) => !a.is_empty(),
+            TypedArrayData::Bool(a) => !a.is_empty(),
+            TypedArrayData::Matrix(m) => m.data.len() > 0,
+            TypedArrayData::I8(a) => !a.is_empty(),
+            TypedArrayData::I16(a) => !a.is_empty(),
+            TypedArrayData::I32(a) => !a.is_empty(),
+            TypedArrayData::U8(a) => !a.is_empty(),
+            TypedArrayData::U16(a) => !a.is_empty(),
+            TypedArrayData::U32(a) => !a.is_empty(),
+            TypedArrayData::U64(a) => !a.is_empty(),
+            TypedArrayData::F32(a) => !a.is_empty(),
+            TypedArrayData::FloatSlice { len, .. } => *len > 0,
+        }
+    }
+}
+
+impl fmt::Display for TypedArrayData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypedArrayData::I64(a) => {
+                write!(f, "Vec<int>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::F64(a) => {
+                write!(f, "Vec<number>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    if *v == v.trunc() && v.abs() < 1e15 {
+                        write!(f, "{}", *v as i64)?;
+                    } else {
+                        write!(f, "{}", v)?;
+                    }
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::Bool(a) => {
+                write!(f, "Vec<bool>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", *v != 0)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::Matrix(m) => {
+                write!(f, "<Mat<number>:{}x{}>", m.rows, m.cols)
+            }
+            TypedArrayData::I8(a) => {
+                write!(f, "Vec<i8>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::I16(a) => {
+                write!(f, "Vec<i16>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::I32(a) => {
+                write!(f, "Vec<i32>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::U8(a) => {
+                write!(f, "Vec<u8>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::U16(a) => {
+                write!(f, "Vec<u16>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::U32(a) => {
+                write!(f, "Vec<u32>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::U64(a) => {
+                write!(f, "Vec<u64>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::F32(a) => {
+                write!(f, "Vec<f32>[")?;
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            TypedArrayData::FloatSlice { parent, offset, len } => {
+                let slice = &parent.data[*offset as usize..(*offset + *len) as usize];
+                write!(f, "Vec<number>[")?;
+                for (i, v) in slice.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    if *v == v.trunc() && v.abs() < 1e15 {
+                        write!(f, "{}", *v as i64)?;
+                    } else {
+                        write!(f, "{}", v)?;
+                    }
+                }
+                write!(f, "]")
+            }
+        }
+    }
+}
+
+/// Temporal data — consolidates Time, Duration, TimeSpan, Timeframe,
+/// TimeReference, DateTimeExpr, and DataDateTimeRef.
+#[derive(Debug, Clone)]
+pub enum TemporalData {
+    DateTime(chrono::DateTime<chrono::FixedOffset>),
+    Duration(shape_ast::ast::Duration),
+    TimeSpan(chrono::Duration),
+    Timeframe(shape_ast::data::Timeframe),
+    TimeReference(Box<shape_ast::ast::TimeReference>),
+    DateTimeExpr(Box<shape_ast::ast::DateTimeExpr>),
+    DataDateTimeRef(Box<shape_ast::ast::DataDateTimeRef>),
+}
+
+impl TemporalData {
+    #[inline]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            TemporalData::DateTime(_) => "time",
+            TemporalData::Duration(_) => "duration",
+            TemporalData::TimeSpan(_) => "timespan",
+            TemporalData::Timeframe(_) => "timeframe",
+            TemporalData::TimeReference(_) => "time_reference",
+            TemporalData::DateTimeExpr(_) => "datetime_expr",
+            TemporalData::DataDateTimeRef(_) => "data_datetime_ref",
+        }
+    }
+
+    #[inline]
+    pub fn is_truthy(&self) -> bool {
+        true
+    }
+}
+
+impl fmt::Display for TemporalData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TemporalData::DateTime(t) => write!(f, "{}", t),
+            TemporalData::Duration(d) => write!(f, "{:?}", d),
+            TemporalData::TimeSpan(ts) => write!(f, "{}", ts),
+            TemporalData::Timeframe(tf) => write!(f, "{:?}", tf),
+            TemporalData::TimeReference(_) => write!(f, "<time_ref>"),
+            TemporalData::DateTimeExpr(_) => write!(f, "<datetime_expr>"),
+            TemporalData::DataDateTimeRef(_) => write!(f, "<data_datetime_ref>"),
+        }
+    }
+}
+
+/// Rare heap data — consolidates ExprProxy, FilterExpr, SimulationCall,
+/// PrintResult, TypeAnnotation, TypeAnnotatedValue, and DataReference.
+#[derive(Debug, Clone)]
+pub enum RareHeapData {
+    ExprProxy(Arc<String>),
+    FilterExpr(Arc<crate::value::FilterNode>),
+    SimulationCall(Box<SimulationCallData>),
+    PrintResult(Box<crate::value::PrintResult>),
+    TypeAnnotation(Box<shape_ast::ast::TypeAnnotation>),
+    TypeAnnotatedValue { type_name: String, value: Box<crate::value_word::ValueWord> },
+    DataReference(Box<DataReferenceData>),
+}
+
+impl RareHeapData {
+    #[inline]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            RareHeapData::ExprProxy(_) => "expr_proxy",
+            RareHeapData::FilterExpr(_) => "filter_expr",
+            RareHeapData::SimulationCall(_) => "simulation_call",
+            RareHeapData::PrintResult(_) => "print_result",
+            RareHeapData::TypeAnnotation(_) => "type_annotation",
+            RareHeapData::TypeAnnotatedValue { value, .. } => value.type_name(),
+            RareHeapData::DataReference(_) => "data_reference",
+        }
+    }
+
+    #[inline]
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            RareHeapData::TypeAnnotatedValue { value, .. } => value.is_truthy(),
+            _ => true,
+        }
+    }
+}
+
+impl fmt::Display for RareHeapData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RareHeapData::ExprProxy(name) => write!(f, "<expr:{}>", name),
+            RareHeapData::FilterExpr(_) => write!(f, "<filter_expr>"),
+            RareHeapData::SimulationCall(data) => write!(f, "<simulation:{}>", data.name),
+            RareHeapData::PrintResult(_) => write!(f, "<print_result>"),
+            RareHeapData::TypeAnnotation(_) => write!(f, "<type_annotation>"),
+            RareHeapData::TypeAnnotatedValue { type_name, value } => write!(f, "{}({})", type_name, value),
+            RareHeapData::DataReference(data) => write!(f, "<data:{}>", data.id),
+        }
+    }
+}
+
+/// Concurrency primitives — consolidates Mutex, Atomic, Lazy, and Channel.
+#[derive(Debug, Clone)]
+pub enum ConcurrencyData {
+    Mutex(Box<MutexData>),
+    Atomic(Box<AtomicData>),
+    Lazy(Box<LazyData>),
+    Channel(Box<ChannelData>),
+}
+
+impl ConcurrencyData {
+    #[inline]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            ConcurrencyData::Mutex(_) => "mutex",
+            ConcurrencyData::Atomic(_) => "atomic",
+            ConcurrencyData::Lazy(_) => "lazy",
+            ConcurrencyData::Channel(_) => "channel",
+        }
+    }
+
+    #[inline]
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            ConcurrencyData::Mutex(_) => true,
+            ConcurrencyData::Atomic(a) => a.inner.load(std::sync::atomic::Ordering::Relaxed) != 0,
+            ConcurrencyData::Lazy(l) => l.is_initialized(),
+            ConcurrencyData::Channel(c) => !c.is_closed(),
+        }
+    }
+}
+
+impl fmt::Display for ConcurrencyData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConcurrencyData::Mutex(_) => write!(f, "<mutex>"),
+            ConcurrencyData::Atomic(a) => write!(f, "<atomic:{}>", a.inner.load(std::sync::atomic::Ordering::Relaxed)),
+            ConcurrencyData::Lazy(l) => {
+                let initialized = l.value.lock().map(|g| g.is_some()).unwrap_or(false);
+                if initialized { write!(f, "<lazy:initialized>") } else { write!(f, "<lazy:pending>") }
+            }
+            ConcurrencyData::Channel(c) => {
+                if c.is_sender() { write!(f, "<channel:sender>") } else { write!(f, "<channel:receiver>") }
+            }
+        }
+    }
+}
+
+/// Table view data — consolidates TypedTable, RowView, ColumnRef, and IndexedTable.
+#[derive(Debug, Clone)]
+pub enum TableViewData {
+    TypedTable { schema_id: u64, table: Arc<crate::datatable::DataTable> },
+    RowView { schema_id: u64, table: Arc<crate::datatable::DataTable>, row_idx: usize },
+    ColumnRef { schema_id: u64, table: Arc<crate::datatable::DataTable>, col_id: u32 },
+    IndexedTable { schema_id: u64, table: Arc<crate::datatable::DataTable>, index_col: u32 },
+}
+
+impl TableViewData {
+    #[inline]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            TableViewData::TypedTable { .. } => "typed_table",
+            TableViewData::RowView { .. } => "row",
+            TableViewData::ColumnRef { .. } => "column",
+            TableViewData::IndexedTable { .. } => "indexed_table",
+        }
+    }
+
+    #[inline]
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            TableViewData::TypedTable { table, .. } => table.row_count() > 0,
+            TableViewData::RowView { .. } => true,
+            TableViewData::ColumnRef { .. } => true,
+            TableViewData::IndexedTable { table, .. } => table.row_count() > 0,
+        }
+    }
+}
+
+impl fmt::Display for TableViewData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TableViewData::TypedTable { table, .. } => write!(f, "<typed_table:{}x{}>", table.row_count(), table.column_count()),
+            TableViewData::RowView { row_idx, .. } => write!(f, "<row:{}>", row_idx),
+            TableViewData::ColumnRef { col_id, .. } => write!(f, "<column:{}>", col_id),
+            TableViewData::IndexedTable { table, .. } => write!(f, "<indexed_table:{}x{}>", table.row_count(), table.column_count()),
+        }
+    }
+}
+
 // ── Generate HeapValue, HeapKind, kind(), is_truthy(), type_name() ──────────
 //
 // All generated from the single source of truth in define_heap_types!().
@@ -988,20 +1350,7 @@ impl fmt::Display for HeapValue {
             HeapValue::DataTable(dt) => {
                 write!(f, "<datatable:{}x{}>", dt.row_count(), dt.column_count())
             }
-            HeapValue::TypedTable { table, .. } => write!(
-                f,
-                "<typed_table:{}x{}>",
-                table.row_count(),
-                table.column_count()
-            ),
-            HeapValue::RowView { row_idx, .. } => write!(f, "<row:{}>", row_idx),
-            HeapValue::ColumnRef { col_id, .. } => write!(f, "<column:{}>", col_id),
-            HeapValue::IndexedTable { table, .. } => write!(
-                f,
-                "<indexed_table:{}x{}>",
-                table.row_count(),
-                table.column_count()
-            ),
+            HeapValue::TableView(tv) => write!(f, "{}", tv),
             HeapValue::HashMap(d) => {
                 write!(f, "HashMap{{")?;
                 for (i, (k, v)) in d.keys.iter().zip(d.values.iter()).enumerate() {
@@ -1098,24 +1447,10 @@ impl fmt::Display for HeapValue {
                 write!(f, "<task_group:{}>", task_ids.len())
             }
             HeapValue::TraitObject { value, .. } => write!(f, "{}", value),
-            HeapValue::ExprProxy(name) => write!(f, "<expr:{}>", name),
-            HeapValue::FilterExpr(_) => write!(f, "<filter_expr>"),
-            HeapValue::Time(t) => write!(f, "{}", t),
-            HeapValue::Duration(d) => write!(f, "{:?}", d),
-            HeapValue::TimeSpan(ts) => write!(f, "{}", ts),
-            HeapValue::Timeframe(tf) => write!(f, "{:?}", tf),
-            HeapValue::TimeReference(_) => write!(f, "<time_ref>"),
-            HeapValue::DateTimeExpr(_) => write!(f, "<datetime_expr>"),
-            HeapValue::DataDateTimeRef(_) => write!(f, "<data_datetime_ref>"),
-            HeapValue::TypeAnnotation(_) => write!(f, "<type_annotation>"),
-            HeapValue::TypeAnnotatedValue { type_name, value } => {
-                write!(f, "{}({})", type_name, value)
-            }
-            HeapValue::PrintResult(_) => write!(f, "<print_result>"),
-            HeapValue::SimulationCall(data) => write!(f, "<simulation:{}>", data.name),
+            HeapValue::Temporal(td) => write!(f, "{}", td),
+            HeapValue::Rare(rd) => write!(f, "{}", rd),
             HeapValue::FunctionRef { name, .. } => write!(f, "<fn:{}>", name),
             HeapValue::ProjectedRef(_) => write!(f, "&ref"),
-            HeapValue::DataReference(data) => write!(f, "<data:{}>", data.id),
             HeapValue::NativeScalar(v) => write!(f, "{v}"),
             HeapValue::NativeView(v) => write!(
                 f,
@@ -1125,43 +1460,7 @@ impl fmt::Display for HeapValue {
                 v.ptr
             ),
             HeapValue::SharedCell(arc) => write!(f, "{}", arc.read().unwrap()),
-            HeapValue::IntArray(a) => {
-                write!(f, "Vec<int>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::FloatArray(a) => {
-                write!(f, "Vec<number>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    if *v == v.trunc() && v.abs() < 1e15 {
-                        write!(f, "{}", *v as i64)?;
-                    } else {
-                        write!(f, "{}", v)?;
-                    }
-                }
-                write!(f, "]")
-            }
-            HeapValue::BoolArray(a) => {
-                write!(f, "Vec<bool>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", *v != 0)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::Matrix(m) => {
-                write!(f, "<Mat<number>:{}x{}>", m.rows, m.cols)
-            }
+            HeapValue::TypedArray(ta) => write!(f, "{}", ta),
             HeapValue::Iterator(it) => {
                 write!(
                     f,
@@ -1173,129 +1472,7 @@ impl fmt::Display for HeapValue {
             HeapValue::Generator(g) => {
                 write!(f, "<generator:state={}>", g.state)
             }
-            HeapValue::Mutex(_) => write!(f, "<mutex>"),
-            HeapValue::Atomic(a) => {
-                write!(
-                    f,
-                    "<atomic:{}>",
-                    a.inner.load(std::sync::atomic::Ordering::Relaxed)
-                )
-            }
-            HeapValue::Channel(c) => {
-                if c.is_sender() {
-                    write!(f, "<channel:sender>")
-                } else {
-                    write!(f, "<channel:receiver>")
-                }
-            }
-            HeapValue::Lazy(l) => {
-                let initialized = l.value.lock().map(|g| g.is_some()).unwrap_or(false);
-                if initialized {
-                    write!(f, "<lazy:initialized>")
-                } else {
-                    write!(f, "<lazy:pending>")
-                }
-            }
-            HeapValue::I8Array(a) => {
-                write!(f, "Vec<i8>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::I16Array(a) => {
-                write!(f, "Vec<i16>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::I32Array(a) => {
-                write!(f, "Vec<i32>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::U8Array(a) => {
-                write!(f, "Vec<u8>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::U16Array(a) => {
-                write!(f, "Vec<u16>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::U32Array(a) => {
-                write!(f, "Vec<u32>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::U64Array(a) => {
-                write!(f, "Vec<u64>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::F32Array(a) => {
-                write!(f, "Vec<f32>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            HeapValue::FloatArraySlice {
-                parent,
-                offset,
-                len,
-            } => {
-                let slice =
-                    &parent.data[*offset as usize..(*offset + *len) as usize];
-                write!(f, "Vec<number>[")?;
-                for (i, v) in slice.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    if *v == v.trunc() && v.abs() < 1e15 {
-                        write!(f, "{}", *v as i64)?;
-                    } else {
-                        write!(f, "{}", v)?;
-                    }
-                }
-                write!(f, "]")
-            }
+            HeapValue::Concurrency(cd) => write!(f, "{}", cd),
         }
     }
 }
@@ -1328,12 +1505,12 @@ impl HeapValue {
             (HeapValue::Err(a), HeapValue::Err(b)) => a == b,
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
-            (HeapValue::Mutex(a), HeapValue::Mutex(b)) => Arc::ptr_eq(&a.inner, &b.inner),
-            (HeapValue::Atomic(a), HeapValue::Atomic(b)) => Arc::ptr_eq(&a.inner, &b.inner),
-            (HeapValue::Lazy(a), HeapValue::Lazy(b)) => Arc::ptr_eq(&a.value, &b.value),
+            (HeapValue::Concurrency(ConcurrencyData::Mutex(a)), HeapValue::Concurrency(ConcurrencyData::Mutex(b))) => Arc::ptr_eq(&a.inner, &b.inner),
+            (HeapValue::Concurrency(ConcurrencyData::Atomic(a)), HeapValue::Concurrency(ConcurrencyData::Atomic(b))) => Arc::ptr_eq(&a.inner, &b.inner),
+            (HeapValue::Concurrency(ConcurrencyData::Lazy(a)), HeapValue::Concurrency(ConcurrencyData::Lazy(b))) => Arc::ptr_eq(&a.value, &b.value),
             (HeapValue::Future(a), HeapValue::Future(b)) => a == b,
-            (HeapValue::ExprProxy(a), HeapValue::ExprProxy(b)) => a == b,
-            (HeapValue::Time(a), HeapValue::Time(b)) => a == b,
+            (HeapValue::Rare(RareHeapData::ExprProxy(a)), HeapValue::Rare(RareHeapData::ExprProxy(b))) => a == b,
+            (HeapValue::Temporal(TemporalData::DateTime(a)), HeapValue::Temporal(TemporalData::DateTime(b))) => a == b,
             (HeapValue::HashMap(d1), HeapValue::HashMap(d2)) => {
                 d1.keys.len() == d2.keys.len()
                     && d1.keys.iter().zip(d2.keys.iter()).all(|(a, b)| a == b)
@@ -1347,31 +1524,23 @@ impl HeapValue {
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 std::sync::Arc::ptr_eq(&a.resource, &b.resource)
             }
-            (HeapValue::IntArray(a), HeapValue::IntArray(b)) => a == b,
-            (HeapValue::FloatArray(a), HeapValue::FloatArray(b)) => a == b,
-            (HeapValue::IntArray(a), HeapValue::FloatArray(b)) => int_float_array_eq(a, b),
-            (HeapValue::FloatArray(a), HeapValue::IntArray(b)) => int_float_array_eq(b, a),
-            (HeapValue::BoolArray(a), HeapValue::BoolArray(b)) => a == b,
-            (HeapValue::I8Array(a), HeapValue::I8Array(b)) => a == b,
-            (HeapValue::I16Array(a), HeapValue::I16Array(b)) => a == b,
-            (HeapValue::I32Array(a), HeapValue::I32Array(b)) => a == b,
-            (HeapValue::U8Array(a), HeapValue::U8Array(b)) => a == b,
-            (HeapValue::U16Array(a), HeapValue::U16Array(b)) => a == b,
-            (HeapValue::U32Array(a), HeapValue::U32Array(b)) => a == b,
-            (HeapValue::U64Array(a), HeapValue::U64Array(b)) => a == b,
-            (HeapValue::F32Array(a), HeapValue::F32Array(b)) => a == b,
-            (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
+            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => int_float_array_eq(a, b),
+            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => int_float_array_eq(b, a),
+            (HeapValue::TypedArray(TypedArrayData::Bool(a)), HeapValue::TypedArray(TypedArrayData::Bool(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::I8(a)), HeapValue::TypedArray(TypedArrayData::I8(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::I16(a)), HeapValue::TypedArray(TypedArrayData::I16(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::I32(a)), HeapValue::TypedArray(TypedArrayData::I32(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::U8(a)), HeapValue::TypedArray(TypedArrayData::U8(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::U16(a)), HeapValue::TypedArray(TypedArrayData::U16(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::U32(a)), HeapValue::TypedArray(TypedArrayData::U32(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::U64(a)), HeapValue::TypedArray(TypedArrayData::U64(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::F32(a)), HeapValue::TypedArray(TypedArrayData::F32(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::Matrix(a)), HeapValue::TypedArray(TypedArrayData::Matrix(b))) => matrix_eq(a, b),
             (
-                HeapValue::FloatArraySlice {
-                    parent: p1,
-                    offset: o1,
-                    len: l1,
-                },
-                HeapValue::FloatArraySlice {
-                    parent: p2,
-                    offset: o2,
-                    len: l2,
-                },
+                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 }),
+                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 }),
             ) => {
                 let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
                 let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
@@ -1444,50 +1613,20 @@ impl HeapValue {
             (HeapValue::Decimal(a), HeapValue::BigInt(b)) => bigint_decimal_eq(b, a),
             (HeapValue::DataTable(a), HeapValue::DataTable(b)) => Arc::ptr_eq(a, b),
             (
-                HeapValue::TypedTable {
-                    schema_id: s1,
-                    table: t1,
-                },
-                HeapValue::TypedTable {
-                    schema_id: s2,
-                    table: t2,
-                },
+                HeapValue::TableView(TableViewData::TypedTable { schema_id: s1, table: t1 }),
+                HeapValue::TableView(TableViewData::TypedTable { schema_id: s2, table: t2 }),
             ) => s1 == s2 && Arc::ptr_eq(t1, t2),
             (
-                HeapValue::RowView {
-                    schema_id: s1,
-                    row_idx: r1,
-                    table: t1,
-                },
-                HeapValue::RowView {
-                    schema_id: s2,
-                    row_idx: r2,
-                    table: t2,
-                },
+                HeapValue::TableView(TableViewData::RowView { schema_id: s1, row_idx: r1, table: t1 }),
+                HeapValue::TableView(TableViewData::RowView { schema_id: s2, row_idx: r2, table: t2 }),
             ) => s1 == s2 && r1 == r2 && Arc::ptr_eq(t1, t2),
             (
-                HeapValue::ColumnRef {
-                    schema_id: s1,
-                    col_id: c1,
-                    table: t1,
-                },
-                HeapValue::ColumnRef {
-                    schema_id: s2,
-                    col_id: c2,
-                    table: t2,
-                },
+                HeapValue::TableView(TableViewData::ColumnRef { schema_id: s1, col_id: c1, table: t1 }),
+                HeapValue::TableView(TableViewData::ColumnRef { schema_id: s2, col_id: c2, table: t2 }),
             ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
             (
-                HeapValue::IndexedTable {
-                    schema_id: s1,
-                    index_col: c1,
-                    table: t1,
-                },
-                HeapValue::IndexedTable {
-                    schema_id: s2,
-                    index_col: c2,
-                    table: t2,
-                },
+                HeapValue::TableView(TableViewData::IndexedTable { schema_id: s1, index_col: c1, table: t1 }),
+                HeapValue::TableView(TableViewData::IndexedTable { schema_id: s2, index_col: c2, table: t2 }),
             ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
             (HeapValue::HashMap(d1), HeapValue::HashMap(d2)) => {
                 d1.keys.len() == d2.keys.len()
@@ -1510,9 +1649,9 @@ impl HeapValue {
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 Arc::ptr_eq(&a.resource, &b.resource)
             }
-            (HeapValue::Mutex(a), HeapValue::Mutex(b)) => Arc::ptr_eq(&a.inner, &b.inner),
-            (HeapValue::Atomic(a), HeapValue::Atomic(b)) => Arc::ptr_eq(&a.inner, &b.inner),
-            (HeapValue::Lazy(a), HeapValue::Lazy(b)) => Arc::ptr_eq(&a.value, &b.value),
+            (HeapValue::Concurrency(ConcurrencyData::Mutex(a)), HeapValue::Concurrency(ConcurrencyData::Mutex(b))) => Arc::ptr_eq(&a.inner, &b.inner),
+            (HeapValue::Concurrency(ConcurrencyData::Atomic(a)), HeapValue::Concurrency(ConcurrencyData::Atomic(b))) => Arc::ptr_eq(&a.inner, &b.inner),
+            (HeapValue::Concurrency(ConcurrencyData::Lazy(a)), HeapValue::Concurrency(ConcurrencyData::Lazy(b))) => Arc::ptr_eq(&a.value, &b.value),
             (HeapValue::Range { .. }, HeapValue::Range { .. }) => false,
             (HeapValue::Enum(a), HeapValue::Enum(b)) => {
                 a.enum_name == b.enum_name && a.variant == b.variant
@@ -1521,44 +1660,36 @@ impl HeapValue {
             (HeapValue::Ok(a), HeapValue::Ok(b)) => a.vw_equals(b),
             (HeapValue::Err(a), HeapValue::Err(b)) => a.vw_equals(b),
             (HeapValue::Future(a), HeapValue::Future(b)) => a == b,
-            (HeapValue::Time(a), HeapValue::Time(b)) => a == b,
-            (HeapValue::Duration(a), HeapValue::Duration(b)) => a == b,
-            (HeapValue::TimeSpan(a), HeapValue::TimeSpan(b)) => a == b,
-            (HeapValue::Timeframe(a), HeapValue::Timeframe(b)) => a == b,
+            (HeapValue::Temporal(TemporalData::DateTime(a)), HeapValue::Temporal(TemporalData::DateTime(b))) => a == b,
+            (HeapValue::Temporal(TemporalData::Duration(a)), HeapValue::Temporal(TemporalData::Duration(b))) => a == b,
+            (HeapValue::Temporal(TemporalData::TimeSpan(a)), HeapValue::Temporal(TemporalData::TimeSpan(b))) => a == b,
+            (HeapValue::Temporal(TemporalData::Timeframe(a)), HeapValue::Temporal(TemporalData::Timeframe(b))) => a == b,
             (HeapValue::FunctionRef { name: n1, .. }, HeapValue::FunctionRef { name: n2, .. }) => {
                 n1 == n2
             }
             (HeapValue::ProjectedRef(a), HeapValue::ProjectedRef(b)) => a == b,
-            (HeapValue::DataReference(a), HeapValue::DataReference(b)) => {
+            (HeapValue::Rare(RareHeapData::DataReference(a)), HeapValue::Rare(RareHeapData::DataReference(b))) => {
                 a.datetime == b.datetime && a.id == b.id && a.timeframe == b.timeframe
             }
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
-            (HeapValue::IntArray(a), HeapValue::IntArray(b)) => a == b,
-            (HeapValue::FloatArray(a), HeapValue::FloatArray(b)) => a == b,
-            (HeapValue::IntArray(a), HeapValue::FloatArray(b)) => int_float_array_eq(a, b),
-            (HeapValue::FloatArray(a), HeapValue::IntArray(b)) => int_float_array_eq(b, a),
-            (HeapValue::BoolArray(a), HeapValue::BoolArray(b)) => a == b,
-            (HeapValue::I8Array(a), HeapValue::I8Array(b)) => a == b,
-            (HeapValue::I16Array(a), HeapValue::I16Array(b)) => a == b,
-            (HeapValue::I32Array(a), HeapValue::I32Array(b)) => a == b,
-            (HeapValue::U8Array(a), HeapValue::U8Array(b)) => a == b,
-            (HeapValue::U16Array(a), HeapValue::U16Array(b)) => a == b,
-            (HeapValue::U32Array(a), HeapValue::U32Array(b)) => a == b,
-            (HeapValue::U64Array(a), HeapValue::U64Array(b)) => a == b,
-            (HeapValue::F32Array(a), HeapValue::F32Array(b)) => a == b,
-            (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
+            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::I64(a)), HeapValue::TypedArray(TypedArrayData::F64(b))) => int_float_array_eq(a, b),
+            (HeapValue::TypedArray(TypedArrayData::F64(a)), HeapValue::TypedArray(TypedArrayData::I64(b))) => int_float_array_eq(b, a),
+            (HeapValue::TypedArray(TypedArrayData::Bool(a)), HeapValue::TypedArray(TypedArrayData::Bool(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::I8(a)), HeapValue::TypedArray(TypedArrayData::I8(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::I16(a)), HeapValue::TypedArray(TypedArrayData::I16(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::I32(a)), HeapValue::TypedArray(TypedArrayData::I32(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::U8(a)), HeapValue::TypedArray(TypedArrayData::U8(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::U16(a)), HeapValue::TypedArray(TypedArrayData::U16(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::U32(a)), HeapValue::TypedArray(TypedArrayData::U32(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::U64(a)), HeapValue::TypedArray(TypedArrayData::U64(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::F32(a)), HeapValue::TypedArray(TypedArrayData::F32(b))) => a == b,
+            (HeapValue::TypedArray(TypedArrayData::Matrix(a)), HeapValue::TypedArray(TypedArrayData::Matrix(b))) => matrix_eq(a, b),
             (
-                HeapValue::FloatArraySlice {
-                    parent: p1,
-                    offset: o1,
-                    len: l1,
-                },
-                HeapValue::FloatArraySlice {
-                    parent: p2,
-                    offset: o2,
-                    len: l2,
-                },
+                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 }),
+                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 }),
             ) => {
                 let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
                 let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];

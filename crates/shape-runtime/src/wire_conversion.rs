@@ -285,9 +285,9 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
         HeapValue::BigInt(i) => WireValue::Integer(*i),
         HeapValue::ProjectedRef(_) => WireValue::Null,
 
-        HeapValue::Time(dt) => WireValue::Timestamp(dt.timestamp_millis()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DateTime(dt)) => WireValue::Timestamp(dt.timestamp_millis()),
 
-        HeapValue::TimeSpan(duration) => {
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::TimeSpan(duration)) => {
             let millis = duration.num_milliseconds();
             WireValue::Duration {
                 value: millis as f64,
@@ -295,7 +295,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
             }
         }
 
-        HeapValue::Duration(duration) => {
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::Duration(duration)) => {
             let value = duration.value;
             let wire_unit = match duration.unit {
                 shape_ast::ast::DurationUnit::Seconds => WireDurationUnit::Seconds,
@@ -358,9 +358,9 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
             name: "<closure>".to_string(),
         },
 
-        HeapValue::Timeframe(tf) => WireValue::String(format!("{}", tf)),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::Timeframe(tf)) => WireValue::String(format!("{}", tf)),
 
-        HeapValue::DataReference(data) => {
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::DataReference(data)) => {
             let mut obj = BTreeMap::new();
             obj.insert(
                 "datetime".to_string(),
@@ -374,7 +374,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
             WireValue::Object(obj)
         }
 
-        HeapValue::SimulationCall(data) => {
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::SimulationCall(data)) => {
             let mut obj = BTreeMap::new();
             obj.insert(
                 "__type".to_string(),
@@ -391,7 +391,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
             WireValue::Object(obj)
         }
 
-        HeapValue::PrintResult(result) => {
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::PrintResult(result)) => {
             use shape_wire::print_result::{WirePrintResult, WirePrintSpan};
 
             let wire_spans: Vec<WirePrintSpan> = result
@@ -486,30 +486,30 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
             }
         }
 
-        HeapValue::TypeAnnotatedValue { value, .. } => nb_to_wire(value, ctx),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::TypeAnnotatedValue { value, .. }) => nb_to_wire(value, ctx),
 
         HeapValue::Future(id) => WireValue::String(format!("<future:{}>", id)),
 
         HeapValue::DataTable(dt) => datatable_to_wire(dt.as_ref()),
 
-        HeapValue::TypedTable { table, schema_id } => {
+        HeapValue::TableView(shape_value::heap_value::TableViewData::TypedTable { table, schema_id }) => {
             datatable_to_wire_with_schema(table.as_ref(), Some(*schema_id as u32))
         }
 
-        HeapValue::RowView { row_idx, .. } => WireValue::String(format!("<Row:{}>", row_idx)),
-        HeapValue::ColumnRef { col_id, .. } => WireValue::String(format!("<ColumnRef:{}>", col_id)),
-        HeapValue::IndexedTable { table, .. } => datatable_to_wire(table.as_ref()),
+        HeapValue::TableView(shape_value::heap_value::TableViewData::RowView { row_idx, .. }) => WireValue::String(format!("<Row:{}>", row_idx)),
+        HeapValue::TableView(shape_value::heap_value::TableViewData::ColumnRef { col_id, .. }) => WireValue::String(format!("<ColumnRef:{}>", col_id)),
+        HeapValue::TableView(shape_value::heap_value::TableViewData::IndexedTable { table, .. }) => datatable_to_wire(table.as_ref()),
         HeapValue::HostClosure(_) => WireValue::String("<HostClosure>".to_string()),
-        HeapValue::ExprProxy(col) => WireValue::String(format!("<ExprProxy:{}>", col)),
-        HeapValue::FilterExpr(_) => WireValue::String("<FilterExpr>".to_string()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::ExprProxy(col)) => WireValue::String(format!("<ExprProxy:{}>", col)),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::FilterExpr(_)) => WireValue::String("<FilterExpr>".to_string()),
         HeapValue::TaskGroup { .. } => WireValue::String("<TaskGroup>".to_string()),
         HeapValue::TraitObject { value, .. } => nb_to_wire(value, ctx),
 
         // Rare AST types — format as debug strings
-        HeapValue::TimeReference(tr) => WireValue::String(format!("{:?}", tr)),
-        HeapValue::DateTimeExpr(expr) => WireValue::String(format!("{:?}", expr)),
-        HeapValue::DataDateTimeRef(dref) => WireValue::String(format!("{:?}", dref)),
-        HeapValue::TypeAnnotation(ann) => WireValue::String(format!("{:?}", ann)),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::TimeReference(tr)) => WireValue::String(format!("{:?}", tr)),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DateTimeExpr(expr)) => WireValue::String(format!("{:?}", expr)),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DataDateTimeRef(dref)) => WireValue::String(format!("{:?}", dref)),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::TypeAnnotation(ann)) => WireValue::String(format!("{:?}", ann)),
 
         HeapValue::NativeScalar(v) => match v {
             shape_value::heap_value::NativeScalar::I8(n) => WireValue::I8(*n),
@@ -566,58 +566,58 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
             WireValue::String(format!("<io_handle:{}:{}>", data.path, status))
         }
         HeapValue::SharedCell(arc) => nb_to_wire(&arc.read().unwrap(), ctx),
-        HeapValue::IntArray(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I64(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v)).collect())
         }
-        HeapValue::FloatArray(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::F64(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Number(v)).collect())
         }
-        HeapValue::FloatArraySlice {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::FloatSlice {
             parent,
             offset,
             len,
-        } => {
+        }) => {
             let start = *offset as usize;
             let end = start + *len as usize;
             let slice = &parent.data[start..end];
             WireValue::Array(slice.iter().map(|&v| WireValue::Number(v)).collect())
         }
-        HeapValue::BoolArray(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::Bool(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Bool(v != 0)).collect())
         }
-        HeapValue::I8Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I8(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v as i64)).collect())
         }
-        HeapValue::I16Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I16(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v as i64)).collect())
         }
-        HeapValue::I32Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I32(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v as i64)).collect())
         }
-        HeapValue::U8Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U8(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v as i64)).collect())
         }
-        HeapValue::U16Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U16(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v as i64)).collect())
         }
-        HeapValue::U32Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U32(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v as i64)).collect())
         }
-        HeapValue::U64Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U64(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Integer(v as i64)).collect())
         }
-        HeapValue::F32Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::F32(a)) => {
             WireValue::Array(a.iter().map(|&v| WireValue::Number(v as f64)).collect())
         }
-        HeapValue::Matrix(m) => WireValue::String(format!("<Mat<number>:{}x{}>", m.rows, m.cols)),
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::Matrix(m)) => WireValue::String(format!("<Mat<number>:{}x{}>", m.rows, m.cols)),
         HeapValue::Iterator(_) => WireValue::String("<iterator>".to_string()),
         HeapValue::Generator(_) => WireValue::String("<generator>".to_string()),
-        HeapValue::Mutex(_) => WireValue::String("<mutex>".to_string()),
-        HeapValue::Atomic(a) => {
+        HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Mutex(_)) => WireValue::String("<mutex>".to_string()),
+        HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Atomic(a)) => {
             WireValue::Integer(a.inner.load(std::sync::atomic::Ordering::Relaxed))
         }
-        HeapValue::Lazy(_) => WireValue::String("<lazy>".to_string()),
-        HeapValue::Channel(c) => {
+        HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Lazy(_)) => WireValue::String("<lazy>".to_string()),
+        HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Channel(c)) => {
             if c.is_sender() {
                 WireValue::String("<channel:sender>".to_string())
             } else {

@@ -732,8 +732,8 @@ fn heap_value_to_serializable(
             }
         }
         HeapValue::HostClosure(_)
-        | HeapValue::ExprProxy(_)
-        | HeapValue::FilterExpr(_)
+        | HeapValue::Rare(shape_value::heap_value::RareHeapData::ExprProxy(_))
+        | HeapValue::Rare(shape_value::heap_value::RareHeapData::FilterExpr(_))
         | HeapValue::TaskGroup { .. }
         | HeapValue::TraitObject { .. }
         | HeapValue::ProjectedRef(_)
@@ -768,24 +768,24 @@ fn heap_value_to_serializable(
             },
             inclusive: *inclusive,
         },
-        HeapValue::Timeframe(tf) => SerializableVMValue::Timeframe(*tf),
-        HeapValue::Duration(d) => SerializableVMValue::Duration(d.clone()),
-        HeapValue::Time(t) => SerializableVMValue::Time(*t),
-        HeapValue::TimeSpan(span) => SerializableVMValue::TimeSpan(span.num_milliseconds()),
-        HeapValue::TimeReference(tr) => SerializableVMValue::TimeReference((**tr).clone()),
-        HeapValue::DateTimeExpr(expr) => SerializableVMValue::DateTimeExpr((**expr).clone()),
-        HeapValue::DataDateTimeRef(dref) => SerializableVMValue::DataDateTimeRef((**dref).clone()),
-        HeapValue::TypeAnnotation(ta) => SerializableVMValue::TypeAnnotation((**ta).clone()),
-        HeapValue::TypeAnnotatedValue { type_name, value } => {
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::Timeframe(tf)) => SerializableVMValue::Timeframe(*tf),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::Duration(d)) => SerializableVMValue::Duration(d.clone()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DateTime(t)) => SerializableVMValue::Time(*t),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::TimeSpan(span)) => SerializableVMValue::TimeSpan(span.num_milliseconds()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::TimeReference(tr)) => SerializableVMValue::TimeReference((**tr).clone()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DateTimeExpr(expr)) => SerializableVMValue::DateTimeExpr((**expr).clone()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DataDateTimeRef(dref)) => SerializableVMValue::DataDateTimeRef((**dref).clone()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::TypeAnnotation(ta)) => SerializableVMValue::TypeAnnotation((**ta).clone()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::TypeAnnotatedValue { type_name, value }) => {
             SerializableVMValue::TypeAnnotatedValue {
                 type_name: type_name.clone(),
                 value: Box::new(nanboxed_to_serializable(value, store)?),
             }
         }
-        HeapValue::PrintResult(pr) => {
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::PrintResult(pr)) => {
             SerializableVMValue::PrintResult(print_result_to_snapshot(pr, store)?)
         }
-        HeapValue::SimulationCall(data) => {
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::SimulationCall(data)) => {
             let mut out = HashMap::new();
             for (k, v) in data.params.iter() {
                 // SimulationCallData.params stores ValueWord (structural boundary in shape-value)
@@ -803,7 +803,7 @@ fn heap_value_to_serializable(
                 None => None,
             },
         },
-        HeapValue::DataReference(data) => SerializableVMValue::DataReference {
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::DataReference(data)) => SerializableVMValue::DataReference {
             datetime: data.datetime,
             id: data.id.clone(),
             timeframe: data.timeframe,
@@ -817,7 +817,7 @@ fn heap_value_to_serializable(
                 kind: BlobKind::DataTable,
             })
         }
-        HeapValue::TypedTable { schema_id, table } => {
+        HeapValue::TableView(shape_value::heap_value::TableViewData::TypedTable { schema_id, table }) => {
             let ser = serialize_datatable(table, store)?;
             let hash = store.put_struct(&ser)?;
             SerializableVMValue::TypedTable {
@@ -828,11 +828,11 @@ fn heap_value_to_serializable(
                 },
             }
         }
-        HeapValue::RowView {
+        HeapValue::TableView(shape_value::heap_value::TableViewData::RowView {
             schema_id,
             table,
             row_idx,
-        } => {
+        }) => {
             let ser = serialize_datatable(table, store)?;
             let hash = store.put_struct(&ser)?;
             SerializableVMValue::RowView {
@@ -844,11 +844,11 @@ fn heap_value_to_serializable(
                 row_idx: *row_idx,
             }
         }
-        HeapValue::ColumnRef {
+        HeapValue::TableView(shape_value::heap_value::TableViewData::ColumnRef {
             schema_id,
             table,
             col_id,
-        } => {
+        }) => {
             let ser = serialize_datatable(table, store)?;
             let hash = store.put_struct(&ser)?;
             SerializableVMValue::ColumnRef {
@@ -860,11 +860,11 @@ fn heap_value_to_serializable(
                 col_id: *col_id,
             }
         }
-        HeapValue::IndexedTable {
+        HeapValue::TableView(shape_value::heap_value::TableViewData::IndexedTable {
             schema_id,
             table,
             index_col,
-        } => {
+        }) => {
             let ser = serialize_datatable(table, store)?;
             let hash = store.put_struct(&ser)?;
             SerializableVMValue::IndexedTable {
@@ -927,7 +927,7 @@ fn heap_value_to_serializable(
             SerializableVMValue::String(format!("<io_handle:{}:{}>", data.path, status))
         }
         HeapValue::SharedCell(arc) => nanboxed_to_serializable(&arc.read().unwrap(), store)?,
-        HeapValue::IntArray(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I64(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -939,7 +939,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::FloatArray(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::F64(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -951,7 +951,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::BoolArray(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::Bool(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -963,7 +963,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::I8Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I8(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -975,7 +975,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::I16Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I16(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -987,7 +987,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::I32Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I32(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -999,7 +999,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::U8Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U8(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -1011,7 +1011,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::U16Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U16(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -1023,7 +1023,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::U32Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U32(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -1035,7 +1035,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::U64Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U64(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -1047,7 +1047,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::F32Array(a) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::F32(a)) => {
             let blob = store_chunked_bytes(slice_as_bytes(a.as_slice()), store)?;
             let hash = store.put_struct(&blob)?;
             SerializableVMValue::TypedArray {
@@ -1059,7 +1059,7 @@ fn heap_value_to_serializable(
                 len: a.len(),
             }
         }
-        HeapValue::Matrix(m) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::Matrix(m)) => {
             let raw_bytes = slice_as_bytes(m.data.as_slice());
             let blob = store_chunked_bytes(raw_bytes, store)?;
             let hash = store.put_struct(&blob)?;
@@ -1072,11 +1072,11 @@ fn heap_value_to_serializable(
                 cols: m.cols,
             }
         }
-        HeapValue::FloatArraySlice {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::FloatSlice {
             parent,
             offset,
             len,
-        } => {
+        }) => {
             // Materialize the slice to an owned float array for serialization
             let start = *offset as usize;
             let end = start + *len as usize;
@@ -1095,10 +1095,10 @@ fn heap_value_to_serializable(
         HeapValue::Char(c) => SerializableVMValue::String(c.to_string()),
         HeapValue::Iterator(_)
         | HeapValue::Generator(_)
-        | HeapValue::Mutex(_)
-        | HeapValue::Atomic(_)
-        | HeapValue::Lazy(_)
-        | HeapValue::Channel(_) => {
+        | HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Mutex(_))
+        | HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Atomic(_))
+        | HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Lazy(_))
+        | HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Channel(_)) => {
             return Err(anyhow::anyhow!(
                 "Cannot snapshot transient value: {}",
                 hv.type_name()
@@ -1769,13 +1769,13 @@ mod tests {
         // cold-path: as_heap_ref retained — test assertion
         let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
-            shape_value::heap_value::HeapValue::FloatArray(a) => {
+            shape_value::heap_value::HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::F64(a)) => {
                 assert_eq!(a.len(), 1000);
                 for i in 0..1000 {
                     assert!((a.as_slice()[i] - data[i]).abs() < f64::EPSILON);
                 }
             }
-            _ => panic!("Expected FloatArray after restore"),
+            _ => panic!("Expected TypedArray(F64) after restore"),
         }
     }
 
@@ -1806,13 +1806,13 @@ mod tests {
         // cold-path: as_heap_ref retained — test assertion
         let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
-            shape_value::heap_value::HeapValue::IntArray(a) => {
+            shape_value::heap_value::HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I64(a)) => {
                 assert_eq!(a.len(), 500);
                 for i in 0..500 {
                     assert_eq!(a.as_slice()[i], data[i]);
                 }
             }
-            _ => panic!("Expected IntArray after restore"),
+            _ => panic!("Expected TypedArray(I64) after restore"),
         }
     }
 
@@ -1839,14 +1839,14 @@ mod tests {
         // cold-path: as_heap_ref retained — test assertion
         let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
-            shape_value::heap_value::HeapValue::Matrix(m) => {
+            shape_value::heap_value::HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::Matrix(m)) => {
                 assert_eq!(m.rows, 3);
                 assert_eq!(m.cols, 4);
                 for i in 0..12 {
                     assert!((m.data.as_slice()[i] - data[i]).abs() < f64::EPSILON);
                 }
             }
-            _ => panic!("Expected Matrix after restore"),
+            _ => panic!("Expected TypedArray(Matrix) after restore"),
         }
     }
 
@@ -1883,7 +1883,7 @@ mod tests {
                 let idx = d.find_key(&key_a);
                 assert!(idx.is_some(), "should find key 'a' in rebuilt index");
             }
-            _ => panic!("Expected HashMap after restore"),
+            _ => panic!("Expected HashMap after restore, got {:?}", hv.kind()),
         }
     }
 
@@ -1914,11 +1914,11 @@ mod tests {
         // cold-path: as_heap_ref retained — test assertion
         let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
-            shape_value::heap_value::HeapValue::BoolArray(a) => {
+            shape_value::heap_value::HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::Bool(a)) => {
                 assert_eq!(a.len(), 5);
                 assert_eq!(a.as_slice(), &data);
             }
-            _ => panic!("Expected BoolArray after restore"),
+            _ => panic!("Expected TypedArray(Bool) after restore"),
         }
     }
 

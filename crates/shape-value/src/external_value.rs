@@ -213,13 +213,13 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
             rows: dt.row_count(),
             columns: dt.column_names().iter().map(|s| s.to_string()).collect(),
         },
-        HeapValue::TypedTable { table, .. } => ExternalValue::DataTable {
+        HeapValue::TableView(crate::heap_value::TableViewData::TypedTable { table, .. }) => ExternalValue::DataTable {
             rows: table.row_count(),
             columns: table.column_names().iter().map(|s| s.to_string()).collect(),
         },
-        HeapValue::RowView { .. } => ExternalValue::Opaque("<row_view>".to_string()),
-        HeapValue::ColumnRef { .. } => ExternalValue::Opaque("<column_ref>".to_string()),
-        HeapValue::IndexedTable { table, .. } => ExternalValue::DataTable {
+        HeapValue::TableView(crate::heap_value::TableViewData::RowView { .. }) => ExternalValue::Opaque("<row_view>".to_string()),
+        HeapValue::TableView(crate::heap_value::TableViewData::ColumnRef { .. }) => ExternalValue::Opaque("<column_ref>".to_string()),
+        HeapValue::TableView(crate::heap_value::TableViewData::IndexedTable { table, .. }) => ExternalValue::DataTable {
             rows: table.row_count(),
             columns: table.column_names().iter().map(|s| s.to_string()).collect(),
         },
@@ -271,44 +271,39 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
         // Trait dispatch
         HeapValue::TraitObject { value, .. } => nb_to_external(value, schemas),
 
-        // SQL pushdown
-        HeapValue::ExprProxy(s) => ExternalValue::Opaque(format!("<expr_proxy:{s}>")),
-        HeapValue::FilterExpr(_) => ExternalValue::Opaque("<filter_expr>".to_string()),
-
-        // Time types
-        HeapValue::Time(t) => ExternalValue::Time(t.to_rfc3339()),
-        HeapValue::Duration(d) => {
+        // Temporal
+        HeapValue::Temporal(crate::heap_value::TemporalData::DateTime(t)) => ExternalValue::Time(t.to_rfc3339()),
+        HeapValue::Temporal(crate::heap_value::TemporalData::Duration(d)) => {
             let secs = d.value as u64;
             ExternalValue::Duration { secs, nanos: 0 }
         }
-        HeapValue::TimeSpan(ts) => ExternalValue::Duration {
+        HeapValue::Temporal(crate::heap_value::TemporalData::TimeSpan(ts)) => ExternalValue::Duration {
             secs: ts.num_seconds().unsigned_abs(),
             nanos: (ts.subsec_nanos().unsigned_abs()),
         },
-        HeapValue::Timeframe(tf) => ExternalValue::String(format!("{tf:?}")),
+        HeapValue::Temporal(crate::heap_value::TemporalData::Timeframe(tf)) => ExternalValue::String(format!("{tf:?}")),
+        HeapValue::Temporal(crate::heap_value::TemporalData::TimeReference(_)) => ExternalValue::Opaque("<time_reference>".to_string()),
+        HeapValue::Temporal(crate::heap_value::TemporalData::DateTimeExpr(_)) => ExternalValue::Opaque("<datetime_expr>".to_string()),
+        HeapValue::Temporal(crate::heap_value::TemporalData::DataDateTimeRef(_)) => ExternalValue::Opaque("<data_datetime_ref>".to_string()),
 
-        // AST types
-        HeapValue::TimeReference(_) => ExternalValue::Opaque("<time_reference>".to_string()),
-        HeapValue::DateTimeExpr(_) => ExternalValue::Opaque("<datetime_expr>".to_string()),
-        HeapValue::DataDateTimeRef(_) => ExternalValue::Opaque("<data_datetime_ref>".to_string()),
-        HeapValue::TypeAnnotation(_) => ExternalValue::Opaque("<type_annotation>".to_string()),
-        HeapValue::TypeAnnotatedValue { type_name, value } => {
+        // Rare
+        HeapValue::Rare(crate::heap_value::RareHeapData::ExprProxy(s)) => ExternalValue::Opaque(format!("<expr_proxy:{s}>")),
+        HeapValue::Rare(crate::heap_value::RareHeapData::FilterExpr(_)) => ExternalValue::Opaque("<filter_expr>".to_string()),
+        HeapValue::Rare(crate::heap_value::RareHeapData::TypeAnnotation(_)) => ExternalValue::Opaque("<type_annotation>".to_string()),
+        HeapValue::Rare(crate::heap_value::RareHeapData::TypeAnnotatedValue { type_name, value }) => {
             let inner = nb_to_external(value, schemas);
             ExternalValue::TypedObject {
                 name: type_name.clone(),
                 fields: BTreeMap::from([("value".to_string(), inner)]),
             }
         }
-        HeapValue::PrintResult(pr) => ExternalValue::String(pr.rendered.clone()),
-        HeapValue::SimulationCall(data) => ExternalValue::Opaque(format!(
+        HeapValue::Rare(crate::heap_value::RareHeapData::PrintResult(pr)) => ExternalValue::String(pr.rendered.clone()),
+        HeapValue::Rare(crate::heap_value::RareHeapData::SimulationCall(data)) => ExternalValue::Opaque(format!(
             "<simulation_call:{} params={}>",
             data.name,
             data.params.len()
         )),
-        HeapValue::FunctionRef { name, .. } => {
-            ExternalValue::Opaque(format!("<function_ref:{name}>"))
-        }
-        HeapValue::DataReference(data) => {
+        HeapValue::Rare(crate::heap_value::RareHeapData::DataReference(data)) => {
             let mut fields = BTreeMap::new();
             fields.insert(
                 "datetime".to_string(),
@@ -320,6 +315,9 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
                 ExternalValue::String(format!("{:?}", data.timeframe)),
             );
             ExternalValue::Object(fields)
+        }
+        HeapValue::FunctionRef { name, .. } => {
+            ExternalValue::Opaque(format!("<function_ref:{name}>"))
         }
 
         HeapValue::Instant(t) => ExternalValue::Opaque(format!("<instant:{:?}>", t.elapsed())),
@@ -360,56 +358,66 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
         }
         HeapValue::Content(node) => ExternalValue::String(format!("{}", node)),
         HeapValue::SharedCell(arc) => nb_to_external(&arc.read().unwrap(), schemas),
-        HeapValue::IntArray(a) => {
+        // TypedArray
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::I64(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v)).collect())
         }
-        HeapValue::FloatArray(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::F64(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Number(v)).collect())
         }
-        HeapValue::BoolArray(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::Bool(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Bool(v != 0)).collect())
         }
-        HeapValue::I8Array(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::I8(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v as i64)).collect())
         }
-        HeapValue::I16Array(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::I16(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v as i64)).collect())
         }
-        HeapValue::I32Array(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::I32(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v as i64)).collect())
         }
-        HeapValue::U8Array(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::U8(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v as i64)).collect())
         }
-        HeapValue::U16Array(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::U16(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v as i64)).collect())
         }
-        HeapValue::U32Array(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::U32(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v as i64)).collect())
         }
-        HeapValue::U64Array(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::U64(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Int(v as i64)).collect())
         }
-        HeapValue::F32Array(a) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::F32(a)) => {
             ExternalValue::Array(a.iter().map(|&v| ExternalValue::Number(v as f64)).collect())
         }
-        HeapValue::Matrix(m) => {
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::Matrix(m)) => {
             ExternalValue::Opaque(format!("<Mat<number>:{}x{}>", m.rows, m.cols))
+        }
+        HeapValue::TypedArray(crate::heap_value::TypedArrayData::FloatSlice {
+            parent,
+            offset,
+            len,
+        }) => {
+            let slice = &parent.data[*offset as usize..(*offset + *len) as usize];
+            ExternalValue::Array(slice.iter().map(|&v| ExternalValue::Number(v)).collect())
         }
         HeapValue::Iterator(_) => ExternalValue::Opaque("<iterator>".to_string()),
         HeapValue::Generator(_) => ExternalValue::Opaque("<generator>".to_string()),
-        HeapValue::Mutex(_) => ExternalValue::Opaque("<mutex>".to_string()),
-        HeapValue::Atomic(a) => {
+        // Concurrency
+        HeapValue::Concurrency(crate::heap_value::ConcurrencyData::Mutex(_)) => ExternalValue::Opaque("<mutex>".to_string()),
+        HeapValue::Concurrency(crate::heap_value::ConcurrencyData::Atomic(a)) => {
             ExternalValue::Int(a.inner.load(std::sync::atomic::Ordering::Relaxed))
         }
-        HeapValue::Channel(c) => {
+        HeapValue::Concurrency(crate::heap_value::ConcurrencyData::Channel(c)) => {
             if c.is_sender() {
                 ExternalValue::Opaque("<channel:sender>".to_string())
             } else {
                 ExternalValue::Opaque("<channel:receiver>".to_string())
             }
         }
-        HeapValue::Lazy(l) => {
+        HeapValue::Concurrency(crate::heap_value::ConcurrencyData::Lazy(l)) => {
             if let Ok(guard) = l.value.lock() {
                 if let Some(val) = guard.as_ref() {
                     return nb_to_external(val, schemas);
@@ -418,14 +426,6 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
             ExternalValue::Opaque("<lazy:uninitialized>".to_string())
         }
         HeapValue::Char(c) => ExternalValue::String(c.to_string()),
-        HeapValue::FloatArraySlice {
-            parent,
-            offset,
-            len,
-        } => {
-            let slice = &parent.data[*offset as usize..(*offset + *len) as usize];
-            ExternalValue::Array(slice.iter().map(|&v| ExternalValue::Number(v)).collect())
-        }
     }
 }
 

@@ -419,7 +419,7 @@ fn heap_to_msgpack_value(hv: &HeapValue, schemas: &TypeSchemaRegistry) -> rmpv::
                 .collect();
             rmpv::Value::Map(entries)
         }
-        HeapValue::TypeAnnotatedValue { value, .. } => nanboxed_to_msgpack_value(value, schemas),
+        HeapValue::Rare(shape_value::RareHeapData::TypeAnnotatedValue { value, .. }) => nanboxed_to_msgpack_value(value, schemas),
         HeapValue::Some(inner) => nanboxed_to_msgpack_value(inner, schemas),
         HeapValue::Ok(inner) => nanboxed_to_msgpack_value(inner, schemas),
         HeapValue::Err(inner) => nanboxed_to_msgpack_value(inner, schemas),

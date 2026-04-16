@@ -7,7 +7,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ConcurrencyData, VMError, ValueWord, ValueWordExt};
 use std::sync::atomic::Ordering;
 
 use super::raw_helpers::{extract_heap_ref, extract_number_coerce};
@@ -38,7 +38,7 @@ pub fn v2_mutex_lock(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("lock()", "mutex"))?;
     match heap {
-        HeapValue::Mutex(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Mutex(data)) => {
             let guard = data
                 .inner
                 .lock()
@@ -58,7 +58,7 @@ pub fn v2_mutex_try_lock(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("try_lock()", "mutex"))?;
     match heap {
-        HeapValue::Mutex(data) => match data.inner.try_lock() {
+        HeapValue::Concurrency(ConcurrencyData::Mutex(data)) => match data.inner.try_lock() {
             Ok(guard) => Ok(into_raw(guard.clone())),
             Err(_) => Ok(into_raw(ValueWord::none())),
         },
@@ -81,7 +81,7 @@ pub fn v2_mutex_set(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("set()", "mutex"))?;
     match heap {
-        HeapValue::Mutex(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Mutex(data)) => {
             let mut guard = data
                 .inner
                 .lock()
@@ -104,7 +104,7 @@ pub fn v2_atomic_load(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("load()", "atomic"))?;
     match heap {
-        HeapValue::Atomic(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
             let val = data.inner.load(Ordering::SeqCst);
             Ok(into_raw(ValueWord::from_i64(val)))
         }
@@ -126,7 +126,7 @@ pub fn v2_atomic_store(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("store()", "atomic"))?;
     match heap {
-        HeapValue::Atomic(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
             data.inner.store(new_val, Ordering::SeqCst);
             Ok(into_raw(ValueWord::none()))
         }
@@ -148,7 +148,7 @@ pub fn v2_atomic_fetch_add(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("fetch_add()", "atomic"))?;
     match heap {
-        HeapValue::Atomic(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
             let prev = data.inner.fetch_add(delta, Ordering::SeqCst);
             Ok(into_raw(ValueWord::from_i64(prev)))
         }
@@ -170,7 +170,7 @@ pub fn v2_atomic_fetch_sub(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("fetch_sub()", "atomic"))?;
     match heap {
-        HeapValue::Atomic(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
             let prev = data.inner.fetch_sub(delta, Ordering::SeqCst);
             Ok(into_raw(ValueWord::from_i64(prev)))
         }
@@ -197,7 +197,7 @@ pub fn v2_atomic_compare_exchange(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("compare_exchange()", "atomic"))?;
     match heap {
-        HeapValue::Atomic(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Atomic(data)) => {
             match data
                 .inner
                 .compare_exchange(expected, new_val, Ordering::SeqCst, Ordering::SeqCst)
@@ -223,7 +223,7 @@ pub fn v2_lazy_get(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("get()", "lazy"))?;
     match heap {
-        HeapValue::Lazy(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Lazy(data)) => {
             // Check if already initialized
             let existing = data
                 .value
@@ -277,7 +277,7 @@ pub fn v2_lazy_is_initialized(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("is_initialized()", "lazy"))?;
     match heap {
-        HeapValue::Lazy(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Lazy(data)) => {
             let initialized = data.is_initialized();
             Ok(into_raw(ValueWord::from_bool(initialized)))
         }

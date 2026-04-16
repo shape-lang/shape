@@ -26,7 +26,7 @@
 use crate::content_renderer::RendererCapabilities;
 use crate::type_schema::{SchemaId, lookup_schema_by_id_public};
 use shape_value::content::{BorderStyle, ContentNode, ContentTable};
-use shape_value::heap_value::HeapValue;
+use shape_value::heap_value::{HeapValue, TypedArrayData, TableViewData};
 use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_HEAP};
 use shape_value::{DataTable, ValueWord, ValueWordExt};
 
@@ -169,14 +169,14 @@ fn render_heap_as_content(value: &ValueWord) -> ContentNode {
             heap_mask,
         }) => render_typed_object_as_content(*schema_id, slots, *heap_mask),
         Some(HeapValue::DataTable(dt)) => datatable_to_content_node(dt, None),
-        Some(HeapValue::TypedTable { table, .. }) => datatable_to_content_node(table, None),
-        Some(HeapValue::IndexedTable { table, .. }) => datatable_to_content_node(table, None),
+        Some(HeapValue::TableView(TableViewData::TypedTable { table, .. })) => datatable_to_content_node(table, None),
+        Some(HeapValue::TableView(TableViewData::IndexedTable { table, .. })) => datatable_to_content_node(table, None),
         // Typed arrays: render as plain text with bracket notation
-        Some(HeapValue::IntArray(a)) => {
+        Some(HeapValue::TypedArray(TypedArrayData::I64(a))) => {
             let elems: Vec<String> = a.iter().map(|v| v.to_string()).collect();
             ContentNode::plain(format!("[{}]", elems.join(", ")))
         }
-        Some(HeapValue::FloatArray(a)) => {
+        Some(HeapValue::TypedArray(TypedArrayData::F64(a))) => {
             let elems: Vec<String> = a
                 .iter()
                 .map(|v| {
@@ -189,11 +189,11 @@ fn render_heap_as_content(value: &ValueWord) -> ContentNode {
                 .collect();
             ContentNode::plain(format!("[{}]", elems.join(", ")))
         }
-        Some(HeapValue::FloatArraySlice {
+        Some(HeapValue::TypedArray(TypedArrayData::FloatSlice {
             parent,
             offset,
             len,
-        }) => {
+        })) => {
             let start = *offset as usize;
             let end = start + *len as usize;
             let elems: Vec<String> = parent.data[start..end]
@@ -208,7 +208,7 @@ fn render_heap_as_content(value: &ValueWord) -> ContentNode {
                 .collect();
             ContentNode::plain(format!("[{}]", elems.join(", ")))
         }
-        Some(HeapValue::BoolArray(a)) => {
+        Some(HeapValue::TypedArray(TypedArrayData::Bool(a))) => {
             let elems: Vec<String> = a
                 .iter()
                 .map(|v| if *v != 0 { "true" } else { "false" }.to_string())

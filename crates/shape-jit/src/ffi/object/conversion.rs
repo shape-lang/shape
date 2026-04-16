@@ -483,6 +483,7 @@ pub fn typed_scalar_to_jit_bits(ts: &shape_value::TypedScalar) -> u64 {
 pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
     use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
     use shape_value::heap_value::HeapValue;
+    use shape_value::{TypedArrayData, TemporalData};
 
     // Unified heap values (bit-47 set) are already in JIT-compatible format.
     // Bump refcount before returning the bits, since the source ValueWord will
@@ -533,8 +534,8 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                 let boxed_arr: Vec<u64> = arr.iter().map(|v| nanboxed_to_jit_bits(v)).collect();
                 JitArray::from_vec(boxed_arr).heap_box()
             }
-            Some(HeapValue::Time(dt)) => unified_box(HK_TIME, dt.timestamp()),
-            Some(HeapValue::Duration(dur)) => {
+            Some(HeapValue::Temporal(TemporalData::DateTime(dt))) => unified_box(HK_TIME, dt.timestamp()),
+            Some(HeapValue::Temporal(TemporalData::Duration(dur))) => {
                 let unit_code = match dur.unit {
                     crate::ast::DurationUnit::Seconds => 0,
                     crate::ast::DurationUnit::Minutes => 1,
@@ -553,7 +554,7 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                     },
                 )
             }
-            Some(HeapValue::Timeframe(tf)) => {
+            Some(HeapValue::Temporal(TemporalData::Timeframe(tf))) => {
                 let internal_tf = crate::ast::data::Timeframe::new(
                     tf.value,
                     match tf.unit {
@@ -594,8 +595,8 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                 },
             ),
             Some(HeapValue::Future(id)) => unified_box(HK_FUTURE, *id),
-            Some(HeapValue::FloatArray(buf)) => {
-                // Bridge FloatArray → JitArray with typed_data pointing to
+            Some(HeapValue::TypedArray(TypedArrayData::F64(buf))) => {
+                // Bridge F64 TypedArray → JitArray with typed_data pointing to
                 // the AlignedTypedBuffer's f64 data for direct numeric access.
                 let len = buf.data.len();
                 let boxed_arr: Vec<u64> = buf
@@ -617,8 +618,8 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                 let _ = len; // suppress unused warning
                 { jit_arr.kind = HK_FLOAT_ARRAY; jit_arr.heap_box() }
             }
-            Some(HeapValue::IntArray(buf)) => {
-                // Bridge IntArray → JitArray with typed_data pointing to
+            Some(HeapValue::TypedArray(TypedArrayData::I64(buf))) => {
+                // Bridge I64 TypedArray → JitArray with typed_data pointing to
                 // the TypedBuffer<i64>'s data for direct integer access.
                 let boxed_arr: Vec<u64> = buf
                     .data
@@ -633,12 +634,12 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                     crate::jit_array::ArrayElementKind::Int64.as_byte();
                 { jit_arr.kind = HK_INT_ARRAY; jit_arr.heap_box() }
             }
-            Some(HeapValue::FloatArraySlice {
+            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice {
                 parent,
                 offset,
                 len,
-            }) => {
-                // Bridge FloatArraySlice → JitArray with typed_data pointing
+            })) => {
+                // Bridge FloatSlice TypedArray → JitArray with typed_data pointing
                 // to the parent MatrixData's AlignedVec at the given offset.
                 // Preserves parent Arc linkage for clean round-trip on deopt.
                 let off = *offset as usize;
@@ -669,21 +670,21 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                 jit_arr.slice_len = *len;
                 { jit_arr.kind = HK_FLOAT_ARRAY_SLICE; jit_arr.heap_box() }
             }
-            Some(HeapValue::Matrix(mat_arc)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::Matrix(mat_arc))) => {
                 // Bridge Matrix → JitMatrix with direct f64 data pointer.
                 let jm = crate::jit_matrix::JitMatrix::from_arc(mat_arc);
                 unified_box(HK_MATRIX, jm)
             }
             // Width-specific typed arrays
-            Some(HeapValue::BoolArray(buf)) => typed_array_to_jit(&buf.data, HK_BOOL_ARRAY, ArrayElementKind::Bool),
-            Some(HeapValue::I8Array(buf)) => typed_array_to_jit(&buf.data, HK_I8_ARRAY, ArrayElementKind::I8),
-            Some(HeapValue::I16Array(buf)) => typed_array_to_jit(&buf.data, HK_I16_ARRAY, ArrayElementKind::I16),
-            Some(HeapValue::I32Array(buf)) => typed_array_to_jit(&buf.data, HK_I32_ARRAY, ArrayElementKind::I32),
-            Some(HeapValue::U8Array(buf)) => typed_array_to_jit(&buf.data, HK_U8_ARRAY, ArrayElementKind::U8),
-            Some(HeapValue::U16Array(buf)) => typed_array_to_jit(&buf.data, HK_U16_ARRAY, ArrayElementKind::U16),
-            Some(HeapValue::U32Array(buf)) => typed_array_to_jit(&buf.data, HK_U32_ARRAY, ArrayElementKind::U32),
-            Some(HeapValue::U64Array(buf)) => typed_array_to_jit(&buf.data, HK_U64_ARRAY, ArrayElementKind::U64),
-            Some(HeapValue::F32Array(buf)) => typed_array_to_jit(&buf.data, HK_F32_ARRAY, ArrayElementKind::F32),
+            Some(HeapValue::TypedArray(TypedArrayData::Bool(buf))) => typed_array_to_jit(&buf.data, HK_BOOL_ARRAY, ArrayElementKind::Bool),
+            Some(HeapValue::TypedArray(TypedArrayData::I8(buf))) => typed_array_to_jit(&buf.data, HK_I8_ARRAY, ArrayElementKind::I8),
+            Some(HeapValue::TypedArray(TypedArrayData::I16(buf))) => typed_array_to_jit(&buf.data, HK_I16_ARRAY, ArrayElementKind::I16),
+            Some(HeapValue::TypedArray(TypedArrayData::I32(buf))) => typed_array_to_jit(&buf.data, HK_I32_ARRAY, ArrayElementKind::I32),
+            Some(HeapValue::TypedArray(TypedArrayData::U8(buf))) => typed_array_to_jit(&buf.data, HK_U8_ARRAY, ArrayElementKind::U8),
+            Some(HeapValue::TypedArray(TypedArrayData::U16(buf))) => typed_array_to_jit(&buf.data, HK_U16_ARRAY, ArrayElementKind::U16),
+            Some(HeapValue::TypedArray(TypedArrayData::U32(buf))) => typed_array_to_jit(&buf.data, HK_U32_ARRAY, ArrayElementKind::U32),
+            Some(HeapValue::TypedArray(TypedArrayData::U64(buf))) => typed_array_to_jit(&buf.data, HK_U64_ARRAY, ArrayElementKind::U64),
+            Some(HeapValue::TypedArray(TypedArrayData::F32(buf))) => typed_array_to_jit(&buf.data, HK_F32_ARRAY, ArrayElementKind::F32),
             // Pass through VM-allocated heap values (TypedObject, Closure,
             // HashMap, DataTable, etc.) as raw bits. Clone first to bump
             // the Arc refcount so the heap allocation stays alive after

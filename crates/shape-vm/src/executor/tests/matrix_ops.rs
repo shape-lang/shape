@@ -13,8 +13,8 @@ use std::sync::Arc;
 /// Extract f64 slice data from either a FloatArray or FloatArraySlice.
 fn extract_float_data(vw: &ValueWord) -> Vec<f64> {
     match vw.as_heap_ref() {
-        Some(HeapValue::FloatArray(arr)) => arr.as_slice().to_vec(),
-        Some(HeapValue::FloatArraySlice { parent, offset, len }) => {
+        Some(HeapValue::TypedArray(shape_value::TypedArrayData::F64(arr))) => arr.as_slice().to_vec(),
+        Some(HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice { parent, offset, len })) => {
             let off = *offset as usize;
             let slice_len = *len as usize;
             parent.data[off..off + slice_len].to_vec()

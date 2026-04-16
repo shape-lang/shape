@@ -10,7 +10,7 @@ use crate::executor::VirtualMachine;
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{TemporalData, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Helper: extract DateTime<FixedOffset> from the receiver (args[0]).
@@ -327,7 +327,7 @@ pub fn v2_add(
     let rhs_hv = unsafe { raw_helpers::extract_heap_ref(args[1]) }
         .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan", args[1]))?;
     match rhs_hv {
-        HeapValue::TimeSpan(dur) => {
+        HeapValue::Temporal(TemporalData::TimeSpan(dur)) => {
             let result = dt
                 .checked_add_signed(*dur)
                 .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
@@ -350,13 +350,13 @@ pub fn v2_sub(
     let rhs_hv = unsafe { raw_helpers::extract_heap_ref(args[1]) }
         .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan or DateTime", args[1]))?;
     match rhs_hv {
-        HeapValue::TimeSpan(dur) => {
+        HeapValue::Temporal(TemporalData::TimeSpan(dur)) => {
             let result = dt
                 .checked_sub_signed(*dur)
                 .ok_or_else(|| VMError::RuntimeError("DateTime overflow in sub".to_string()))?;
             Ok(ValueWord::from_time(result).into_raw_bits())
         }
-        HeapValue::Time(other_dt) => {
+        HeapValue::Temporal(TemporalData::DateTime(other_dt)) => {
             let diff = *dt - *other_dt;
             Ok(ValueWord::from_timespan(diff).into_raw_bits())
         }
@@ -504,7 +504,7 @@ pub fn v2_timespan_add(
     let recv_hv = unsafe { raw_helpers::extract_heap_ref(args[0]) }
         .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan", args[0]))?;
     let dur = match recv_hv {
-        HeapValue::TimeSpan(ts) => *ts,
+        HeapValue::Temporal(TemporalData::TimeSpan(ts)) => *ts,
         _ => {
             return Err(VMError::TypeError {
                 expected: "Duration/TimeSpan",
@@ -515,13 +515,13 @@ pub fn v2_timespan_add(
     let rhs_hv = unsafe { raw_helpers::extract_heap_ref(args[1]) }
         .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan or DateTime", args[1]))?;
     match rhs_hv {
-        HeapValue::TimeSpan(other_dur) => {
+        HeapValue::Temporal(TemporalData::TimeSpan(other_dur)) => {
             let result = dur
                 .checked_add(other_dur)
                 .ok_or_else(|| VMError::RuntimeError("Duration overflow in add".to_string()))?;
             Ok(ValueWord::from_timespan(result).into_raw_bits())
         }
-        HeapValue::Time(dt) => {
+        HeapValue::Temporal(TemporalData::DateTime(dt)) => {
             let result = dt
                 .checked_add_signed(dur)
                 .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
@@ -543,7 +543,7 @@ pub fn v2_timespan_sub(
     let recv_hv = unsafe { raw_helpers::extract_heap_ref(args[0]) }
         .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan", args[0]))?;
     let dur = match recv_hv {
-        HeapValue::TimeSpan(ts) => *ts,
+        HeapValue::Temporal(TemporalData::TimeSpan(ts)) => *ts,
         _ => {
             return Err(VMError::TypeError {
                 expected: "Duration/TimeSpan",
@@ -554,7 +554,7 @@ pub fn v2_timespan_sub(
     let rhs_hv = unsafe { raw_helpers::extract_heap_ref(args[1]) }
         .ok_or_else(|| raw_helpers::type_error("Duration/TimeSpan", args[1]))?;
     match rhs_hv {
-        HeapValue::TimeSpan(other_dur) => {
+        HeapValue::Temporal(TemporalData::TimeSpan(other_dur)) => {
             let result = dur
                 .checked_sub(other_dur)
                 .ok_or_else(|| VMError::RuntimeError("Duration overflow in sub".to_string()))?;

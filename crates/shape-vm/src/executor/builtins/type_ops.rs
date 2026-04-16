@@ -661,7 +661,7 @@ impl VirtualMachine {
             TAG_REF => TypeAnnotation::Basic("reference".to_string()),
             TAG_HEAP => {
                 // cold-path: as_heap_ref retained — type introspection multi-variant match
-                if let Some(shape_value::HeapValue::TypeAnnotation(_)) = nb.as_heap_ref() { // cold-path
+                if let Some(shape_value::HeapValue::Rare(shape_value::RareHeapData::TypeAnnotation(_))) = nb.as_heap_ref() { // cold-path
                     return TypeAnnotation::Reference("Type".into());
                 }
 
@@ -968,8 +968,8 @@ impl VirtualMachine {
         // cold-path: as_heap_ref retained — multi-variant table extraction
         let table = match args[0].as_heap_ref() { // cold-path
             Some(HeapValue::DataTable(dt)) => dt.clone(),
-            Some(HeapValue::TypedTable { table, .. }) => table.clone(),
-            Some(HeapValue::IndexedTable { table, .. }) => table.clone(),
+            Some(HeapValue::TableView(shape_value::TableViewData::TypedTable { table, .. })) => table.clone(),
+            Some(HeapValue::TableView(shape_value::TableViewData::IndexedTable { table, .. })) => table.clone(),
             _ => {
                 return Ok(self.native_result_err(
                     format!(

@@ -134,10 +134,10 @@ impl VirtualMachine {
         let mut preferred_type_name: Option<String> = None;
         let mut selected_impl_name: Option<String> = None;
         // cold-path: as_heap_ref retained — UFCS dispatch TypeAnnotatedValue unwrap
-        let unwrapped = if let Some(HeapValue::TypeAnnotatedValue {
+        let unwrapped = if let Some(HeapValue::Rare(shape_value::RareHeapData::TypeAnnotatedValue {
             type_name,
             value: inner,
-        }) = value.as_heap_ref() // cold-path
+        })) = value.as_heap_ref() // cold-path
         {
             if let Some(impl_name) = type_name.strip_prefix("__impl__:") {
                 selected_impl_name = Some(impl_name.to_string());
@@ -1070,10 +1070,10 @@ impl VirtualMachine {
         let dt = DataTable::with_type_name(batch, type_name).with_schema_id(schema_id);
         let table = Arc::new(dt);
 
-        Ok(ValueWord::from_heap_value(HeapValue::TypedTable {
+        Ok(ValueWord::from_heap_value(HeapValue::TableView(shape_value::TableViewData::TypedTable {
             schema_id: schema_id as u64,
             table,
-        }))
+        })))
     }
 }
 

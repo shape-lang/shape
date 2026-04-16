@@ -8,7 +8,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::objects::raw_helpers;
 use crate::memory::{record_heap_write, write_barrier_slot, write_barrier_vw};
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
-use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt, heap_value::NativeScalar};
+use shape_value::{HeapValue, TypedArrayData, TemporalData, RareHeapData, TableViewData, VMError, ValueWord, ValueWordExt, heap_value::NativeScalar};
 use std::sync::Arc;
 
 /// PHF map for Time property access — replaces sequential string comparisons.
@@ -517,7 +517,7 @@ impl VirtualMachine {
                 }
 
                 // IntArray: typed array indexing
-                HeapValue::IntArray(arr) => {
+                HeapValue::TypedArray(TypedArrayData::I64(arr)) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
                             return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
@@ -539,7 +539,7 @@ impl VirtualMachine {
                 }
 
                 // FloatArray: typed array indexing
-                HeapValue::FloatArray(arr) => {
+                HeapValue::TypedArray(TypedArrayData::F64(arr)) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
                             return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
@@ -561,7 +561,7 @@ impl VirtualMachine {
                 }
 
                 // FloatArraySlice: zero-copy read-only view into matrix row
-                HeapValue::FloatArraySlice { parent, offset, len } => {
+                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len }) => {
                     let slice_len = *len as usize;
                     let off = *offset as usize;
                     if let Some(ks) = key_str {
@@ -584,7 +584,7 @@ impl VirtualMachine {
                 }
 
                 // BoolArray: typed array indexing
-                HeapValue::BoolArray(arr) => {
+                HeapValue::TypedArray(TypedArrayData::Bool(arr)) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
                             return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
@@ -630,7 +630,7 @@ impl VirtualMachine {
                 }
 
                 // Matrix: .rows, .cols, .length, or numeric index
-                HeapValue::Matrix(mat) => {
+                HeapValue::TypedArray(TypedArrayData::Matrix(mat)) => {
                     if let Some(ks) = key_str {
                         match ks {
                             "rows" => return self.push_raw_u64(ValueWord::from_i64(mat.rows as i64)),
@@ -654,7 +654,7 @@ impl VirtualMachine {
                             let offset = actual as u32 * cols;
                             let len = cols;
                             return self.push_raw_u64(ValueWord::from_heap_value(
-                                HeapValue::FloatArraySlice { parent: parent_arc, offset, len },
+                                HeapValue::TypedArray(TypedArrayData::FloatSlice { parent: parent_arc, offset, len }),
                             ));
                         } else {
                             return self.push_raw_u64(ValueWord::none());
@@ -663,7 +663,7 @@ impl VirtualMachine {
                 }
 
                 // Time: PHF map dispatch
-                HeapValue::Time(dt) => {
+                HeapValue::Temporal(TemporalData::DateTime(dt)) => {
                     if let Some(ks) = key_str {
                         if let Some(accessor) = TIME_PROPERTIES.get(ks) {
                             return self.push_raw_u64(accessor(dt));
@@ -673,7 +673,7 @@ impl VirtualMachine {
                 }
 
                 // TypedTable → ColumnRef
-                HeapValue::TypedTable { schema_id, table } => {
+                HeapValue::TableView(TableViewData::TypedTable { schema_id, table }) => {
                     if let Some(ks) = key_str {
                         let col_id = table
                             .inner()
@@ -703,9 +703,9 @@ impl VirtualMachine {
                 }
 
                 // IndexedTable → ColumnRef
-                HeapValue::IndexedTable {
+                HeapValue::TableView(TableViewData::IndexedTable {
                     schema_id, table, ..
-                } => {
+                }) => {
                     if let Some(ks) = key_str {
                         let col_id = table
                             .inner()
@@ -722,7 +722,7 @@ impl VirtualMachine {
                 }
 
                 // RowView → column value
-                HeapValue::RowView { table, row_idx, .. } => {
+                HeapValue::TableView(TableViewData::RowView { table, row_idx, .. }) => {
                     if let Some(ks) = key_str {
                         let col_idx = table
                             .inner()
@@ -770,7 +770,7 @@ impl VirtualMachine {
                 }
 
                 // ExprProxy → nested ExprProxy
-                HeapValue::ExprProxy(col) => {
+                HeapValue::Rare(RareHeapData::ExprProxy(col)) => {
                     if let Some(ks) = key_str {
                         return self
                             .push_raw_u64(ValueWord::from_string(Arc::new(format!("{}.{}", col, ks))));
@@ -981,7 +981,7 @@ impl VirtualMachine {
         // Typed array index assignment (IntArray, FloatArray, BoolArray)
         if let Some(heap) = object_nb.as_heap_mut() {
             match heap {
-                HeapValue::IntArray(arr) => {
+                HeapValue::TypedArray(TypedArrayData::I64(arr)) => {
                     let idx = Self::parse_array_index(key_nb)?;
                     let len = arr.len() as i64;
                     let actual = if idx < 0 { len + idx } else { idx };
@@ -1005,7 +1005,7 @@ impl VirtualMachine {
                     arr_mut.data[actual as usize] = val;
                     return Ok(());
                 }
-                HeapValue::FloatArray(arr) => {
+                HeapValue::TypedArray(TypedArrayData::F64(arr)) => {
                     let idx = Self::parse_array_index(key_nb)?;
                     let len = arr.len() as i64;
                     let actual = if idx < 0 { len + idx } else { idx };
@@ -1029,12 +1029,12 @@ impl VirtualMachine {
                     arr_mut.data.as_mut_slice()[actual as usize] = val;
                     return Ok(());
                 }
-                HeapValue::FloatArraySlice { .. } => {
+                HeapValue::TypedArray(TypedArrayData::FloatSlice { .. }) => {
                     return Err(VMError::RuntimeError(
                         "cannot mutate read-only row view".to_string(),
                     ));
                 }
-                HeapValue::BoolArray(arr) => {
+                HeapValue::TypedArray(TypedArrayData::Bool(arr)) => {
                     let idx = Self::parse_array_index(key_nb)?;
                     let len = arr.len() as i64;
                     let actual = if idx < 0 { len + idx } else { idx };
@@ -1146,10 +1146,10 @@ impl VirtualMachine {
         if let Some(hv) = unsafe { raw_helpers::extract_heap_ref(nb.raw_bits()) } {
             let length = match hv {
                 HeapValue::Array(arr) => arr.len(),
-                HeapValue::IntArray(arr) => arr.len(),
-                HeapValue::FloatArray(arr) => arr.len(),
-                HeapValue::FloatArraySlice { len, .. } => *len as usize,
-                HeapValue::BoolArray(arr) => arr.len(),
+                HeapValue::TypedArray(TypedArrayData::I64(arr)) => arr.len(),
+                HeapValue::TypedArray(TypedArrayData::F64(arr)) => arr.len(),
+                HeapValue::TypedArray(TypedArrayData::FloatSlice { len, .. }) => *len as usize,
+                HeapValue::TypedArray(TypedArrayData::Bool(arr)) => arr.len(),
                 HeapValue::TypedObject { slots, .. } => slots.len(),
                 HeapValue::NativeView(view) => view.layout.fields.len(),
                 HeapValue::String(s) => s.chars().count(),
@@ -1157,7 +1157,7 @@ impl VirtualMachine {
                 HeapValue::Set(d) => d.items.len(),
                 HeapValue::Deque(d) => d.items.len(),
                 HeapValue::PriorityQueue(d) => d.items.len(),
-                HeapValue::Matrix(m) => m.data.len(),
+                HeapValue::TypedArray(TypedArrayData::Matrix(m)) => m.data.len(),
                 _ => {
                     return Err(VMError::TypeError {
                         expected: "array, object, string, or matrix",

@@ -11,6 +11,7 @@ use shape_runtime::type_schema::field_types::FieldType;
 use shape_runtime::type_system::annotation_to_string;
 use shape_value::heap_value::HeapValue;
 use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use shape_value::{TypedArrayData, TemporalData, RareHeapData, ConcurrencyData, TableViewData};
 use shape_value::{ValueWord, ValueWordExt};
 
 /// Formatter for ValueWord values
@@ -155,11 +156,11 @@ impl<'a> ValueFormatter<'a> {
             Some(HeapValue::Closure { function_id, .. }) => format!("[Closure:{}]", function_id),
             Some(HeapValue::HostClosure(_)) => "<HostClosure>".to_string(),
             Some(HeapValue::DataTable(dt)) => format!("{}", dt),
-            Some(HeapValue::TypedTable { table, .. }) => format!("{}", table),
-            Some(HeapValue::RowView { table, row_idx, .. }) => {
+            Some(HeapValue::TableView(TableViewData::TypedTable { table, .. })) => format!("{}", table),
+            Some(HeapValue::TableView(TableViewData::RowView { table, row_idx, .. })) => {
                 format!("[Row {} of {} rows]", row_idx, table.row_count())
             }
-            Some(HeapValue::ColumnRef { table, col_id, .. }) => {
+            Some(HeapValue::TableView(TableViewData::ColumnRef { table, col_id, .. })) => {
                 let col = table.inner().column(*col_id as usize);
                 let dtype = col.data_type();
                 let type_str = match dtype {
@@ -176,9 +177,9 @@ impl<'a> ValueFormatter<'a> {
                     .unwrap_or_else(|| format!("col_{}", col_id));
                 format!("Column<{}>({}, {} rows)", type_str, name, col.len())
             }
-            Some(HeapValue::IndexedTable {
+            Some(HeapValue::TableView(TableViewData::IndexedTable {
                 table, index_col, ..
-            }) => {
+            })) => {
                 let col_name = table
                     .column_names()
                     .get(*index_col as usize)
@@ -252,23 +253,23 @@ impl<'a> ValueFormatter<'a> {
             Some(HeapValue::TraitObject { value, .. }) => {
                 self.format_nb_with_depth(value, depth + 1)
             }
-            Some(HeapValue::ExprProxy(col)) => format!("<ExprProxy:{}>", col),
-            Some(HeapValue::FilterExpr(node)) => format!("<FilterExpr:{:?}>", node),
-            Some(HeapValue::Time(t)) => t.to_rfc3339(),
-            Some(HeapValue::Duration(duration)) => format!("{}{:?}", duration.value, duration.unit),
-            Some(HeapValue::TimeSpan(ts)) => format!("{:?}", ts),
-            Some(HeapValue::Timeframe(tf)) => format!("{:?}", tf),
-            Some(HeapValue::TimeReference(value)) => format!("{:?}", value),
-            Some(HeapValue::DateTimeExpr(value)) => format!("{:?}", value),
-            Some(HeapValue::DataDateTimeRef(value)) => format!("{:?}", value),
-            Some(HeapValue::TypeAnnotation(value)) => annotation_to_string(value),
-            Some(HeapValue::TypeAnnotatedValue { value, .. }) => {
+            Some(HeapValue::Rare(RareHeapData::ExprProxy(col))) => format!("<ExprProxy:{}>", col),
+            Some(HeapValue::Rare(RareHeapData::FilterExpr(node))) => format!("<FilterExpr:{:?}>", node),
+            Some(HeapValue::Temporal(TemporalData::DateTime(t))) => t.to_rfc3339(),
+            Some(HeapValue::Temporal(TemporalData::Duration(duration))) => format!("{}{:?}", duration.value, duration.unit),
+            Some(HeapValue::Temporal(TemporalData::TimeSpan(ts))) => format!("{:?}", ts),
+            Some(HeapValue::Temporal(TemporalData::Timeframe(tf))) => format!("{:?}", tf),
+            Some(HeapValue::Temporal(TemporalData::TimeReference(value))) => format!("{:?}", value),
+            Some(HeapValue::Temporal(TemporalData::DateTimeExpr(value))) => format!("{:?}", value),
+            Some(HeapValue::Temporal(TemporalData::DataDateTimeRef(value))) => format!("{:?}", value),
+            Some(HeapValue::Rare(RareHeapData::TypeAnnotation(value))) => annotation_to_string(value),
+            Some(HeapValue::Rare(RareHeapData::TypeAnnotatedValue { value, .. })) => {
                 self.format_nb_with_depth(value, depth + 1)
             }
-            Some(HeapValue::PrintResult(p)) => p.rendered.clone(),
-            Some(HeapValue::SimulationCall(_)) => "[SimulationCall]".to_string(),
+            Some(HeapValue::Rare(RareHeapData::PrintResult(p))) => p.rendered.clone(),
+            Some(HeapValue::Rare(RareHeapData::SimulationCall(_))) => "[SimulationCall]".to_string(),
             Some(HeapValue::FunctionRef { .. }) => "[FunctionRef]".to_string(),
-            Some(HeapValue::DataReference(_)) => "[DataReference]".to_string(),
+            Some(HeapValue::Rare(RareHeapData::DataReference(_))) => "[DataReference]".to_string(),
             Some(HeapValue::NativeScalar(v)) => v.to_string(),
             Some(HeapValue::NativeView(v)) => format!(
                 "<{}:{}@0x{:x}>",
@@ -320,11 +321,11 @@ impl<'a> ValueFormatter<'a> {
             Some(HeapValue::SharedCell(arc)) => {
                 self.format_nb_with_depth(&arc.read().unwrap(), depth)
             }
-            Some(HeapValue::IntArray(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::I64(a))) => {
                 let elems: Vec<String> = a.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::FloatArray(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::F64(a))) => {
                 let elems: Vec<String> = a
                     .iter()
                     .map(|v| {
@@ -337,7 +338,7 @@ impl<'a> ValueFormatter<'a> {
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::FloatArraySlice { parent, offset, len }) => {
+            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len })) => {
                 let off = *offset as usize;
                 let slice_len = *len as usize;
                 let data = &parent.data[off..off + slice_len];
@@ -353,42 +354,42 @@ impl<'a> ValueFormatter<'a> {
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::BoolArray(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::Bool(a))) => {
                 let elems: Vec<String> = a
                     .iter()
                     .map(|v| if *v != 0 { "true" } else { "false" }.to_string())
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::I8Array(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::I8(a))) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::I16Array(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::I16(a))) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::I32Array(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::I32(a))) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::U8Array(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::U8(a))) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::U16Array(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::U16(a))) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::U32Array(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::U32(a))) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::U64Array(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::U64(a))) => {
                 let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::F32Array(a)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::F32(a))) => {
                 let elems: Vec<String> = a
                     .data
                     .iter()
@@ -402,7 +403,7 @@ impl<'a> ValueFormatter<'a> {
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
-            Some(HeapValue::Matrix(m)) => {
+            Some(HeapValue::TypedArray(TypedArrayData::Matrix(m))) => {
                 format!("<Mat<number>:{}x{}>", m.rows, m.cols)
             }
             Some(HeapValue::Iterator(it)) => {
@@ -411,14 +412,14 @@ impl<'a> ValueFormatter<'a> {
             Some(HeapValue::Generator(g)) => {
                 format!("<generator:state={}>", g.state)
             }
-            Some(HeapValue::Mutex(_)) => "<mutex>".to_string(),
-            Some(HeapValue::Atomic(a)) => {
+            Some(HeapValue::Concurrency(ConcurrencyData::Mutex(_))) => "<mutex>".to_string(),
+            Some(HeapValue::Concurrency(ConcurrencyData::Atomic(a))) => {
                 format!(
                     "<atomic:{}>",
                     a.inner.load(std::sync::atomic::Ordering::Relaxed)
                 )
             }
-            Some(HeapValue::Lazy(l)) => {
+            Some(HeapValue::Concurrency(ConcurrencyData::Lazy(l))) => {
                 let initialized = l.value.lock().map(|g| g.is_some()).unwrap_or(false);
                 if initialized {
                     "<lazy:initialized>".to_string()
@@ -426,7 +427,7 @@ impl<'a> ValueFormatter<'a> {
                     "<lazy:pending>".to_string()
                 }
             }
-            Some(HeapValue::Channel(c)) => {
+            Some(HeapValue::Concurrency(ConcurrencyData::Channel(c))) => {
                 if c.is_sender() {
                     "<channel:sender>".to_string()
                 } else {

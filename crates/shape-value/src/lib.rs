@@ -66,6 +66,9 @@ pub mod tags {
         HEAP_KIND_U64_ARRAY, HEAP_KIND_F32_ARRAY, HEAP_KIND_SET, HEAP_KIND_DEQUE,
         HEAP_KIND_PRIORITY_QUEUE, HEAP_KIND_CHANNEL, HEAP_KIND_CHAR, HEAP_KIND_PROJECTED_REF,
         HEAP_KIND_FLOAT_ARRAY_SLICE,
+        // New consolidated ordinals
+        HEAP_KIND_TYPED_ARRAY, HEAP_KIND_TEMPORAL, HEAP_KIND_RARE, HEAP_KIND_CONCURRENCY,
+        HEAP_KIND_TABLE_VIEW,
     };
 }
 pub mod typed_buffer;
@@ -95,8 +98,9 @@ pub use extraction::{
 };
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
 pub use heap_value::{
-    ChannelData, DataReferenceData, DequeData, HashMapData, HeapKind, HeapValue, PriorityQueueData,
-    ProjectedRefData, RefProjection, SetData, SimulationCallData,
+    ChannelData, ConcurrencyData, DataReferenceData, DequeData, HashMapData, HeapKind, HeapValue,
+    PriorityQueueData, ProjectedRefData, RareHeapData, RefProjection, SetData, SimulationCallData,
+    TableViewData, TemporalData, TypedArrayData,
 };
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;

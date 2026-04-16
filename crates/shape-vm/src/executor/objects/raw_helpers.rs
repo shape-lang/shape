@@ -10,7 +10,7 @@
 use shape_value::heap_value::{HashMapData, HeapValue};
 use shape_value::slot::ValueSlot;
 use shape_value::tags::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_HEAP, TAG_INT};
-use shape_value::{ArrayView, Upvalue, VMError, ValueWord, ValueWordExt};
+use shape_value::{TypedArrayData, TemporalData, RareHeapData, ArrayView, Upvalue, VMError, ValueWord, ValueWordExt};
 
 // ─── Inline scalar extraction ─────────────────────────────────────────────
 
@@ -85,7 +85,7 @@ pub fn extract_str(bits: u64) -> Option<&'static str> {
 pub fn extract_datetime(bits: u64) -> Option<&'static chrono::DateTime<chrono::FixedOffset>> {
     unsafe {
         extract_heap_ref(bits).and_then(|hv| match hv {
-            HeapValue::Time(dt) => Some(dt),
+            HeapValue::Temporal(TemporalData::DateTime(dt)) => Some(dt),
             _ => None,
         })
     }
@@ -148,14 +148,14 @@ pub fn extract_any_array(bits: u64) -> Option<ArrayView<'static>> {
     unsafe {
         extract_heap_ref(bits).and_then(|hv| match hv {
             HeapValue::Array(a) => Some(ArrayView::Generic(a)),
-            HeapValue::IntArray(a) => Some(ArrayView::Int(a)),
-            HeapValue::FloatArray(a) => Some(ArrayView::Float(a)),
-            HeapValue::BoolArray(a) => Some(ArrayView::Bool(a)),
-            HeapValue::I8Array(a) => Some(ArrayView::I8(a)),
-            HeapValue::I16Array(a) => Some(ArrayView::I16(a)),
-            HeapValue::I32Array(a) => Some(ArrayView::I32(a)),
-            HeapValue::U8Array(a) => Some(ArrayView::U8(a)),
-            HeapValue::U16Array(a) => Some(ArrayView::U16(a)),
+            HeapValue::TypedArray(TypedArrayData::I64(a)) => Some(ArrayView::Int(a)),
+            HeapValue::TypedArray(TypedArrayData::F64(a)) => Some(ArrayView::Float(a)),
+            HeapValue::TypedArray(TypedArrayData::Bool(a)) => Some(ArrayView::Bool(a)),
+            HeapValue::TypedArray(TypedArrayData::I8(a)) => Some(ArrayView::I8(a)),
+            HeapValue::TypedArray(TypedArrayData::I16(a)) => Some(ArrayView::I16(a)),
+            HeapValue::TypedArray(TypedArrayData::I32(a)) => Some(ArrayView::I32(a)),
+            HeapValue::TypedArray(TypedArrayData::U8(a)) => Some(ArrayView::U8(a)),
+            HeapValue::TypedArray(TypedArrayData::U16(a)) => Some(ArrayView::U16(a)),
             _ => None,
         })
     }
@@ -207,7 +207,7 @@ pub fn extract_priority_queue(
 pub fn extract_matrix(bits: u64) -> Option<&'static shape_value::heap_value::MatrixData> {
     unsafe {
         extract_heap_ref(bits).and_then(|hv| match hv {
-            HeapValue::Matrix(arc) => Some(arc.as_ref()),
+            HeapValue::TypedArray(TypedArrayData::Matrix(arc)) => Some(arc.as_ref()),
             _ => None,
         })
     }
@@ -221,7 +221,7 @@ pub fn extract_matrix_arc(
 ) -> Option<std::sync::Arc<shape_value::heap_value::MatrixData>> {
     unsafe {
         extract_heap_ref(bits).and_then(|hv| match hv {
-            HeapValue::Matrix(arc) => Some(arc.clone()),
+            HeapValue::TypedArray(TypedArrayData::Matrix(arc)) => Some(arc.clone()),
             _ => None,
         })
     }
@@ -322,7 +322,7 @@ pub fn extract_typed_object(bits: u64) -> Option<(u64, &'static [ValueSlot], u64
 #[inline]
 pub fn unwrap_annotated_bits(bits: u64) -> u64 {
     unsafe {
-        if let Some(HeapValue::TypeAnnotatedValue { value, .. }) = extract_heap_ref(bits) {
+        if let Some(HeapValue::Rare(RareHeapData::TypeAnnotatedValue { value, .. })) = extract_heap_ref(bits) {
             value.into_raw_bits()
         } else {
             bits
@@ -414,7 +414,7 @@ pub fn extract_filter_expr(
 ) -> Option<&'static std::sync::Arc<shape_value::value::FilterNode>> {
     unsafe {
         extract_heap_ref(bits).and_then(|hv| match hv {
-            HeapValue::FilterExpr(f) => Some(f),
+            HeapValue::Rare(RareHeapData::FilterExpr(f)) => Some(f),
             _ => None,
         })
     }

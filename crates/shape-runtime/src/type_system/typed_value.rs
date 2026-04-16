@@ -290,10 +290,10 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
         HeapValue::BigInt(_) => SemanticType::Integer,
         HeapValue::HostClosure(_) => SemanticType::Named("HostClosure".to_string()),
         HeapValue::DataTable(_) => SemanticType::Named("DataTable".to_string()),
-        HeapValue::TypedTable { .. } => SemanticType::Named("TypedTable".to_string()),
-        HeapValue::RowView { .. } => SemanticType::Named("Row".to_string()),
-        HeapValue::ColumnRef { .. } => SemanticType::Named("ColumnRef".to_string()),
-        HeapValue::IndexedTable { .. } => SemanticType::Named("IndexedTable".to_string()),
+        HeapValue::TableView(shape_value::heap_value::TableViewData::TypedTable { .. }) => SemanticType::Named("TypedTable".to_string()),
+        HeapValue::TableView(shape_value::heap_value::TableViewData::RowView { .. }) => SemanticType::Named("Row".to_string()),
+        HeapValue::TableView(shape_value::heap_value::TableViewData::ColumnRef { .. }) => SemanticType::Named("ColumnRef".to_string()),
+        HeapValue::TableView(shape_value::heap_value::TableViewData::IndexedTable { .. }) => SemanticType::Named("IndexedTable".to_string()),
         HeapValue::Range { .. } => SemanticType::Named("Range".to_string()),
         HeapValue::Enum(e) => SemanticType::Named(e.enum_name.clone()),
         HeapValue::Some(inner) => SemanticType::Option(Box::new(infer_semantic_type_nb(inner))),
@@ -308,12 +308,12 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
         HeapValue::Future(_) => SemanticType::Named("Future".to_string()),
         HeapValue::TaskGroup { .. } => SemanticType::Named("TaskGroup".to_string()),
         HeapValue::TraitObject { value, .. } => infer_semantic_type_nb(value),
-        HeapValue::ExprProxy(_) => SemanticType::Named("ExprProxy".to_string()),
-        HeapValue::FilterExpr(_) => SemanticType::Named("FilterExpr".to_string()),
-        HeapValue::Time(_) => SemanticType::Named("Time".to_string()),
-        HeapValue::Duration(_) => SemanticType::Named("Duration".to_string()),
-        HeapValue::TimeSpan(_) => SemanticType::Named("TimeSpan".to_string()),
-        HeapValue::Timeframe(_) => SemanticType::Named("Timeframe".to_string()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::ExprProxy(_)) => SemanticType::Named("ExprProxy".to_string()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::FilterExpr(_)) => SemanticType::Named("FilterExpr".to_string()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DateTime(_)) => SemanticType::Named("Time".to_string()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::Duration(_)) => SemanticType::Named("Duration".to_string()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::TimeSpan(_)) => SemanticType::Named("TimeSpan".to_string()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::Timeframe(_)) => SemanticType::Named("Timeframe".to_string()),
         HeapValue::NativeScalar(v) => match v {
             shape_value::heap_value::NativeScalar::I8(_) => SemanticType::Named("i8".to_string()),
             shape_value::heap_value::NativeScalar::U8(_) => SemanticType::Named("u8".to_string()),
@@ -337,14 +337,14 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
             if view.mutable { "CMut" } else { "CView" },
             view.layout.name
         )),
-        HeapValue::TimeReference(_) => SemanticType::Named("TimeReference".to_string()),
-        HeapValue::DateTimeExpr(_) => SemanticType::Named("DateTimeExpr".to_string()),
-        HeapValue::DataDateTimeRef(_) => SemanticType::Named("DataDateTimeRef".to_string()),
-        HeapValue::TypeAnnotation(_) => SemanticType::Named("TypeAnnotation".to_string()),
-        HeapValue::TypeAnnotatedValue { value, .. } => infer_semantic_type_nb(value),
-        HeapValue::PrintResult(_) => SemanticType::Named("PrintResult".to_string()),
-        HeapValue::SimulationCall(_) => SemanticType::Named("SimulationCall".to_string()),
-        HeapValue::DataReference { .. } => SemanticType::Named("DataReference".to_string()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::TimeReference(_)) => SemanticType::Named("TimeReference".to_string()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DateTimeExpr(_)) => SemanticType::Named("DateTimeExpr".to_string()),
+        HeapValue::Temporal(shape_value::heap_value::TemporalData::DataDateTimeRef(_)) => SemanticType::Named("DataDateTimeRef".to_string()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::TypeAnnotation(_)) => SemanticType::Named("TypeAnnotation".to_string()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::TypeAnnotatedValue { value, .. }) => infer_semantic_type_nb(value),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::PrintResult(_)) => SemanticType::Named("PrintResult".to_string()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::SimulationCall(_)) => SemanticType::Named("SimulationCall".to_string()),
+        HeapValue::Rare(shape_value::heap_value::RareHeapData::DataReference(_)) => SemanticType::Named("DataReference".to_string()),
         HeapValue::HashMap(_) => SemanticType::Named("HashMap".to_string()),
         HeapValue::Set(_) => SemanticType::Named("Set".to_string()),
         HeapValue::Deque(_) => SemanticType::Named("Deque".to_string()),
@@ -353,41 +353,41 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
         HeapValue::Instant(_) => SemanticType::Named("Instant".to_string()),
         HeapValue::IoHandle(_) => SemanticType::Named("IoHandle".to_string()),
         HeapValue::SharedCell(arc) => infer_semantic_type_nb(&arc.read().unwrap()),
-        HeapValue::IntArray(_) => SemanticType::Array(Box::new(SemanticType::Integer)),
-        HeapValue::FloatArray(_) => SemanticType::Array(Box::new(SemanticType::Number)),
-        HeapValue::FloatArraySlice { .. } => SemanticType::Array(Box::new(SemanticType::Number)),
-        HeapValue::BoolArray(_) => SemanticType::Array(Box::new(SemanticType::Bool)),
-        HeapValue::I8Array(_) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I64(_)) => SemanticType::Array(Box::new(SemanticType::Integer)),
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::F64(_)) => SemanticType::Array(Box::new(SemanticType::Number)),
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::FloatSlice { .. }) => SemanticType::Array(Box::new(SemanticType::Number)),
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::Bool(_)) => SemanticType::Array(Box::new(SemanticType::Bool)),
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I8(_)) => {
             SemanticType::Array(Box::new(SemanticType::Named("i8".to_string())))
         }
-        HeapValue::I16Array(_) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I16(_)) => {
             SemanticType::Array(Box::new(SemanticType::Named("i16".to_string())))
         }
-        HeapValue::I32Array(_) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::I32(_)) => {
             SemanticType::Array(Box::new(SemanticType::Named("i32".to_string())))
         }
-        HeapValue::U8Array(_) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U8(_)) => {
             SemanticType::Array(Box::new(SemanticType::Named("u8".to_string())))
         }
-        HeapValue::U16Array(_) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U16(_)) => {
             SemanticType::Array(Box::new(SemanticType::Named("u16".to_string())))
         }
-        HeapValue::U32Array(_) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U32(_)) => {
             SemanticType::Array(Box::new(SemanticType::Named("u32".to_string())))
         }
-        HeapValue::U64Array(_) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::U64(_)) => {
             SemanticType::Array(Box::new(SemanticType::Named("u64".to_string())))
         }
-        HeapValue::F32Array(_) => {
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::F32(_)) => {
             SemanticType::Array(Box::new(SemanticType::Named("f32".to_string())))
         }
-        HeapValue::Matrix(_) => SemanticType::Named("Mat<number>".to_string()),
+        HeapValue::TypedArray(shape_value::heap_value::TypedArrayData::Matrix(_)) => SemanticType::Named("Mat<number>".to_string()),
         HeapValue::Iterator(_) => SemanticType::Named("Iterator".to_string()),
         HeapValue::Generator(_) => SemanticType::Named("Generator".to_string()),
-        HeapValue::Mutex(_) => SemanticType::Named("Mutex".to_string()),
-        HeapValue::Atomic(_) => SemanticType::Named("Atomic".to_string()),
-        HeapValue::Lazy(_) => SemanticType::Named("Lazy".to_string()),
-        HeapValue::Channel(_) => SemanticType::Named("Channel".to_string()),
+        HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Mutex(_)) => SemanticType::Named("Mutex".to_string()),
+        HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Atomic(_)) => SemanticType::Named("Atomic".to_string()),
+        HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Lazy(_)) => SemanticType::Named("Lazy".to_string()),
+        HeapValue::Concurrency(shape_value::heap_value::ConcurrencyData::Channel(_)) => SemanticType::Named("Channel".to_string()),
         HeapValue::Char(_) => SemanticType::Named("char".to_string()),
     }
 }

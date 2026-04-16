@@ -212,7 +212,7 @@ pub fn nb_to_concrete_type(nb: &ValueWord) -> Option<ConcreteType> {
                 Some(ConcreteType::Struct(shape_value::v2::StructLayoutId(0)))
             }
             HeapValue::String(_) => Some(ConcreteType::String),
-            HeapValue::TypeAnnotation(ann) => annotation_to_concrete(ann).ok(),
+            HeapValue::Rare(shape_value::RareHeapData::TypeAnnotation(ann)) => annotation_to_concrete(ann).ok(),
             _ => None,
         };
     }

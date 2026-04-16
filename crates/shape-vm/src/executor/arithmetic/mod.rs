@@ -8,7 +8,7 @@ use crate::{
     executor::objects::raw_helpers,
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{TypedArrayData, TemporalData, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use crate::constants::EXACT_F64_INT_LIMIT;
@@ -27,11 +27,11 @@ fn ic_tag(v: &ValueWord) -> u8 {
 }
 
 /// Materialize a `FloatArraySlice` into a `FloatArray` so that downstream
-/// arithmetic paths (which match on `HeapValue::FloatArray`) work unchanged.
+/// arithmetic paths (which match on `HeapValue::TypedArray(TypedArrayData::F64(...))`) work unchanged.
 /// Non-slice values pass through unmodified.
 #[inline]
 fn materialize_float_slice(vw: ValueWord) -> ValueWord {
-    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) =
+    if let Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len })) =
         // SAFETY: vw is a live stack/arg value; pointer is valid.
         unsafe { raw_helpers::extract_heap_ref(vw.raw_bits()) }
     {
@@ -1292,7 +1292,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_decimal(*a_dec + *b_dec));
                             }
                             // Time + TimeSpan => Time
-                            (HeapValue::Time(dt), HeapValue::TimeSpan(dur)) => {
+                            (HeapValue::Temporal(TemporalData::DateTime(dt)), HeapValue::Temporal(TemporalData::TimeSpan(dur))) => {
                                 let result = dt.checked_add_signed(*dur).ok_or_else(|| {
                                     VMError::RuntimeError(
                                         "DateTime overflow in addition".to_string(),
@@ -1301,7 +1301,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_time(result));
                             }
                             // TimeSpan + Time => Time
-                            (HeapValue::TimeSpan(dur), HeapValue::Time(dt)) => {
+                            (HeapValue::Temporal(TemporalData::TimeSpan(dur)), HeapValue::Temporal(TemporalData::DateTime(dt))) => {
                                 let result = dt.checked_add_signed(*dur).ok_or_else(|| {
                                     VMError::RuntimeError(
                                         "DateTime overflow in addition".to_string(),
@@ -1310,7 +1310,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_time(result));
                             }
                             // TimeSpan + TimeSpan => TimeSpan
-                            (HeapValue::TimeSpan(a_dur), HeapValue::TimeSpan(b_dur)) => {
+                            (HeapValue::Temporal(TemporalData::TimeSpan(a_dur)), HeapValue::Temporal(TemporalData::TimeSpan(b_dur))) => {
                                 let result = a_dur.checked_add(b_dur).ok_or_else(|| {
                                     VMError::RuntimeError(
                                         "Duration overflow in addition".to_string(),
@@ -1319,7 +1319,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_timespan(result));
                             }
                             // Vec<number> + Vec<number> => element-wise SIMD add
-                            (HeapValue::FloatArray(a_arr), HeapValue::FloatArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::F64(a_arr)), HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec<number> length mismatch: {} vs {}",
@@ -1335,7 +1335,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<int> + Vec<int> => element-wise with overflow check
-                            (HeapValue::IntArray(a_arr), HeapValue::IntArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::I64(a_arr)), HeapValue::TypedArray(TypedArrayData::I64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec<int> length mismatch: {} vs {}",
@@ -1361,7 +1361,7 @@ impl VirtualMachine {
                                 }
                             }
                             // Vec<int> + Vec<number> => coerce to f64, element-wise add
-                            (HeapValue::IntArray(a_arr), HeapValue::FloatArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::I64(a_arr)), HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec length mismatch: {} vs {}",
@@ -1380,7 +1380,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<number> + Vec<int> => coerce to f64, element-wise add
-                            (HeapValue::FloatArray(a_arr), HeapValue::IntArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::F64(a_arr)), HeapValue::TypedArray(TypedArrayData::I64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec length mismatch: {} vs {}",
@@ -1399,7 +1399,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Matrix + Matrix => element-wise add
-                            (HeapValue::Matrix(a_mat), HeapValue::Matrix(b_mat)) => {
+                            (HeapValue::TypedArray(TypedArrayData::Matrix(a_mat)), HeapValue::TypedArray(TypedArrayData::Matrix(b_mat))) => {
                                 let result = shape_runtime::intrinsics::matrix_kernels::matrix_add(
                                     a_mat, b_mat,
                                 )
@@ -1756,12 +1756,12 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_decimal(*a_dec - *b_dec));
                             }
                             // Time - Time => TimeSpan (duration between two instants)
-                            (HeapValue::Time(a_dt), HeapValue::Time(b_dt)) => {
+                            (HeapValue::Temporal(TemporalData::DateTime(a_dt)), HeapValue::Temporal(TemporalData::DateTime(b_dt))) => {
                                 let diff = *a_dt - *b_dt;
                                 return self.push_raw_u64(ValueWord::from_timespan(diff));
                             }
                             // Time - TimeSpan => Time
-                            (HeapValue::Time(dt), HeapValue::TimeSpan(dur)) => {
+                            (HeapValue::Temporal(TemporalData::DateTime(dt)), HeapValue::Temporal(TemporalData::TimeSpan(dur))) => {
                                 let result = dt.checked_sub_signed(*dur).ok_or_else(|| {
                                     VMError::RuntimeError(
                                         "DateTime overflow in subtraction".to_string(),
@@ -1770,7 +1770,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_time(result));
                             }
                             // TimeSpan - TimeSpan => TimeSpan
-                            (HeapValue::TimeSpan(a_dur), HeapValue::TimeSpan(b_dur)) => {
+                            (HeapValue::Temporal(TemporalData::TimeSpan(a_dur)), HeapValue::Temporal(TemporalData::TimeSpan(b_dur))) => {
                                 let result = a_dur.checked_sub(b_dur).ok_or_else(|| {
                                     VMError::RuntimeError(
                                         "Duration overflow in subtraction".to_string(),
@@ -1779,7 +1779,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_timespan(result));
                             }
                             // Vec<number> - Vec<number>
-                            (HeapValue::FloatArray(a_arr), HeapValue::FloatArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::F64(a_arr)), HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec<number> length mismatch: {} vs {}",
@@ -1795,7 +1795,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<int> - Vec<int>
-                            (HeapValue::IntArray(a_arr), HeapValue::IntArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::I64(a_arr)), HeapValue::TypedArray(TypedArrayData::I64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec<int> length mismatch: {} vs {}",
@@ -1821,7 +1821,7 @@ impl VirtualMachine {
                                 }
                             }
                             // Vec<int> - Vec<number> / Vec<number> - Vec<int>
-                            (HeapValue::IntArray(a_arr), HeapValue::FloatArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::I64(a_arr)), HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec length mismatch: {} vs {}",
@@ -1839,7 +1839,7 @@ impl VirtualMachine {
                                 return self
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
-                            (HeapValue::FloatArray(a_arr), HeapValue::IntArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::F64(a_arr)), HeapValue::TypedArray(TypedArrayData::I64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec length mismatch: {} vs {}",
@@ -1858,7 +1858,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Matrix - Matrix => element-wise sub
-                            (HeapValue::Matrix(a_mat), HeapValue::Matrix(b_mat)) => {
+                            (HeapValue::TypedArray(TypedArrayData::Matrix(a_mat)), HeapValue::TypedArray(TypedArrayData::Matrix(b_mat))) => {
                                 let result = shape_runtime::intrinsics::matrix_kernels::matrix_sub(
                                     a_mat, b_mat,
                                 )
@@ -1996,7 +1996,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_decimal(*a_dec * *b_dec));
                             }
                             // Vec<number> * Vec<number>
-                            (HeapValue::FloatArray(a_arr), HeapValue::FloatArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::F64(a_arr)), HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec<number> length mismatch: {} vs {}",
@@ -2012,7 +2012,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<int> * Vec<int>
-                            (HeapValue::IntArray(a_arr), HeapValue::IntArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::I64(a_arr)), HeapValue::TypedArray(TypedArrayData::I64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec<int> length mismatch: {} vs {}",
@@ -2036,7 +2036,7 @@ impl VirtualMachine {
                                 }
                             }
                             // Mixed int/float
-                            (HeapValue::IntArray(a_arr), HeapValue::FloatArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::I64(a_arr)), HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec length mismatch: {} vs {}",
@@ -2054,7 +2054,7 @@ impl VirtualMachine {
                                 return self
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
-                            (HeapValue::FloatArray(a_arr), HeapValue::IntArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::F64(a_arr)), HeapValue::TypedArray(TypedArrayData::I64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec length mismatch: {} vs {}",
@@ -2073,7 +2073,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Matrix * Matrix => matmul
-                            (HeapValue::Matrix(a_mat), HeapValue::Matrix(b_mat)) => {
+                            (HeapValue::TypedArray(TypedArrayData::Matrix(a_mat)), HeapValue::TypedArray(TypedArrayData::Matrix(b_mat))) => {
                                 let result =
                                     shape_runtime::intrinsics::matrix_kernels::matrix_matmul(
                                         a_mat, b_mat,
@@ -2082,7 +2082,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                             // Matrix * FloatArray => matvec
-                            (HeapValue::Matrix(mat), HeapValue::FloatArray(vec_data)) => {
+                            (HeapValue::TypedArray(TypedArrayData::Matrix(mat)), HeapValue::TypedArray(TypedArrayData::F64(vec_data))) => {
                                 let result =
                                     shape_runtime::intrinsics::matrix_kernels::matrix_matvec(
                                         mat,
@@ -2297,7 +2297,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_decimal(*a_dec / *b_dec));
                             }
                             // Vec<number> / Vec<number>
-                            (HeapValue::FloatArray(a_arr), HeapValue::FloatArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::F64(a_arr)), HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec<number> length mismatch: {} vs {}",
@@ -2313,7 +2313,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<int> / Vec<int>
-                            (HeapValue::IntArray(a_arr), HeapValue::IntArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::I64(a_arr)), HeapValue::TypedArray(TypedArrayData::I64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec<int> length mismatch: {} vs {}",
@@ -2329,7 +2329,7 @@ impl VirtualMachine {
                                 }
                             }
                             // Mixed int/float
-                            (HeapValue::IntArray(a_arr), HeapValue::FloatArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::I64(a_arr)), HeapValue::TypedArray(TypedArrayData::F64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec length mismatch: {} vs {}",
@@ -2347,7 +2347,7 @@ impl VirtualMachine {
                                 return self
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
-                            (HeapValue::FloatArray(a_arr), HeapValue::IntArray(b_arr)) => {
+                            (HeapValue::TypedArray(TypedArrayData::F64(a_arr)), HeapValue::TypedArray(TypedArrayData::I64(b_arr))) => {
                                 if a_arr.len() != b_arr.len() {
                                     return Err(VMError::RuntimeError(format!(
                                         "Vec length mismatch: {} vs {}",

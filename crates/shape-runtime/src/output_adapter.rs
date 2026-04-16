@@ -225,7 +225,7 @@ mod tests {
 
         // cold-path: as_heap_ref retained — test assertion
         match returned.as_heap_ref().expect("Expected heap value") { // cold-path
-            HeapValue::PrintResult(pr) => {
+            HeapValue::Rare(shape_value::RareHeapData::PrintResult(pr)) => {
                 assert_eq!(pr.rendered, "Test output");
                 assert_eq!(pr.spans.len(), 1);
             }

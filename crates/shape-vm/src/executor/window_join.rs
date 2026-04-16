@@ -4,15 +4,15 @@ use std::sync::Arc;
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{TemporalData, TableViewData, VMError, ValueWord, ValueWordExt};
 
 use super::VirtualMachine;
 
 impl VirtualMachine {
     /// Handle eval datetime expression.
     ///
-    /// Pops a `HeapValue::DateTimeExpr` from the stack, evaluates it into a
-    /// `HeapValue::Time` (chrono DateTime), and pushes the result.
+    /// Pops a `HeapValue::Temporal(TemporalData::DateTimeExpr(...))` from the stack, evaluates it into a
+    /// `HeapValue::Temporal(TemporalData::DateTime(...))` (chrono DateTime), and pushes the result.
     pub(crate) fn handle_eval_datetime_expr(
         &mut self,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -20,7 +20,7 @@ impl VirtualMachine {
         let val = self.pop_raw_u64()?;
         // cold-path: as_heap_ref retained — DateTimeExpr extraction (no typed extractor)
         let dt_expr = match val.as_heap_ref() { // cold-path
-            Some(HeapValue::DateTimeExpr(expr)) => expr.as_ref().clone(),
+            Some(HeapValue::Temporal(TemporalData::DateTimeExpr(expr))) => expr.as_ref().clone(),
             _ => {
                 return Err(VMError::RuntimeError(format!(
                     "EvalDateTimeExpr expected DateTimeExpr on stack, got {}",
@@ -337,8 +337,8 @@ impl VirtualMachine {
         // cold-path: as_heap_ref retained — multi-variant DataTable/TypedTable/IndexedTable match
         let table = match value_nb.as_heap_ref() { // cold-path
             Some(HeapValue::DataTable(dt)) => dt.clone(),
-            Some(HeapValue::TypedTable { table, .. }) => table.clone(),
-            Some(HeapValue::IndexedTable { table, .. }) => table.clone(),
+            Some(HeapValue::TableView(TableViewData::TypedTable { table, .. })) => table.clone(),
+            Some(HeapValue::TableView(TableViewData::IndexedTable { table, .. })) => table.clone(),
             _ => {
                 return Err(VMError::RuntimeError(format!(
                     "BindSchema expected DataTable, got {}",
@@ -358,10 +358,10 @@ impl VirtualMachine {
         let arrow_schema = table.schema();
         match schema.bind_to_arrow_schema(&arrow_schema) {
             Ok(_binding) => {
-                self.push_raw_u64(ValueWord::from_heap_value(HeapValue::TypedTable {
+                self.push_raw_u64(ValueWord::from_heap_value(HeapValue::TableView(TableViewData::TypedTable {
                     schema_id,
                     table,
-                }))?;
+                })))?;
                 Ok(())
             }
             Err(e) => Err(VMError::RuntimeError(format!(
@@ -385,7 +385,7 @@ impl VirtualMachine {
 
         // cold-path: as_heap_ref retained — RowView extraction (no typed extractor)
         match row_view_nb.as_heap_ref() { // cold-path
-            Some(HeapValue::RowView { table, row_idx, .. }) => {
+            Some(HeapValue::TableView(TableViewData::RowView { table, row_idx, .. })) => {
                 let row_idx = *row_idx;
                 let ptrs = table.column_ptr(col_id as usize).ok_or_else(|| {
                     VMError::RuntimeError(format!(

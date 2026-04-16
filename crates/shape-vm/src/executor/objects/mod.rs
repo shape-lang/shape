@@ -588,7 +588,7 @@ impl VirtualMachine {
                 HeapKind::FloatArraySlice => {
                     // Materialize the slice as a FloatArray, then dispatch
                     // cold-path: as_heap_ref retained — FloatArraySlice multi-field extraction
-                    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) = as_vw_ref(&raw_args[0]).as_heap_ref() { // cold-path
+                    if let Some(HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice { parent, offset, len })) = as_vw_ref(&raw_args[0]).as_heap_ref() { // cold-path
                         let off = *offset as usize;
                         let slice_len = *len as usize;
                         let data = &parent.data[off..off + slice_len];
@@ -846,6 +846,275 @@ impl VirtualMachine {
                             ))
                         })?;
                     self.dispatch_method_handler(handler, raw_args, ctx)?;
+                }
+                // ===== Consolidated wrapper dispatch =====
+                HeapKind::Concurrency => {
+                    // Sub-dispatch based on inner ConcurrencyData variant
+                    let hv = unsafe { raw_helpers::extract_heap_ref(raw_args[0]) };
+                    match hv {
+                        Some(HeapValue::Concurrency(shape_value::ConcurrencyData::Mutex(_))) => {
+                            let handler = method_registry::MUTEX_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "Unknown method '{}' on Mutex type",
+                                        method_name
+                                    ))
+                                })?;
+                            crate::executor::ic_fast_paths::method_ic_record(
+                                self, self.ip, HeapKind::Concurrency as u8, method_id.0 as u32, handler,
+                            );
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        Some(HeapValue::Concurrency(shape_value::ConcurrencyData::Atomic(_))) => {
+                            let handler = method_registry::ATOMIC_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "Unknown method '{}' on Atomic type",
+                                        method_name
+                                    ))
+                                })?;
+                            crate::executor::ic_fast_paths::method_ic_record(
+                                self, self.ip, HeapKind::Concurrency as u8, method_id.0 as u32, handler,
+                            );
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        Some(HeapValue::Concurrency(shape_value::ConcurrencyData::Lazy(_))) => {
+                            let handler = method_registry::LAZY_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "Unknown method '{}' on Lazy type",
+                                        method_name
+                                    ))
+                                })?;
+                            crate::executor::ic_fast_paths::method_ic_record(
+                                self, self.ip, HeapKind::Concurrency as u8, method_id.0 as u32, handler,
+                            );
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        Some(HeapValue::Concurrency(shape_value::ConcurrencyData::Channel(_))) => {
+                            let handler = method_registry::CHANNEL_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "Unknown method '{}' on Channel type",
+                                        method_name
+                                    ))
+                                })?;
+                            crate::executor::ic_fast_paths::method_ic_record(
+                                self, self.ip, HeapKind::Concurrency as u8, method_id.0 as u32, handler,
+                            );
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        _ => {
+                            return Err(VMError::RuntimeError(format!(
+                                "Method '{}' not available on concurrency type '{}'",
+                                method_name,
+                                as_vw_ref(&raw_args[0]).type_name()
+                            )));
+                        }
+                    }
+                }
+                HeapKind::TypedArray => {
+                    // Sub-dispatch based on inner TypedArrayData variant
+                    let hv = unsafe { raw_helpers::extract_heap_ref(raw_args[0]) };
+                    match hv {
+                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::F64(_))) => {
+                            if let Some(handler) = method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str()) {
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
+                                let old = ValueWord::from_raw_bits(raw_args[0]);
+                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else {
+                                return Err(VMError::RuntimeError(format!("Unknown method '{}' on Vec<number> type", method_name)));
+                            }
+                        }
+                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice { parent, offset, len })) => {
+                            // Materialize the slice as a FloatArray, then dispatch
+                            let off = *offset as usize;
+                            let slice_len = *len as usize;
+                            let data = &parent.data[off..off + slice_len];
+                            let mut aligned = shape_value::aligned_vec::AlignedVec::with_capacity(slice_len);
+                            for &v in data {
+                                aligned.push(v);
+                            }
+                            drop(ValueWord::from_raw_bits(raw_args[0]));
+                            raw_args[0] = ValueWord::from_float_array(Arc::new(aligned.into())).into_raw_bits();
+                            if let Some(handler) = method_registry::FLOAT_ARRAY_METHODS.get(method_name.as_str()) {
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
+                                let old = ValueWord::from_raw_bits(raw_args[0]);
+                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else {
+                                return Err(VMError::RuntimeError(format!("Unknown method '{}' on Vec<number> type", method_name)));
+                            }
+                        }
+                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::I64(_))) => {
+                            if let Some(handler) = method_registry::INT_ARRAY_METHODS.get(method_name.as_str()) {
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
+                                let old = ValueWord::from_raw_bits(raw_args[0]);
+                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else {
+                                return Err(VMError::RuntimeError(format!("Unknown method '{}' on Vec<int> type", method_name)));
+                            }
+                        }
+                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::Bool(_))) => {
+                            if let Some(handler) = method_registry::BOOL_ARRAY_METHODS.get(method_name.as_str()) {
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
+                                let old = ValueWord::from_raw_bits(raw_args[0]);
+                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else {
+                                return Err(VMError::RuntimeError(format!("Unknown method '{}' on Vec<bool> type", method_name)));
+                            }
+                        }
+                        Some(HeapValue::TypedArray(shape_value::TypedArrayData::Matrix(_))) => {
+                            let handler = method_registry::MATRIX_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "Unknown method '{}' on Mat<number> type",
+                                        method_name
+                                    ))
+                                })?;
+                            crate::executor::ic_fast_paths::method_ic_record(
+                                self, self.ip, HeapKind::TypedArray as u8, method_id.0 as u32, handler,
+                            );
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        _ => {
+                            // For other typed arrays, try generic array methods
+                            if let Some(handler) = method_registry::ARRAY_METHODS.get(method_name.as_str()) {
+                                let old = ValueWord::from_raw_bits(raw_args[0]);
+                                raw_args[0] = ValueWord::from_array(old.as_any_array().unwrap().to_generic()).into_raw_bits();
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else {
+                                return Err(VMError::RuntimeError(format!(
+                                    "Unknown method '{}' on typed array type",
+                                    method_name
+                                )));
+                            }
+                        }
+                    }
+                }
+                HeapKind::Temporal => {
+                    // Sub-dispatch: DateTime gets datetime methods, others error
+                    let hv = unsafe { raw_helpers::extract_heap_ref(raw_args[0]) };
+                    match hv {
+                        Some(HeapValue::Temporal(shape_value::TemporalData::DateTime(_))) => {
+                            let handler = method_registry::DATETIME_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "Unknown method '{}' on DateTime type",
+                                        method_name
+                                    ))
+                                })?;
+                            crate::executor::ic_fast_paths::method_ic_record(
+                                self, self.ip, HeapKind::Temporal as u8, method_id.0 as u32, handler,
+                            );
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        Some(HeapValue::Temporal(shape_value::TemporalData::TimeSpan(_))) => {
+                            // TimeSpan has operator methods (add, sub) — look in DATETIME_METHODS
+                            let handler = method_registry::DATETIME_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "Unknown method '{}' on TimeSpan type",
+                                        method_name
+                                    ))
+                                })?;
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        _ => {
+                            return Err(VMError::RuntimeError(format!(
+                                "Method '{}' not available on temporal type '{}'",
+                                method_name,
+                                as_vw_ref(&raw_args[0]).type_name()
+                            )));
+                        }
+                    }
+                }
+                HeapKind::TableView => {
+                    // Sub-dispatch based on inner TableViewData variant
+                    let hv = unsafe { raw_helpers::extract_heap_ref(raw_args[0]) };
+                    match hv {
+                        Some(HeapValue::TableView(shape_value::TableViewData::TypedTable { .. })) => {
+                            let handler = method_registry::DATATABLE_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    if method_registry::INDEXED_TABLE_METHODS.contains_key(method_name.as_str()) {
+                                        VMError::RuntimeError(format!(
+                                            "{}() requires an indexed table. Use table.index_by(column) first.",
+                                            method_name
+                                        ))
+                                    } else {
+                                        VMError::RuntimeError(format!(
+                                            "Unknown method '{}' on DataTable type", method_name
+                                        ))
+                                    }
+                                })?;
+                            crate::executor::ic_fast_paths::method_ic_record(
+                                self, self.ip, HeapKind::TableView as u8, method_id.0 as u32, handler,
+                            );
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        Some(HeapValue::TableView(shape_value::TableViewData::IndexedTable { .. })) => {
+                            if let Some(handler) = method_registry::INDEXED_TABLE_METHODS.get(method_name.as_str()) {
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else if let Some(handler) = method_registry::DATATABLE_METHODS.get(method_name.as_str()) {
+                                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                            } else {
+                                return Err(VMError::RuntimeError(format!(
+                                    "Unknown method '{}' on IndexedTable type",
+                                    method_name
+                                )));
+                            }
+                        }
+                        Some(HeapValue::TableView(shape_value::TableViewData::ColumnRef { .. })) => {
+                            let handler = method_registry::COLUMN_METHODS
+                                .get(method_name.as_str())
+                                .ok_or_else(|| {
+                                    VMError::RuntimeError(format!(
+                                        "Unknown method '{}' on Column type",
+                                        method_name
+                                    ))
+                                })?;
+                            crate::executor::ic_fast_paths::method_ic_record(
+                                self, self.ip, HeapKind::TableView as u8, method_id.0 as u32, handler,
+                            );
+                            self.dispatch_method_handler(handler, raw_args, ctx)?;
+                        }
+                        Some(HeapValue::TableView(shape_value::TableViewData::RowView { .. })) => {
+                            // RowView doesn't have dedicated methods typically
+                            return Err(VMError::RuntimeError(format!(
+                                "Method '{}' not available on RowView type",
+                                method_name
+                            )));
+                        }
+                        _ => {
+                            return Err(VMError::RuntimeError(format!(
+                                "Method '{}' not available on table type '{}'",
+                                method_name,
+                                as_vw_ref(&raw_args[0]).type_name()
+                            )));
+                        }
+                    }
+                }
+                HeapKind::Rare => {
+                    return Err(VMError::RuntimeError(format!(
+                        "Method '{}' not available on type '{}'",
+                        method_name,
+                        as_vw_ref(&raw_args[0]).type_name()
+                    )));
                 }
                 _ => {
                     return Err(VMError::RuntimeError(format!(

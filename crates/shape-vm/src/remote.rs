@@ -2396,7 +2396,7 @@ mod tests {
         // cold-path: as_heap_ref retained — test assertion on deserialized value
         let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
-            shape_value::heap_value::HeapValue::FloatArray(a) => {
+            shape_value::heap_value::HeapValue::TypedArray(shape_value::TypedArrayData::F64(a)) => {
                 assert_eq!(a.len(), 256 * 1024);
                 assert!((a.as_slice()[0] - 0.0).abs() < f64::EPSILON);
                 assert!((a.as_slice()[1000] - 1000.0).abs() < f64::EPSILON);

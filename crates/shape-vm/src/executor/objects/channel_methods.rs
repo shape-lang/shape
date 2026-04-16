@@ -4,7 +4,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{ConcurrencyData, VMError, ValueWord, ValueWordExt};
 
 use super::raw_helpers::extract_heap_ref;
 
@@ -38,7 +38,7 @@ pub fn v2_channel_send(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("send()", "channel"))?;
     match heap {
-        HeapValue::Channel(data) => match data.as_ref() {
+        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => match data.as_ref() {
             shape_value::heap_value::ChannelData::Sender { tx, closed, .. } => {
                 if closed.load(std::sync::atomic::Ordering::Relaxed) {
                     Ok(into_raw(ValueWord::from_bool(false)))
@@ -68,7 +68,7 @@ pub fn v2_channel_recv(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("recv()", "channel"))?;
     match heap {
-        HeapValue::Channel(data) => match data.as_ref() {
+        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => match data.as_ref() {
             shape_value::heap_value::ChannelData::Receiver { rx, .. } => {
                 let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 match guard.recv() {
@@ -95,7 +95,7 @@ pub fn v2_channel_try_recv(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("try_recv()", "channel"))?;
     match heap {
-        HeapValue::Channel(data) => match data.as_ref() {
+        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => match data.as_ref() {
             shape_value::heap_value::ChannelData::Receiver { rx, .. } => {
                 let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 match guard.try_recv() {
@@ -122,7 +122,7 @@ pub fn v2_channel_close(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("close()", "channel"))?;
     match heap {
-        HeapValue::Channel(data) => {
+        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => {
             data.close();
             Ok(into_raw(ValueWord::none()))
         }
@@ -141,7 +141,7 @@ pub fn v2_channel_is_closed(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("is_closed()", "channel"))?;
     match heap {
-        HeapValue::Channel(data) => Ok(into_raw(ValueWord::from_bool(data.is_closed()))),
+        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => Ok(into_raw(ValueWord::from_bool(data.is_closed()))),
         _ => Err(VMError::RuntimeError(
             "is_closed() called on non-channel value".to_string(),
         )),
@@ -157,7 +157,7 @@ pub fn v2_channel_is_sender(
     let heap = unsafe { extract_heap_ref(args[0]) }
         .ok_or_else(|| type_mismatch_error("is_sender()", "channel"))?;
     match heap {
-        HeapValue::Channel(data) => Ok(into_raw(ValueWord::from_bool(data.is_sender()))),
+        HeapValue::Concurrency(ConcurrencyData::Channel(data)) => Ok(into_raw(ValueWord::from_bool(data.is_sender()))),
         _ => Err(VMError::RuntimeError(
             "is_sender() called on non-channel value".to_string(),
         )),
