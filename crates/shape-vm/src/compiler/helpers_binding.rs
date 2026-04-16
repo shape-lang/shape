@@ -144,6 +144,69 @@ impl BytecodeCompiler {
         true
     }
 
+    /// Get the MIR context name for the code currently being compiled.
+    /// For function bodies this is the function name; for top-level code
+    /// it comes from the `non_function_mir_context_stack`.
+    pub(super) fn current_mir_context_name(&self) -> Option<&str> {
+        // Try function context first (most common)
+        if let Some(name) = self
+            .current_function
+            .and_then(|idx| self.program.functions.get(idx))
+            .map(|f| f.name.as_str())
+        {
+            return Some(name);
+        }
+        // Fall back to non-function MIR context (top-level code)
+        self.non_function_mir_context_stack.last().map(|s| s.as_str())
+    }
+
+    /// Query the MIR borrow analysis for the ownership decision at a given span.
+    /// Returns `None` if MIR analysis isn't available for the current context,
+    /// or if the span doesn't map to a known MIR program point.
+    pub(super) fn query_ownership_decision(
+        &self,
+        span: &shape_ast::ast::Span,
+    ) -> Option<crate::mir::analysis::OwnershipDecision> {
+        let ctx = self.current_mir_context_name()?;
+        let analysis = self.mir_borrow_analyses.get(ctx)?;
+        let span_map = self.mir_span_to_point.get(ctx)?;
+        let point = span_map.get(span)?;
+        Some(analysis.ownership_at(*point))
+    }
+
+    /// Emit a local-variable load with ownership awareness.
+    ///
+    /// When MIR analysis is available and proves Move semantics, emits
+    /// `LoadLocalMove`. When it proves Clone, emits `LoadLocalClone`.
+    /// Otherwise falls back to `LoadLocal` (Copy types or no MIR info),
+    /// preserving the existing behavior.
+    ///
+    /// This is intentionally conservative: the `query_ownership_decision`
+    /// lookup can return `None` for many spans (e.g. compiler-generated
+    /// code, pre-MIR contexts), and the fallback is always safe.
+    pub(super) fn emit_load_local_owned(
+        &mut self,
+        slot: u16,
+        span: &shape_ast::ast::Span,
+    ) {
+        use crate::bytecode::{Instruction, OpCode, Operand};
+        use crate::mir::analysis::OwnershipDecision;
+
+        let decision = self.query_ownership_decision(span);
+
+        let opcode = match decision {
+            Some(OwnershipDecision::Move) => OpCode::LoadLocalMove,
+            Some(OwnershipDecision::Clone) => OpCode::LoadLocalClone,
+            _ => {
+                // Copy types or no MIR info: use existing LoadLocal
+                // (backward compatible, zero behavioral change)
+                OpCode::LoadLocal
+            }
+        };
+
+        self.emit(Instruction::new(opcode, Some(Operand::Local(slot))));
+    }
+
     pub(super) fn apply_binding_semantics_to_pattern_bindings(
         &mut self,
         pattern: &DestructurePattern,

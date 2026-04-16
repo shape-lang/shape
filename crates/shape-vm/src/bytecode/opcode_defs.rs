@@ -656,6 +656,17 @@ define_opcodes! {
     /// Less than or equal (string × string → bool). Lexicographic comparison.
     LteString = 0x103, Comparison, pops: 2, pushes: 1;
 
+    // ===== Ownership-Aware Variable Operations =====
+    /// Load local with Move semantics — transfers ownership, source slot is zeroed.
+    /// Used when the compiler proves the source binding is dead after this point.
+    LoadLocalMove = 0x104, Variable, pops: 0, pushes: 1;
+    /// Load local with Clone semantics — clones the value, source stays live.
+    /// For heap-tagged values, this bumps the Arc refcount.
+    LoadLocalClone = 0x105, Variable, pops: 0, pushes: 1;
+    /// Store local with Drop semantics — drops the old value before storing.
+    /// Respects ownership: if old value is uniquely owned, frees immediately.
+    StoreLocalDrop = 0x106, Variable, pops: 1, pushes: 0;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;

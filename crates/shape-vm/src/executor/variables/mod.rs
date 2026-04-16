@@ -345,8 +345,11 @@ impl VirtualMachine {
         match instruction.opcode {
             LoadLocal => self.op_load_local(instruction)?,
             LoadLocalTrusted => self.op_load_local_trusted(instruction)?,
+            LoadLocalMove => self.op_load_local_move(instruction)?,
+            LoadLocalClone => self.op_load_local_clone(instruction)?,
             StoreLocal => self.op_store_local(instruction)?,
             StoreLocalTyped => self.op_store_local_typed(instruction)?,
+            StoreLocalDrop => self.op_store_local_drop(instruction)?,
             LoadModuleBinding => self.op_load_module_binding(instruction)?,
             StoreModuleBinding => self.op_store_module_binding(instruction)?,
             StoreModuleBindingTyped => self.op_store_module_binding_typed(instruction)?,
@@ -578,6 +581,126 @@ impl VirtualMachine {
                     let nb = unsafe { ValueWord::clone_from_bits(bits) };
                     self.push_raw_u64(nb)?;
                 }
+            }
+        } else {
+            return Err(VMError::InvalidOperand);
+        }
+        Ok(())
+    }
+
+    /// Load local with Move semantics. The source slot is zeroed (set to
+    /// NONE_BITS) so it cannot be used again. This avoids refcount
+    /// manipulation entirely — the value is transferred, not cloned.
+    ///
+    /// If the slot contains a SharedCell (mutable closure capture), moving
+    /// out would invalidate other closures that share the cell. In that
+    /// case we fall back to clone behaviour (read through the Arc, bump
+    /// refcount) and leave the cell in place.
+    fn op_load_local_move(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        if let Some(Operand::Local(idx)) = instruction.operand {
+            let bp = self.current_locals_base();
+            let slot = bp + idx as usize;
+            debug_assert!(
+                slot < self.stack.len(),
+                "LoadLocalMove slot {} out of bounds (stack len {})",
+                slot,
+                self.stack.len()
+            );
+            let bits = self.stack[slot];
+
+            // SharedCell guard: can't move out of a shared cell — other
+            // closures may still reference it. Fall back to clone.
+            if let Some(arc) = raw_helpers::extract_shared_cell(bits) {
+                let inner = arc.read().unwrap().clone();
+                self.push_raw_u64(inner)?;
+            } else {
+                // Transfer: zero the source slot (NONE_BITS is an inline tag,
+                // no heap allocation, no drop needed) and push the raw bits.
+                self.stack[slot] = Self::NONE_BITS;
+                self.push_raw_u64(bits)?;
+            }
+        } else {
+            return Err(VMError::InvalidOperand);
+        }
+        Ok(())
+    }
+
+    /// Load local with Clone semantics. The source stays live.
+    /// For heap-tagged values, this bumps the Arc refcount.
+    ///
+    /// This is semantically equivalent to the current LoadLocal behaviour
+    /// (always clones), but is emitted explicitly by the compiler when it
+    /// knows the value is still needed after the load.
+    ///
+    /// Like LoadLocal, SharedCell auto-deref is performed: if the slot
+    /// contains a SharedCell the inner value is read through the Arc.
+    fn op_load_local_clone(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        if let Some(Operand::Local(idx)) = instruction.operand {
+            let bp = self.current_locals_base();
+            let slot = bp + idx as usize;
+            debug_assert!(
+                slot < self.stack.len(),
+                "LoadLocalClone slot {} out of bounds (stack len {})",
+                slot,
+                self.stack.len()
+            );
+            let bits = self.stack[slot];
+
+            // SharedCell auto-deref: read through the Arc.
+            if let Some(arc) = raw_helpers::extract_shared_cell(bits) {
+                let inner = arc.read().unwrap().clone();
+                self.push_raw_u64(inner)?;
+            } else {
+                // Clone: bump refcount for heap values.
+                let cloned = raw_helpers::clone_raw_bits(bits);
+                self.push_raw_u64(cloned)?;
+            }
+        } else {
+            return Err(VMError::InvalidOperand);
+        }
+        Ok(())
+    }
+
+    /// Store to local, dropping the old value first.
+    /// Used for reassignment where the old value needs cleanup.
+    ///
+    /// For heap-tagged old values whose Arc refcount reaches zero, the
+    /// HeapValue is freed immediately. For inline old values (int, bool,
+    /// f64, unit, none) the "drop" is a no-op since they carry no heap
+    /// resource.
+    ///
+    /// If the slot contains a SharedCell (mutable closure capture), the
+    /// new value is written through the Arc so all holders see the update.
+    fn op_store_local_drop(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        use shape_value::tags::{get_tag, is_tagged, TAG_HEAP};
+
+        if let Some(Operand::Local(idx)) = instruction.operand {
+            let bp = self.current_locals_base();
+            let slot = bp + idx as usize;
+
+            if slot >= self.stack.len() {
+                self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            }
+
+            let new_bits = self.pop_raw_u64()?;
+            let old_bits = self.stack[slot];
+
+            // SharedCell auto-deref: write through the Arc.
+            if let Some(arc) = raw_helpers::extract_shared_cell(old_bits) {
+                let arc = arc.clone();
+                let old = arc.read().unwrap().clone();
+                record_heap_write();
+                write_barrier_vw(&old, &new_bits);
+                *arc.write().unwrap() = new_bits;
+            } else {
+                // Drop the old value: decrement Arc refcount for heap-tagged values.
+                if is_tagged(old_bits) && get_tag(old_bits) == TAG_HEAP {
+                    raw_helpers::drop_raw_bits(old_bits);
+                }
+                // Store new value directly.
+                record_heap_write();
+                write_barrier_slot(old_bits, new_bits);
+                self.stack[slot] = new_bits;
             }
         } else {
             return Err(VMError::InvalidOperand);

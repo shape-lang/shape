@@ -196,7 +196,7 @@ impl BytecodeCompiler {
                     // *primitive* type AND is immutable. We only upgrade for
                     // immutable let-bindings with int/float/bool slots to avoid
                     // breaking SharedCell, heap-type, or ref-mutated semantics.
-                    let load_op = if self.immutable_locals.contains(&local_idx)
+                    if self.immutable_locals.contains(&local_idx)
                         && self
                             .type_tracker
                             .get_local_type(local_idx)
@@ -208,11 +208,17 @@ impl BytecodeCompiler {
                             })
                             .unwrap_or(false)
                     {
-                        OpCode::LoadLocalTrusted
+                        self.emit(Instruction::new(
+                            OpCode::LoadLocalTrusted,
+                            Some(Operand::Local(local_idx)),
+                        ));
                     } else {
-                        OpCode::LoadLocal
-                    };
-                    self.emit(Instruction::new(load_op, Some(Operand::Local(local_idx))));
+                        // Ownership-aware load: consults MIR borrow analysis
+                        // to emit LoadLocalMove / LoadLocalClone when the
+                        // decision is available; falls back to plain LoadLocal
+                        // for Copy types or when no MIR info exists.
+                        self.emit_load_local_owned(local_idx, &span);
+                    }
                 }
             }
             // Track schema for typed merge optimization

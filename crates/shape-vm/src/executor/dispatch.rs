@@ -468,8 +468,11 @@ impl VirtualMachine {
             // Variables (including reference operations)
             LoadLocal
             | LoadLocalTrusted
+            | LoadLocalMove
+            | LoadLocalClone
             | StoreLocal
             | StoreLocalTyped
+            | StoreLocalDrop
             | LoadModuleBinding
             | StoreModuleBinding
             | StoreModuleBindingTyped

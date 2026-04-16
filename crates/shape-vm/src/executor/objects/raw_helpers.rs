@@ -553,6 +553,21 @@ pub fn clone_raw_bits(bits: u64) -> u64 {
     bits
 }
 
+/// Drop raw u64 bits, decrementing Arc refcount for heap-tagged values.
+///
+/// For inline values this is a no-op. For heap-tagged values,
+/// the underlying Arc refcount is decremented (and if it reaches zero,
+/// the HeapValue is freed).
+#[inline(always)]
+pub fn drop_raw_bits(bits: u64) {
+    if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
+        let ptr = get_payload(bits) as *const HeapValue;
+        if !ptr.is_null() {
+            unsafe { std::sync::Arc::decrement_strong_count(ptr) };
+        }
+    }
+}
+
 // ─── Closure / callable inspection from raw bits ─────────────────────────
 
 /// Extract closure info (function_id, upvalues) from raw heap-tagged bits.
