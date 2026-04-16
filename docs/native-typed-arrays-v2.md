@@ -1,24 +1,17 @@
-# Native Typed Arrays v2: Rust-Equivalent Array Performance
+# Native Typed Collections v2: Rust-Equivalent Data Structure Performance
 
 ## Problem Statement
 
-When the compiler proves `let mut arr: Array<int> = [1, 2, 3]`, the runtime should compile array access to the same instructions as Rust or C:
+When the compiler proves the types of collection elements and keys, the runtime should compile data structure access to the same instructions as Rust or C:
 
 ```
-arr[i]     → load i64 [data_ptr + i * 8]     // single instruction
-arr.push(x) → store i64 [data_ptr + len * 8]  // + bounds check + realloc
-arr.len    → load usize [header + 16]          // direct field read
+arr[i]       → load i64 [data_ptr + i * 8]           // Array<int>: single instruction
+map.get(k)   → hash + probe + load [bucket_ptr + off] // HashMap<string, int>: same as Rust HashMap
+obj.field    → load f64 [ptr + 8]                      // TypedObject: computed field offset
+str.len      → load usize [ptr + offset]               // String: direct field read
 ```
 
-Currently, even with ownership-aware allocation (Phase 1-4), the data path is:
-
-```
-arr[i] → extract HeapValue from Box/Arc
-       → match HeapValue::TypedArray(TypedArrayData::I64(arc))
-       → arc.data[i]                          // 3+ indirections
-```
-
-The v2 `TypedArray<T>` layout already exists in `v2_typed_array.rs` but isn't wired into the default execution path.
+Currently, even with ownership-aware allocation (Phases 1-4), every collection access goes through the HeapValue enum dispatch — 3+ indirections regardless of whether the compiler has proven the types.
 
 ## Current Architecture
 
@@ -29,256 +22,290 @@ crates/shape-value/src/v2_typed_array.rs:
   TypedArrayHeader { heap_header: HeapHeader, len: u32, cap: u32 }
   TypedArray<T>    { header: TypedArrayHeader, data: [T] }  // C-repr, inline data
 
+crates/shape-value/src/v2/typed_map.rs:
+  TypedMapHeader, TypedMap<K,V>  // native hash map layout
+
+crates/shape-value/src/v2_struct_layout.rs:
+  StructLayout — compile-time field offsets for TypedObject
+
 crates/shape-value/src/heap_value.rs:
   HeapHeader { refcount: AtomicU32, kind: u16, flags: u8 }  // 8 bytes, repr(C)
 ```
 
-Layout in memory:
+Memory layout (v2 TypedArray):
 ```
 [HeapHeader: 8 bytes][len: 4][cap: 4][data: T * cap]
  offset 0             offset 8        offset 16
 ```
 
-### What the JIT can already do
+### What's missing across ALL collection types
 
-The JIT (Cranelift) can generate native array access when it knows the element type. The tiered compilation system (Tier 1 @ 100 calls, Tier 2 @ 10k) already profiles types via feedback vectors.
+1. **Compiler doesn't emit typed opcodes** for most collection operations
+2. **Executor dispatches through HeapValue enum** for every access
+3. **JIT doesn't use v2 layouts** — goes through same HeapValue path
+4. **No monomorphized method calls** — `arr.map`, `map.get`, `set.has` all go through PHF lookup
+5. **No inline/stack allocation** for small collections
 
-### What's missing
+## Design: Per-Collection Native Path
 
-1. **Compiler doesn't emit typed array opcodes for all proven cases** — monomorphization for method calls (`arr.map`, `arr.filter`) isn't complete
-2. **Executor still dispatches through HeapValue enum** for array operations
-3. **JIT doesn't use v2 TypedArray layout** — it goes through the same HeapValue path as the interpreter
-4. **No inline array optimization** — small arrays (`[x, y, z]`) could live on the stack
+### Array<T>
 
-## Design: Three Tiers of Array Performance
+| Operation | Current | Native (Tier 1) | JIT (Tier 2) |
+|-----------|---------|-----------------|--------------|
+| `arr[i]` | HeapValue match → TypedBuffer | `GetElemI64` opcode | `load [ptr + i*8]` |
+| `arr.push(x)` | PHF lookup → generic handler | `ArrayPushI64` opcode | inline realloc + store |
+| `arr.len` | HeapValue match | `ArrayLenTyped` opcode | `load [ptr + 8]` |
+| `arr.map(f)` | PHF → generic loop | Typed loop (monomorphized) | SIMD vectorized loop |
+| `arr.filter(f)` | PHF → generic loop | Typed loop | SIMD predicated |
+| `arr.sum()` | PHF → generic | Direct SIMD reduction | `vaddpd` loop |
 
-### Tier 0: Interpreter (current + ownership)
+**v2 layout**: `TypedArray<T>` — contiguous `[T]` after header. Element access = pointer arithmetic.
 
-```
-let mut arr = [1, 2, 3]
-// Box<HeapValue::TypedArray(TypedArrayData::I64(Arc<TypedBuffer<i64>>))>
-// arr[i]: match HeapValue → match TypedArrayData → arc.data[i]
-// ~3 indirections, no atomic ops (owned)
-```
+### HashMap<K, V>
 
-This is what we have after Phases 1-4. Good enough for non-hot code.
+| Operation | Current | Native (Tier 1) | JIT (Tier 2) |
+|-----------|---------|-----------------|--------------|
+| `map.get(k)` | HeapValue match → HashMapData → linear probe | `MapGetTyped` opcode | inline hash + probe |
+| `map.set(k,v)` | PHF lookup → generic handler | `MapSetTyped` opcode | inline hash + store |
+| `map.has(k)` | PHF → generic | `MapHasTyped` opcode | inline hash + test |
+| `map.keys()` | PHF → allocate Vec | Typed iterator | lazy key iteration |
+| `map.len` | HeapValue match | Direct field read | `load [ptr + offset]` |
 
-### Tier 1: Typed Opcodes (compile-time proven)
+**v2 layout**: `TypedMap<K,V>` — Swiss table (like Rust's HashMap). Key hash stored inline. When K=string and V=int/float, the map can use fixed-width buckets.
 
-When the compiler proves the array element type:
+Key optimization: when K is `string` (common case), use string interning + integer key comparison instead of full string hashing.
 
-```
-let mut arr: Array<int> = [1, 2, 3]
-// Compiler emits: NewTypedArrayI64, GetTypedElemI64, SetTypedElemI64
-// Executor handler: skip HeapValue match, direct TypedBuffer access
-// ~1 indirection (pointer to buffer data)
-```
+### Set<T>
 
-New opcodes:
-```rust
-GetTypedElemI64 = ...,   // operand: slot + index → push i64
-SetTypedElemI64 = ...,   // operand: slot + index + value
-GetTypedElemF64 = ...,
-SetTypedElemF64 = ...,
-TypedArrayLen   = ...,   // operand: slot → push length
-TypedArrayPush  = ...,   // operand: slot + value (realloc if needed)
-```
+| Operation | Current | Native (Tier 1) | JIT (Tier 2) |
+|-----------|---------|-----------------|--------------|
+| `set.has(x)` | HeapValue match → SetData → HashSet lookup | `SetHasTyped` opcode | inline hash + probe |
+| `set.add(x)` | PHF → generic | `SetAddTyped` opcode | inline hash + insert |
+| `set.union(other)` | PHF → generic | Typed merge | vectorized merge |
 
-### Tier 2: JIT Native (Cranelift codegen)
+**v2 layout**: Same as TypedMap but values are unit. When T=int, use bit-set for small ranges.
 
-When a function is hot enough for JIT compilation:
+### String
 
-```
-let mut arr: Array<int> = [1, 2, 3]
-// JIT generates: 
-//   mov rax, [rbp + arr_offset]     ; load array pointer
-//   mov rcx, [rax + 8]              ; load length
-//   cmp rdi, rcx                    ; bounds check
-//   jae .oob
-//   mov rsi, [rax + 16 + rdi * 8]  ; load element (single instruction!)
-```
+| Operation | Current | Native (Tier 1) | JIT (Tier 2) |
+|-----------|---------|-----------------|--------------|
+| `str.len` | HeapValue match → Arc<String> → len() | `StringLen` opcode | `load [ptr + offset]` |
+| `str[i]` | HeapValue match → char_at | `StringCharAt` opcode | UTF-8 indexed load |
+| `str + str` | PHF → clone + push_str | `StringConcat` opcode | inline memcpy |
+| `str.contains(s)` | PHF → generic | `StringContains` opcode | SIMD string search |
+| `str.split(sep)` | PHF → allocate Vec<String> | Lazy split iterator | zero-copy slices |
 
-This requires the JIT to:
-1. Know the array is `TypedArray<i64>` (from type proof or feedback)
-2. Use the v2 layout (`data` at offset 16 from header)
-3. Emit direct pointer arithmetic for element access
+**v2 layout**: `UnifiedString` — `HeapHeader + len + data[]`. Small string optimization (SSO) for strings ≤ 23 bytes: store inline in the ValueWord, no heap allocation.
 
-### Tier 3: Stack-allocated small arrays (future)
+### TypedObject (structs)
 
-```
-let arr = [x, y, z]
-// 3 elements × 8 bytes = 24 bytes → fits in stack frame
-// No heap allocation at all
-// arr[i]: load from stack frame offset
-```
+| Operation | Current | Native (Tier 1) | JIT (Tier 2) |
+|-----------|---------|-----------------|--------------|
+| `obj.field` | GetFieldTyped opcode → slot array | Already typed! | `load [ptr + offset]` |
+| `obj.field = x` | SetFieldTyped → slot array | Already typed! | `store [ptr + offset]` |
 
-For arrays with compile-time-known small size (≤ 8 elements), allocate inline in the stack frame.
+TypedObject already has the best support — `GetFieldTyped`/`SetFieldTyped` opcodes use precomputed offsets. The JIT compiles these to single load/store instructions. The remaining work is the v2 struct layout where fields are contiguous native values (no slot array indirection).
+
+### Deque<T>
+
+| Operation | Current | Native (Tier 1) | JIT (Tier 2) |
+|-----------|---------|-----------------|--------------|
+| `deq.pushBack(x)` | PHF → generic | `DequePushBack` opcode | ring buffer append |
+| `deq.popFront()` | PHF → generic | `DequePopFront` opcode | ring buffer head advance |
+
+**v2 layout**: Ring buffer with `head`, `tail`, `cap` fields + contiguous `[T]` data.
+
+### PriorityQueue<T>
+
+| Operation | Current | Native | JIT |
+|-----------|---------|--------|-----|
+| `pq.push(x)` | PHF → generic | `PQPush` opcode | binary heap sift-up |
+| `pq.pop()` | PHF → generic | `PQPop` opcode | binary heap sift-down |
+
+**v2 layout**: Binary heap in contiguous `[T]` array. When T has a known comparison (int, float), use typed comparison without dynamic dispatch.
 
 ## Implementation Plan
 
-### Phase A: Typed Array Opcodes for Interpreter
+### Phase A: Typed Element Access Opcodes (Interpreter)
 
-**Goal**: When the compiler proves element type, emit typed array opcodes that skip the HeapValue dispatch.
+**Goal**: Compiler emits typed opcodes when element/key/value types are proven. Executor handlers skip HeapValue enum dispatch.
 
-#### A.1: Add typed element access opcodes
-
-```rust
-// In opcode_defs.rs:
-GetElemI64     = ...,  // [slot, index] → push i64
-GetElemF64     = ...,  // [slot, index] → push f64
-SetElemI64     = ...,  // [slot, index, value] → store
-SetElemF64     = ...,  // [slot, index, value] → store
-ArrayLenTyped  = ...,  // [slot] → push length (no HeapValue match)
-ArrayPushI64   = ...,  // [slot, value] → push to typed array
-ArrayPushF64   = ...,  // [slot, value] → push to typed array
-```
-
-#### A.2: Executor handlers
+#### A.1: Array typed opcodes
 
 ```rust
-fn op_get_elem_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-    let slot = instruction.operand.slot();
-    let index = self.pop_raw_u64()? as usize;
-    let arr_bits = self.stack[self.frame_base() + slot];
-    // Direct path: skip HeapValue match, extract TypedBuffer pointer
-    let ptr = get_heap_ptr(arr_bits);
-    let hv = unsafe { &*ptr };
-    match hv {
-        HeapValue::TypedArray(TypedArrayData::I64(buf)) => {
-            if index >= buf.data.len() {
-                return Err(VMError::IndexOutOfBounds { index, length: buf.data.len() });
-            }
-            self.push_raw_u64(vw_from_i64(buf.data[index]))?;
-        }
-        _ => return Err(VMError::TypeError { expected: "Array<int>", got: hv.type_name() }),
-    }
-    Ok(())
-}
+GetElemI64    = ...,  // [arr_slot, index] → push i64
+GetElemF64    = ...,  // [arr_slot, index] → push f64
+SetElemI64    = ...,  // [arr_slot, index, value] → store
+SetElemF64    = ...,  // [arr_slot, index, value] → store
+ArrayLenTyped = ...,  // [arr_slot] → push length
+ArrayPushI64  = ...,  // [arr_slot, value] → append
+ArrayPushF64  = ...,  // [arr_slot, value] → append
 ```
 
-#### A.3: Compiler emits typed opcodes
+#### A.2: HashMap typed opcodes
 
-In the compiler's index-access handler, when the array type is proven:
 ```rust
-// If arr is proven Array<int>:
-self.emit(OpCode::GetElemI64, operand, span);
-// Instead of generic:
-self.emit(OpCode::GetElement, operand, span);
+MapGetStrI64  = ...,  // [map_slot, key] → push Option<i64>
+MapGetStrF64  = ...,  // [map_slot, key] → push Option<f64>
+MapSetStrI64  = ...,  // [map_slot, key, value] → set
+MapSetStrF64  = ...,  // [map_slot, key, value] → set
+MapHasStr     = ...,  // [map_slot, key] → push bool
+MapLenTyped   = ...,  // [map_slot] → push length
 ```
+
+#### A.3: String typed opcodes
+
+```rust
+StringLen     = ...,  // [str_slot] → push length
+StringCharAt  = ...,  // [str_slot, index] → push char
+StringConcat  = ...,  // [str_a, str_b] → push new string
+StringSlice   = ...,  // [str_slot, start, end] → push slice
+```
+
+#### A.4: Compiler emission
+
+In the compiler's index/method resolution:
+- When `arr` is proven `Array<int>`: emit `GetElemI64` instead of generic `GetElement`
+- When `map` is proven `HashMap<string, int>`: emit `MapGetStrI64` instead of `CallMethod("get")`
+- When `str` is proven `string`: emit `StringLen` instead of `CallMethod("len")`
 
 ### Phase B: Method Call Monomorphization
 
 **Goal**: `arr.map(|x| x * 2)` where `arr: Array<int>` compiles to a typed loop.
 
-#### B.1: Specialize stdlib higher-order methods
+#### B.1: Per-type specialized method handlers
 
-For `Array<int>.map(f)`:
+For each collection method + type combination, generate a specialized handler:
+
 ```rust
-fn specialized_map_i64(
-    vm: &mut VirtualMachine,
-    arr_bits: u64,      // Array<int>
-    closure_bits: u64,   // (int) -> T
-) -> Result<u64, VMError> {
-    let buf = extract_int_buffer(arr_bits)?;
-    let mut result = Vec::with_capacity(buf.len());
-    for &elem in &buf.data {
-        // Push i64 directly, call closure, get result
-        let input = vw_from_i64(elem);
-        let output = vm.call_closure(closure_bits, &[input])?;
+// Array<int>.map(f) → specialized typed loop
+fn map_i64(vm: &mut VM, arr: &TypedBuffer<i64>, closure: u64) -> Result<u64, VMError> {
+    let mut result = Vec::with_capacity(arr.data.len());
+    for &elem in &arr.data {
+        let output = vm.call_closure_1arg(closure, vw_from_i64(elem))?;
         result.push(output);
     }
     Ok(vw_heap_box_owned(HeapValue::Array(Arc::new(result))))
 }
+
+// HashMap<string, int>.forEach(f) → typed iteration
+fn for_each_str_i64(vm: &mut VM, map: &HashMapData, closure: u64) -> Result<(), VMError> {
+    for (k, v) in map.iter_typed::<String, i64>() {
+        vm.call_closure_2arg(closure, vw_from_string(k), vw_from_i64(v))?;
+    }
+    Ok(())
+}
 ```
 
-Register in `TYPED_ARRAY_METHODS` PHF map for `HeapKind::TypedArray`.
+#### B.2: Register in typed PHF maps
 
-#### B.2: Compiler emits direct Call instead of CallMethod
+Extend `TYPED_ARRAY_METHODS`, add `TYPED_MAP_METHODS`, `TYPED_SET_METHODS`:
 
-When `arr.map(f)` is compiled and `arr` is proven `Array<int>`:
+```rust
+static TYPED_INT_ARRAY_METHODS: phf::Map<&str, MethodFnV2> = phf_map! {
+    "map" => map_i64,
+    "filter" => filter_i64,
+    "reduce" => reduce_i64,
+    "sum" => sum_i64,        // Direct SIMD reduction
+    "sort" => sort_i64,      // Radix sort for integers
+    // ...
+};
+```
+
+#### B.3: Compiler emits direct Call instead of CallMethod
+
+When the method receiver type is fully proven:
 ```rust
 // Instead of: CallMethod("map")  → runtime PHF lookup
-// Emit: CallSpecialized(map_i64)  → direct function call
+// Emit: CallDirect(map_i64_idx)   → direct function dispatch
 ```
 
 ### Phase C: JIT v2 Layout Integration
 
-**Goal**: The JIT compiles typed array access to single-instruction loads.
+**Goal**: JIT compiles collection access to native instructions.
 
-#### C.1: JIT uses v2 TypedArray layout
+#### C.1: v2 TypedArray in JIT
 
-When JIT-compiling a function that accesses `Array<int>`:
-```rust
-// Cranelift IR:
-let arr_ptr = builder.ins().load(types::I64, arr_slot);
-let data_ptr = builder.ins().iadd_imm(arr_ptr, 16);  // skip header
-let elem_ptr = builder.ins().imul_imm(index, 8);
-let elem_addr = builder.ins().iadd(data_ptr, elem_ptr);
-let value = builder.ins().load(types::I64, elem_addr);
+```
+arr[i] → mov rax, [rbp + arr_slot]     ; load array pointer
+          mov ecx, [rax + 8]            ; load length (bounds check)
+          cmp edi, ecx
+          jae .oob
+          mov rsi, [rax + 16 + rdi * 8] ; load element
 ```
 
-#### C.2: Bounds check with branch prediction
+#### C.2: v2 TypedMap in JIT
 
-```rust
-let len = builder.ins().load(types::I32, arr_ptr, 8);  // len at offset 8
-let len64 = builder.ins().uextend(types::I64, len);
-let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, index, len64);
-builder.ins().brif(in_bounds, ok_block, &[], oob_block, &[]);
-// ok_block: emit the load
-// oob_block: deopt back to interpreter
+```
+map.get(k) → hash(k)                    ; compute hash
+              probe(map.ctrl, hash)      ; Swiss table probe
+              load [map.data + slot * entry_size] ; load value
 ```
 
-#### C.3: Loop vectorization
+#### C.3: SIMD vectorization for bulk operations
 
-For `arr.map(|x| x * 2)` on `Array<f64>`:
 ```
-// Cranelift + SIMD:
-vload f64x4 [data_ptr + i*32]
-vmul  f64x4, [2.0, 2.0, 2.0, 2.0]
-vstore f64x4 [result_ptr + i*32]
+arr.sum() → vpaddq zmm0, [data + i*64]  ; 8x i64 parallel add (AVX-512)
+            ; or
+            vaddpd ymm0, [data + i*32]   ; 4x f64 parallel add (AVX2)
 ```
 
-### Phase D: Stack-Allocated Small Arrays (Future)
+#### C.4: String SSO in JIT
 
-For `let arr = [a, b, c]` where size ≤ 8:
-- Allocate in stack frame, not heap
-- No HeapValue wrapper, no pointer indirection
-- `arr[i]` = frame-relative load
+Small strings (≤ 23 bytes) stored inline in the ValueWord + 2 adjacent stack slots:
+```
+[tag: 1 byte][len: 1 byte][data: 22 bytes]  // No heap allocation
+```
 
-Requires escape analysis to prove the array doesn't escape the function.
+JIT recognizes SSO strings and emits inline comparison/concatenation.
+
+### Phase D: Stack-Allocated Small Collections (Future)
+
+For compile-time-known small sizes:
+- `[x, y, z]` (≤ 8 elements) → stack frame, no heap
+- `{ a: 1, b: 2 }` (≤ 4 fields) → stack frame
+- `"hello"` (≤ 23 bytes) → SSO inline
+
+Requires escape analysis to prove the collection doesn't escape the function.
 
 ## Metrics
 
-| Metric | Current (Tier 0) | Phase A (Tier 1) | Phase C (Tier 2) | Rust equivalent |
-|--------|------------------|-------------------|-------------------|-----------------|
-| `arr[i]` cost | ~3 indirections + match | 1 indirection + match | 1 load instruction | 1 load instruction |
-| `arr.push(x)` | HeapValue match + Arc CoW | Direct buffer push | Inline realloc + store | Vec::push |
-| `arr.len` | HeapValue match | Direct field load | Direct field load | Direct field load |
-| `arr.map(f)` | PHF lookup + generic loop | Typed loop | SIMD vectorized loop | Iterator + LLVM auto-vec |
+| Collection | Operation | Current | Phase A | Phase C | Rust |
+|------------|-----------|---------|---------|---------|------|
+| `Array<int>` | `arr[i]` | ~3 indirections | 1 indirection | 1 load | 1 load |
+| `Array<float>` | `arr.sum()` | generic loop | typed loop | SIMD | SIMD |
+| `HashMap<str,int>` | `map.get(k)` | 3 indirections + PHF | 1 indirection + hash | inline hash | inline hash |
+| `String` | `str.len` | 2 indirections | 1 field load | 1 field load | 1 field load |
+| `TypedObject` | `obj.x` | 1 slot load | 1 slot load | 1 field load | 1 field load |
+| `Set<int>` | `set.has(x)` | 3 indirections | 1 hash probe | inline probe | inline probe |
 
 ## Execution Order
 
-1. **Phase A** (2-3 weeks): Typed element access opcodes for interpreter. Biggest win for non-JIT code.
-2. **Phase B** (2-3 weeks): Method monomorphization. Makes `map`/`filter`/`reduce` fast.
-3. **Phase C** (3-4 weeks): JIT v2 layout. Single-instruction element access.
-4. **Phase D** (future): Stack arrays. Zero-allocation small arrays.
+1. **Phase A** (3-4 weeks): Typed opcodes for interpreter — Array, HashMap, String. Biggest win for non-JIT code.
+2. **Phase B** (3-4 weeks): Method monomorphization — map/filter/reduce/sort become typed loops.
+3. **Phase C** (4-6 weeks): JIT v2 layouts — single-instruction access, SIMD vectorization.
+4. **Phase D** (future): Stack allocation — zero-heap small collections.
 
 ## Key Files
 
 | File | Role |
 |------|------|
 | `crates/shape-value/src/v2_typed_array.rs` | v2 TypedArray layout (exists) |
-| `crates/shape-value/src/heap_value.rs` | HeapHeader definition (exists) |
-| `crates/shape-vm/src/bytecode/opcode_defs.rs` | Add typed element opcodes |
-| `crates/shape-vm/src/executor/v2_handlers/typed_array.rs` | Typed array executor handlers |
-| `crates/shape-vm/src/compiler/expressions/property_access.rs` | Emit typed index access |
+| `crates/shape-value/src/v2/typed_map.rs` | v2 TypedMap layout (exists) |
+| `crates/shape-value/src/v2/string_obj.rs` | v2 UnifiedString (exists) |
+| `crates/shape-value/src/v2_struct_layout.rs` | v2 struct layout (exists) |
+| `crates/shape-value/src/heap_value.rs` | HeapHeader (exists) |
+| `crates/shape-vm/src/bytecode/opcode_defs.rs` | Add typed collection opcodes |
+| `crates/shape-vm/src/executor/v2_handlers/` | Typed executor handlers (partially exists) |
+| `crates/shape-vm/src/compiler/expressions/` | Emit typed opcodes when types proven |
 | `crates/shape-vm/src/compiler/monomorphization/` | Method call specialization |
-| `crates/shape-jit/src/mir_compiler/` | JIT codegen for typed arrays |
-| `crates/shape-vm/src/executor/objects/typed_array_methods.rs` | Specialized method handlers |
+| `crates/shape-jit/src/mir_compiler/` | JIT codegen for v2 layouts |
+| `crates/shape-vm/src/executor/objects/typed_array_methods.rs` | Specialized typed array methods (exists) |
 
 ## Non-Goals
 
-- Not changing the language syntax — `Array<int>` already works
-- Not requiring type annotations — the compiler infers element types
-- Not breaking existing code — untyped arrays still work via HeapValue path
-- Not removing HeapValue::Array — it remains as the dynamic fallback for heterogeneous arrays
+- Not changing Shape syntax — `Array<int>`, `HashMap<string, int>` already work
+- Not requiring type annotations — compiler infers element types
+- Not breaking existing code — untyped collections still work via HeapValue
+- Not removing HeapValue — it remains as the dynamic fallback
+- Not implementing a custom allocator — use system malloc/jemalloc
