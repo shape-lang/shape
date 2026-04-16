@@ -11,6 +11,7 @@
 
 // Re-export core types
 pub mod aligned_vec;
+pub mod array_view;
 pub mod closure;
 pub mod content;
 pub mod context;
