@@ -4,7 +4,6 @@
 //! `shape.toml` files and discovering project roots.
 
 use serde::{Deserialize, Serialize};
-use shape_value::ValueWordExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

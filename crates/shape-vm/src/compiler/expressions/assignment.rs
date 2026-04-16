@@ -1,7 +1,6 @@
 //! Assignment and let expression compilation
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
-use shape_value::ValueWordExt;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{Expr, Spanned};
 use shape_ast::error::{Result, ShapeError};

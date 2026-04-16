@@ -2,7 +2,7 @@
 //! for correlation, covariance, percentile, median, distributions, stochastic
 //! processes, and random number generation.
 
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{VMError, ValueWord};
 
 use super::NbIntrinsicResult;
 
@@ -176,6 +176,7 @@ pub fn vm_intrinsic_median(args: &[ValueWord]) -> NbIntrinsicResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_value::ValueWordExt;
     use std::sync::Arc;
 
     fn make_nb_array(values: Vec<f64>) -> ValueWord {

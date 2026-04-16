@@ -12,7 +12,7 @@ use crate::context::ExecutionContext;
 use crate::simd_i64;
 use crate::simd_rolling;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 
 /// Intrinsic: Rolling sum over a window
 pub fn intrinsic_rolling_sum(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {

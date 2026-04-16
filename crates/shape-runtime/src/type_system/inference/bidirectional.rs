@@ -26,7 +26,6 @@
 //!   so downstream inference stays precise.
 
 use super::TypeInferenceEngine;
-use shape_value::ValueWordExt;
 use crate::type_system::*;
 use shape_ast::ast::{Expr, FunctionParameter, ObjectEntry, TypeAnnotation};
 

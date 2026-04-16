@@ -5,7 +5,6 @@
 //! `ChartSpec` output for unified rendering.
 
 use arrow_ipc::reader::StreamReader;
-use shape_value::ValueWordExt;
 use arrow_schema::{DataType, Schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

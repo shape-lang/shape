@@ -14,7 +14,7 @@ use crate::project::{DependencySpec, ProjectRoot, find_project_root, normalize_p
 use shape_ast::ast::{AnnotationDef, FunctionDef, ImportStmt, Program};
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::parser::parse_program;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

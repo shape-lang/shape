@@ -27,7 +27,6 @@
 //! ```
 
 use crate::tags;
-use crate::value_word::ValueWordExt;
 use std::alloc::{self, Layout};
 use std::slice;
 use std::sync::atomic::AtomicU32;

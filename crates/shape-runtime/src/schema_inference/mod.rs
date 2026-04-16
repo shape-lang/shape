@@ -6,7 +6,6 @@
 pub mod lockfile;
 
 use arrow_schema::Schema as ArrowSchema;
-use shape_value::ValueWordExt;
 use std::path::Path;
 
 /// Error type for schema inference operations.

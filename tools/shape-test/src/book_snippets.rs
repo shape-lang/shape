@@ -5,7 +5,6 @@
 //! `.expected` file is `{{#include}}`'d into the book markdown — single source of truth.
 
 use std::path::{Path, PathBuf};
-use shape_value::ValueWordExt;
 
 /// A single book snippet extracted from a .shape file.
 pub struct BookSnippet {

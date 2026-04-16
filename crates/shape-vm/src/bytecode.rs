@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use shape_abi_v1::PermissionSet;
 use shape_ast::ast::{DataDateTimeRef, DateTimeExpr, Duration, TimeReference, TypeAnnotation};
 use shape_ast::data::Timeframe;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 use std::collections::HashMap;
 
 const DEFAULT_TRAIT_IMPL_SELECTOR: &str = "__default__";

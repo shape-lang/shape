@@ -13,7 +13,6 @@ pub use evolution::{
 pub use registry::{RecordField, RecordSchema, TraitImplEntry, TypeAliasEntry};
 
 use super::*;
-use shape_value::ValueWordExt;
 use evolution::EvolutionRegistry;
 use registry::TypeRegistry;
 use shape_ast::ast::{

@@ -4,7 +4,6 @@
 //! Call (function call), Return, Unreachable (trap).
 
 use cranelift::prelude::*;
-use shape_value::ValueWordExt;
 
 use super::MirToIR;
 use shape_vm::mir::types::*;

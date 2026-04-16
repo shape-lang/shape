@@ -1,7 +1,6 @@
 //! Closure (function expression) compilation
 
 use crate::bytecode::{Function, Instruction, OpCode, Operand};
-use shape_value::ValueWordExt;
 use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 use shape_ast::ast::{Expr, FunctionDef, Span};
 use shape_ast::error::{Result, ShapeError};

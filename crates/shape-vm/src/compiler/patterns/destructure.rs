@@ -1,7 +1,6 @@
 //! Destructure patterns - extracting values from compound structures
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
-use shape_value::ValueWordExt;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::VariableTypeInfo;
 use shape_ast::ast::{DecompositionBinding, TypeAnnotation};

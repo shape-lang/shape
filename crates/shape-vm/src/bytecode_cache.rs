@@ -5,7 +5,6 @@
 //! This avoids redundant recompilation when source files haven't changed.
 
 use sha2::{Digest, Sha256};
-use shape_value::ValueWordExt;
 use std::path::PathBuf;
 
 use crate::bytecode::BytecodeProgram;

@@ -9,7 +9,6 @@
 //! the same shape, enabling inline caching.
 
 use std::collections::HashMap;
-use crate::value_word::ValueWordExt;
 use std::fmt;
 use std::sync::Mutex;
 

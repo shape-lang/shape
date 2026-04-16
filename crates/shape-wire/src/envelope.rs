@@ -5,7 +5,6 @@
 //! available format options.
 
 use crate::metadata::{TypeInfo, TypeKind, TypeRegistry};
-use shape_value::ValueWordExt;
 use crate::value::WireValue;
 use serde::{Deserialize, Serialize};
 

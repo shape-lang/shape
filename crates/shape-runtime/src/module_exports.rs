@@ -4,7 +4,7 @@
 //! a plugin has been loaded through the ABI capability interfaces.
 
 use crate::type_schema::{TypeSchema, TypeSchemaRegistry};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::future::Future;

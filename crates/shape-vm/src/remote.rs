@@ -28,7 +28,7 @@ use shape_runtime::snapshot::{
     SerializableVMValue, SnapshotStore, nanboxed_to_serializable, serializable_to_nanboxed,
 };
 use shape_runtime::type_schema::TypeSchemaRegistry;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 
 use shape_wire::WireValue;
 
@@ -1755,6 +1755,7 @@ mod tests {
     use crate::bytecode::{FunctionBlob, FunctionHash, Instruction, OpCode, Program};
     use crate::compiler::BytecodeCompiler;
     use shape_abi_v1::PermissionSet;
+    use shape_value::ValueWordExt;
     use std::collections::HashMap;
 
     /// Helper: compile Shape source to BytecodeProgram

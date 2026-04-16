@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::value_word::{ValueWord, ValueWordExt};
+use crate::value_word::ValueWord;
 
 /// Type alias for array storage — ValueWord elements for 9x memory reduction.
 pub type VMArray = Arc<Vec<ValueWord>>;

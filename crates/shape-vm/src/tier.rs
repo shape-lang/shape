@@ -8,7 +8,6 @@
 //! - Tier 2: Optimizing JIT (inlining, constant propagation) — after 10,000 calls
 
 use std::collections::{HashMap, HashSet};
-use shape_value::ValueWordExt;
 use std::sync::{Arc, mpsc};
 
 use crate::bytecode::BytecodeProgram;

@@ -4,7 +4,6 @@
 //! Old blobs remain valid for in-flight frames. New calls use updated blobs.
 
 use crate::bytecode::{FunctionBlob, FunctionHash};
-use shape_value::ValueWordExt;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 

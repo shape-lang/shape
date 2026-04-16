@@ -6,7 +6,6 @@
 //! - compile-time artifacts (schema inference, comptime outputs, generated metadata)
 
 use serde::{Deserialize, Serialize};
-use shape_value::ValueWordExt;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;

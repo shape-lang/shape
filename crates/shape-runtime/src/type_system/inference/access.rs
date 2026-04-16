@@ -3,7 +3,6 @@
 //! Handles type inference for property access, index access, function calls, and iterators.
 
 use super::TypeInferenceEngine;
-use shape_value::ValueWordExt;
 use crate::type_system::*;
 use shape_ast::ast::{Expr, Span, TypeAnnotation};
 use std::collections::HashMap;

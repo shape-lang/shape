@@ -18,7 +18,6 @@
 //! ```
 
 use crate::error::{Result, WireError};
-use shape_value::ValueWordExt;
 use crate::value::WireValue;
 use chrono::DateTime;
 use std::collections::HashMap;

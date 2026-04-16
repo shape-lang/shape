@@ -5,7 +5,6 @@
 //! extension module artifacts to the unified module loader.
 
 use crate::extensions::ParsedModuleSchema;
-use shape_value::ValueWordExt;
 use crate::frontmatter::parse_frontmatter;
 use crate::module_loader::{ModuleCode, ModuleLoader};
 use crate::project::find_project_root;

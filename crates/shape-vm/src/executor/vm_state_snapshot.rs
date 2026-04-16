@@ -6,7 +6,7 @@
 //! borrow on it.
 
 use shape_runtime::module_exports::{FrameInfo, VmStateAccessor};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 
 use super::VirtualMachine;
 

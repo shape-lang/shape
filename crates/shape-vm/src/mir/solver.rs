@@ -50,7 +50,6 @@
 //!   crossing detached task boundaries (B0014).
 
 use super::analysis::*;
-use shape_value::ValueWordExt;
 use super::cfg::ControlFlowGraph;
 use super::liveness::{self, LivenessResult};
 use super::types::*;

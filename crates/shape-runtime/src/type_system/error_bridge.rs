@@ -4,7 +4,6 @@
 //! and the unified error type (`ShapeError`).
 
 use super::errors::TypeError;
-use shape_value::ValueWordExt;
 use shape_ast::ast::Span;
 use shape_ast::error::{ShapeError, span_to_location};
 

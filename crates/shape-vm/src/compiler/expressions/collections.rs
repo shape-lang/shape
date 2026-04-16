@@ -1,7 +1,6 @@
 //! Collection expression compilation (arrays, objects)
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
-use shape_value::ValueWordExt;
 use crate::type_tracking::{NumericType, VariableTypeInfo};
 use shape_ast::ast::{EnumConstructorPayload, Expr, Literal, Spanned, TypeAnnotation, TypeParam};
 use shape_ast::error::{Result, ShapeError};

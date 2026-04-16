@@ -250,8 +250,8 @@ pub extern "C" fn jit_v2_print_typed(value_bits: u64, type_tag: i8) {
             }
         }
         _ => {
-            // Fallback: use standard NaN-boxed formatting
-            println!("{}", crate::ffi::conversion::format_nan_boxed(value_bits));
+            // Fallback: use standard ValueWord formatting
+            println!("{}", crate::ffi::conversion::format_value_word(value_bits));
         }
     }
 }

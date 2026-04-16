@@ -4,7 +4,6 @@
 //! was executed with specific arguments and produced a specific result.
 
 use serde::{Deserialize, Serialize};
-use shape_value::ValueWordExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};

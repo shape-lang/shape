@@ -1,5 +1,4 @@
 use sha2::{Digest, Sha256};
-use shape_value::ValueWordExt;
 use std::path::PathBuf;
 
 fn main() {

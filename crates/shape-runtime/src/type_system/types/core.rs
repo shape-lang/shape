@@ -6,7 +6,6 @@
 //! - `TypeScheme`: Polymorphic type schemes
 
 use shape_ast::ast::TypeAnnotation;
-use shape_value::ValueWordExt;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

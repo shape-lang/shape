@@ -3,7 +3,6 @@
 //! Handles type inference for all expression types.
 
 use super::{CheckMode, TypeInferenceEngine};
-use shape_value::ValueWordExt;
 use crate::type_system::checking::MethodTable;
 use crate::type_system::exhaustiveness;
 use crate::type_system::*;

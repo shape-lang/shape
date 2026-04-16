@@ -10,7 +10,6 @@
 //! - Sized integer (i32) ops require a FrameDescriptor with non-Unknown slots
 
 use super::{BytecodeProgram, OpCode, Operand};
-use shape_value::ValueWordExt;
 use crate::type_tracking::SlotKind;
 
 /// Errors produced by the bytecode verifier.

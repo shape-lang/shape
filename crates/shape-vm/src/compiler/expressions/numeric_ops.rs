@@ -1,7 +1,6 @@
 //! Numeric binary-op helpers shared by expression lowering.
 
 use crate::bytecode::{Instruction, OpCode};
-use shape_value::ValueWordExt;
 use crate::type_tracking::NumericType;
 use shape_ast::ast::{BinaryOp, TypeAnnotation};
 use shape_runtime::type_system::{BuiltinTypes, Type};
@@ -297,6 +296,7 @@ pub(super) fn typed_opcode_for(op: &BinaryOp, nt: NumericType) -> Option<OpCode>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_value::ValueWordExt;
 
     #[test]
     fn width_aware_basic_types_map_to_numeric_hints() {

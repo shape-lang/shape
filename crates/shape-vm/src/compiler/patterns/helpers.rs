@@ -1,7 +1,6 @@
 //! Helper functions for pattern compilation
 
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
-use shape_value::ValueWordExt;
 use shape_ast::ast::Literal;
 use shape_ast::error::Result;
 

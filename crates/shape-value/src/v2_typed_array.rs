@@ -23,7 +23,6 @@
 //! element size is determined by `elem_type`.
 
 use std::alloc::{self, Layout};
-use crate::value_word::ValueWordExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------

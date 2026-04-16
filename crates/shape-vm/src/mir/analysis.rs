@@ -8,7 +8,6 @@
 //! **DRY rule**: Analysis runs ONCE. No consumer re-derives these results.
 
 use super::liveness::LivenessResult;
-use shape_value::ValueWordExt;
 use super::types::*;
 use shape_ast::ast::Span;
 use std::collections::HashMap;

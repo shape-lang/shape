@@ -1,7 +1,6 @@
 //! Phase 3: prove array bounds for selected loop accesses.
 
 use std::collections::{HashMap, HashSet};
-use shape_value::ValueWordExt;
 
 use cranelift::prelude::IntCC;
 use shape_vm::bytecode::{BytecodeProgram, OpCode, Operand};

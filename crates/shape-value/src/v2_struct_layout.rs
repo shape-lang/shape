@@ -120,7 +120,6 @@ const fn align_up(offset: u32, align: u32) -> u32 {
 ///
 /// ```
 /// use shape_value::v2_struct_layout::{compute_struct_layout, FieldType};
-use crate::value_word::ValueWordExt;
 ///
 /// let layout = compute_struct_layout("Point", &[
 ///     ("x".into(), FieldType::F64),

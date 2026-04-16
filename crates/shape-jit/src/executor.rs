@@ -274,12 +274,12 @@ impl JITExecutor {
             ScalarKind::None => {
                 // None could also be a fallback for non-scalar heap types.
                 // Check if raw_bits is actually a heap value.
-                self.nan_boxed_to_wire(raw_bits)
+                self.value_word_to_wire(raw_bits)
             }
         }
     }
 
-    fn nan_boxed_to_wire(&self, bits: u64) -> WireValue {
+    fn value_word_to_wire(&self, bits: u64) -> WireValue {
         use crate::ffi::jit_kinds::jit_unbox;
         use crate::ffi::value_ffi::{
             HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number,
@@ -296,7 +296,7 @@ impl JITExecutor {
         } else if bits == TAG_BOOL_FALSE {
             WireValue::Bool(false)
         } else if is_tagged(bits) && get_tag(bits) == TAG_INT {
-            // NaN-boxed i48 integer — sign-extend to i64 and return as integer
+            // Tagged i48 integer — sign-extend to i64 and return as integer
             let int_val = sign_extend_i48(get_payload(bits));
             WireValue::Integer(int_val)
         } else if is_heap_kind(bits, HK_STRING) {

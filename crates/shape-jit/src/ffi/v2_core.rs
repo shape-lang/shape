@@ -1,17 +1,15 @@
-//! v2 Core FFI functions — native typed replacements for NaN-boxed functions.
+//! v2 Core FFI functions — native typed replacements for dynamic-dispatch functions.
 //!
 //! These functions accept raw native types (pointers, i64, f64, u8) instead of
-//! NaN-boxed u64 values. They are the v2 replacements for:
+//! tagged u64 values. They are the v2 replacements for:
 //! - `jit_print(value_bits: u64)` -> type-specific print functions
 //! - arc_retain/arc_release -> pointer-based retain/release
-//!
-//! Part of the v2 NaN-boxing removal plan (Step 4).
 
 use super::typed_object::TypedObject;
-use super::conversion::format_nan_boxed;
+use super::conversion::format_value_word;
 
 // ============================================================================
-// Retain / Release — operate on raw heap pointers, no NaN-boxing
+// Retain / Release — operate on raw heap pointers
 // ============================================================================
 
 /// Increment the reference count on a TypedObject (legacy v1 TypedObject path).
@@ -146,7 +144,7 @@ pub extern "C" fn jit_v2_print_typed_native(value_bits: u64, type_tag: u8) {
         }
         _ => {
             // Fallback: NaN-boxed legacy path
-            println!("{}", format_nan_boxed(value_bits));
+            println!("{}", format_value_word(value_bits));
         }
     }
 }

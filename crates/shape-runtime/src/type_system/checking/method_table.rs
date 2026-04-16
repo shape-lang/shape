@@ -40,7 +40,6 @@
 //! for methods available on every value (e.g. `toString`, `toJSON`).
 
 use crate::type_system::{BuiltinTypes, Type};
-use shape_value::ValueWordExt;
 use shape_ast::ast::TypeAnnotation;
 use std::collections::HashMap;
 

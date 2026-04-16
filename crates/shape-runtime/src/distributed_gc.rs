@@ -5,7 +5,6 @@
 //! Unreferenced blobs are eligible for collection.
 
 use std::collections::{HashMap, HashSet};
-use shape_value::ValueWordExt;
 use std::time::{Duration, Instant};
 
 /// Unique identifier for a VM node in the distributed system.

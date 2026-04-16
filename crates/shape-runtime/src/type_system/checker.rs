@@ -4,7 +4,6 @@
 //! and reports type errors with helpful messages.
 
 use super::errors::{TypeError, TypeErrorWithLocation, TypeResult};
-use shape_value::ValueWordExt;
 use super::inference::TypeInferenceEngine;
 use super::*;
 use shape_ast::ast::{EnumDef, Expr, Item, Program, Span, Statement, TypeAnnotation};

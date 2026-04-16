@@ -8,7 +8,6 @@
 //! - native dependency lockfile artifact validation
 
 use crate::package_bundle::PackageBundle;
-use shape_value::ValueWordExt;
 use crate::package_lock::{ArtifactDeterminism, LockedArtifact, PackageLock};
 use crate::project::{
     ExternalLockMode, NativeDependencyProvider, NativeDependencySpec, NativeTarget, ProjectRoot,

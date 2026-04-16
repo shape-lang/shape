@@ -34,7 +34,6 @@ use shape_ast::ast::TypeAnnotation;
 use shape_runtime::type_schema::{FieldType, SchemaId, TypeSchema, TypeSchemaRegistry};
 use shape_runtime::type_system::{BuiltinTypes, StorageType};
 use shape_value::v2::struct_layout::{FieldKind, StructLayout};
-use shape_value::ValueWordExt;
 
 /// Numeric type known at compile time for typed opcode emission.
 ///

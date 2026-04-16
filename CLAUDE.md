@@ -28,7 +28,7 @@ The repo is a monorepo with several top-level projects:
 | Crate | Path | Purpose |
 |-------|------|---------|
 | **shape-ast** | `crates/shape-ast/` | Pest grammar (`shape.pest`) + AST types |
-| **shape-value** | `crates/shape-value/` | NaN-boxed value representation, HeapValue, TypedObject schemas |
+| **shape-value** | `crates/shape-value/` | Value representation (`ValueWord` in `value_word.rs`), HeapValue, TypedObject schemas |
 | **shape-types** | `crates/shape-types/` | Type system definitions, type inference types |
 | **shape-common** | `crates/shape-common/` | Shared utilities across crates |
 | **shape-runtime** | `crates/shape-runtime/` | Bytecode compiler, builtin functions, method registry, type schemas, stdlib modules, capability tags |
@@ -127,17 +127,18 @@ Shape supports:
 
 ## Architecture
 
-> **v2 Runtime**: The runtime is migrating to fully typed, zero-tag native values. See `docs/runtime-v2-spec.md` for the authoritative spec. The v1 NaN-boxing system described below is being replaced — all new code should target the v2 architecture.
+> **v2 Runtime**: The runtime uses typed, zero-tag native values for proven types and `ValueWord` (8-byte tagged word) as the dynamic fallback. See `docs/runtime-v2-spec.md` for the authoritative spec. All new code should target the v2 architecture.
 
 ### Compilation Pipeline
 1. **Parser** (shape-ast): Pest grammar → AST
 2. **Bytecode Compiler** (shape-runtime): Two-pass — register functions, then compile. Type inference and checking happen during compilation. Emits typed opcodes when types are proven at compile time.
-3. **VM Interpreter** (shape-vm): Stack-based execution with typed 8-byte slots (v2: raw native values, no NaN-boxing), feedback vectors for type profiling
+3. **VM Interpreter** (shape-vm): Stack-based execution with typed 8-byte slots (raw native values for proven types, `ValueWord` dynamic fallback), feedback vectors for type profiling
 4. **JIT** (shape-jit): Cranelift codegen via MirToIR, tiered (Tier 1 baseline @ 100 calls, Tier 2 optimizing @ 10k), OSR for hot loops, deoptimization back to interpreter
 
-### Value Representation (v1 → v2 transition)
-- **v1 (NaN-boxing)**: `ValueWord`/`NanBoxed` — all values in 8 bytes with 3-bit tag. Being removed.
-- **v2 (native types)**: Raw `f64`/`i64`/`i32`/`i8`/`bool`/`*const T` in 8-byte stack slots. Opcodes encode the type — no runtime tag checking. See `docs/runtime-v2-spec.md`.
+### Value Representation
+- **`ValueWord`** (`value_word.rs`, ~2,650 lines): 8-byte tagged word used as the dynamic fallback representation. Encodes inline scalars (i48 int, f64, bool, unit, null) and heap pointers via tag bits. Declarative macros define the tag layout and accessor methods. The former `nan_boxing.rs` and `tags.rs` modules have been consolidated into `value_word.rs`; JIT-specific FFI tag constants live in `ffi/value_ffi.rs` and `ffi/jit_kinds.rs` within shape-jit.
+- **`SlotKind`** (`type_tracking.rs`): Describes the storage kind per stack slot. Typed slots (`Float64`, `Int64`, `Int32`, `Bool`, etc.) hold raw native values with no tag overhead. The `Dynamic` variant represents a `ValueWord`-encoded slot; `Unknown` is for unresolved/uninitialized slots.
+- **v2 native types**: Raw `f64`/`i64`/`i32`/`i8`/`bool`/`*const T` in 8-byte stack slots when the compiler proves the type. Opcodes encode the type — no runtime tag checking. See `docs/runtime-v2-spec.md`.
 - **HeapHeader**: 8-byte `repr(C)` header (refcount `AtomicU32` at offset 0, kind `u16`, flags `u8`). All heap objects share this header.
 - **TypedArray\<T\>**: Contiguous native buffer (`HeapHeader` + `*mut T` + len/cap). `Array<number>` → `TypedArray<f64>` with `arr[i]` = `load f64 [data + i*8]`.
 - **TypedStruct**: C-compatible fixed layout with compile-time field offsets. `point.x` = `load f64 [ptr + 8]`.
@@ -164,7 +165,7 @@ Shape supports:
 ### Performance Features
 - **Typed opcodes**: `AddInt`, `MulNumber`, `EqInt`, etc. — skip runtime type checks when compiler proves types
 - **String interning**: `StringId(u32)` in opcodes, O(1) reverse lookup via `HashMap<String, u32>`
-- **Immutable closures**: `Upvalue::Immutable(NanBoxed)` — no Arc, no lock for non-mutated captures
+- **Immutable closures**: `Upvalue::Immutable(ValueWord)` — no Arc, no lock for non-mutated captures
 - **Feedback-guided JIT**: IC state machine (Uninitialized → Monomorphic → Polymorphic → Megamorphic) drives speculative optimization
 - **Zero-cost typed field access**: `field_type_tag` encoded in operand at compile time; executor reads slots directly without schema lookup
 - **Cold-path marking**: `#[cold]` on error/underflow paths for branch prediction

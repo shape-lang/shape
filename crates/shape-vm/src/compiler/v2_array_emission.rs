@@ -8,7 +8,6 @@
 //! Integration into the actual opcode emission paths will happen separately.
 
 use crate::type_tracking::{SlotKind, TypeTracker};
-use shape_value::ValueWordExt;
 use shape_ast::ast::{Expr, Literal, TypeAnnotation};
 
 /// Check if an array literal has a proven homogeneous element type.

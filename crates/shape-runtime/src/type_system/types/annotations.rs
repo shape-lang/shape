@@ -3,7 +3,6 @@
 //! Handles conversions between TypeAnnotation (AST) and SemanticType.
 
 use super::builtins::BuiltinTypes;
-use shape_value::ValueWordExt;
 use crate::type_system::semantic::{EnumVariant, FunctionParam, FunctionSignature, SemanticType};
 use shape_ast::ast::TypeAnnotation;
 

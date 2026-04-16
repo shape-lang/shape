@@ -1,7 +1,6 @@
 //! Loop compilation (for, while, loop expressions)
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
-use shape_value::ValueWordExt;
 use crate::type_tracking::NumericType;
 use shape_ast::ast::{Expr, ForInit, RangeKind};
 use shape_ast::error::{Result, ShapeError};

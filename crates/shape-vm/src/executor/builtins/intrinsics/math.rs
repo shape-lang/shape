@@ -3,7 +3,7 @@
 //! Each function is a thin wrapper that calls the runtime intrinsic with a
 //! temporary ExecutionContext and converts ShapeError to VMError.
 
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{VMError, ValueWord};
 
 use super::NbIntrinsicResult;
 
@@ -90,6 +90,7 @@ pub fn vm_intrinsic_from_char_code(args: &[ValueWord]) -> NbIntrinsicResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_value::ValueWordExt;
     use std::sync::Arc;
 
     fn make_nb_array(values: Vec<f64>) -> ValueWord {

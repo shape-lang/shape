@@ -12,7 +12,7 @@
 
 use crate::Result;
 use shape_ast::error::ShapeError;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 use std::collections::HashMap;
 
 /// Single source of truth for all module binding values.
@@ -225,6 +225,7 @@ impl ModuleBindingRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_value::ValueWordExt;
     use shape_value::heap_value::HeapValue;
 
     #[test]

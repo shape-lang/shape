@@ -8,7 +8,7 @@
 //! allowing Shape to run on any platform.
 
 use serde::{Deserialize, Serialize};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 use std::sync::Arc;
 
 /// Events that can be queued for processing
@@ -293,6 +293,7 @@ pub fn create_tokio_event_queue() -> SharedEventQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_value::ValueWordExt;
     use std::sync::Arc;
 
     #[test]

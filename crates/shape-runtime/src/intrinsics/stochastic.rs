@@ -8,7 +8,7 @@ use super::{extract_f64, extract_usize, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
 use rand::Rng;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 
 fn sample_standard_normal() -> f64 {
     random::with_rng(|rng| {
@@ -205,6 +205,7 @@ pub fn intrinsic_random_walk(args: &[ValueWord], _ctx: &mut ExecutionContext) ->
 mod tests {
     use super::*;
     use crate::intrinsics::random as random_intrinsics;
+    use shape_value::ValueWordExt;
 
     fn mean_variance(samples: &[f64]) -> (f64, f64) {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;

@@ -20,7 +20,7 @@
 //! by providing one type with correct ValueWord clone/drop semantics **and**
 //! a stable C layout for the JIT.
 
-use crate::value_word::{ValueWord, ValueWordExt};
+use crate::value_word::ValueWord;
 use std::alloc::{self, Layout};
 use std::slice;
 
@@ -422,6 +422,7 @@ impl From<std::sync::Arc<Vec<ValueWord>>> for ShapeArray {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value_word::ValueWordExt;
 
     #[test]
     fn test_repr_c_layout() {

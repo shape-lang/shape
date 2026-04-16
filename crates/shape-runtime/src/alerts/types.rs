@@ -3,7 +3,6 @@
 //! Core types for the alert system.
 
 use chrono::{DateTime, Utc};
-use shape_value::ValueWordExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;

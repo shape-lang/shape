@@ -10,7 +10,7 @@
 use crate::executor::VirtualMachine;
 use phf::phf_map;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{VMError, ValueWord};
 
 /// Method handler: operates on raw u64 stack slots — no Vec, no ValueWord on the hot path.
 ///

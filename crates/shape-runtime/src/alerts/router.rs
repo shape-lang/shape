@@ -3,7 +3,6 @@
 //! Routes alerts to appropriate sinks based on tags.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use shape_value::ValueWordExt;
 use std::sync::{Arc, RwLock};
 
 use super::sinks::AlertSink;

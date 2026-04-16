@@ -10,7 +10,6 @@
 //! defined in stdlib and registered at application startup.
 
 use crate::data::DataFrame;
-use shape_value::ValueWordExt;
 use shape_ast::error::{Result, ShapeError};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

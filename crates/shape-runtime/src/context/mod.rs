@@ -37,7 +37,7 @@ use crate::snapshot::{
 };
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 
 /// Execution context for evaluating expressions
 #[derive(Clone)]
@@ -754,6 +754,7 @@ mod tests {
     use crate::data::{AsyncDataProvider, CacheKey, DataQuery, NullAsyncProvider, Timeframe};
     use crate::snapshot::SnapshotStore;
     use shape_ast::ast::VarKind;
+    use shape_value::ValueWordExt;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

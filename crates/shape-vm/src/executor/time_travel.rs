@@ -4,7 +4,7 @@
 //! allowing forward and backward navigation through execution history.
 
 use shape_runtime::snapshot::SnapshotStore;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::ValueWord;
 use std::collections::VecDeque;
 
 /// When to capture VM snapshots.

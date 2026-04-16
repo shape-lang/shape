@@ -15,7 +15,6 @@
 //! - Array lifetime is within a single basic block (no branches cross it)
 
 use std::collections::{HashMap, HashSet};
-use shape_value::ValueWordExt;
 
 use shape_vm::bytecode::{BytecodeProgram, Constant, OpCode, Operand};
 

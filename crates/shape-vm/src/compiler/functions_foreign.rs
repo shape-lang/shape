@@ -1,7 +1,6 @@
 //! Foreign function (extern C) compilation
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
-use shape_value::ValueWordExt;
 use shape_ast::ast::FunctionDef;
 use shape_ast::error::{Result, ShapeError};
 

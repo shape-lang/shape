@@ -9,7 +9,7 @@
 //! they feed values back into the VM.
 
 use crate::debugger::VMDebugger;
-use shape_value::{ExternalValue, ValueWord, ValueWordExt};
+use shape_value::{ExternalValue, ValueWord};
 
 /// Debugger integration for VirtualMachine
 pub trait DebuggerIntegration {

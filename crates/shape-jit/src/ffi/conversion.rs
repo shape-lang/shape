@@ -198,8 +198,8 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
     }
 }
 
-/// Format a NaN-boxed value as a string for display
-pub(crate) fn format_nan_boxed(value_bits: u64) -> String {
+/// Format a ValueWord (tagged 8-byte word) as a string for display
+pub(crate) fn format_value_word(value_bits: u64) -> String {
     use shape_value::tags::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
 
     if is_number(value_bits) {
@@ -226,29 +226,29 @@ pub(crate) fn format_nan_boxed(value_bits: u64) -> String {
             }
             Some(HK_ARRAY) => {
                 let arr = unsafe { jit_unbox::<JitArray>(value_bits) };
-                let elems: Vec<String> = arr.iter().map(|&bits| format_nan_boxed(bits)).collect();
+                let elems: Vec<String> = arr.iter().map(|&bits| format_value_word(bits)).collect();
                 format!("[{}]", elems.join(", "))
             }
             Some(HK_OK) => {
                 let inner = unsafe { *jit_unbox::<u64>(value_bits) };
-                format!("Ok({})", format_nan_boxed(inner))
+                format!("Ok({})", format_value_word(inner))
             }
             Some(HK_ERR) => {
                 let inner = unsafe { *jit_unbox::<u64>(value_bits) };
-                format!("Err({})", format_nan_boxed(inner))
+                format!("Err({})", format_value_word(inner))
             }
             Some(HK_SOME) => {
                 let inner = unsafe { *jit_unbox::<u64>(value_bits) };
-                format!("Some({})", format_nan_boxed(inner))
+                format!("Some({})", format_value_word(inner))
             }
             _ => "[object]".to_string(),
         }
     }
 }
 
-/// Print a NaN-boxed value to stdout with a newline
+/// Print a ValueWord value to stdout with a newline
 pub extern "C" fn jit_print(value_bits: u64) {
-    println!("{}", format_nan_boxed(value_bits));
+    println!("{}", format_value_word(value_bits));
 }
 
 /// Convert value to number

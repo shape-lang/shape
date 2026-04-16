@@ -6,7 +6,6 @@
 //! to either a native code pointer or a marker indicating VM interpretation.
 
 use shape_vm::bytecode::FunctionHash;
-use shape_value::ValueWordExt;
 use std::collections::HashMap;
 
 /// Entry in the mixed function table supporting both JIT and interpreted functions.

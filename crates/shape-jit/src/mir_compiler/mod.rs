@@ -52,7 +52,6 @@ use std::collections::HashMap;
 
 use crate::ffi_refs::FFIFuncRefs;
 use shape_value::v2::ConcreteType;
-use shape_value::ValueWordExt;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::SlotKind;

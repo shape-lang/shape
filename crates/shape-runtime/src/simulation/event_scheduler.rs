@@ -4,7 +4,6 @@
 //! using a min-heap to efficiently schedule and retrieve events by time.
 
 use std::cmp::{Ordering, Reverse};
-use shape_value::ValueWordExt;
 use std::collections::BinaryHeap;
 
 /// A scheduled event for discrete event simulation.

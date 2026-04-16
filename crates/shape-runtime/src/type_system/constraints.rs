@@ -29,7 +29,6 @@
 //! `Unifier` (Robinson's algorithm with path compression).
 
 use super::checking::MethodTable;
-use shape_value::ValueWordExt;
 use super::unification::Unifier;
 use super::*;
 use shape_ast::ast::{ObjectTypeField, TypeAnnotation};

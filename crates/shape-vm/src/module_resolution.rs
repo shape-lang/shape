@@ -4,7 +4,6 @@
 //! file-based module loaders, and the module loader configuration API.
 
 use crate::configuration::BytecodeExecutor;
-use shape_value::ValueWordExt;
 
 use shape_ast::Program;
 use shape_ast::ast::{ExportItem, Item};
@@ -242,6 +241,7 @@ mod tests {
     use crate::compiler::BytecodeCompiler;
     use crate::executor::VirtualMachine;
     use crate::module_graph;
+    use shape_value::ValueWordExt;
 
     /// Helper: build a graph and compile a program with prelude + imports.
     fn compile_program_with_graph(

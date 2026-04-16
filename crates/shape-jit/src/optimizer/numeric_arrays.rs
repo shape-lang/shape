@@ -4,7 +4,6 @@
 //! confidently keep numeric values in typed form during lowering.
 
 use std::collections::HashSet;
-use shape_value::ValueWordExt;
 
 use shape_vm::bytecode::{BytecodeProgram, Constant, OpCode, Operand};
 

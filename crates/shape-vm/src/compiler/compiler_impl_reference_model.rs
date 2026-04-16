@@ -1,5 +1,4 @@
 use super::*;
-use shape_value::ValueWordExt;
 
 impl BytecodeCompiler {
     pub(super) fn infer_reference_params_from_types(

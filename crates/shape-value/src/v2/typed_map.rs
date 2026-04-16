@@ -10,7 +10,6 @@
 //! - `TypedMapStringPtr` — `HashMap<string, *const u8>`
 
 use super::heap_header::{HeapHeader, HEAP_KIND_V2_TYPED_MAP};
-use crate::value_word::ValueWordExt;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 
 /// Sentinel hash values for bucket state.

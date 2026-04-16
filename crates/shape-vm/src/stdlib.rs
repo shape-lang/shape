@@ -5,7 +5,6 @@
 //! Domain-specific modules (finance, iot, etc.) require explicit imports.
 
 use std::path::Path;
-use shape_value::ValueWordExt;
 use std::sync::OnceLock;
 
 use shape_ast::error::{Result, ShapeError};

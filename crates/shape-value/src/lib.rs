@@ -30,8 +30,6 @@ pub mod value_word;
 /// Backward-compatibility alias for the renamed module.
 pub mod nanboxed {
     pub use crate::value_word::*;
-    /// Backward-compatibility alias: `NanBoxed` is now `ValueWord`.
-    pub type NanBoxed = super::value_word::ValueWord;
 }
 pub mod shape_array;
 pub mod shape_graph;
@@ -104,8 +102,6 @@ pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use scalar::{ScalarKind, TypedScalar, ValueWordScalarExt};
 pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueWord, ValueWordDisplay, ValueWordExt, nan_tag_type_name, nan_tag_is_truthy};
-/// Backward-compatibility alias: `NanBoxed` is now `ValueWord`.
-pub type NanBoxed = ValueWord;
 pub use shape_array::ShapeArray;
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,
