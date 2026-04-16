@@ -4364,15 +4364,18 @@ impl BytecodeCompiler {
                         }
                     }
 
-                    // Phase 3: Emit PromoteToOwned before StoreLocal for uniquely-owned
-                    // let bindings. This converts freshly-allocated Arc<HeapValue> (refcount 1)
+                    // Phase 3/4: Emit PromoteToOwned before StoreLocal for uniquely-owned
+                    // bindings. This converts freshly-allocated Arc<HeapValue> (refcount 1)
                     // to Box<HeapValue>, eliminating atomic refcount overhead for the lifetime
-                    // of the binding. Only applies to immutable `let` / `const` bindings with
-                    // Direct storage class (not `var` or `let mut`).
+                    // of the binding. Applies to:
+                    //   - `let` (immutable) with Direct storage
+                    //   - `let mut` (owned mutable) with Direct storage
+                    //   - `const` with Direct storage
+                    // Does NOT apply to `var` bindings, which stay Arc for shared mutability.
                     if let Some(name) = var_decl.pattern.as_identifier() {
-                        let is_immutable_let = (var_decl.kind == VarKind::Let && !var_decl.is_mut)
+                        let is_owned_binding = var_decl.kind == VarKind::Let
                             || var_decl.kind == VarKind::Const;
-                        if is_immutable_let {
+                        if is_owned_binding {
                             if let Some(local_idx) = self.resolve_local(name) {
                                 let should_promote = self
                                     .mir_storage_class_for_slot(local_idx)

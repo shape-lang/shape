@@ -3261,8 +3261,9 @@ fn test_promote_to_owned_not_emitted_for_var_binding() {
 }
 
 #[test]
-fn test_promote_to_owned_not_emitted_for_let_mut() {
-    // A `let mut` binding should NOT get PromoteToOwned because it can be mutated.
+fn test_promote_to_owned_emitted_for_let_mut() {
+    // Phase 4: `let mut` bindings with Direct storage class get PromoteToOwned.
+    // They are uniquely owned (Box-backed), so mutation is direct without CoW.
     let code = r#"
     fn test() -> int {
         let mut x = 1
@@ -3276,10 +3277,14 @@ fn test_promote_to_owned_not_emitted_for_let_mut() {
 
     let opcodes: Vec<_> = bytecode.instructions.iter().map(|ins| ins.opcode).collect();
     assert!(
-        !opcodes.contains(&OpCode::PromoteToOwned),
-        "let mut binding should NOT get PromoteToOwned, got opcodes: {:?}",
+        opcodes.contains(&OpCode::PromoteToOwned),
+        "let mut binding should get PromoteToOwned (owned mutable), got opcodes: {:?}",
         opcodes
     );
+
+    // Verify the mutation still works correctly at runtime.
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(2));
 }
 
 #[test]
@@ -3299,5 +3304,126 @@ fn test_promote_to_owned_not_emitted_for_int_binding() {
     "#;
     let result = compile_and_run(code);
     assert_eq!(result.as_i64(), Some(42));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 4: Owned vs Shared mutation differentiation
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_phase4_let_mut_string_gets_promote_to_owned() {
+    // `let mut` with a heap type (string) should get PromoteToOwned.
+    // The binding is uniquely owned — mutation goes through direct &mut access.
+    let code = r#"
+    fn test() -> string {
+        let mut s = "hello"
+        s = "world"
+        s
+    }
+    test()
+    "#;
+    let program = parse_program(code).unwrap();
+    let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+
+    let opcodes: Vec<_> = bytecode.instructions.iter().map(|ins| ins.opcode).collect();
+    assert!(
+        opcodes.contains(&OpCode::PromoteToOwned),
+        "let mut string binding should get PromoteToOwned, got opcodes: {:?}",
+        opcodes
+    );
+
+    let result = compile_and_run(code);
+    assert_eq!(result.as_str().map(|s| s.to_string()), Some("world".to_string()));
+}
+
+#[test]
+fn test_phase4_var_string_no_promote_to_owned() {
+    // `var` binding should NOT get PromoteToOwned — stays Arc for shared mutability.
+    let code = r#"
+    fn test() -> string {
+        var s = "hello"
+        s = "world"
+        s
+    }
+    test()
+    "#;
+    let program = parse_program(code).unwrap();
+    let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+
+    let opcodes: Vec<_> = bytecode.instructions.iter().map(|ins| ins.opcode).collect();
+    assert!(
+        !opcodes.contains(&OpCode::PromoteToOwned),
+        "var binding should NOT get PromoteToOwned, got opcodes: {:?}",
+        opcodes
+    );
+
+    let result = compile_and_run(code);
+    assert_eq!(result.as_str().map(|s| s.to_string()), Some("world".to_string()));
+}
+
+#[test]
+fn test_phase4_let_mut_array_mutation_works() {
+    // `let mut` array: owned (Box-backed after PromoteToOwned).
+    // Mutation goes through direct &mut access, no CoW needed.
+    let code = r#"
+    fn test() -> int {
+        let mut arr = [1, 2, 3]
+        arr.push(4)
+        arr.length()
+    }
+    test()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(4));
+}
+
+#[test]
+fn test_phase4_var_array_mutation_works() {
+    // `var` array: shared (Arc-backed, CoW on mutation).
+    // Mutation goes through Arc::make_mut.
+    let code = r#"
+    fn test() -> int {
+        var arr = [1, 2, 3]
+        arr.push(4)
+        arr.length()
+    }
+    test()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(4));
+}
+
+#[test]
+fn test_phase4_let_mut_reassign_preserves_value() {
+    // `let mut` with multiple reassignments — each assignment should work
+    // on the owned value.
+    let code = r#"
+    fn test() -> int {
+        let mut x = 10
+        x = x + 5
+        x = x * 2
+        x
+    }
+    test()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(30));
+}
+
+#[test]
+fn test_phase4_var_reassign_preserves_value() {
+    // `var` with multiple reassignments — each assignment should work
+    // via Arc-backed shared mutation.
+    let code = r#"
+    fn test() -> int {
+        var x = 10
+        x = x + 5
+        x = x * 2
+        x
+    }
+    test()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(30));
 }
 
