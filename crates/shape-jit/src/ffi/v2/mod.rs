@@ -49,6 +49,114 @@ pub extern "C" fn jit_v2_array_len_f64(arr: *const TypedArray<f64>) -> u32 {
     unsafe { TypedArray::len(arr) }
 }
 
+/// SIMD-accelerated sum over a `TypedArray<f64>` (Phase C.3).
+///
+/// Uses `wide::f64x4` for 4-lane parallel addition when `len >= 16`. Below
+/// that threshold, the vector load/splat overhead exceeds the savings so we
+/// fall back to scalar accumulation. Returns `0.0` for null or empty arrays.
+///
+/// # Safety
+/// `arr` must be a valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_sum_f64(arr: *const TypedArray<f64>) -> f64 {
+    if arr.is_null() {
+        return 0.0;
+    }
+    let (data, len) = unsafe { ((*arr).data as *const f64, (*arr).len as usize) };
+    if len == 0 || data.is_null() {
+        return 0.0;
+    }
+    unsafe { simd_sum_f64_inner(data, len) }
+}
+
+/// SIMD-accelerated sum over a `TypedArray<i64>` (Phase C.3). Uses wrapping
+/// arithmetic (matches Shape's v2 int-sum semantics — no overflow panic).
+///
+/// # Safety
+/// `arr` must be a valid `TypedArray<i64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_sum_i64(arr: *const TypedArray<i64>) -> i64 {
+    if arr.is_null() {
+        return 0;
+    }
+    let (data, len) = unsafe { ((*arr).data as *const i64, (*arr).len as usize) };
+    if len == 0 || data.is_null() {
+        return 0;
+    }
+    unsafe { simd_sum_i64_inner(data, len) }
+}
+
+/// SIMD reduction threshold — below this, setup cost dominates.
+const SIMD_SUM_THRESHOLD: usize = 16;
+
+#[inline]
+unsafe fn simd_sum_f64_inner(data: *const f64, len: usize) -> f64 {
+    use wide::f64x4;
+    if len < SIMD_SUM_THRESHOLD {
+        let mut s = 0.0_f64;
+        for i in 0..len {
+            s += unsafe { *data.add(i) };
+        }
+        return s;
+    }
+    let chunks = len / 4;
+    let mut acc = f64x4::splat(0.0);
+    for i in 0..chunks {
+        let b = i * 4;
+        let v = unsafe {
+            f64x4::from([
+                *data.add(b),
+                *data.add(b + 1),
+                *data.add(b + 2),
+                *data.add(b + 3),
+            ])
+        };
+        acc += v;
+    }
+    let parts = acc.to_array();
+    let mut s = parts[0] + parts[1] + parts[2] + parts[3];
+    for i in (chunks * 4)..len {
+        s += unsafe { *data.add(i) };
+    }
+    s
+}
+
+#[inline]
+unsafe fn simd_sum_i64_inner(data: *const i64, len: usize) -> i64 {
+    use wide::i64x4;
+    if len < SIMD_SUM_THRESHOLD {
+        let mut s: i64 = 0;
+        for i in 0..len {
+            s = s.wrapping_add(unsafe { *data.add(i) });
+        }
+        return s;
+    }
+    let chunks = len / 4;
+    let mut acc = i64x4::splat(0);
+    for i in 0..chunks {
+        let b = i * 4;
+        let v = unsafe {
+            i64x4::from([
+                *data.add(b),
+                *data.add(b + 1),
+                *data.add(b + 2),
+                *data.add(b + 3),
+            ])
+        };
+        // wide::i64x4 lacks AddAssign; rebind the accumulator.
+        acc = acc + v;
+    }
+    let parts = acc.to_array();
+    let mut s = parts[0]
+        .wrapping_add(parts[1])
+        .wrapping_add(parts[2])
+        .wrapping_add(parts[3]);
+    for i in (chunks * 4)..len {
+        s = s.wrapping_add(unsafe { *data.add(i) });
+    }
+    s
+}
+
 // ============================================================================
 // Array FFI — i64
 // ============================================================================
@@ -287,6 +395,94 @@ pub extern "C" fn jit_v2_alloc_struct(size: u32, kind: u16) -> *mut u8 {
 mod tests {
     use super::*;
     use shape_value::v2::heap_header::HEAP_KIND_V2_STRUCT;
+
+    // ── Phase C.3 SIMD sum tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_simd_sum_f64_small_scalar_path() {
+        // Below SIMD_SUM_THRESHOLD — exercises scalar accumulation.
+        let arr = jit_v2_array_new_f64(8);
+        for i in 0..8 {
+            jit_v2_array_push_f64(arr, (i + 1) as f64); // 1..=8
+        }
+        let sum = jit_v2_array_sum_f64(arr);
+        assert!((sum - 36.0).abs() < 1e-12);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_sum_f64_large_vector_path() {
+        // Above SIMD_SUM_THRESHOLD with non-multiple-of-4 length (exercises
+        // both the f64x4 loop and the scalar remainder).
+        let arr = jit_v2_array_new_f64(128);
+        let mut expected = 0.0_f64;
+        for i in 0..101 {
+            let v = i as f64 * 0.5;
+            jit_v2_array_push_f64(arr, v);
+            expected += v;
+        }
+        let sum = jit_v2_array_sum_f64(arr);
+        assert!(
+            (sum - expected).abs() < 1e-9,
+            "sum={} expected={}",
+            sum,
+            expected
+        );
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_sum_f64_empty() {
+        let arr = jit_v2_array_new_f64(0);
+        let sum = jit_v2_array_sum_f64(arr);
+        assert_eq!(sum, 0.0);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_sum_f64_null_safe() {
+        assert_eq!(jit_v2_array_sum_f64(std::ptr::null()), 0.0);
+    }
+
+    #[test]
+    fn test_simd_sum_i64_small_scalar_path() {
+        let arr = jit_v2_array_new_i64(16);
+        for i in 0..10 {
+            jit_v2_array_push_i64(arr, (i + 1) as i64);
+        }
+        let sum = jit_v2_array_sum_i64(arr);
+        assert_eq!(sum, 55);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_sum_i64_large_vector_path() {
+        let arr = jit_v2_array_new_i64(128);
+        let mut expected: i64 = 0;
+        for i in 0..103 {
+            let v = i as i64;
+            jit_v2_array_push_i64(arr, v);
+            expected = expected.wrapping_add(v);
+        }
+        let sum = jit_v2_array_sum_i64(arr);
+        assert_eq!(sum, expected);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_sum_i64_wrapping_overflow() {
+        // Two i64::MAX values should wrap without panicking. Padded to 16
+        // elements so we go down the SIMD path that also uses wrapping adds.
+        let arr = jit_v2_array_new_i64(16);
+        jit_v2_array_push_i64(arr, i64::MAX);
+        jit_v2_array_push_i64(arr, 1);
+        for _ in 2..16 {
+            jit_v2_array_push_i64(arr, 0);
+        }
+        let sum = jit_v2_array_sum_i64(arr);
+        assert_eq!(sum, i64::MAX.wrapping_add(1));
+        unsafe { TypedArray::drop_array(arr) };
+    }
 
     #[test]
     fn test_array_f64_roundtrip() {

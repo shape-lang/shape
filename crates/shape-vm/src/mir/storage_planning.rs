@@ -30,6 +30,13 @@ use crate::type_tracking::{
     MutationCapability,
 };
 
+/// Maximum element count for a non-escaping aggregate to be eligible for the
+/// stack-allocated / inline optimization hint. Arrays larger than this are
+/// never flagged, even if they don't escape. The threshold matches the
+/// SmallVec inline-capacity target discussed in the Phase D design notes
+/// (8 elements × 8 bytes = 64 B, one cache line).
+pub const INLINE_ARRAY_MAX_ELEMENTS: usize = 8;
+
 /// The computed storage plan for a single function.
 #[derive(Debug, Clone)]
 pub struct StoragePlan {
@@ -37,6 +44,20 @@ pub struct StoragePlan {
     pub slot_classes: HashMap<SlotId, BindingStorageClass>,
     /// Maps each local slot to its enriched binding semantics.
     pub slot_semantics: HashMap<SlotId, BindingSemantics>,
+    /// Optimization hint (Phase D.2 infrastructure): slots that hold a small,
+    /// compile-time-sized aggregate (array/tuple literal) that is provably
+    /// non-escaping, non-captured, and non-aliased. The value is the element
+    /// count.
+    ///
+    /// Consumers may choose to:
+    ///   * emit inline-on-stack storage (SROA — eliminate the allocation),
+    ///   * pick a SmallVec-backed `HeapValue::Array` path, or
+    ///   * ignore the hint entirely (semantics-preserving).
+    ///
+    /// Today no consumer acts on the hint; it is recorded so that future
+    /// codegen passes (inline arrays, scalar replacement of aggregates) can
+    /// activate without re-running escape analysis.
+    pub inline_array_sizes: HashMap<SlotId, usize>,
 }
 
 /// Input bundle for the storage planner.
@@ -228,6 +249,7 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
         return StoragePlan {
             slot_classes,
             slot_semantics,
+            inline_array_sizes: HashMap::new(),
         };
     }
 
@@ -238,10 +260,99 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
         slot_semantics.insert(slot, semantics);
     }
 
+    // Detect small non-escaping aggregates and record the hint. This is
+    // gathered after slot decisions so we can consult `slot_semantics` for the
+    // authoritative escape/aliasing verdict.
+    let inline_array_sizes = detect_inline_array_candidates(input, &slot_semantics);
+
     StoragePlan {
         slot_classes,
         slot_semantics,
+        inline_array_sizes,
     }
+}
+
+/// Scan MIR for aggregate assignments that are safe to inline on the stack.
+///
+/// A slot is a candidate when **all** of the following hold:
+/// - It is assigned exactly one `Rvalue::Aggregate` with `N <= INLINE_ARRAY_MAX_ELEMENTS`.
+/// - Its computed `escape_status` is `Local` (does not flow to the return slot).
+/// - It is not captured by any closure.
+/// - It is not re-assigned after the aggregate initialization (otherwise the
+///   slot can't be treated as a fixed-shape value).
+/// - It is not mutated through index assignment (future work: inline arrays
+///   with index writes would need per-element tracking).
+///
+/// The hint is purely advisory — emitting it does not commit to any specific
+/// codegen strategy. Zero-size aggregates are also skipped since they add no
+/// allocation pressure to begin with.
+fn detect_inline_array_candidates(
+    input: &StoragePlannerInput<'_>,
+    slot_semantics: &HashMap<SlotId, BindingSemantics>,
+) -> HashMap<SlotId, usize> {
+    let mut aggregate_sizes: HashMap<SlotId, usize> = HashMap::new();
+    let mut disqualified: HashSet<SlotId> = HashSet::new();
+
+    for block in input.mir.iter_blocks() {
+        for stmt in &block.statements {
+            let StatementKind::Assign(place, rvalue) = &stmt.kind else {
+                continue;
+            };
+            let Place::Local(slot) = place else {
+                // A projection write (e.g. `arr[i] = x`) into a candidate
+                // slot disqualifies it — the aggregate shape is mutable.
+                disqualified.insert(place.root_local());
+                continue;
+            };
+
+            match rvalue {
+                Rvalue::Aggregate(ops) => {
+                    // Only the first aggregate assignment counts. A later
+                    // reassignment (even another aggregate) means the slot
+                    // isn't a fixed-shape value.
+                    if aggregate_sizes.contains_key(slot) {
+                        disqualified.insert(*slot);
+                    } else {
+                        aggregate_sizes.insert(*slot, ops.len());
+                    }
+                }
+                _ => {
+                    // Any non-aggregate assignment (re-binding, function
+                    // result, etc.) after the aggregate disqualifies the slot.
+                    if aggregate_sizes.contains_key(slot) {
+                        disqualified.insert(*slot);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut hints = HashMap::new();
+    for (slot, size) in aggregate_sizes {
+        if disqualified.contains(&slot) {
+            continue;
+        }
+        if size == 0 || size > INLINE_ARRAY_MAX_ELEMENTS {
+            continue;
+        }
+        let Some(sem) = slot_semantics.get(&slot) else {
+            continue;
+        };
+        if sem.escape_status != EscapeStatus::Local {
+            continue;
+        }
+        // Be defensive: any aliasing (shared-immutable or shared-mutable)
+        // rules out the SROA-style optimization, even though the aggregate
+        // itself would remain addressable on the stack.
+        if sem.aliasability != Aliasability::Unique {
+            continue;
+        }
+        if input.closure_captures.contains(&slot) {
+            continue;
+        }
+        hints.insert(slot, size);
+    }
+    hints
 }
 
 /// Decide the storage class for a single slot, returning both the storage class
@@ -1327,6 +1438,347 @@ mod tests {
             plan.slot_semantics.get(&SlotId(1)).map(|s| s.escape_status),
             Some(EscapeStatus::Escaped),
             "slot flowing to return should have Escaped status in plan"
+        );
+    }
+
+    // ── Tests: inline-array-candidate detection (Phase D.2 infrastructure) ──
+
+    #[test]
+    fn test_inline_hint_for_small_local_aggregate() {
+        // bb0: _1 = [1, 2, 3]; return
+        // _1 is a 3-element aggregate that never flows to _0 → candidate.
+        let mir = make_mir(
+            "test_inline_small_local",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Aggregate(vec![
+                            Operand::Constant(MirConstant::Int(1)),
+                            Operand::Constant(MirConstant::Int(2)),
+                            Operand::Constant(MirConstant::Int(3)),
+                        ]),
+                    ),
+                    0,
+                )],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            2,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+        };
+
+        let plan = plan_storage(&input);
+        assert_eq!(
+            plan.inline_array_sizes.get(&SlotId(1)),
+            Some(&3),
+            "3-element non-escaping aggregate should be hinted"
+        );
+    }
+
+    #[test]
+    fn test_no_inline_hint_when_aggregate_escapes() {
+        // bb0: _1 = [1, 2]; _0 = copy _1; return
+        // _1 flows to return → escapes, so no hint.
+        let mir = make_mir(
+            "test_no_inline_escape",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Aggregate(vec![
+                                Operand::Constant(MirConstant::Int(1)),
+                                Operand::Constant(MirConstant::Int(2)),
+                            ]),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            2,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+        };
+
+        let plan = plan_storage(&input);
+        assert!(
+            !plan.inline_array_sizes.contains_key(&SlotId(1)),
+            "escaping aggregate must not be hinted"
+        );
+    }
+
+    #[test]
+    fn test_no_inline_hint_when_aggregate_too_large() {
+        // bb0: _1 = [1; 9]; return
+        // 9 > INLINE_ARRAY_MAX_ELEMENTS (8) → no hint.
+        let big_ops: Vec<Operand> = (0..9)
+            .map(|_| Operand::Constant(MirConstant::Int(0)))
+            .collect();
+        let mir = make_mir(
+            "test_no_inline_too_large",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Aggregate(big_ops),
+                    ),
+                    0,
+                )],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            2,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+        };
+
+        let plan = plan_storage(&input);
+        assert!(
+            !plan.inline_array_sizes.contains_key(&SlotId(1)),
+            "oversize aggregate must not be hinted"
+        );
+    }
+
+    #[test]
+    fn test_no_inline_hint_when_aggregate_captured() {
+        // bb0: _1 = [1, 2]; ClosureCapture(copy _1); return
+        let mir = make_mir(
+            "test_no_inline_captured",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Aggregate(vec![
+                                Operand::Constant(MirConstant::Int(1)),
+                                Operand::Constant(MirConstant::Int(2)),
+                            ]),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::ClosureCapture {
+                            closure_slot: SlotId(1),
+                            operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                            function_id: None,
+                        },
+                        1,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            2,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let mut closure_captures = HashSet::new();
+        closure_captures.insert(SlotId(1));
+        let mutable_captures = HashSet::new();
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+        };
+
+        let plan = plan_storage(&input);
+        assert!(
+            !plan.inline_array_sizes.contains_key(&SlotId(1)),
+            "captured aggregate must not be hinted"
+        );
+    }
+
+    #[test]
+    fn test_no_inline_hint_when_reassigned() {
+        // bb0: _1 = [1, 2]; _1 = [3, 4]; return
+        // Two aggregate assignments to the same slot → disqualify.
+        let mir = make_mir(
+            "test_no_inline_reassigned",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Aggregate(vec![
+                                Operand::Constant(MirConstant::Int(1)),
+                                Operand::Constant(MirConstant::Int(2)),
+                            ]),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Aggregate(vec![
+                                Operand::Constant(MirConstant::Int(3)),
+                                Operand::Constant(MirConstant::Int(4)),
+                            ]),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            2,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+        };
+
+        let plan = plan_storage(&input);
+        assert!(
+            !plan.inline_array_sizes.contains_key(&SlotId(1)),
+            "re-assigned slot must not be hinted"
+        );
+    }
+
+    #[test]
+    fn test_inline_hint_at_boundary_size() {
+        // Exactly INLINE_ARRAY_MAX_ELEMENTS elements → eligible.
+        let ops: Vec<Operand> = (0..INLINE_ARRAY_MAX_ELEMENTS)
+            .map(|_| Operand::Constant(MirConstant::Int(0)))
+            .collect();
+        let mir = make_mir(
+            "test_inline_boundary",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Aggregate(ops),
+                    ),
+                    0,
+                )],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            2,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+        };
+
+        let plan = plan_storage(&input);
+        assert_eq!(
+            plan.inline_array_sizes.get(&SlotId(1)),
+            Some(&INLINE_ARRAY_MAX_ELEMENTS),
+            "boundary-size aggregate should be hinted"
+        );
+    }
+
+    #[test]
+    fn test_no_inline_hint_with_fallbacks() {
+        // had_fallbacks=true → planner bails to Deferred and records no hints.
+        let mir = make_mir(
+            "test_no_inline_fallback",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Aggregate(vec![
+                            Operand::Constant(MirConstant::Int(1)),
+                        ]),
+                    ),
+                    0,
+                )],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            2,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: true,
+        };
+
+        let plan = plan_storage(&input);
+        assert!(
+            plan.inline_array_sizes.is_empty(),
+            "fallback path must not record any hints"
         );
     }
 }

@@ -23,6 +23,7 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 sha2 = "0.10"
 libloading = "0.8"
+wide = "0.7"
 
 # Cranelift is required for JIT
 cranelift = "0.110"

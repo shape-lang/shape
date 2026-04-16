@@ -5454,6 +5454,7 @@ dependencies = [
  "shape-wire",
  "target-lexicon 0.12.16",
  "thiserror 1.0.69",
+ "wide",
 ]
 
 [[package]]

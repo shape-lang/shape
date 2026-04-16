@@ -57,6 +57,10 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
 
     // Struct allocation
     builder.symbol("jit_v2_alloc_struct", v2::jit_v2_alloc_struct as *const u8);
+
+    // SIMD reductions (Phase C.3)
+    builder.symbol("jit_v2_array_sum_f64", v2::jit_v2_array_sum_f64 as *const u8);
+    builder.symbol("jit_v2_array_sum_i64", v2::jit_v2_array_sum_i64 as *const u8);
 }
 
 /// Helper: declare a function and insert into the map.
@@ -363,5 +367,25 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         sig.params.push(AbiParam::new(types::I32)); // kind (u16 promoted to i32)
         sig.returns.push(AbiParam::new(types::I64)); // ptr
         declare(module, ffi_funcs, "jit_v2_alloc_struct", &sig);
+    }
+
+    // ========================================================================
+    // SIMD reductions (Phase C.3)
+    // ========================================================================
+
+    // jit_v2_array_sum_f64(arr: ptr) -> f64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // arr ptr
+        sig.returns.push(AbiParam::new(types::F64)); // NATIVE F64
+        declare(module, ffi_funcs, "jit_v2_array_sum_f64", &sig);
+    }
+
+    // jit_v2_array_sum_i64(arr: ptr) -> i64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // arr ptr
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_array_sum_i64", &sig);
     }
 }

@@ -286,6 +286,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 self.write_place(destination, none_val)?;
                 Ok(Some(()))
             }
+            "sum" => {
+                // Phase C.3: Bypass method dispatch entirely — call the SIMD
+                // reduction FFI (`jit_v2_array_sum_f64` / `jit_v2_array_sum_i64`)
+                // in one shot. The FFI uses `wide::f64x4`/`wide::i64x4` lanes
+                // so AVX2/NEON-capable CPUs get a ~4x throughput over the
+                // scalar loop.
+                if !rest_args.is_empty() {
+                    return Ok(None);
+                }
+                let sum_func = match elem {
+                    SlotKind::Float64 => self.ffi.v2_array_sum_f64,
+                    SlotKind::Int64 | SlotKind::UInt64 => self.ffi.v2_array_sum_i64,
+                    _ => return Ok(None),
+                };
+                let arr_ptr = self.read_place(receiver)?;
+                let inst = self.builder.ins().call(sum_func, &[arr_ptr]);
+                let result = self.builder.inst_results(inst)[0];
+                self.release_old_value_if_heap(destination)?;
+                self.write_place(destination, result)?;
+                Ok(Some(()))
+            }
             _ => Ok(None),
         }
     }

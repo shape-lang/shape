@@ -257,28 +257,37 @@ pub fn pop_element(view: &NativeTypedArrayView) -> Option<ValueWord> {
 }
 
 /// Sum all elements of a numeric (F64/I64/I32) typed array.
+///
+/// F64 and I64 variants use `wide::f64x4` / `wide::i64x4` SIMD reduction on
+/// arrays with >= `SIMD_SUM_THRESHOLD` elements. Smaller arrays fall back to
+/// scalar accumulation where SIMD setup overhead would exceed the savings.
 pub fn sum_elements(view: &NativeTypedArrayView) -> Option<ValueWord> {
+    /// Minimum element count at which SIMD reduction beats scalar.
+    const SIMD_SUM_THRESHOLD: usize = 16;
+
     match view.elem_type {
         NativeElemType::F64 => {
-            let mut s = 0.0_f64;
-            for i in 0..view.len {
-                let val = unsafe {
-                    let arr = view.ptr as *const TypedArray<f64>;
-                    TypedArray::<f64>::get_unchecked(arr, i)
-                };
-                s += val;
+            let len = view.len as usize;
+            if len == 0 {
+                return Some(vw_from_f64(0.0));
             }
+            let data = unsafe {
+                let arr = view.ptr as *const TypedArray<f64>;
+                (*arr).data as *const f64
+            };
+            let s = unsafe { simd_sum_f64(data, len, SIMD_SUM_THRESHOLD) };
             Some(vw_from_f64(s))
         }
         NativeElemType::I64 => {
-            let mut s: i64 = 0;
-            for i in 0..view.len {
-                let val = unsafe {
-                    let arr = view.ptr as *const TypedArray<i64>;
-                    TypedArray::<i64>::get_unchecked(arr, i)
-                };
-                s = s.wrapping_add(val);
+            let len = view.len as usize;
+            if len == 0 {
+                return Some(vw_from_i64(0));
             }
+            let data = unsafe {
+                let arr = view.ptr as *const TypedArray<i64>;
+                (*arr).data as *const i64
+            };
+            let s = unsafe { simd_sum_i64(data, len, SIMD_SUM_THRESHOLD) };
             Some(vw_from_i64(s))
         }
         NativeElemType::I32 => {
@@ -294,6 +303,86 @@ pub fn sum_elements(view: &NativeTypedArrayView) -> Option<ValueWord> {
         }
         NativeElemType::Bool => None,
     }
+}
+
+/// SIMD-accelerated f64 sum using `wide::f64x4` lanes.
+///
+/// # Safety
+/// `data` must point to at least `len` valid, contiguous `f64` values.
+#[inline]
+unsafe fn simd_sum_f64(data: *const f64, len: usize, threshold: usize) -> f64 {
+    use wide::f64x4;
+
+    if len < threshold {
+        let mut s = 0.0_f64;
+        for i in 0..len {
+            s += unsafe { *data.add(i) };
+        }
+        return s;
+    }
+
+    let chunks = len / 4;
+    let mut acc = f64x4::splat(0.0);
+    for i in 0..chunks {
+        let base = i * 4;
+        let v = unsafe {
+            f64x4::from([
+                *data.add(base),
+                *data.add(base + 1),
+                *data.add(base + 2),
+                *data.add(base + 3),
+            ])
+        };
+        acc += v;
+    }
+    let parts = acc.to_array();
+    let mut s = parts[0] + parts[1] + parts[2] + parts[3];
+    for i in (chunks * 4)..len {
+        s += unsafe { *data.add(i) };
+    }
+    s
+}
+
+/// SIMD-accelerated i64 sum using `wide::i64x4` lanes. Wrapping semantics.
+///
+/// # Safety
+/// `data` must point to at least `len` valid, contiguous `i64` values.
+#[inline]
+unsafe fn simd_sum_i64(data: *const i64, len: usize, threshold: usize) -> i64 {
+    use wide::i64x4;
+
+    if len < threshold {
+        let mut s: i64 = 0;
+        for i in 0..len {
+            s = s.wrapping_add(unsafe { *data.add(i) });
+        }
+        return s;
+    }
+
+    let chunks = len / 4;
+    let mut acc = i64x4::splat(0);
+    for i in 0..chunks {
+        let base = i * 4;
+        let v = unsafe {
+            i64x4::from([
+                *data.add(base),
+                *data.add(base + 1),
+                *data.add(base + 2),
+                *data.add(base + 3),
+            ])
+        };
+        // wide::i64x4 lacks AddAssign; use binary + and reassign.
+        acc = acc + v;
+    }
+    let parts = acc.to_array();
+    let mut s = parts[0]
+        .wrapping_add(parts[1])
+        .wrapping_add(parts[2])
+        .wrapping_add(parts[3]);
+    for i in (chunks * 4)..len {
+        s = s.wrapping_add(unsafe { *data.add(i) });
+    }
+    s
 }
 
 /// Compute the average (mean) of all elements of a numeric typed array.

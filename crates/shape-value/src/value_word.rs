@@ -349,6 +349,109 @@ pub type ValueWord = u64;
 /// Wrapper for Display/Debug formatting of ValueWord values.
 pub struct ValueWordDisplay(pub u64);
 
+// ═══════════════════════════════════════════════════════════════════════
+// Small-string interning (Phase D.4)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// ## Design rationale
+//
+// True small-string optimization (SSO) in the sense of "pack the bytes inline
+// in the 8-byte ValueWord" is not feasible in the current layout: all 8
+// NaN-boxing tag values (0b000..0b111) are already consumed (see tag table
+// at the top of this file) and only 48 bits of payload are available, which
+// is too few bytes to be useful (strings <= 6 bytes is a rounding error).
+//
+// Multi-slot SSO (spreading bytes across 2-3 adjacent stack slots) would
+// require compiler support for multi-slot string bindings and invasive
+// changes to the executor + JIT — not worth it as an isolated change.
+//
+// Instead, we collapse the common case of **repeated short strings** via
+// a process-global intern pool. Programs allocate `Arc<String>` over and
+// over for the same content (field names, enum tags, short literals like
+// "ok", "id", "name"). With interning, N copies share a single allocation
+// and the Arc refcount does the rest.
+//
+// ## Behavioural contract
+//
+// - `ValueWord::from_string(s)` still returns a `ValueWord` wrapping
+//   `Arc<String>`. Callers observe no change: `as_string()` / `as_heap_ref()`
+//   return the same `&str` content. Mutation is already impossible via
+//   `Arc<String>` (no `Arc::make_mut` is called on interned strings in the
+//   codebase — all string ops produce a new `String`).
+// - Long strings (len > `INTERN_THRESHOLD`) bypass the pool entirely: the
+//   hash/lookup cost isn't justified for long unique payloads, and the
+//   memory win would be marginal.
+// - The pool is bounded by `INTERN_CAP` entries. When full, new lookups
+//   fall through to the no-intern path — we never evict, keeping all live
+//   `Arc<String>` refs valid.
+// - The pool uses `std::sync::LazyLock<Mutex<...>>` (same pattern as
+//   `shape_graph::GLOBAL_SHAPE_TABLE`). A `HashMap<Arc<String>, ()>` (set
+//   semantics keyed by the Arc's string content) would work, but using
+//   `HashMap<Arc<String>, Arc<String>>` lets us return the *canonical* Arc
+//   without rebuilding one.
+//
+// ## Future work
+//
+// A fully-inline SSO (store up to ~22 bytes inline across a 24-byte heap
+// object with its own refcount) would eliminate the outer `Arc` allocation
+// entirely for short strings. That's a bigger change — it touches the
+// HeapValue representation, VM executor string reads, JIT FFI, and wire
+// serialization. Revisit once the `StringObj` / `UnifiedString` v2 paths
+// are the primary runtime representation.
+pub(crate) mod string_intern {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    /// Strings with byte length <= this value are candidates for interning.
+    /// Chosen to cover common field names, enum tags, and short literals
+    /// (e.g. "ok", "err", "id", "name", "type", "value") while excluding
+    /// long user content where the hash cost dominates.
+    pub const INTERN_THRESHOLD: usize = 32;
+
+    /// Hard cap on pool size. When reached, new strings bypass interning.
+    /// Sized to comfortably fit all stdlib field names + enum tags + common
+    /// literals across a large program. Entries are never evicted once
+    /// inserted (the pool owns an Arc ref keeping the string alive).
+    pub const INTERN_CAP: usize = 8192;
+
+    static POOL: LazyLock<Mutex<HashMap<Arc<String>, Arc<String>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::with_capacity(256)));
+
+    /// Return the canonical `Arc<String>` for `s` if `s` is short enough to
+    /// intern; otherwise return `s` unchanged. Callers should always use
+    /// the returned Arc — it may be a different (shared) pointer than the
+    /// input.
+    #[inline]
+    pub fn intern_short_string(s: Arc<String>) -> Arc<String> {
+        if s.len() > INTERN_THRESHOLD {
+            return s;
+        }
+        // Acquire the lock. If the mutex is poisoned (another thread panicked
+        // while holding it), fall through without interning rather than
+        // propagating the panic — interning is an optimization, not a
+        // correctness requirement.
+        let mut pool = match POOL.lock() {
+            Ok(guard) => guard,
+            Err(_) => return s,
+        };
+        if let Some(existing) = pool.get(&s) {
+            return existing.clone();
+        }
+        if pool.len() >= INTERN_CAP {
+            return s;
+        }
+        pool.insert(s.clone(), s.clone());
+        s
+    }
+
+    /// Test-only: current pool size. Pool entries are never cleared, so
+    /// tests should use deltas (not absolute values) to verify growth.
+    #[cfg(test)]
+    pub(crate) fn __test_pool_len() -> usize {
+        POOL.lock().map(|p| p.len()).unwrap_or(0)
+    }
+}
+
 /// Heap-box a HeapValue (non-GC).
 #[inline] #[cfg(not(feature = "gc"))]
 pub(crate) fn vw_heap_box(v: HeapValue) -> ValueWord {
@@ -432,7 +535,10 @@ macro_rules! native_scalar_constructors_impl {
 
 macro_rules! define_heap_constructors {
     ($mac:ident) => { $mac! {
-        fn from_string(s: Arc<String>) => String;
+        // NOTE: `from_string` is NOT in this list — it has an explicit impl
+        // that interns short strings via `string_intern::intern_short_string`
+        // (see `from_string` on `ValueWordExt`). See module docs below for the
+        // interning design and future SSO opportunity.
         fn from_char(c: char) => Char;
         fn from_array(a: crate::value::VMArray) => Array;
         fn from_decimal(d: rust_decimal::Decimal) => Decimal;
@@ -586,6 +692,12 @@ pub trait ValueWordExt {
     fn heap_box(v: HeapValue) -> ValueWord;
     fn from_heap_value(v: HeapValue) -> ValueWord;
     fn as_char(&self) -> Option<char>;
+
+    /// Construct a ValueWord from an `Arc<String>`. Short strings are routed
+    /// through the process-global intern pool — repeated short strings (field
+    /// names, enum tags, short literals) share a single `Arc<String>` allocation
+    /// across the whole program. See `string_intern` module below.
+    fn from_string(s: Arc<String>) -> ValueWord;
 
     // --- Macro-generated heap-boxing constructors ---
     define_heap_constructors!(heap_constructors_trait);
@@ -791,6 +903,27 @@ impl ValueWordExt for u64 {
     #[inline]
     fn as_char(&self) -> Option<char> {
         if let Some(HeapValue::Char(c)) = self.as_heap_ref() { Some(*c) } else { std::option::Option::None }
+    }
+
+    // ===== String constructor (explicit: uses intern pool) =====
+
+    /// Construct a ValueWord from an `Arc<String>`.
+    ///
+    /// Short strings (len <= `string_intern::INTERN_THRESHOLD`) are interned
+    /// in a process-global pool so that repeated field names, enum tags, and
+    /// short literals share a single heap allocation. Long strings bypass
+    /// the pool and are heap-boxed directly (the pool lookup cost isn't
+    /// worth it for long unique payloads).
+    ///
+    /// This is the Phase D.4 "small string optimization" approach: rather
+    /// than fitting short strings inline in the ValueWord (infeasible because
+    /// all 8 NaN-box tag values are already consumed), we collapse duplicates
+    /// so that N copies of `"name"` share one allocation. See the
+    /// `string_intern` module below for the full design rationale.
+    #[inline]
+    fn from_string(s: Arc<String>) -> ValueWord {
+        let interned = string_intern::intern_short_string(s);
+        ValueWord::heap_box(HeapValue::String(interned))
     }
 
     // ===== Macro-generated trivial constructors =====
@@ -2921,5 +3054,98 @@ mod tests {
         } else {
             panic!("expected BigInt(99)");
         }
+    }
+
+    // ===== Small-string interning (Phase D.4) =====
+    //
+    // The intern pool is a process-global resource and tests run in parallel,
+    // so assertions must be robust to cross-test pollution. We use string
+    // contents that are unlikely to appear in other tests (unique prefixes
+    // per test) and check relative behavior ("two calls with the same content
+    // return Arc-equal results") rather than absolute pool sizes where
+    // possible.
+
+    #[test]
+    fn test_intern_short_strings_share_allocation() {
+        // Two separately-allocated `Arc<String>` with identical content should
+        // deduplicate to a single canonical Arc after going through the pool.
+        let a = string_intern::intern_short_string(Arc::new("intern_test_share_name".to_string()));
+        let b = string_intern::intern_short_string(Arc::new("intern_test_share_name".to_string()));
+        assert!(Arc::ptr_eq(&a, &b), "interned short strings must share allocation");
+        assert_eq!(&*a, "intern_test_share_name");
+    }
+
+    #[test]
+    fn test_intern_long_strings_bypass_pool() {
+        // A string longer than INTERN_THRESHOLD bypasses the pool.
+        // Use a unique prefix so other parallel tests can't collide.
+        let long = format!("intern_test_long_{}", "x".repeat(string_intern::INTERN_THRESHOLD + 1));
+        assert!(long.len() > string_intern::INTERN_THRESHOLD);
+        let a = string_intern::intern_short_string(Arc::new(long.clone()));
+        let b = string_intern::intern_short_string(Arc::new(long.clone()));
+        // Both pass through untouched; they are NOT the same allocation.
+        assert!(!Arc::ptr_eq(&a, &b), "long strings must not be interned");
+        assert_eq!(&*a, &*b);
+    }
+
+    #[test]
+    fn test_intern_threshold_boundary() {
+        // Exactly at the threshold: interned. (Use a fixed-length unique
+        // string — "aaaa..." padded to exactly THRESHOLD bytes.)
+        let at: String = std::iter::repeat('a').take(string_intern::INTERN_THRESHOLD).collect();
+        let a1 = string_intern::intern_short_string(Arc::new(at.clone()));
+        let a2 = string_intern::intern_short_string(Arc::new(at.clone()));
+        assert!(Arc::ptr_eq(&a1, &a2), "len == threshold must intern");
+
+        // One past the threshold: NOT interned.
+        let over: String = std::iter::repeat('b').take(string_intern::INTERN_THRESHOLD + 1).collect();
+        let b1 = string_intern::intern_short_string(Arc::new(over.clone()));
+        let b2 = string_intern::intern_short_string(Arc::new(over.clone()));
+        assert!(!Arc::ptr_eq(&b1, &b2), "len > threshold must not intern");
+    }
+
+    #[test]
+    fn test_from_string_uses_interning() {
+        // End-to-end: two ValueWords built via `from_string` with identical
+        // short content should point to the same underlying `Arc<String>`.
+        let v1 = ValueWord::from_string(Arc::new("intern_test_e2e_id".to_string()));
+        let v2 = ValueWord::from_string(Arc::new("intern_test_e2e_id".to_string()));
+
+        // The two ValueWords wrap distinct Arc<HeapValue> allocations (each
+        // `from_string` call makes its own outer Arc), but the inner
+        // `Arc<String>` they hold must be the same allocation.
+        let s1 = match v1.as_heap_ref().expect("heap ref") {
+            HeapValue::String(s) => s.clone(),
+            _ => panic!("expected String variant"),
+        };
+        let s2 = match v2.as_heap_ref().expect("heap ref") {
+            HeapValue::String(s) => s.clone(),
+            _ => panic!("expected String variant"),
+        };
+        assert!(Arc::ptr_eq(&s1, &s2), "from_string must share short-string Arcs");
+        assert_eq!(&**s1, "intern_test_e2e_id");
+    }
+
+    #[test]
+    fn test_intern_preserves_content_across_many_calls() {
+        // Repeatedly interning varied short strings returns correct content
+        // on every call, including for repeated inputs.
+        let inputs = [
+            "intern_test_many_a",
+            "intern_test_many_b",
+            "intern_test_many_c",
+            "intern_test_many_a", // duplicate
+            "intern_test_many_b", // duplicate
+        ];
+        let mut results = Vec::new();
+        for s in inputs {
+            results.push(string_intern::intern_short_string(Arc::new(s.to_string())));
+        }
+        for (r, s) in results.iter().zip(inputs.iter()) {
+            assert_eq!(&***r, *s);
+        }
+        // Duplicates must be Arc-equal to their first occurrence.
+        assert!(Arc::ptr_eq(&results[0], &results[3]), "dup 'a' must share Arc");
+        assert!(Arc::ptr_eq(&results[1], &results[4]), "dup 'b' must share Arc");
     }
 }

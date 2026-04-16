@@ -633,6 +633,9 @@ impl JITCompiler {
             v2_release: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_release"], builder.func),
             // v2 struct allocation
             v2_alloc_struct: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_alloc_struct"], builder.func),
+            // v2 SIMD reductions (Phase C.3)
+            v2_array_sum_f64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_sum_f64"], builder.func),
+            v2_array_sum_i64: self.module.declare_func_in_func(self.ffi_funcs["jit_v2_array_sum_i64"], builder.func),
         }
     }
 }

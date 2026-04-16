@@ -261,4 +261,7 @@ pub struct FFIFuncRefs {
     pub(crate) v2_release: FuncRef,
     // v2 struct allocation
     pub(crate) v2_alloc_struct: FuncRef,
+    // v2 SIMD reductions (Phase C.3)
+    pub(crate) v2_array_sum_f64: FuncRef,
+    pub(crate) v2_array_sum_i64: FuncRef,
 }
