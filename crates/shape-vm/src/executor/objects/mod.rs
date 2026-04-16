@@ -79,6 +79,9 @@ pub mod channel_methods;
 // for the generic Add overload on built-in heap types.
 pub mod concat;
 
+// Typed HashMap and String access opcodes — local-slot based, skip HeapValue dispatch.
+pub mod typed_access;
+
 use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,

@@ -13,6 +13,16 @@ use shape_value::ValueWordExt;
 
 use super::super::BytecodeCompiler;
 
+/// Classification of a local-slot receiver for typed `.length` emission.
+enum TypedLengthLocal {
+    /// Receiver is a typed array — emit `ArrayLenTyped(slot)`
+    Array(u16),
+    /// Receiver is a typed HashMap — emit `MapLenTyped(slot)`
+    Map(u16),
+    /// Receiver is a string — emit `StringLenTyped(slot)`
+    String(u16),
+}
+
 /// Map a FieldType to a NumericType for typed opcode emission.
 fn field_type_to_numeric(ft: &FieldType) -> Option<NumericType> {
     match ft {
@@ -260,6 +270,49 @@ impl BytecodeCompiler {
         } else {
             None
         };
+
+        // Typed collection `.length` local-slot fast path.
+        //
+        // When the receiver is an identifier in a local slot with a proven
+        // collection type, emit the local-slot-based length opcode which
+        // reads the receiver directly from the slot without pushing it
+        // onto the stack.
+        if property == "length" {
+            if let Some(local) = self.try_resolve_typed_length_local(object) {
+                match local {
+                    TypedLengthLocal::Array(slot) => {
+                        self.emit(Instruction::new(
+                            OpCode::ArrayLenTyped,
+                            Some(Operand::Local(slot)),
+                        ));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = Some(NumericType::Int);
+                        return Ok(());
+                    }
+                    TypedLengthLocal::Map(slot) => {
+                        self.emit(Instruction::new(
+                            OpCode::MapLenTyped,
+                            Some(Operand::Local(slot)),
+                        ));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = Some(NumericType::Int);
+                        return Ok(());
+                    }
+                    TypedLengthLocal::String(slot) => {
+                        self.emit(Instruction::new(
+                            OpCode::StringLenTyped,
+                            Some(Operand::Local(slot)),
+                        ));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = Some(NumericType::Int);
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         // Fall back to standard property access
         self.compile_expr(object)?;
@@ -514,6 +567,26 @@ impl BytecodeCompiler {
             None
         };
 
+        // Local-slot-based typed-array index access fast path.
+        //
+        // When the receiver is an identifier in a local slot with a proven
+        // typed-array kind (i64 or f64), emit `GetElemI64`/`GetElemF64`
+        // with the local slot as operand. This avoids pushing the array
+        // pointer onto the stack before the index.
+        if end_index.is_none() {
+            if let Some((slot, elem_opcode)) = self.try_resolve_typed_elem_get(object) {
+                self.compile_expr(index)?;
+                self.emit(Instruction::new(
+                    elem_opcode,
+                    Some(Operand::Local(slot)),
+                ));
+                self.last_expr_schema = None;
+                self.last_expr_type_info = None;
+                self.last_expr_numeric_type = inferred_numeric;
+                return Ok(());
+            }
+        }
+
         self.compile_expr(object)?;
         self.compile_expr(index)?;
         if let Some(end) = end_index {
@@ -532,5 +605,57 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
         self.last_expr_numeric_type = inferred_numeric;
         Ok(())
+    }
+
+    /// Try to resolve a receiver expression to a local-slot-based typed
+    /// length opcode target.
+    fn try_resolve_typed_length_local(&mut self, object: &Expr) -> Option<TypedLengthLocal> {
+        let name = match object {
+            Expr::Identifier(name, _) => name,
+            _ => return None,
+        };
+        let local_idx = self.resolve_local(name)?;
+
+        // Typed array (v2)
+        if self.v2_typed_array_locals.contains_key(&local_idx) {
+            return Some(TypedLengthLocal::Array(local_idx));
+        }
+        // Typed HashMap (v2)
+        if self.v2_typed_map_locals.contains_key(&local_idx) {
+            return Some(TypedLengthLocal::Map(local_idx));
+        }
+        // String (non-param locals with confirmed type name)
+        if !self.param_locals.contains(&local_idx) {
+            let is_string = self
+                .type_tracker
+                .get_local_type(local_idx)
+                .and_then(|info| info.type_name.as_deref().map(|n| n == "string" || n == "String"))
+                .unwrap_or(false);
+            if is_string {
+                return Some(TypedLengthLocal::String(local_idx));
+            }
+        }
+        None
+    }
+
+    /// Try to resolve a receiver expression to a local-slot-based typed
+    /// element get opcode. Returns `Some((slot, opcode))` for i64/f64
+    /// typed arrays.
+    fn try_resolve_typed_elem_get(&self, object: &Expr) -> Option<(u16, OpCode)> {
+        let name = match object {
+            Expr::Identifier(name, _) => name,
+            _ => return None,
+        };
+        let local_idx = self.resolve_local(name)?;
+        let kind = self.v2_typed_array_locals.get(&local_idx)?;
+        match kind {
+            crate::compiler::v2_typed_emission::TypedArrayKind::I64 => {
+                Some((local_idx, OpCode::GetElemI64))
+            }
+            crate::compiler::v2_typed_emission::TypedArrayKind::F64 => {
+                Some((local_idx, OpCode::GetElemF64))
+            }
+            _ => None,
+        }
     }
 }

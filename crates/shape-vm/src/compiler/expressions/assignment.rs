@@ -436,6 +436,66 @@ impl BytecodeCompiler {
                 // overwrite tracker state).
                 let typed_kind = self.resolve_receiver_typed_array_kind(object);
                 if let Expr::Identifier(name, _) = object.as_ref() {
+                    // Local-slot-based SetElem fast path: `SetElemI64`/
+                    // `SetElemF64` take the array slot as operand and
+                    // the (index, value) on the stack. Saves LoadLocal.
+                    if let Some(kind) = typed_kind {
+                        let set_elem_opcode = match kind {
+                            crate::compiler::v2_typed_emission::TypedArrayKind::I64 => {
+                                Some(OpCode::SetElemI64)
+                            }
+                            crate::compiler::v2_typed_emission::TypedArrayKind::F64 => {
+                                Some(OpCode::SetElemF64)
+                            }
+                            _ => None,
+                        };
+                        if let Some(set_opcode) = set_elem_opcode {
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                if !self.ref_locals.contains(&local_idx) {
+                                    let source_loc = self.span_to_source_location(index.span());
+                                    self.check_write_allowed_in_current_context(
+                                        Self::borrow_key_for_local(local_idx),
+                                        Some(source_loc),
+                                    )
+                                    .map_err(|e| match e {
+                                        ShapeError::SemanticError { message, location } => {
+                                            let user_msg = message.replace(
+                                                &format!("(slot {})", local_idx),
+                                                &format!("'{}'", name),
+                                            );
+                                            ShapeError::SemanticError {
+                                                message: user_msg,
+                                                location,
+                                            }
+                                        }
+                                        other => other,
+                                    })?;
+                                    self.reject_direct_reference_storage(
+                                        &assign_expr.value,
+                                        ARRAY_REF_STORAGE_ERROR,
+                                    )?;
+                                    self.compile_expr(index)?;
+                                    self.compile_expr(&assign_expr.value)?;
+                                    let value_local =
+                                        self.declare_temp_local("__assign_value_")?;
+                                    self.emit(Instruction::simple(OpCode::Dup));
+                                    self.emit(Instruction::new(
+                                        OpCode::StoreLocal,
+                                        Some(Operand::Local(value_local)),
+                                    ));
+                                    self.emit(Instruction::new(
+                                        set_opcode,
+                                        Some(Operand::Local(local_idx)),
+                                    ));
+                                    self.emit(Instruction::new(
+                                        OpCode::LoadLocal,
+                                        Some(Operand::Local(value_local)),
+                                    ));
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
                     // Typed array fast path: emit (arr_ptr, index, value)
                     // directly so the v2 set opcode can pop them in order.
                     // Skip ref-parameter cases — they fall back to the

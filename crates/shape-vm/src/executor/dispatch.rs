@@ -671,6 +671,22 @@ impl VirtualMachine {
                 return self.exec_v2_typed_array(instruction);
             }
 
+            // Typed array element access (local-slot based, skip HeapValue dispatch)
+            GetElemI64 | GetElemF64 | SetElemI64 | SetElemF64
+            | ArrayPushI64 | ArrayPushF64 | ArrayLenTyped => {
+                return self.exec_typed_array_elem_ops(instruction);
+            }
+
+            // Typed HashMap access (local-slot based, skip HeapValue dispatch)
+            MapGetStrI64 | MapGetStrF64 | MapSetStrI64 | MapHasStr | MapLenTyped => {
+                return self.exec_typed_map_access(instruction);
+            }
+
+            // Typed String access (local-slot based or stack-based)
+            StringLenTyped | StringCharAt | StringConcatTyped => {
+                return self.exec_typed_string_access(instruction);
+            }
+
             // v2 typed map operations
             NewTypedMapStringF64
             | NewTypedMapStringI64

@@ -671,6 +671,42 @@ define_opcodes! {
     /// Used by the compiler before StoreLocal for uniquely-owned let bindings.
     PromoteToOwned = 0x107, Stack, pops: 0, pushes: 0;
 
+    // ===== Typed Array Element Access (local-slot based, skip HeapValue dispatch) =====
+    /// Get i64 element from typed int array. Operand: local slot. Index on stack.
+    GetElemI64 = 0x108, Object, pops: 1, pushes: 1;
+    /// Get f64 element from typed float array. Operand: local slot. Index on stack.
+    GetElemF64 = 0x109, Object, pops: 1, pushes: 1;
+    /// Set i64 element in typed int array. Operand: local slot. Index and value on stack.
+    SetElemI64 = 0x10A, Object, pops: 2, pushes: 0;
+    /// Set f64 element in typed float array. Operand: local slot. Index and value on stack.
+    SetElemF64 = 0x10B, Object, pops: 2, pushes: 0;
+    /// Push i64 to typed int array. Operand: local slot. Value on stack.
+    ArrayPushI64 = 0x10C, Object, pops: 1, pushes: 0;
+    /// Push f64 to typed float array. Operand: local slot. Value on stack.
+    ArrayPushF64 = 0x10D, Object, pops: 1, pushes: 0;
+    /// Get length of typed array (any element type). Operand: local slot.
+    ArrayLenTyped = 0x10E, Object, pops: 0, pushes: 1;
+
+    // ===== Typed HashMap Access (local-slot based) =====
+    /// Get value from HashMap<string, int>. Key on stack. Operand: map slot.
+    MapGetStrI64 = 0x10F, Object, pops: 1, pushes: 1;
+    /// Get value from HashMap<string, float>. Key on stack. Operand: map slot.
+    MapGetStrF64 = 0x110, Object, pops: 1, pushes: 1;
+    /// Set value in HashMap<string, int>. Key and value on stack. Operand: map slot.
+    MapSetStrI64 = 0x111, Object, pops: 2, pushes: 0;
+    /// Check if key exists in HashMap<string, *>. Key on stack. Operand: map slot.
+    MapHasStr = 0x112, Object, pops: 1, pushes: 1;
+    /// Get HashMap length. Operand: map slot.
+    MapLenTyped = 0x113, Object, pops: 0, pushes: 1;
+
+    // ===== Typed String Access (local-slot based) =====
+    /// Get string length (chars). Operand: string slot.
+    StringLenTyped = 0x114, Object, pops: 0, pushes: 1;
+    /// Get char at index. Index on stack. Operand: string slot.
+    StringCharAt = 0x115, Object, pops: 1, pushes: 1;
+    /// Concatenate two strings. Both on stack.
+    StringConcatTyped = 0x116, Object, pops: 2, pushes: 1;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;
@@ -762,6 +798,24 @@ impl OpCode {
             | OpCode::TypedArrayPushI32
             | OpCode::TypedArrayPushBool
             | OpCode::TypedArrayLen
+            // Local-slot-based typed array element access
+            | OpCode::GetElemI64
+            | OpCode::GetElemF64
+            | OpCode::SetElemI64
+            | OpCode::SetElemF64
+            | OpCode::ArrayPushI64
+            | OpCode::ArrayPushF64
+            | OpCode::ArrayLenTyped
+            // Local-slot-based typed HashMap access
+            | OpCode::MapGetStrI64
+            | OpCode::MapGetStrF64
+            | OpCode::MapSetStrI64
+            | OpCode::MapHasStr
+            | OpCode::MapLenTyped
+            // Local-slot-based typed String access
+            | OpCode::StringLenTyped
+            | OpCode::StringCharAt
+            | OpCode::StringConcatTyped
             // Typed field access
             | OpCode::FieldLoadF64
             | OpCode::FieldLoadI64

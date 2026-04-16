@@ -1360,6 +1360,15 @@ impl BytecodeCompiler {
             }
         }
 
+        // Local-slot-based typed method dispatch.
+        //
+        // When the receiver is an identifier in a local slot with a proven
+        // collection or string type, emit the local-slot-based opcodes that
+        // read the receiver directly from the slot.
+        if let Some(()) = self.try_compile_typed_slot_method(receiver, method, args)? {
+            return Ok(());
+        }
+
         // Universal type query: `expr.type()`.
         // Use static type constants when fully resolved; otherwise fall back to
         // runtime `TypeOf` so generic parameters resolve to concrete call-site types.
@@ -1890,6 +1899,222 @@ impl BytecodeCompiler {
 
         self.clear_last_expr_reference_result();
         Ok(())
+    }
+
+    /// Try to compile a method call using local-slot-based typed opcodes.
+    ///
+    /// Returns `Ok(Some(()))` if the method was compiled as a typed opcode,
+    /// `Ok(None)` if the method should fall through to the generic path.
+    fn try_compile_typed_slot_method(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<()>> {
+        let name = match receiver {
+            Expr::Identifier(name, _) => name,
+            _ => return Ok(None),
+        };
+        let local_idx = match self.resolve_local(name) {
+            Some(idx) => idx,
+            None => return Ok(None),
+        };
+
+        match method {
+            // `.len()` — typed length for arrays, maps, strings
+            "len" if args.is_empty() => {
+                if self.v2_typed_array_locals.contains_key(&local_idx) {
+                    self.emit(Instruction::new(
+                        OpCode::ArrayLenTyped,
+                        Some(Operand::Local(local_idx)),
+                    ));
+                    self.last_expr_schema = None;
+                    self.last_expr_type_info = None;
+                    self.last_expr_numeric_type = Some(NumericType::Int);
+                    self.clear_last_expr_reference_result();
+                    return Ok(Some(()));
+                }
+                if self.v2_typed_map_locals.contains_key(&local_idx) {
+                    self.emit(Instruction::new(
+                        OpCode::MapLenTyped,
+                        Some(Operand::Local(local_idx)),
+                    ));
+                    self.last_expr_schema = None;
+                    self.last_expr_type_info = None;
+                    self.last_expr_numeric_type = Some(NumericType::Int);
+                    self.clear_last_expr_reference_result();
+                    return Ok(Some(()));
+                }
+                if !self.param_locals.contains(&local_idx) {
+                    let is_string = self
+                        .type_tracker
+                        .get_local_type(local_idx)
+                        .and_then(|info| info.type_name.as_deref().map(|n| n == "string" || n == "String"))
+                        .unwrap_or(false);
+                    if is_string {
+                        self.emit(Instruction::new(
+                            OpCode::StringLenTyped,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = Some(NumericType::Int);
+                        self.clear_last_expr_reference_result();
+                        return Ok(Some(()));
+                    }
+                }
+            }
+
+            // `.get(key)` — typed HashMap get for string-keyed maps
+            "get" if args.len() == 1 => {
+                if let Some(kind) = self.v2_typed_map_locals.get(&local_idx).copied() {
+                    let opcode = match kind {
+                        crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64 => {
+                            Some(OpCode::MapGetStrI64)
+                        }
+                        crate::compiler::v2_typed_map_emission::TypedMapKind::StringF64 => {
+                            Some(OpCode::MapGetStrF64)
+                        }
+                        _ => None,
+                    };
+                    if let Some(opcode) = opcode {
+                        self.compile_expr(&args[0])?;
+                        self.emit(Instruction::new(
+                            opcode,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = match kind {
+                            crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64 => {
+                                Some(NumericType::Int)
+                            }
+                            crate::compiler::v2_typed_map_emission::TypedMapKind::StringF64 => {
+                                Some(NumericType::Number)
+                            }
+                            _ => None,
+                        };
+                        self.clear_last_expr_reference_result();
+                        return Ok(Some(()));
+                    }
+                }
+            }
+
+            // `.has(key)` — typed HashMap has for string-keyed maps
+            "has" if args.len() == 1 => {
+                if let Some(kind) = self.v2_typed_map_locals.get(&local_idx).copied() {
+                    let is_string_keyed = matches!(
+                        kind,
+                        crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64
+                            | crate::compiler::v2_typed_map_emission::TypedMapKind::StringF64
+                            | crate::compiler::v2_typed_map_emission::TypedMapKind::StringPtr
+                    );
+                    if is_string_keyed {
+                        self.compile_expr(&args[0])?;
+                        self.emit(Instruction::new(
+                            OpCode::MapHasStr,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = None;
+                        self.clear_last_expr_reference_result();
+                        return Ok(Some(()));
+                    }
+                }
+            }
+
+            // `.set(key, value)` — typed HashMap set for HashMap<string, int>
+            "set" if args.len() == 2 => {
+                if let Some(kind) = self.v2_typed_map_locals.get(&local_idx).copied() {
+                    if matches!(kind, crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64) {
+                        self.compile_expr(&args[0])?;
+                        self.compile_expr(&args[1])?;
+                        self.emit(Instruction::new(
+                            OpCode::MapSetStrI64,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = None;
+                        self.clear_last_expr_reference_result();
+                        return Ok(Some(()));
+                    }
+                }
+            }
+
+            // `.push(value)` — typed array push (local-slot-based)
+            "push" if args.len() == 1 => {
+                if let Some(&kind) = self.v2_typed_array_locals.get(&local_idx) {
+                    let opcode = match kind {
+                        crate::compiler::v2_typed_emission::TypedArrayKind::I64 => {
+                            Some(OpCode::ArrayPushI64)
+                        }
+                        crate::compiler::v2_typed_emission::TypedArrayKind::F64 => {
+                            Some(OpCode::ArrayPushF64)
+                        }
+                        _ => None,
+                    };
+                    if let Some(opcode) = opcode {
+                        let source_loc = self.span_to_source_location(receiver.span());
+                        if !self.ref_locals.contains(&local_idx) {
+                            self.check_named_binding_write_allowed(name, Some(source_loc))?;
+                        }
+                        self.compile_expr(&args[0])?;
+                        self.emit(Instruction::new(
+                            opcode,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                        // Push the mutated array as expression result.
+                        if self.ref_locals.contains(&local_idx)
+                            || self.reference_value_locals.contains(&local_idx)
+                        {
+                            self.emit(Instruction::new(
+                                OpCode::DerefLoad,
+                                Some(Operand::Local(local_idx)),
+                            ));
+                        } else {
+                            self.emit(Instruction::new(
+                                OpCode::LoadLocal,
+                                Some(Operand::Local(local_idx)),
+                            ));
+                        }
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = None;
+                        self.clear_last_expr_reference_result();
+                        return Ok(Some(()));
+                    }
+                }
+            }
+
+            // `.charAt(index)` — typed string char access
+            "charAt" if args.len() == 1 => {
+                if !self.param_locals.contains(&local_idx) {
+                    let is_string = self
+                        .type_tracker
+                        .get_local_type(local_idx)
+                        .and_then(|info| info.type_name.as_deref().map(|n| n == "string" || n == "String"))
+                        .unwrap_or(false);
+                    if is_string {
+                        self.compile_expr(&args[0])?;
+                        self.emit(Instruction::new(
+                            OpCode::StringCharAt,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                        self.last_expr_schema = None;
+                        self.last_expr_type_info = None;
+                        self.last_expr_numeric_type = None;
+                        self.clear_last_expr_reference_result();
+                        return Ok(Some(()));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+
+        Ok(None)
     }
 
     fn compile_module_namespace_call(

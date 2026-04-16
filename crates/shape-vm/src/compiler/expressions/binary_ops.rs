@@ -710,7 +710,9 @@ impl BytecodeCompiler {
                     let either_is_string = matches!(lhs_name.as_deref(), Some("string"))
                         || matches!(rhs_name.as_deref(), Some("string"));
                     if is_strish(&lhs_name) && is_strish(&rhs_name) && either_is_string {
-                        self.emit(Instruction::simple(OpCode::StringConcat));
+                        // Use the typed string concatenation opcode when both
+                        // operands are proven strings/chars.
+                        self.emit(Instruction::simple(OpCode::StringConcatTyped));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
                         self.last_expr_numeric_type = None;
