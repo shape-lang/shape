@@ -978,6 +978,129 @@ pub(crate) fn handle_float_for_each(
     Ok(ValueWord::none().into_raw_bits())
 }
 
+/// v2 reduce for float arrays: fold with accumulator.
+pub(crate) fn handle_float_reduce(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    // args: [receiver, reducer_fn, initial_value]
+    if args.len() != 3 {
+        return Err(VMError::RuntimeError(
+            "reduce() requires exactly 2 arguments (reducer, initial)".to_string(),
+        ));
+    }
+    let arr_clone: Vec<f64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<number>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    let mut acc_bits = args[2];
+    for &v in &arr_clone {
+        let elem_bits = f64::to_bits(v);
+        acc_bits = vm.call_value_immediate_raw(args[1], &[acc_bits, elem_bits], ctx.as_deref_mut())?;
+    }
+    Ok(acc_bits)
+}
+
+/// v2 find for float arrays: return first element matching predicate, or none.
+pub(crate) fn handle_float_find(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<f64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<number>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = f64::to_bits(v);
+        let result_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        if raw_helpers::is_truthy_raw(result_bits) {
+            return Ok(ValueWord::from_f64(v).into_raw_bits());
+        }
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::none().into_raw_bits())
+}
+
+/// v2 some for float arrays: return true if any element matches predicate.
+pub(crate) fn handle_float_some(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<f64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<number>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = f64::to_bits(v);
+        let result_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        if raw_helpers::is_truthy_raw(result_bits) {
+            drop(ValueWord::from_raw_bits(result_bits));
+            return Ok(ValueWord::from_bool(true).into_raw_bits());
+        }
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::from_bool(false).into_raw_bits())
+}
+
+/// v2 every for float arrays: return true if all elements match predicate.
+pub(crate) fn handle_float_every(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<f64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_float_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<number>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = f64::to_bits(v);
+        let result_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        if !raw_helpers::is_truthy_raw(result_bits) {
+            drop(ValueWord::from_raw_bits(result_bits));
+            return Ok(ValueWord::from_bool(false).into_raw_bits());
+        }
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::from_bool(true).into_raw_bits())
+}
+
 /// v2 toArray for float arrays: convert typed array to generic Array.
 pub(crate) fn handle_float_to_array(
     _vm: &mut crate::executor::VirtualMachine,
@@ -1095,6 +1218,129 @@ pub(crate) fn handle_int_for_each(
     Ok(ValueWord::none().into_raw_bits())
 }
 
+/// v2 reduce for int arrays: fold with accumulator.
+pub(crate) fn handle_int_reduce(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    // args: [receiver, reducer_fn, initial_value]
+    if args.len() != 3 {
+        return Err(VMError::RuntimeError(
+            "reduce() requires exactly 2 arguments (reducer, initial)".to_string(),
+        ));
+    }
+    let arr_clone: Vec<i64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<int>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    let mut acc_bits = args[2];
+    for &v in &arr_clone {
+        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        acc_bits = vm.call_value_immediate_raw(args[1], &[acc_bits, elem_bits], ctx.as_deref_mut())?;
+    }
+    Ok(acc_bits)
+}
+
+/// v2 find for int arrays: return first element matching predicate, or none.
+pub(crate) fn handle_int_find(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<i64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<int>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        let result_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        if raw_helpers::is_truthy_raw(result_bits) {
+            return Ok(elem_bits);
+        }
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::none().into_raw_bits())
+}
+
+/// v2 some for int arrays: return true if any element matches predicate.
+pub(crate) fn handle_int_some(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<i64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<int>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        let result_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        if raw_helpers::is_truthy_raw(result_bits) {
+            drop(ValueWord::from_raw_bits(result_bits));
+            return Ok(ValueWord::from_bool(true).into_raw_bits());
+        }
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::from_bool(false).into_raw_bits())
+}
+
+/// v2 every for int arrays: return true if all elements match predicate.
+pub(crate) fn handle_int_every(
+    vm: &mut crate::executor::VirtualMachine,
+    args: &mut [u64],
+    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+) -> Result<u64, shape_value::VMError> {
+    let cb_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
+    let arr_clone: Vec<i64> = {
+        let vw = borrow_vw(args[0]);
+        let arr = vw.as_int_array().ok_or_else(|| VMError::TypeError {
+            expected: "Vec<int>",
+            got: vw.type_name(),
+        })?;
+        arr.iter().copied().collect()
+    };
+    for (i, &v) in arr_clone.iter().enumerate() {
+        let elem_bits = ValueWord::from_i64(v).into_raw_bits();
+        let result_bits = if cb_arity >= 2 {
+            let idx_bits = ValueWord::from_i64(i as i64).into_raw_bits();
+            vm.call_value_immediate_raw(args[1], &[elem_bits, idx_bits], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_raw(args[1], &[elem_bits], ctx.as_deref_mut())?
+        };
+        if !raw_helpers::is_truthy_raw(result_bits) {
+            drop(ValueWord::from_raw_bits(result_bits));
+            return Ok(ValueWord::from_bool(false).into_raw_bits());
+        }
+        drop(ValueWord::from_raw_bits(result_bits));
+    }
+    Ok(ValueWord::from_bool(true).into_raw_bits())
+}
+
 /// v2 toArray for int arrays: convert typed array to generic Array.
 pub(crate) fn handle_int_to_array(
     _vm: &mut crate::executor::VirtualMachine,
@@ -1119,4 +1365,119 @@ pub(crate) fn handle_bool_to_array(
         .to_generic_array()
         .ok_or_else(|| VMError::RuntimeError("toArray() requires a typed array".into()))?;
     Ok(ValueWord::from_array(generic).into_raw_bits())
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::eval;
+    use shape_value::ValueWordExt;
+
+    #[test]
+    fn test_int_array_map() {
+        let result = eval("[1, 2, 3].map(|x| x * 2)");
+        let arr = result.as_any_array().expect("expected array");
+        let generic = arr.to_generic();
+        assert_eq!(generic.len(), 3);
+        assert_eq!(generic[0].as_i64(), Some(2));
+        assert_eq!(generic[1].as_i64(), Some(4));
+        assert_eq!(generic[2].as_i64(), Some(6));
+    }
+
+    #[test]
+    fn test_float_array_filter() {
+        let result = eval("[1.0, 2.0, 3.0].filter(|x| x > 1.5)");
+        let arr = result.as_any_array().expect("expected array");
+        let generic = arr.to_generic();
+        assert_eq!(generic.len(), 2);
+        assert_eq!(generic[0].as_f64(), Some(2.0));
+        assert_eq!(generic[1].as_f64(), Some(3.0));
+    }
+
+    #[test]
+    fn test_int_array_reduce() {
+        let result = eval("[1, 2, 3].reduce(|a, b| a + b, 0)");
+        assert_eq!(result.as_i64(), Some(6));
+    }
+
+    #[test]
+    fn test_int_array_some_true() {
+        let result = eval("[1, 2, 3].some(|x| x > 2)");
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_int_array_some_false() {
+        let result = eval("[1, 2, 3].some(|x| x > 5)");
+        assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_int_array_every_true() {
+        let result = eval("[1, 2, 3].every(|x| x > 0)");
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_int_array_every_false() {
+        let result = eval("[1, 2, 3].every(|x| x > 2)");
+        assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_int_array_find() {
+        let result = eval("[1, 2, 3].find(|x| x > 1)");
+        assert_eq!(result.as_i64(), Some(2));
+    }
+
+    #[test]
+    fn test_int_array_find_none() {
+        let result = eval("[1, 2, 3].find(|x| x > 10)");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_float_array_reduce() {
+        let result = eval("[1.0, 2.0, 3.0].reduce(|a, b| a + b, 0.0)");
+        assert_eq!(result.as_f64(), Some(6.0));
+    }
+
+    #[test]
+    fn test_float_array_some() {
+        let result = eval("[1.0, 2.0, 3.0].some(|x| x > 2.5)");
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_float_array_every() {
+        let result = eval("[1.0, 2.0, 3.0].every(|x| x > 0.0)");
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_float_array_find() {
+        let result = eval("[1.0, 2.0, 3.0].find(|x| x > 1.5)");
+        assert_eq!(result.as_f64(), Some(2.0));
+    }
+
+    #[test]
+    fn test_int_array_reduce_with_multiply() {
+        // reduce with multiplication and non-zero initial
+        let result = eval("[1, 2, 3].reduce(|a, b| a * b, 1)");
+        assert_eq!(result.as_i64(), Some(6));
+    }
+
+    #[test]
+    fn test_int_array_for_each() {
+        // forEach returns none; just verify it doesn't crash
+        let result = eval(r#"
+            let mut sum = 0
+            [1, 2, 3].forEach(|x| { sum = sum + x })
+            sum
+        "#);
+        assert_eq!(result.as_i64(), Some(6));
+    }
 }

@@ -465,7 +465,7 @@ pub static INDEXED_TABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_ma
 ///
 /// **Aggregations:** sum, avg, mean, min, max, std, variance
 /// **Numeric:** dot, norm, normalize, cumsum, diff, abs, sqrt, ln, exp
-/// **Standard:** len, length, map, filter, forEach, toArray
+/// **Standard:** len, length, map, filter, reduce, fold, forEach, find, some, every, toArray
 pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Aggregations — MethodFnV2 (v2 typed array + v1 fallback)
     "sum" => crate::executor::objects::typed_array_methods::v2_float_sum,
@@ -489,7 +489,12 @@ pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map!
     "exp" => crate::executor::objects::typed_array_methods::handle_float_exp,
     "map" => crate::executor::objects::typed_array_methods::handle_float_map,
     "filter" => crate::executor::objects::typed_array_methods::handle_float_filter,
+    "reduce" => crate::executor::objects::typed_array_methods::handle_float_reduce,
+    "fold" => crate::executor::objects::typed_array_methods::handle_float_reduce,
     "forEach" => crate::executor::objects::typed_array_methods::handle_float_for_each,
+    "find" => crate::executor::objects::typed_array_methods::handle_float_find,
+    "some" => crate::executor::objects::typed_array_methods::handle_float_some,
+    "every" => crate::executor::objects::typed_array_methods::handle_float_every,
     "toArray" => crate::executor::objects::typed_array_methods::handle_float_to_array,
 };
 
@@ -497,7 +502,7 @@ pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map!
 ///
 /// **Aggregations:** sum, avg, mean, min, max
 /// **Numeric:** abs
-/// **Standard:** len, length, map, filter, forEach, toArray
+/// **Standard:** len, length, map, filter, reduce, fold, forEach, find, some, every, toArray
 pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Aggregations — MethodFnV2 (v2 typed array + v1 fallback)
     "sum" => crate::executor::objects::typed_array_methods::v2_int_sum,
@@ -511,7 +516,12 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "abs" => crate::executor::objects::typed_array_methods::handle_int_abs,
     "map" => crate::executor::objects::typed_array_methods::handle_int_map,
     "filter" => crate::executor::objects::typed_array_methods::handle_int_filter,
+    "reduce" => crate::executor::objects::typed_array_methods::handle_int_reduce,
+    "fold" => crate::executor::objects::typed_array_methods::handle_int_reduce,
     "forEach" => crate::executor::objects::typed_array_methods::handle_int_for_each,
+    "find" => crate::executor::objects::typed_array_methods::handle_int_find,
+    "some" => crate::executor::objects::typed_array_methods::handle_int_some,
+    "every" => crate::executor::objects::typed_array_methods::handle_int_every,
     "toArray" => crate::executor::objects::typed_array_methods::handle_int_to_array,
 };
 
