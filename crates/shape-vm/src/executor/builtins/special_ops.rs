@@ -133,10 +133,11 @@ impl VirtualMachine {
         // Unwrap type-annotated wrappers and capture explicit impl selectors.
         let mut preferred_type_name: Option<String> = None;
         let mut selected_impl_name: Option<String> = None;
+        // cold-path: as_heap_ref retained — UFCS dispatch TypeAnnotatedValue unwrap
         let unwrapped = if let Some(HeapValue::TypeAnnotatedValue {
             type_name,
             value: inner,
-        }) = value.as_heap_ref()
+        }) = value.as_heap_ref() // cold-path
         {
             if let Some(impl_name) = type_name.strip_prefix("__impl__:") {
                 selected_impl_name = Some(impl_name.to_string());
@@ -175,7 +176,8 @@ impl VirtualMachine {
 
         let type_name = preferred_type_name
             .map(|s| s.to_string())
-            .or_else(|| match value.as_heap_ref() {
+            // cold-path: as_heap_ref retained — UFCS type name resolution
+            .or_else(|| match value.as_heap_ref() { // cold-path
                 Some(HeapValue::TypedObject { schema_id, .. }) => self
                     .lookup_schema(*schema_id as u32)
                     .map(|schema| schema.name.clone()),

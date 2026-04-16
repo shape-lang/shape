@@ -5,6 +5,7 @@
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::objects::object_creation::clone_slots_with_update;
+use crate::executor::objects::raw_helpers;
 use shape_runtime::type_schema::FieldType;
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
@@ -117,20 +118,14 @@ impl TypedObjectOps for super::VirtualMachine {
         } = operand
         {
             let obj_nb = self.pop_raw_u64()?;
-            let obj_nb =
-                if let Some(HeapValue::TypeAnnotatedValue { value, .. }) = obj_nb.as_heap_ref() {
-                    value.as_ref().clone()
-                } else {
-                    obj_nb
-                };
+            let obj_bits = raw_helpers::unwrap_annotated_bits(obj_nb);
 
             // ValueWord fast path: HeapValue::TypedObject dispatch
-            if let Some(HeapValue::TypedObject {
-                schema_id,
-                slots,
-                heap_mask,
-            }) = obj_nb.as_heap_ref()
+            if let Some((schema_id_val, slots, heap_mask_val)) =
+                raw_helpers::extract_typed_object(obj_bits)
             {
+                let schema_id = &schema_id_val;
+                let heap_mask = &heap_mask_val;
                 // Schema mismatch — fall back to name-based field lookup.
                 // This happens when e.g. `let u: User = { id: 1, name: "Alice" }`
                 // creates an anonymous TypedObject (schema X) then the compiler
@@ -270,33 +265,24 @@ impl TypedObjectOps for super::VirtualMachine {
         {
             let value_nb = self.pop_raw_u64()?;
             let object_nb = self.pop_raw_u64()?;
-            let object_nb = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
-                object_nb.as_heap_ref()
-            {
-                value.as_ref().clone()
-            } else {
-                object_nb
-            };
+            let object_bits = raw_helpers::unwrap_annotated_bits(object_nb);
             let field_index = *field_idx as usize;
 
-            if let Some(HeapValue::TypedObject {
-                schema_id,
-                slots,
-                heap_mask,
-            }) = object_nb.as_heap_ref()
+            if let Some((schema_id_val, slots, heap_mask_val)) =
+                raw_helpers::extract_typed_object(object_bits)
             {
                 if field_index < slots.len() {
                     let field_type = tag_to_field_type(*field_type_tag);
                     let (new_slots, new_mask) = clone_slots_with_update(
                         // BARRIER: TypedObject field update (CoW)
                         slots,
-                        *heap_mask,
+                        heap_mask_val,
                         field_index,
                         &value_nb,
                         field_type.as_ref(),
                     );
                     return self.push_raw_u64(ValueWord::from_heap_value(HeapValue::TypedObject {
-                        schema_id: *schema_id,
+                        schema_id: schema_id_val,
                         slots: new_slots.into_boxed_slice(),
                         heap_mask: new_mask,
                     }));
@@ -304,7 +290,7 @@ impl TypedObjectOps for super::VirtualMachine {
             }
 
             // Non-TypedObject or out-of-bounds index: preserve previous behavior.
-            self.push_raw_u64(object_nb)?;
+            self.push_raw_u64(object_bits)?;
             Ok(())
         } else {
             Err(VMError::InvalidOperand)

@@ -251,7 +251,8 @@ fn infer_semantic_type_nb(nb: &ValueWord) -> SemanticType {
             }))
         }
         TAG_HEAP => {
-            match nb.as_heap_ref() {
+            // cold-path: as_heap_ref retained — multi-variant type inference dispatch
+            match nb.as_heap_ref() { // cold-path
                 Some(hv) => infer_semantic_type_heap(hv),
                 // Should never happen: Heap tag but no heap ref
                 std::option::Option::None => SemanticType::Named("Unknown".to_string()),

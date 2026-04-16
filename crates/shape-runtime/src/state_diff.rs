@@ -581,7 +581,8 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
                         }
 
                         if new_val.is_heap() {
-                            if let Some(hv) = new_val.as_heap_ref() {
+                            // cold-path: as_heap_ref retained — generic heap-to-slot store
+                            if let Some(hv) = new_val.as_heap_ref() { // cold-path
                                 new_slots[field_idx] =
                                     shape_value::ValueSlot::from_heap(hv.clone());
                                 new_heap_mask |= 1u64 << field_idx;
@@ -619,7 +620,8 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
 
                             // Write back the patched value
                             if patched.is_heap() {
-                                if let Some(hv) = patched.as_heap_ref() {
+                                // cold-path: as_heap_ref retained — generic heap-to-slot store
+                                if let Some(hv) = patched.as_heap_ref() { // cold-path
                                     new_slots[field_idx] =
                                         shape_value::ValueSlot::from_heap(hv.clone());
                                     new_heap_mask |= 1u64 << field_idx;
@@ -935,7 +937,8 @@ mod tests {
             schema_id: outer_id as u64,
             slots: vec![
                 ValueSlot::from_heap(HeapValue::String(name_val.clone())), // name
-                ValueSlot::from_heap(inner_old.as_heap_ref().unwrap().clone()), // inner
+                // cold-path: as_heap_ref retained — test fixture construction
+                ValueSlot::from_heap(inner_old.as_heap_ref().unwrap().clone()), // inner // cold-path
                 ValueSlot::from_number(10.0),                              // score
             ]
             .into_boxed_slice(),
@@ -946,7 +949,8 @@ mod tests {
             schema_id: outer_id as u64,
             slots: vec![
                 ValueSlot::from_heap(HeapValue::String(name_val.clone())), // name (same)
-                ValueSlot::from_heap(inner_new.as_heap_ref().unwrap().clone()), // inner (y changed)
+                // cold-path: as_heap_ref retained — test fixture construction
+                ValueSlot::from_heap(inner_new.as_heap_ref().unwrap().clone()), // inner (y changed) // cold-path
                 ValueSlot::from_number(10.0),                              // score (same)
             ]
             .into_boxed_slice(),
@@ -1060,7 +1064,8 @@ mod tests {
             schema_id: outer_id as u64,
             slots: vec![
                 ValueSlot::from_number(100.0),
-                ValueSlot::from_heap(inner_obj.as_heap_ref().unwrap().clone()),
+                // cold-path: as_heap_ref retained — test fixture construction
+                ValueSlot::from_heap(inner_obj.as_heap_ref().unwrap().clone()), // cold-path
             ]
             .into_boxed_slice(),
             heap_mask: 0b10, // slot 1 is heap

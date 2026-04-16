@@ -8,8 +8,9 @@
 //! the wrong type is undefined behavior for heap pointer extraction.
 
 use shape_value::heap_value::{HashMapData, HeapValue};
+use shape_value::slot::ValueSlot;
 use shape_value::tags::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_HEAP, TAG_INT};
-use shape_value::{ArrayView, VMError, ValueWord, ValueWordExt};
+use shape_value::{ArrayView, Upvalue, VMError, ValueWord, ValueWordExt};
 
 // ─── Inline scalar extraction ─────────────────────────────────────────────
 
@@ -233,6 +234,231 @@ pub fn extract_content(bits: u64) -> Option<&'static shape_value::content::Conte
     unsafe {
         extract_heap_ref(bits).and_then(|hv| match hv {
             HeapValue::Content(node) => Some(node.as_ref()),
+            _ => None,
+        })
+    }
+}
+
+// ─── SharedCell / Future / TaskGroup extraction ─────────────────────────
+
+/// Extract &Arc<RwLock<ValueWord>> from heap-tagged SharedCell bits.
+#[inline]
+pub fn extract_shared_cell(
+    bits: u64,
+) -> Option<&'static std::sync::Arc<std::sync::RwLock<ValueWord>>> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::SharedCell(arc) => Some(arc),
+            _ => None,
+        })
+    }
+}
+
+/// Extract future ID from heap-tagged Future bits.
+#[inline]
+pub fn extract_future_id(bits: u64) -> Option<u64> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Future(id) => Some(*id),
+            _ => None,
+        })
+    }
+}
+
+/// Extract (kind, &task_ids) from heap-tagged TaskGroup bits.
+#[inline]
+pub fn extract_task_group(bits: u64) -> Option<(u8, &'static Vec<u64>)> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::TaskGroup { kind, task_ids } => Some((*kind, task_ids)),
+            _ => None,
+        })
+    }
+}
+
+// ─── BigInt / Decimal extraction ────────────────────────────────────────
+
+/// Extract i64 from heap-tagged BigInt bits.
+#[inline]
+pub fn extract_big_int(bits: u64) -> Option<i64> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::BigInt(v) => Some(*v),
+            _ => None,
+        })
+    }
+}
+
+/// Extract Decimal from heap-tagged Decimal bits.
+#[inline]
+pub fn extract_decimal(bits: u64) -> Option<rust_decimal::Decimal> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Decimal(d) => Some(*d),
+            _ => None,
+        })
+    }
+}
+
+// ─── TypedObject / TypeAnnotatedValue extraction ────────────────────────
+
+/// Extract (schema_id, &slots, heap_mask) from heap-tagged TypedObject bits.
+#[inline]
+pub fn extract_typed_object(bits: u64) -> Option<(u64, &'static [ValueSlot], u64)> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::TypedObject {
+                schema_id,
+                slots,
+                heap_mask,
+            } => Some((*schema_id, slots.as_ref(), *heap_mask)),
+            _ => None,
+        })
+    }
+}
+
+/// Unwrap TypeAnnotatedValue to its inner bits. Returns the input unchanged
+/// if it's not a TypeAnnotatedValue.
+#[inline]
+pub fn unwrap_annotated_bits(bits: u64) -> u64 {
+    unsafe {
+        if let Some(HeapValue::TypeAnnotatedValue { value, .. }) = extract_heap_ref(bits) {
+            value.into_raw_bits()
+        } else {
+            bits
+        }
+    }
+}
+
+// ─── Option / Result extraction ─────────────────────────────────────────
+
+/// Extract inner &ValueWord from heap-tagged Some bits.
+#[inline]
+pub fn extract_some_inner(bits: u64) -> Option<&'static ValueWord> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Some(inner) => Some(inner.as_ref()),
+            _ => None,
+        })
+    }
+}
+
+/// Extract inner &ValueWord from heap-tagged Ok bits.
+#[inline]
+pub fn extract_ok_inner(bits: u64) -> Option<&'static ValueWord> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Ok(inner) => Some(inner.as_ref()),
+            _ => None,
+        })
+    }
+}
+
+/// Extract inner &ValueWord from heap-tagged Err bits.
+#[inline]
+pub fn extract_err_inner(bits: u64) -> Option<&'static ValueWord> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Err(inner) => Some(inner.as_ref()),
+            _ => None,
+        })
+    }
+}
+
+// ─── Enum extraction ────────────────────────────────────────────────────
+
+/// Extract &EnumValue from heap-tagged Enum bits.
+#[inline]
+pub fn extract_enum(bits: u64) -> Option<&'static shape_value::enums::EnumValue> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Enum(e) => Some(e.as_ref()),
+            _ => None,
+        })
+    }
+}
+
+// ─── Range extraction ───────────────────────────────────────────────────
+
+/// Extract (start, end, inclusive) from heap-tagged Range bits.
+#[inline]
+pub fn extract_range(
+    bits: u64,
+) -> Option<(
+    Option<&'static ValueWord>,
+    Option<&'static ValueWord>,
+    bool,
+)> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::Range {
+                start,
+                end,
+                inclusive,
+            } => Some((
+                start.as_ref().map(|b| b.as_ref()),
+                end.as_ref().map(|b| b.as_ref()),
+                *inclusive,
+            )),
+            _ => None,
+        })
+    }
+}
+
+// ─── FilterExpr / TraitObject extraction ────────────────────────────────
+
+/// Extract &Arc<FilterNode> from heap-tagged FilterExpr bits.
+#[inline]
+pub fn extract_filter_expr(
+    bits: u64,
+) -> Option<&'static std::sync::Arc<shape_value::value::FilterNode>> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::FilterExpr(f) => Some(f),
+            _ => None,
+        })
+    }
+}
+
+/// Extract (&ValueWord, &Arc<VTable>) from heap-tagged TraitObject bits.
+#[inline]
+pub fn extract_trait_object(
+    bits: u64,
+) -> Option<(
+    &'static ValueWord,
+    &'static std::sync::Arc<shape_value::value::VTable>,
+)> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::TraitObject { value, vtable } => Some((value.as_ref(), vtable)),
+            _ => None,
+        })
+    }
+}
+
+// ─── IoHandle extraction ────────────────────────────────────────────────
+
+/// Extract &IoHandleData from heap-tagged IoHandle bits.
+#[inline]
+pub fn extract_io_handle(bits: u64) -> Option<&'static shape_value::heap_value::IoHandleData> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::IoHandle(h) => Some(h.as_ref()),
+            _ => None,
+        })
+    }
+}
+
+// ─── DataTable extraction ───────────────────────────────────────────────
+
+/// Extract &Arc<DataTable> from heap-tagged DataTable bits.
+#[inline]
+pub fn extract_datatable(
+    bits: u64,
+) -> Option<&'static std::sync::Arc<shape_value::datatable::DataTable>> {
+    unsafe {
+        extract_heap_ref(bits).and_then(|hv| match hv {
+            HeapValue::DataTable(dt) => Some(dt),
             _ => None,
         })
     }

@@ -140,12 +140,8 @@ pub(crate) fn state_capture_call_stub(
     // Resolve function hash via fn_hash logic
     let func_id = if let Some(fid) = f.as_function_id() {
         Some(fid as usize)
-    } else if let Some(heap_ref) = f.as_heap_ref() {
-        if let shape_value::HeapValue::Closure { function_id, .. } = heap_ref {
-            Some(*function_id as usize)
-        } else {
-            None
-        }
+    } else if let Some((fid, _)) = crate::executor::objects::raw_helpers::extract_closure_info(f.raw_bits()) {
+        Some(fid as usize)
     } else {
         None
     };

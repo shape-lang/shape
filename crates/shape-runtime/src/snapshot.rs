@@ -668,7 +668,8 @@ pub fn nanboxed_to_serializable(
                 }
                 return Ok(SerializableVMValue::None);
             }
-            let hv = nb.as_heap_ref().unwrap();
+            // cold-path: as_heap_ref retained — multi-variant serialization dispatch
+            let hv = nb.as_heap_ref().unwrap(); // cold-path
             heap_value_to_serializable(hv, store)
         }
         _ => Ok(SerializableVMValue::None), // References and other tags should not appear in snapshots
@@ -1765,7 +1766,8 @@ mod tests {
         }
 
         let restored = serializable_to_nanboxed(&serialized, &store).unwrap();
-        let hv = restored.as_heap_ref().unwrap();
+        // cold-path: as_heap_ref retained — test assertion
+        let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
             shape_value::heap_value::HeapValue::FloatArray(a) => {
                 assert_eq!(a.len(), 1000);
@@ -1801,7 +1803,8 @@ mod tests {
         }
 
         let restored = serializable_to_nanboxed(&serialized, &store).unwrap();
-        let hv = restored.as_heap_ref().unwrap();
+        // cold-path: as_heap_ref retained — test assertion
+        let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
             shape_value::heap_value::HeapValue::IntArray(a) => {
                 assert_eq!(a.len(), 500);
@@ -1833,7 +1836,8 @@ mod tests {
         }
 
         let restored = serializable_to_nanboxed(&serialized, &store).unwrap();
-        let hv = restored.as_heap_ref().unwrap();
+        // cold-path: as_heap_ref retained — test assertion
+        let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
             shape_value::heap_value::HeapValue::Matrix(m) => {
                 assert_eq!(m.rows, 3);
@@ -1868,7 +1872,8 @@ mod tests {
         }
 
         let restored = serializable_to_nanboxed(&serialized, &store).unwrap();
-        let hv = restored.as_heap_ref().unwrap();
+        // cold-path: as_heap_ref retained — test assertion
+        let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
             shape_value::heap_value::HeapValue::HashMap(d) => {
                 assert_eq!(d.keys.len(), 2);
@@ -1906,7 +1911,8 @@ mod tests {
         }
 
         let restored = serializable_to_nanboxed(&serialized, &store).unwrap();
-        let hv = restored.as_heap_ref().unwrap();
+        // cold-path: as_heap_ref retained — test assertion
+        let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
             shape_value::heap_value::HeapValue::BoolArray(a) => {
                 assert_eq!(a.len(), 5);

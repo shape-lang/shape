@@ -56,10 +56,8 @@ fn slot_to_nb_raw(slots: &[ValueSlot], heap_mask: u64, idx: usize) -> ValueWord 
 }
 
 fn nb_to_wire_with_builtin_fallback(nb: &ValueWord, ctx: &Context) -> WireValue {
-    if let Some(HeapValue::TypedObject {
-        slots, heap_mask, ..
-    }) = nb.as_heap_ref()
-        && let Some(value) = fallback_builtin_typedobject_to_wire(slots, *heap_mask, ctx)
+    if let Some((_sid, slots, heap_mask)) = nb.as_typed_object()
+        && let Some(value) = fallback_builtin_typedobject_to_wire(slots, heap_mask, ctx)
     {
         return value;
     }
@@ -270,7 +268,8 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
         }
         return WireValue::Null;
     }
-    let hv = match nb.as_heap_ref() {
+    // cold-path: as_heap_ref retained — multi-variant serialization dispatch
+    let hv = match nb.as_heap_ref() { // cold-path
         Some(hv) => hv,
         None => return WireValue::Null,
     };
@@ -560,7 +559,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
         HeapValue::PriorityQueue(d) => {
             WireValue::Array(d.items.iter().map(|v| nb_to_wire(v, ctx)).collect())
         }
-        HeapValue::Content(node) => WireValue::Content(node.as_ref().clone()),
+        HeapValue::Content(node) => WireValue::Content((**node).clone()),
         HeapValue::Instant(t) => WireValue::String(format!("<instant:{:?}>", t.elapsed())),
         HeapValue::IoHandle(data) => {
             let status = if data.is_open() { "open" } else { "closed" };
@@ -664,14 +663,14 @@ pub fn nb_extract_content_full(nb: &ValueWord) -> Option<ExtractedContent> {
 
     // Check if value is already a Content node
     let node: Option<shape_value::content::ContentNode> =
-        if let Some(HeapValue::Content(node)) = nb.as_heap_ref() {
-            Some(node.as_ref().clone())
-        } else if let Some(HeapValue::DataTable(dt)) = nb.as_heap_ref() {
+        if let Some(content) = nb.as_content() {
+            Some(content.clone())
+        } else if let Some(dt) = nb.as_datatable() {
             // Auto-wrap DataTable as ContentNode::Table
             Some(crate::content_dispatch::datatable_to_content_node(dt, None))
-        } else if let Some(HeapValue::TypedTable { table, .. }) = nb.as_heap_ref() {
+        } else if let Some((_sid, dt)) = nb.as_typed_table() {
             Some(crate::content_dispatch::datatable_to_content_node(
-                table, None,
+                dt, None,
             ))
         } else {
             None
@@ -1244,10 +1243,12 @@ mod tests {
         }
 
         let roundtrip = wire_to_nb(&wire);
-        let hv = roundtrip.as_heap_ref().expect("Expected heap value");
+        // cold-path: as_heap_ref retained — test assertion on multiple variants
+        let hv = roundtrip.as_heap_ref().expect("Expected heap value"); // cold-path
         match hv {
             HeapValue::Err(inner) => {
-                let inner_hv = inner.as_heap_ref().expect("Expected heap inner");
+                // cold-path: as_heap_ref retained — test assertion on multiple variants
+                let inner_hv = inner.as_heap_ref().expect("Expected heap inner"); // cold-path
                 assert!(
                     matches!(inner_hv, HeapValue::TypedObject { .. }),
                     "Expected TypedObject inside Err"

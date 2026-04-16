@@ -217,7 +217,8 @@ impl DataTable {
                     } else {
                         match get_tag(bits) {
                             TAG_HEAP => {
-                                let hv = nb.as_heap_ref().cloned().unwrap_or_else(|| {
+                                // cold-path: as_heap_ref retained — datatable cell heap extraction
+                                let hv = nb.as_heap_ref().cloned().unwrap_or_else(|| { // cold-path
                                     HeapValue::String(std::sync::Arc::new(String::new()))
                                 });
                                 (ValueSlot::from_heap(hv), true)

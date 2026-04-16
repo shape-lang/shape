@@ -283,7 +283,8 @@ fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVM
         TAG_FUNCTION => SerializableVMValue::Function(nb.as_function_id().unwrap()),
         TAG_HEAP => {
             use shape_value::HeapValue;
-            match nb.as_heap_ref() {
+            // cold-path: as_heap_ref retained — serialization multi-variant match
+            match nb.as_heap_ref() { // cold-path
                 Some(HeapValue::String(s)) => SerializableVMValue::String((**s).clone()),
                 Some(HeapValue::Decimal(d)) => SerializableVMValue::Decimal(*d),
                 Some(HeapValue::BigInt(i)) => SerializableVMValue::Int(*i),

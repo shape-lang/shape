@@ -43,7 +43,8 @@ impl VirtualMachine {
                 slots.push(ValueSlot::from_bool(nb.as_bool().unwrap_or(false)));
             } else if nb.is_none() {
                 slots.push(ValueSlot::none());
-            } else if let Some(hv) = nb.as_heap_ref() {
+            // cold-path: as_heap_ref retained — enum payload slot extraction
+            } else if let Some(hv) = nb.as_heap_ref() { // cold-path
                 slots.push(ValueSlot::from_heap(hv.clone()));
                 heap_mask |= 1u64 << slot_idx;
             } else {

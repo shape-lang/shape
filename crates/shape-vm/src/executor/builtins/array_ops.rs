@@ -139,7 +139,8 @@ impl VirtualMachine {
             return Ok(ValueWord::from_i64(s.len() as i64));
         }
         // TypedObject: return number of slots
-        if let Some(HeapValue::TypedObject { slots, .. }) = args[0].as_heap_ref() {
+        // cold-path: as_heap_ref retained — TypedObject slot count for len()
+        if let Some(HeapValue::TypedObject { slots, .. }) = args[0].as_heap_ref() { // cold-path
             return Ok(ValueWord::from_i64(slots.len() as i64));
         }
         Err(VMError::RuntimeError(format!(

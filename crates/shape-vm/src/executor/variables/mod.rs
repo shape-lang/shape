@@ -3,6 +3,7 @@
 //! Handles: LoadLocal, StoreLocal, LoadModuleBinding, StoreModuleBinding, LoadClosure, StoreClosure, CloseUpvalue
 
 use crate::executor::objects::object_creation::clone_slots_with_update;
+use crate::executor::objects::raw_helpers;
 use crate::executor::typed_object_ops::{read_slot_fast, tag_to_field_type};
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
@@ -45,20 +46,13 @@ impl VirtualMachine {
                                 .to_string(),
                         )
                     })?;
-                    let base_value = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
-                        base_value.as_heap_ref()
-                    {
-                        value.as_ref().clone()
-                    } else {
-                        base_value
-                    };
-                    if let Some(HeapValue::TypedObject {
-                        slots, heap_mask, ..
-                    }) = base_value.as_heap_ref()
+                    let bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
+                    if let Some((_schema_id, slots, heap_mask)) =
+                        raw_helpers::extract_typed_object(bits)
                     {
                         let index = *field_idx as usize;
                         if index < slots.len() {
-                            let is_heap = (*heap_mask & (1u64 << index)) != 0;
+                            let is_heap = (heap_mask & (1u64 << index)) != 0;
                             return Ok(read_slot_fast(&slots[index], is_heap, *field_type_tag));
                         }
                     }
@@ -71,10 +65,9 @@ impl VirtualMachine {
                                 .to_string(),
                         )
                     })?;
-                    let base_value = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
-                        base_value.as_heap_ref()
-                    {
-                        value.as_ref().clone()
+                    let unwrapped_bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
+                    let base_value = if unwrapped_bits != base_value.raw_bits() {
+                        unsafe { ValueWord::clone_from_bits(unwrapped_bits) }
                     } else {
                         base_value
                     };
@@ -102,13 +95,13 @@ impl VirtualMachine {
                         )
                     })?;
                     // Return the row as a FloatArraySlice (read-only view)
-                    if let Some(HeapValue::Matrix(mat_arc)) = base_value.as_heap_ref() {
+                    if let Some(mat_arc) = raw_helpers::extract_matrix_arc(base_value.raw_bits()) {
                         let cols = mat_arc.cols;
                         let offset = *row_index * cols;
                         if *row_index < mat_arc.rows {
                             return Ok(ValueWord::from_heap_value(
                                 HeapValue::FloatArraySlice {
-                                    parent: mat_arc.clone(),
+                                    parent: mat_arc,
                                     offset,
                                     len: cols,
                                 },
@@ -161,23 +154,14 @@ impl VirtualMachine {
                                 .to_string(),
                         )
                     })?;
-                    let base_value = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
-                        base_value.as_heap_ref()
-                    {
-                        value.as_ref().clone()
-                    } else {
-                        base_value
-                    };
-                    if let Some(HeapValue::TypedObject {
-                        schema_id,
-                        slots,
-                        heap_mask,
-                    }) = base_value.as_heap_ref()
+                    let bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
+                    if let Some((schema_id, slots, heap_mask)) =
+                        raw_helpers::extract_typed_object(bits)
                     {
                         let field_type = tag_to_field_type(*field_type_tag);
                         let (new_slots, new_mask) = clone_slots_with_update(
                             slots,
-                            *heap_mask,
+                            heap_mask,
                             *field_idx as usize,
                             &value,
                             field_type.as_ref(),
@@ -185,7 +169,7 @@ impl VirtualMachine {
                         return self.write_ref_value(
                             &data.base,
                             ValueWord::from_heap_value(HeapValue::TypedObject {
-                                schema_id: *schema_id,
+                                schema_id,
                                 slots: new_slots.into_boxed_slice(),
                                 heap_mask: new_mask,
                             }),
@@ -202,10 +186,9 @@ impl VirtualMachine {
                                 .to_string(),
                         )
                     })?;
-                    let mut base_value = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
-                        base_value.as_heap_ref()
-                    {
-                        value.as_ref().clone()
+                    let unwrapped_bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
+                    let mut base_value = if unwrapped_bits != base_value.raw_bits() {
+                        unsafe { ValueWord::clone_from_bits(unwrapped_bits) }
                     } else {
                         base_value
                     };
@@ -518,12 +501,11 @@ impl VirtualMachine {
             }
 
             // Legacy path: clone_from_bits + SharedCell auto-deref.
-            let nb = unsafe { ValueWord::clone_from_bits(bits) };
-            // Auto-deref SharedCell: read the inner value through the Arc
-            if let Some(HeapValue::SharedCell(arc)) = nb.as_heap_ref() {
+            if let Some(arc) = raw_helpers::extract_shared_cell(bits) {
                 let inner = arc.read().unwrap().clone();
                 self.push_raw_u64(inner)?;
             } else {
+                let nb = unsafe { ValueWord::clone_from_bits(bits) };
                 self.push_raw_u64(nb)?;
             }
         } else {
@@ -669,18 +651,12 @@ impl VirtualMachine {
             let nb = self.pop_raw_u64()?;
 
             // Auto-deref SharedCell: write through the Arc
-            let is_shared_cell = self.stack_peek_raw(slot, |vw| {
-                vw.as_heap_ref().is_some_and(|hv| matches!(hv, HeapValue::SharedCell(_)))
-            });
-            if is_shared_cell {
-                let slot_vw = self.stack_read_raw(slot);
-                if let Some(HeapValue::SharedCell(arc)) = slot_vw.as_heap_ref() {
-                    let arc = arc.clone();
-                    let old = arc.read().unwrap().clone();
-                    record_heap_write();
-                    write_barrier_vw(&old, &nb);
-                    *arc.write().unwrap() = nb;
-                }
+            if let Some(arc) = raw_helpers::extract_shared_cell(self.stack[slot]) {
+                let arc = arc.clone();
+                let old = arc.read().unwrap().clone();
+                record_heap_write();
+                write_barrier_vw(&old, &nb);
+                *arc.write().unwrap() = nb;
             } else {
                 record_heap_write();
                 write_barrier_slot(self.stack[slot], nb.raw_bits());
@@ -721,18 +697,12 @@ impl VirtualMachine {
                 nb
             };
 
-            let is_shared_cell = self.stack_peek_raw(slot, |vw| {
-                vw.as_heap_ref().is_some_and(|hv| matches!(hv, HeapValue::SharedCell(_)))
-            });
-            if is_shared_cell {
-                let slot_vw = self.stack_read_raw(slot);
-                if let Some(HeapValue::SharedCell(arc)) = slot_vw.as_heap_ref() {
-                    let arc = arc.clone();
-                    let old = arc.read().unwrap().clone();
-                    record_heap_write();
-                    write_barrier_vw(&old, &truncated);
-                    *arc.write().unwrap() = truncated;
-                }
+            if let Some(arc) = raw_helpers::extract_shared_cell(self.stack[slot]) {
+                let arc = arc.clone();
+                let old = arc.read().unwrap().clone();
+                record_heap_write();
+                write_barrier_vw(&old, &truncated);
+                *arc.write().unwrap() = truncated;
             } else {
                 record_heap_write();
                 write_barrier_slot(self.stack[slot], truncated.raw_bits());
@@ -758,7 +728,7 @@ impl VirtualMachine {
                 ValueWord::none()
             };
             // Auto-deref SharedCell
-            if let Some(HeapValue::SharedCell(arc)) = nb.as_heap_ref() {
+            if let Some(arc) = raw_helpers::extract_shared_cell(nb.raw_bits()) {
                 let inner = arc.read().unwrap().clone();
                 self.push_raw_u64(inner)?;
             } else {
@@ -844,8 +814,8 @@ impl VirtualMachine {
         let base_value = self.resolve_ref_value(&base_ref);
         let is_matrix = base_value
             .as_ref()
-            .and_then(|v| v.as_heap_ref())
-            .is_some_and(|hv| matches!(hv, HeapValue::Matrix(_)));
+            .and_then(|v| raw_helpers::extract_matrix(v.raw_bits()))
+            .is_some();
 
         let projection = if is_matrix {
             // Convert index to row index
@@ -1004,22 +974,12 @@ impl VirtualMachine {
             }
 
             // Auto-deref SharedCell: write through the Arc
-            let is_shared_cell = {
-                let bits = self.module_bindings[index];
-                let tmp = ValueWord::from_raw_bits(bits);
-                let r = tmp.as_heap_ref().is_some_and(|hv| matches!(hv, HeapValue::SharedCell(_)));
-                std::mem::forget(tmp);
-                r
-            };
-            if is_shared_cell {
-                let slot_vw = self.binding_read_raw(index);
-                if let Some(HeapValue::SharedCell(arc)) = slot_vw.as_heap_ref() {
-                    let arc = arc.clone();
-                    let old = arc.read().unwrap().clone();
-                    record_heap_write();
-                    write_barrier_vw(&old, &nb);
-                    *arc.write().unwrap() = nb;
-                }
+            if let Some(arc) = raw_helpers::extract_shared_cell(self.module_bindings[index]) {
+                let arc = arc.clone();
+                let old = arc.read().unwrap().clone();
+                record_heap_write();
+                write_barrier_vw(&old, &nb);
+                *arc.write().unwrap() = nb;
             } else {
                 record_heap_write();
                 write_barrier_slot(self.module_bindings[index], nb.raw_bits());
@@ -1056,22 +1016,12 @@ impl VirtualMachine {
             }
 
             // Auto-deref SharedCell: write through the Arc
-            let is_shared_cell = {
-                let bits = self.module_bindings[index];
-                let tmp = ValueWord::from_raw_bits(bits);
-                let r = tmp.as_heap_ref().is_some_and(|hv| matches!(hv, HeapValue::SharedCell(_)));
-                std::mem::forget(tmp);
-                r
-            };
-            if is_shared_cell {
-                let slot_vw = self.binding_read_raw(index);
-                if let Some(HeapValue::SharedCell(arc)) = slot_vw.as_heap_ref() {
-                    let arc = arc.clone();
-                    let old = arc.read().unwrap().clone();
-                    record_heap_write();
-                    write_barrier_vw(&old, &truncated);
-                    *arc.write().unwrap() = truncated;
-                }
+            if let Some(arc) = raw_helpers::extract_shared_cell(self.module_bindings[index]) {
+                let arc = arc.clone();
+                let old = arc.read().unwrap().clone();
+                record_heap_write();
+                write_barrier_vw(&old, &truncated);
+                *arc.write().unwrap() = truncated;
             } else {
                 record_heap_write();
                 write_barrier_slot(self.module_bindings[index], truncated.raw_bits());
@@ -1097,11 +1047,7 @@ impl VirtualMachine {
             let slot = bp + idx as usize;
 
             // If not already a SharedCell, wrap the value in one
-            let is_cell = self.stack_peek_raw(slot, |vw| {
-                vw.as_heap_ref()
-                    .map(|hv| matches!(hv, HeapValue::SharedCell(_)))
-                    .unwrap_or(false)
-            });
+            let is_cell = raw_helpers::extract_shared_cell(self.stack[slot]).is_some();
 
             if !is_cell {
                 let old_bits = self.stack[slot];
@@ -1138,15 +1084,7 @@ impl VirtualMachine {
             }
 
             // If not already a SharedCell, wrap the value in one
-            let is_cell = {
-                let bits = self.module_bindings[index];
-                let tmp = ValueWord::from_raw_bits(bits);
-                let r = tmp.as_heap_ref()
-                    .map(|hv| matches!(hv, HeapValue::SharedCell(_)))
-                    .unwrap_or(false);
-                std::mem::forget(tmp);
-                r
-            };
+            let is_cell = raw_helpers::extract_shared_cell(self.module_bindings[index]).is_some();
 
             if !is_cell {
                 let old_bits = self.module_bindings[index];

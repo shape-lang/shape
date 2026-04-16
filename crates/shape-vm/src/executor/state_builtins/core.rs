@@ -18,6 +18,7 @@ use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleFunction
 use shape_runtime::state_diff;
 use shape_runtime::type_schema::{FieldType, TypeSchema};
 use shape_value::{ValueWord, ValueWordExt};
+use crate::executor::objects::raw_helpers;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -370,12 +371,8 @@ pub(crate) fn state_fn_hash(args: &[ValueWord], ctx: &ModuleContext) -> Result<V
 
     let func_id = if let Some(fid) = f.as_function_id() {
         Some(fid as usize)
-    } else if let Some(heap_ref) = f.as_heap_ref() {
-        if let shape_value::HeapValue::Closure { function_id, .. } = heap_ref {
-            Some(*function_id as usize)
-        } else {
-            None
-        }
+    } else if let Some((fid, _)) = raw_helpers::extract_closure_info(f.raw_bits()) {
+        Some(fid as usize)
     } else {
         None
     };
@@ -571,12 +568,14 @@ pub(crate) fn state_diff(args: &[ValueWord], ctx: &ModuleContext) -> Result<Valu
         let changed_hv = if let Some(view) = changed_map.as_any_array() {
             HeapValue::Array(view.to_generic())
         } else {
-            changed_map.as_heap_ref().unwrap().clone()
+            // cold-path: as_heap_ref retained — fallback for non-array heap values
+            changed_map.as_heap_ref().unwrap().clone() // cold-path
         };
         let removed_hv = if let Some(view) = removed.as_any_array() {
             HeapValue::Array(view.to_generic())
         } else {
-            removed.as_heap_ref().unwrap().clone()
+            // cold-path: as_heap_ref retained — fallback for non-array heap values
+            removed.as_heap_ref().unwrap().clone() // cold-path
         };
         let slots = vec![
             ValueSlot::from_heap(changed_hv),

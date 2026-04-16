@@ -264,7 +264,8 @@ fn marshal_typed_object(
                 // Extract the inner array or wrap
                 let heap_val = if let Some(view) = arr_nb.as_any_array() {
                     HeapValue::Array(view.to_generic())
-                } else if let Some(hv) = arr_nb.as_heap_ref() {
+                // cold-path: as_heap_ref retained — msgpack marshaling fallback
+                } else if let Some(hv) = arr_nb.as_heap_ref() { // cold-path
                     hv.clone()
                 } else {
                     HeapValue::Array(Arc::new(Vec::new()))
@@ -276,7 +277,8 @@ fn marshal_typed_object(
                 let obj_nb = val
                     .map(|v| untyped_msgpack_to_nanboxed(v))
                     .unwrap_or_else(ValueWord::none);
-                if let Some(hv) = obj_nb.as_heap_ref() {
+                // cold-path: as_heap_ref retained — msgpack marshaling object field
+                if let Some(hv) = obj_nb.as_heap_ref() { // cold-path
                     slots.push(ValueSlot::from_heap(hv.clone()));
                     heap_mask |= 1u64 << (slots.len() - 1);
                 } else {
@@ -288,7 +290,8 @@ fn marshal_typed_object(
                 let nb = val
                     .map(|v| untyped_msgpack_to_nanboxed(v))
                     .unwrap_or_else(ValueWord::none);
-                if let Some(hv) = nb.as_heap_ref() {
+                // cold-path: as_heap_ref retained — msgpack marshaling generic fallback
+                if let Some(hv) = nb.as_heap_ref() { // cold-path
                     slots.push(ValueSlot::from_heap(hv.clone()));
                     heap_mask |= 1u64 << (slots.len() - 1);
                 } else if let Some(f) = nb.as_f64() {
@@ -348,7 +351,8 @@ fn nanboxed_to_msgpack_value(nb: &ValueWord, schemas: &TypeSchemaRegistry) -> rm
                         .collect(),
                 );
             }
-            nb.as_heap_ref()
+            // cold-path: as_heap_ref retained — msgpack serialization
+            nb.as_heap_ref() // cold-path
                 .map(|hv| heap_to_msgpack_value(hv, schemas))
                 .unwrap_or(rmpv::Value::Nil)
         }
@@ -642,7 +646,8 @@ mod tests {
         .unwrap();
 
         // Verify it's a TypedObject
-        match result.as_heap_ref() {
+        // cold-path: as_heap_ref retained — test assertion
+        match result.as_heap_ref() { // cold-path
             Some(HeapValue::TypedObject {
                 schema_id, slots, ..
             }) => {
@@ -663,7 +668,8 @@ mod tests {
         let val = rmpv::Value::String(rmpv::Utf8String::from("anything"));
         let bytes = rmp_serde::to_vec(&val).unwrap();
         let result = unmarshal_result(&bytes, "Result<any>", None, &schemas).unwrap();
-        match result.as_heap_ref() {
+        // cold-path: as_heap_ref retained — test assertion
+        match result.as_heap_ref() { // cold-path
             Some(HeapValue::String(s)) => assert_eq!(s.as_str(), "anything"),
             _ => panic!("expected string"),
         }

@@ -739,8 +739,9 @@ fn value_to_usize(value: &ValueWord, label: &str) -> Result<usize, String> {
 fn is_shape_callable(value: &ValueWord) -> bool {
     value.as_function_id().is_some()
         || value.as_module_function().is_some()
+        // cold-path: as_heap_ref retained — multi-variant callable check
         || matches!(
-            value.as_heap_ref(),
+            value.as_heap_ref(), // cold-path
             Some(
                 HeapValue::Closure { .. }
                     | HeapValue::HostClosure(_)

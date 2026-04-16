@@ -763,7 +763,8 @@ fn normalize_comptime_value(nb: &ValueWord, vm: &VirtualMachine) -> ValueWord {
         return ValueWord::from_array(Arc::new(normalized));
     }
 
-    match nb.as_heap_ref() {
+    // cold-path: as_heap_ref retained — comptime value normalization
+    match nb.as_heap_ref() { // cold-path
         Some(HeapValue::TypedObject {
             schema_id,
             slots,
@@ -840,7 +841,8 @@ pub(crate) fn nb_to_literal(nb: &ValueWord) -> shape_ast::ast::Literal {
                 Literal::String(s.to_string())
             } else if let Some(d) = nb.as_decimal() {
                 Literal::Decimal(d)
-            } else if let Some(HeapValue::TypeAnnotation(ann)) = nb.as_heap_ref() {
+            // cold-path: as_heap_ref retained — comptime literal conversion
+            } else if let Some(HeapValue::TypeAnnotation(ann)) = nb.as_heap_ref() { // cold-path
                 // Comptime substitution currently supports literal splicing only.
                 // Preserve type-query usefulness by materializing canonical type text.
                 Literal::String(annotation_to_string(ann))
@@ -923,7 +925,8 @@ fn nb_to_expr(nb: &ValueWord, span: Span) -> std::result::Result<Expr, String> {
         return Ok(Expr::Literal(shape_ast::ast::Literal::Unit, span));
     }
 
-    if let Some(heap) = nb.as_heap_ref() {
+    // cold-path: as_heap_ref retained — comptime literal error reporting
+    if let Some(heap) = nb.as_heap_ref() { // cold-path
         return Err(match heap {
             HeapValue::DataTable(_) | HeapValue::TypedTable { .. } => {
                 "table values are not valid comptime literals".to_string()
@@ -1180,8 +1183,9 @@ mod tests {
         );
         let val = result.unwrap();
         // build_config now returns TypedObject
+        // cold-path: as_heap_ref retained — test assertion
         let is_typed_object_or_string = val
-            .as_heap_ref()
+            .as_heap_ref() // cold-path
             .is_some_and(|h| matches!(h, HeapValue::TypedObject { .. } | HeapValue::String(_)));
         assert!(
             is_typed_object_or_string,

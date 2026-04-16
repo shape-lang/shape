@@ -133,8 +133,8 @@ impl<'a> ValueFormatter<'a> {
             return format!("<unified:{}>", kind);
         }
 
-        // Heap path: dispatch on HeapValue variant
-        match value.as_heap_ref() {
+        // cold-path: as_heap_ref retained — display formatting multi-variant match
+        match value.as_heap_ref() { // cold-path
             Some(HeapValue::String(s)) => s.as_ref().clone(),
             Some(HeapValue::Array(arr)) => self.format_nanboxed_array(arr.as_ref(), depth),
             Some(HeapValue::ProjectedRef(_)) => {

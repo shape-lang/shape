@@ -430,7 +430,8 @@ impl VirtualMachine {
                 let result_nb = self.invoke_module_fn(&module_fn, &args_vec)?;
                 return Ok(result_nb);
             }
-            TAG_HEAP => match callee.as_heap_ref() {
+            // cold-path: as_heap_ref retained — multi-variant callee dispatch
+            TAG_HEAP => match callee.as_heap_ref() { // cold-path
                 Some(shape_value::HeapValue::Closure {
                     function_id,
                     upvalues,

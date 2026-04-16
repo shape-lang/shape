@@ -45,6 +45,7 @@
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
+    executor::objects::raw_helpers,
 };
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord, ValueWordExt};
@@ -235,51 +236,46 @@ impl VirtualMachine {
     fn op_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
         let nb = self.pop_raw_u64()?;
-        match nb.as_heap_ref() {
-            Some(HeapValue::Future(id)) => {
-                let id = *id;
+        if let Some(id) = raw_helpers::extract_future_id(nb) {
+            // Try to resolve the task inline from the task scheduler.
+            // For `async let x = expr`, the callable stored by SpawnTask
+            // is the already-evaluated value of `expr`. We resolve it
+            // directly without suspending.
+            let resolved = self.task_scheduler.resolve_task(id, |callable| {
+                // The callable is the value that was on the stack when
+                // SpawnTask executed. For simple expressions it's already
+                // the result value.
+                Ok(callable)
+            });
 
-                // Try to resolve the task inline from the task scheduler.
-                // For `async let x = expr`, the callable stored by SpawnTask
-                // is the already-evaluated value of `expr`. We resolve it
-                // directly without suspending.
-                let resolved = self.task_scheduler.resolve_task(id, |callable| {
-                    // The callable is the value that was on the stack when
-                    // SpawnTask executed. For simple expressions it's already
-                    // the result value.
-                    Ok(callable)
-                });
-
-                match resolved {
-                    Ok(value) => {
-                        self.push_raw_u64(value)?;
-                        // Await consumes a Future and pushes a result: net stack effect is 0.
-                        debug_assert_eq!(
-                            self.sp, sp_before,
-                            "op_await: stack depth changed (before={}, after={})",
-                            sp_before, self.sp
-                        );
-                        Ok(AsyncExecutionResult::Continue)
-                    }
-                    Err(_) => {
-                        // Could not resolve inline — suspend for host runtime
-                        Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
-                            wait_type: WaitType::Future { id },
-                            resume_ip: self.ip,
-                        }))
-                    }
+            match resolved {
+                Ok(value) => {
+                    self.push_raw_u64(value)?;
+                    // Await consumes a Future and pushes a result: net stack effect is 0.
+                    debug_assert_eq!(
+                        self.sp, sp_before,
+                        "op_await: stack depth changed (before={}, after={})",
+                        sp_before, self.sp
+                    );
+                    Ok(AsyncExecutionResult::Continue)
+                }
+                Err(_) => {
+                    // Could not resolve inline — suspend for host runtime
+                    Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
+                        wait_type: WaitType::Future { id },
+                        resume_ip: self.ip,
+                    }))
                 }
             }
-            _ => {
-                // Sync shortcut: value is already resolved, push it back
-                self.push_raw_u64(nb)?;
-                debug_assert_eq!(
-                    self.sp, sp_before,
-                    "op_await (sync shortcut): stack depth changed (before={}, after={})",
-                    sp_before, self.sp
-                );
-                Ok(AsyncExecutionResult::Continue)
-            }
+        } else {
+            // Sync shortcut: value is already resolved, push it back
+            self.push_raw_u64(nb)?;
+            debug_assert_eq!(
+                self.sp, sp_before,
+                "op_await (sync shortcut): stack depth changed (before={}, after={})",
+                sp_before, self.sp
+            );
+            Ok(AsyncExecutionResult::Continue)
         }
     }
 
@@ -338,14 +334,13 @@ impl VirtualMachine {
         let mut task_ids = Vec::with_capacity(arity);
         for _ in 0..arity {
             let nb = self.pop_raw_u64()?;
-            match nb.as_heap_ref() {
-                Some(HeapValue::Future(id)) => task_ids.push(*id),
-                _ => {
-                    return Err(VMError::RuntimeError(format!(
-                        "JoinInit expected Future, got {}",
-                        nb.type_name()
-                    )));
-                }
+            if let Some(id) = raw_helpers::extract_future_id(nb) {
+                task_ids.push(id);
+            } else {
+                return Err(VMError::RuntimeError(format!(
+                    "JoinInit expected Future, got {}",
+                    nb.type_name()
+                )));
             }
         }
         // Reverse so task_ids[0] corresponds to first branch
@@ -366,39 +361,37 @@ impl VirtualMachine {
     fn op_join_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
         let nb = self.pop_raw_u64()?;
-        match nb.as_heap_ref() {
-            Some(HeapValue::TaskGroup { kind, task_ids }) => {
-                let kind = *kind;
-                let task_ids = task_ids.clone();
+        if let Some((kind, task_ids_ref)) = raw_helpers::extract_task_group(nb) {
+            let task_ids = task_ids_ref.clone();
 
-                let result = self
-                    .task_scheduler
-                    .resolve_task_group(kind, &task_ids, |callable| Ok(callable));
+            let result = self
+                .task_scheduler
+                .resolve_task_group(kind, &task_ids, |callable| Ok(callable));
 
-                match result {
-                    Ok(value) => {
-                        self.push_raw_u64(value)?;
-                        // JoinAwait consumes a TaskGroup and pushes a result: net effect is 0.
-                        debug_assert_eq!(
-                            self.sp, sp_before,
-                            "op_join_await: stack depth changed (before={}, after={})",
-                            sp_before, self.sp
-                        );
-                        Ok(AsyncExecutionResult::Continue)
-                    }
-                    Err(_) => {
-                        // Could not resolve inline — suspend for host runtime
-                        Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
-                            wait_type: WaitType::TaskGroup { kind, task_ids },
-                            resume_ip: self.ip,
-                        }))
-                    }
+            match result {
+                Ok(value) => {
+                    self.push_raw_u64(value)?;
+                    // JoinAwait consumes a TaskGroup and pushes a result: net effect is 0.
+                    debug_assert_eq!(
+                        self.sp, sp_before,
+                        "op_join_await: stack depth changed (before={}, after={})",
+                        sp_before, self.sp
+                    );
+                    Ok(AsyncExecutionResult::Continue)
+                }
+                Err(_) => {
+                    // Could not resolve inline — suspend for host runtime
+                    Ok(AsyncExecutionResult::Suspended(SuspensionInfo {
+                        wait_type: WaitType::TaskGroup { kind, task_ids },
+                        resume_ip: self.ip,
+                    }))
                 }
             }
-            _ => Err(VMError::RuntimeError(format!(
+        } else {
+            Err(VMError::RuntimeError(format!(
                 "JoinAwait expected TaskGroup, got {}",
                 nb.type_name()
-            ))),
+            )))
         }
     }
 
@@ -408,15 +401,14 @@ impl VirtualMachine {
     /// The host runtime is responsible for actually cancelling the task.
     fn op_cancel_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let nb = self.pop_raw_u64()?;
-        match nb.as_heap_ref() {
-            Some(HeapValue::Future(id)) => {
-                self.task_scheduler.cancel(*id);
-                Ok(AsyncExecutionResult::Continue)
-            }
-            _ => Err(VMError::RuntimeError(format!(
+        if let Some(id) = raw_helpers::extract_future_id(nb) {
+            self.task_scheduler.cancel(id);
+            Ok(AsyncExecutionResult::Continue)
+        } else {
+            Err(VMError::RuntimeError(format!(
                 "CancelTask expected Future, got {}",
                 nb.type_name()
-            ))),
+            )))
         }
     }
 

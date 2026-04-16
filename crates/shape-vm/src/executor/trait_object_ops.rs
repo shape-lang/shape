@@ -6,6 +6,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
+use crate::executor::objects::raw_helpers;
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, VTable, VTableEntry, ValueWord, ValueWordExt};
 use std::collections::HashMap;
@@ -105,8 +106,8 @@ impl VirtualMachine {
 
         let receiver = self.pop_raw_u64()?;
 
-        match receiver.as_heap_ref() {
-            Some(HeapValue::TraitObject { value, vtable }) => {
+        match raw_helpers::extract_trait_object(receiver.raw_bits()) {
+            Some((value, vtable)) => {
                 let concrete_kind = value
                     .heap_kind()
                     .map(|k| k as u8)
@@ -129,7 +130,7 @@ impl VirtualMachine {
                 ) {
                     let callee = ValueWord::from_function(hit.function_id);
                     let mut all_args = Vec::with_capacity(1 + args.len());
-                    all_args.push(value.as_ref().clone());
+                    all_args.push(value.clone());
                     all_args.extend(args);
                     let result = self.call_value_immediate_nb(&callee, &all_args, None)?;
                     self.push_raw_u64(result)?;
@@ -139,7 +140,7 @@ impl VirtualMachine {
                 // Full vtable lookup
                 if let Some(entry) = vtable.methods.get(&method_name) {
                     let mut all_args = Vec::with_capacity(1 + args.len());
-                    all_args.push(value.as_ref().clone());
+                    all_args.push(value.clone());
                     all_args.extend(args);
 
                     let (callee, resolved_func_id) = match entry {
@@ -210,7 +211,7 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         let value = self.pop_raw_u64()?;
-        if let Some(HeapValue::IoHandle(handle_data)) = value.as_heap_ref() {
+        if let Some(handle_data) = raw_helpers::extract_io_handle(value.raw_bits()) {
             handle_data.close();
             return Ok(());
         }
@@ -226,7 +227,7 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         let value = self.pop_raw_u64()?;
-        if let Some(HeapValue::IoHandle(handle_data)) = value.as_heap_ref() {
+        if let Some(handle_data) = raw_helpers::extract_io_handle(value.raw_bits()) {
             handle_data.close();
             return Ok(());
         }

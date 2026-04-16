@@ -108,7 +108,8 @@ impl ValueSlot {
                 }
                 return (Self(0), false);
             }
-            if let Some(hv) = nb.as_heap_ref() {
+            // cold-path: as_heap_ref retained — generic heap-to-slot fallback
+            if let Some(hv) = nb.as_heap_ref() { // cold-path
                 return (Self::from_heap(hv.clone()), true);
             }
             return (Self(0), false);

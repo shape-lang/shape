@@ -200,7 +200,8 @@ pub fn nb_to_concrete_type(nb: &ValueWord) -> Option<ConcreteType> {
         return Some(ConcreteType::Array(Box::new(ConcreteType::Void)));
     }
 
-    if let Some(heap) = nb.as_heap_ref() {
+    // cold-path: as_heap_ref retained — comptime concrete type inference
+    if let Some(heap) = nb.as_heap_ref() { // cold-path
         return match heap {
             HeapValue::TypedObject { .. } => {
                 // We don't have enough info to recover the StructLayoutId

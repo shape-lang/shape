@@ -122,7 +122,8 @@ impl VirtualMachine {
                 return Ok(());
             }
         }
-        let done = match iter.as_heap_ref() {
+        // cold-path: as_heap_ref retained — multi-variant iteration done check
+        let done = match iter.as_heap_ref() { // cold-path
             Some(HeapValue::Array(arr)) => idx < 0 || idx as usize >= arr.len(),
             Some(HeapValue::IntArray(arr)) => idx < 0 || idx as usize >= arr.len(),
             Some(HeapValue::FloatArray(arr)) => idx < 0 || idx as usize >= arr.len(),
@@ -209,7 +210,8 @@ impl VirtualMachine {
                 return Ok(());
             }
         }
-        let result = match iter.as_heap_ref() {
+        // cold-path: as_heap_ref retained — multi-variant iteration next element
+        let result = match iter.as_heap_ref() { // cold-path
             Some(HeapValue::Array(arr)) => {
                 if idx < 0 {
                     ValueWord::none()

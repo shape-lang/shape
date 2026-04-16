@@ -41,7 +41,8 @@ impl VirtualMachine {
             schema_id,
             slots,
             heap_mask,
-        }) = args[0].as_heap_ref()
+        // cold-path: as_heap_ref retained — TypedObject schema-driven subset
+        }) = args[0].as_heap_ref() // cold-path
         {
             let sid = *schema_id as u32;
             let orig_slots = slots.clone();

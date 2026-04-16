@@ -371,7 +371,7 @@ mod tests {
         // Should be retrievable
         let val = registry.get_by_name("test_func");
         assert!(
-            matches!(val, Some(nb) if nb.as_heap_ref().is_some_and(|h| matches!(h, HeapValue::Closure { .. })))
+            matches!(val, Some(nb) if nb.as_closure().is_some())
         );
     }
 

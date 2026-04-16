@@ -142,7 +142,8 @@ pub fn nb_to_external(nb: &ValueWord, schemas: &dyn SchemaLookup) -> ExternalVal
                 }
                 return ExternalValue::Opaque(format!("<unified:{}>", kind));
             }
-            if let Some(hv) = nb.as_heap_ref() {
+            // cold-path: as_heap_ref retained — external value multi-variant conversion
+            if let Some(hv) = nb.as_heap_ref() { // cold-path
                 heap_to_external(hv, schemas)
             } else {
                 ExternalValue::Opaque("<invalid_heap>".to_string())

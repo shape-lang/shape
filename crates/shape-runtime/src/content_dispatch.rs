@@ -156,7 +156,8 @@ fn render_heap_as_content(value: &ValueWord) -> ContentNode {
             }
         }
     }
-    match value.as_heap_ref() {
+    // cold-path: as_heap_ref retained — multi-variant content rendering dispatch
+    match value.as_heap_ref() { // cold-path
         Some(HeapValue::String(s)) => ContentNode::plain(s.as_ref().clone()),
         Some(HeapValue::Decimal(d)) => ContentNode::plain(d.to_string()),
         Some(HeapValue::BigInt(i)) => ContentNode::plain(i.to_string()),
@@ -273,7 +274,7 @@ fn render_array_as_content(arr: &[ValueWord]) -> ContentNode {
     }
 
     // Check first element to determine rendering strategy
-    if let Some(HeapValue::TypedObject { .. }) = arr.first().and_then(|v| v.as_heap_ref()) {
+    if arr.first().and_then(|v| v.as_typed_object()).is_some() {
         return render_typed_array_as_table(arr);
     }
 

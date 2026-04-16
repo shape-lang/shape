@@ -5,6 +5,7 @@
 //! on user-defined types still goes through `CallMethod` (see Phase 2.5).
 
 use crate::executor::VirtualMachine;
+use crate::executor::objects::raw_helpers;
 use crate::executor::v2_handlers::v2_array_detect::{
     ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I32, ELEM_TYPE_I64, V2ElemType, as_v2_typed_array,
     stamp_elem_type,
@@ -29,18 +30,21 @@ impl VirtualMachine {
         let a = ValueWord::from_raw_bits(a_bits);
         let b = ValueWord::from_raw_bits(b_bits);
 
-        let result = match (a.as_heap_ref(), b.as_heap_ref()) {
-            (Some(HeapValue::String(s_a)), Some(HeapValue::String(s_b))) => {
-                format!("{}{}", s_a, s_b)
-            }
-            (Some(HeapValue::String(s)), Some(HeapValue::Char(c))) => format!("{}{}", s, c),
-            (Some(HeapValue::Char(c)), Some(HeapValue::String(s))) => format!("{}{}", c, s),
-            (Some(HeapValue::Char(c_a)), Some(HeapValue::Char(c_b))) => format!("{}{}", c_a, c_b),
-            _ => {
-                return Err(VMError::TypeError {
-                    expected: "string or char operands for StringConcat",
-                    got: a.type_name(),
-                });
+        // Fast path: both strings via raw_helpers
+        let result = if let (Some(s_a), Some(s_b)) = (raw_helpers::extract_str(a.raw_bits()), raw_helpers::extract_str(b.raw_bits())) {
+            format!("{}{}", s_a, s_b)
+        } else {
+            // cold-path: as_heap_ref retained — String/Char mixed combinations
+            match (a.as_heap_ref(), b.as_heap_ref()) { // cold-path
+                (Some(HeapValue::String(s)), Some(HeapValue::Char(c))) => format!("{}{}", s, c),
+                (Some(HeapValue::Char(c)), Some(HeapValue::String(s))) => format!("{}{}", c, s),
+                (Some(HeapValue::Char(c_a)), Some(HeapValue::Char(c_b))) => format!("{}{}", c_a, c_b),
+                _ => {
+                    return Err(VMError::TypeError {
+                        expected: "string or char operands for StringConcat",
+                        got: a.type_name(),
+                    });
+                }
             }
         };
         self.push_raw_u64(ValueWord::from_string(Arc::new(result)))
@@ -158,12 +162,14 @@ impl VirtualMachine {
         }
 
         // ── v1 legacy generic Array path ─────────────────────────────────
-        if let (Some(HeapValue::Array(arr_a)), Some(HeapValue::Array(arr_b))) =
-            (a.as_heap_ref(), b.as_heap_ref())
+        if let (Some(view_a), Some(view_b)) =
+            (raw_helpers::extract_any_array(a.raw_bits()), raw_helpers::extract_any_array(b.raw_bits()))
         {
+            let arr_a = view_a.to_generic();
+            let arr_b = view_b.to_generic();
             let mut result = Vec::with_capacity(arr_a.len() + arr_b.len());
-            result.extend_from_slice(arr_a);
-            result.extend_from_slice(arr_b);
+            result.extend_from_slice(&arr_a);
+            result.extend_from_slice(&arr_b);
             return self.push_raw_u64(ValueWord::from_array(Arc::new(result)));
         }
 

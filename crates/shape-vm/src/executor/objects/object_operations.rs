@@ -34,7 +34,8 @@ impl VirtualMachine {
 
         // Extract slots/heap_mask from both TypedObjects via HeapValue (no ValueWord materialization)
         let (left_slots, left_heap_mask, right_slots, right_heap_mask) =
-            match (left_nb.as_heap_ref(), right_nb.as_heap_ref()) {
+            // cold-path: as_heap_ref retained — TypedObject multi-field extraction for merge
+            match (left_nb.as_heap_ref(), right_nb.as_heap_ref()) { // cold-path
                 (
                     Some(HeapValue::TypedObject {
                         slots: l,
@@ -93,7 +94,7 @@ impl VirtualMachine {
         let source_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
         let target_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
-        // TypedObject + TypedObject: schema-driven merge (HeapValue fast path)
+        // cold-path: as_heap_ref retained — TypedObject multi-field extraction for merge
         if let (
             Some(HeapValue::TypedObject {
                 schema_id: left_sid,
@@ -105,7 +106,7 @@ impl VirtualMachine {
                 slots: right_slots,
                 heap_mask: right_mask,
             }),
-        ) = (target_nb.as_heap_ref(), source_nb.as_heap_ref())
+        ) = (target_nb.as_heap_ref(), source_nb.as_heap_ref()) // cold-path
         {
             let left_id = *left_sid as u32;
             let right_id = *right_sid as u32;

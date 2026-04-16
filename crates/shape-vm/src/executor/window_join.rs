@@ -18,7 +18,8 @@ impl VirtualMachine {
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         let val = self.pop_raw_u64()?;
-        let dt_expr = match val.as_heap_ref() {
+        // cold-path: as_heap_ref retained — DateTimeExpr extraction (no typed extractor)
+        let dt_expr = match val.as_heap_ref() { // cold-path
             Some(HeapValue::DateTimeExpr(expr)) => expr.as_ref().clone(),
             _ => {
                 return Err(VMError::RuntimeError(format!(
@@ -333,7 +334,8 @@ impl VirtualMachine {
 
         let value_nb = self.pop_raw_u64()?;
 
-        let table = match value_nb.as_heap_ref() {
+        // cold-path: as_heap_ref retained — multi-variant DataTable/TypedTable/IndexedTable match
+        let table = match value_nb.as_heap_ref() { // cold-path
             Some(HeapValue::DataTable(dt)) => dt.clone(),
             Some(HeapValue::TypedTable { table, .. }) => table.clone(),
             Some(HeapValue::IndexedTable { table, .. }) => table.clone(),
@@ -381,7 +383,8 @@ impl VirtualMachine {
 
         let row_view_nb = self.pop_raw_u64()?;
 
-        match row_view_nb.as_heap_ref() {
+        // cold-path: as_heap_ref retained — RowView extraction (no typed extractor)
+        match row_view_nb.as_heap_ref() { // cold-path
             Some(HeapValue::RowView { table, row_idx, .. }) => {
                 let row_idx = *row_idx;
                 let ptrs = table.column_ptr(col_id as usize).ok_or_else(|| {

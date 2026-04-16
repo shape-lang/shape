@@ -150,7 +150,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
     use shape_value::{ValueWord, ValueWordExt};
 
     // NOTE: Unified heap values (bit-47 set) are NOT passed through directly.
-    // The VM's as_heap_ref() returns None for unified heap, so we must convert
+    // The VM's as_heap_ref() returns None for unified heap, so we must convert // cold-path
     // them to VM-format ValueWords via the heap_kind match block below.
 
     if is_number(bits) {
@@ -520,7 +520,8 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
         }
         TAG_MODULE_FN => TAG_NULL,
         TAG_REF => TAG_NULL,
-        TAG_HEAP => match nb.as_heap_ref() {
+        // cold-path: as_heap_ref retained — JIT conversion multi-variant dispatch
+        TAG_HEAP => match nb.as_heap_ref() { // cold-path
             Some(HeapValue::String(s)) => box_str(s),
             Some(HeapValue::Array(arr)) => {
                 // AUDIT(C4): heap island — each element converted via nanboxed_to_jit_bits

@@ -660,12 +660,14 @@ impl VirtualMachine {
             }
             TAG_REF => TypeAnnotation::Basic("reference".to_string()),
             TAG_HEAP => {
-                if let Some(shape_value::HeapValue::TypeAnnotation(_)) = nb.as_heap_ref() {
+                // cold-path: as_heap_ref retained — type introspection multi-variant match
+                if let Some(shape_value::HeapValue::TypeAnnotation(_)) = nb.as_heap_ref() { // cold-path
                     return TypeAnnotation::Reference("Type".into());
                 }
 
+                // cold-path: as_heap_ref retained — TypedObject schema lookup
                 if let Some(shape_value::HeapValue::TypedObject { schema_id, .. }) =
-                    nb.as_heap_ref()
+                    nb.as_heap_ref() // cold-path
                 {
                     let type_name = self
                         .program
@@ -963,7 +965,8 @@ impl VirtualMachine {
     ) -> Result<ValueWord, VMError> {
         check_arity("__native_table_bind_type", &args, 2)?;
 
-        let table = match args[0].as_heap_ref() {
+        // cold-path: as_heap_ref retained — multi-variant table extraction
+        let table = match args[0].as_heap_ref() { // cold-path
             Some(HeapValue::DataTable(dt)) => dt.clone(),
             Some(HeapValue::TypedTable { table, .. }) => table.clone(),
             Some(HeapValue::IndexedTable { table, .. }) => table.clone(),

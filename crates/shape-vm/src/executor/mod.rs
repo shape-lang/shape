@@ -14,7 +14,7 @@ pub(crate) mod ic_fast_paths;
 mod jit_ops;
 mod logical;
 mod loops;
-mod objects;
+pub(crate) mod objects;
 mod osr;
 mod resume;
 mod snapshot;

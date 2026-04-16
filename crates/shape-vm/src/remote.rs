@@ -2392,7 +2392,8 @@ mod tests {
 
         // The reassembled value should deserialize to the same data
         let restored = shape_runtime::snapshot::serializable_to_nanboxed(&args[0], &store).unwrap();
-        let hv = restored.as_heap_ref().unwrap();
+        // cold-path: as_heap_ref retained — test assertion on deserialized value
+        let hv = restored.as_heap_ref().unwrap(); // cold-path
         match hv {
             shape_value::heap_value::HeapValue::FloatArray(a) => {
                 assert_eq!(a.len(), 256 * 1024);

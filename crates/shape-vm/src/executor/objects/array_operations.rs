@@ -364,7 +364,8 @@ impl VirtualMachine {
         }
 
         use shape_value::heap_value::HeapValue;
-        match array_nb.as_heap_ref() {
+        // cold-path: as_heap_ref retained — multi-variant array slice operation
+        match array_nb.as_heap_ref() { // cold-path
             Some(HeapValue::Array(arr)) => {
                 let len = arr.len() as i32;
                 let actual_start = if start < 0 {

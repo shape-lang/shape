@@ -587,7 +587,8 @@ impl VirtualMachine {
                 }
                 HeapKind::FloatArraySlice => {
                     // Materialize the slice as a FloatArray, then dispatch
-                    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) = as_vw_ref(&raw_args[0]).as_heap_ref() {
+                    // cold-path: as_heap_ref retained — FloatArraySlice multi-field extraction
+                    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) = as_vw_ref(&raw_args[0]).as_heap_ref() { // cold-path
                         let off = *offset as usize;
                         let slice_len = *len as usize;
                         let data = &parent.data[off..off + slice_len];
@@ -1071,7 +1072,8 @@ impl VirtualMachine {
         let receiver_ref = as_vw_ref(&raw_args[0]);
 
         // Extract TypedObject fields via HeapValue (no ValueWord materialization)
-        let (schema_id, slots, heap_mask) = match receiver_ref.as_heap_ref() {
+        // cold-path: as_heap_ref retained — TypedObject multi-field extraction for method dispatch
+        let (schema_id, slots, heap_mask) = match receiver_ref.as_heap_ref() { // cold-path
             Some(HeapValue::TypedObject {
                 schema_id,
                 slots,
@@ -1163,7 +1165,7 @@ impl VirtualMachine {
                 // If field is callable (function or closure) or another module (TypedObject),
                 // handle accordingly.
                 if field_nb.is_function()
-                    || matches!(field_nb.as_heap_ref(), Some(HeapValue::Closure { .. }))
+                    || raw_helpers::extract_closure_info(field_nb.raw_bits()).is_some()
                 {
                     let callee_bits = field_nb.into_raw_bits();
                     let result_bits =

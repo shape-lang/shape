@@ -13,7 +13,8 @@ use crate::configuration::BytecodeExecutor;
 use crate::executor::SNAPSHOT_FUTURE_ID;
 use crate::executor::debugger_integration::DebuggerIntegration;
 use crate::executor::{ForeignFunctionHandle, VMConfig, VirtualMachine};
-use shape_value::{HeapValue, ValueWord, ValueWordExt};
+use crate::executor::objects::raw_helpers;
+use shape_value::{ValueWord, ValueWordExt};
 
 use shape_ast::Program;
 use shape_runtime::context::ExecutionContext;
@@ -39,9 +40,7 @@ impl BytecodeExecutor {
             // Check ModuleBindingRegistry first
             if let Some(value) = module_binding_registry.read().unwrap().get_by_name(name) {
                 // Skip functions - they're already compiled into the bytecode
-                if value
-                    .as_heap_ref()
-                    .is_some_and(|h| matches!(h, HeapValue::Closure { .. }))
+                if raw_helpers::extract_closure_info(value.raw_bits()).is_some()
                 {
                     continue;
                 }
@@ -52,9 +51,7 @@ impl BytecodeExecutor {
             // Fall back to ExecutionContext
             if let Ok(Some(value)) = ctx.get_variable(name) {
                 // Skip functions - they're already compiled
-                if value
-                    .as_heap_ref()
-                    .is_some_and(|h| matches!(h, HeapValue::Closure { .. }))
+                if raw_helpers::extract_closure_info(value.raw_bits()).is_some()
                 {
                     continue;
                 }
@@ -599,9 +596,7 @@ impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
                 continue;
             }
             if let Ok(Some(value)) = ctx.get_variable(name) {
-                let is_closure = value
-                    .as_heap_ref()
-                    .is_some_and(|h| matches!(h, HeapValue::Closure { .. }));
+                let is_closure = raw_helpers::extract_closure_info(value.raw_bits()).is_some();
                 if !is_closure {
                     vm.set_module_binding(idx, value);
                 }

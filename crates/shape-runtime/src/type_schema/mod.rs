@@ -433,7 +433,8 @@ pub(crate) fn nb_to_slot(nb: &shape_value::ValueWord) -> (shape_value::slot::Val
                 // For other unified types, store raw bits.
                 return (ValueSlot::from_raw(nb.raw_bits()), false);
             }
-            let hv = nb.as_heap_ref().unwrap().clone();
+            // cold-path: as_heap_ref retained — generic heap-to-slot clone
+            let hv = nb.as_heap_ref().unwrap().clone(); // cold-path
             (ValueSlot::from_heap(hv), true)
         }
     } else {

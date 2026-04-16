@@ -10,6 +10,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::{ForeignFunctionHandle, VirtualMachine},
 };
+use crate::executor::objects::raw_helpers;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 use shape_value::tags::{TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
 
@@ -413,42 +414,38 @@ impl VirtualMachine {
                 Ok(())
             }
             TAG_HEAP => {
-                use shape_value::heap_value::HeapValue;
-                match callee_nb.as_heap_ref() {
-                    Some(HeapValue::Closure {
-                        function_id,
-                        upvalues,
-                    }) => {
-                        let function_id = *function_id;
-                        let upvalues = upvalues.clone();
-                        drop(callee_nb);
-                        // Collect args as ValueWord, then remove callee
-                        let args_base = callee_idx + 1;
-                        let mut args_nb = Vec::with_capacity(arg_count);
-                        for i in 0..arg_count {
-                            args_nb.push(self.stack_take_raw(args_base + i));
-                        }
-                        drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
-                        self.stack[callee_idx] = Self::NONE_BITS;
-                        self.sp = callee_idx;
-                        self.call_closure_with_nb_args(function_id, upvalues, &args_nb)
+                // Extract closure info via raw_helpers
+                if let Some((function_id, upvalues_slice)) = raw_helpers::extract_closure_info(callee_nb.raw_bits()) {
+                    let function_id = function_id;
+                    let upvalues = upvalues_slice.to_vec();
+                    drop(callee_nb);
+                    // Collect args as ValueWord, then remove callee
+                    let args_base = callee_idx + 1;
+                    let mut args_nb = Vec::with_capacity(arg_count);
+                    for i in 0..arg_count {
+                        args_nb.push(self.stack_take_raw(args_base + i));
                     }
-                    Some(HeapValue::HostClosure(callable)) => {
-                        let callable = callable.clone();
-                        drop(callee_nb);
-                        let args_base = callee_idx + 1;
-                        let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
-                        for i in 0..arg_count {
-                            args_nb.push(self.stack_take_raw(args_base + i));
-                        }
-                        drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
-                        self.stack[callee_idx] = Self::NONE_BITS;
-                        self.sp = callee_idx;
-                        let result_nb = callable.call(&args_nb).map_err(VMError::RuntimeError)?;
-                        self.push_raw_u64(result_nb)?;
-                        Ok(())
+                    drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                    self.stack[callee_idx] = Self::NONE_BITS;
+                    self.sp = callee_idx;
+                    self.call_closure_with_nb_args(function_id, upvalues, &args_nb)
+                // cold-path: as_heap_ref retained — HostClosure fallback (no typed extractor)
+                } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) = callee_nb.as_heap_ref() { // cold-path
+                    let callable = callable.clone();
+                    drop(callee_nb);
+                    let args_base = callee_idx + 1;
+                    let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
+                    for i in 0..arg_count {
+                        args_nb.push(self.stack_take_raw(args_base + i));
                     }
-                    _ => Err(VMError::InvalidCall),
+                    drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                    self.stack[callee_idx] = Self::NONE_BITS;
+                    self.sp = callee_idx;
+                    let result_nb = callable.call(&args_nb).map_err(VMError::RuntimeError)?;
+                    self.push_raw_u64(result_nb)?;
+                    Ok(())
+                } else {
+                    Err(VMError::InvalidCall)
                 }
             }
             _ => Err(VMError::InvalidCall),
@@ -486,8 +483,7 @@ impl VirtualMachine {
                         // If the captured value is a SharedCell (boxed by BoxLocal),
                         // extract and reuse its Arc so the closure and enclosing scope
                         // share the same mutable cell.
-                        if let Some(shape_value::heap_value::HeapValue::SharedCell(arc)) =
-                            nb.as_heap_ref()
+                        if let Some(arc) = raw_helpers::extract_shared_cell(nb.raw_bits())
                         {
                             Upvalue::Mutable(arc.clone())
                         } else {

@@ -32,8 +32,6 @@ fn toml_value_to_nanboxed(value: toml::Value) -> ValueWord {
 
 /// Convert a `ValueWord` into a `toml::Value` for serialization.
 fn nanboxed_to_toml_value(nb: &ValueWord) -> toml::Value {
-    use shape_value::heap_value::HeapValue;
-
     if nb.is_none() {
         return toml::Value::String("null".to_string());
     }
@@ -67,12 +65,10 @@ fn nanboxed_to_toml_value(nb: &ValueWord) -> toml::Value {
         return toml::Value::Table(map);
     }
     // TypedObject — convert via field extraction
-    if let Some(heap) = nb.as_heap_ref() {
-        if let HeapValue::TypedObject { slots, .. } = heap {
-            // Fall back to string representation for complex types
-            let _ = slots;
-            return toml::Value::String(format!("{}", shape_value::ValueWordDisplay(*nb)));
-        }
+    if let Some((_sid, slots, _hm)) = nb.as_typed_object() {
+        // Fall back to string representation for complex types
+        let _ = slots;
+        return toml::Value::String(format!("{}", shape_value::ValueWordDisplay(*nb)));
     }
     toml::Value::String(format!("{}", shape_value::ValueWordDisplay(*nb)))
 }

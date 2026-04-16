@@ -313,7 +313,8 @@ pub(crate) fn handle_resample(
 
     // Parse aggregation spec
     let arg2_nb = borrow_vw(args[2]);
-    let agg_spec = match arg2_nb.as_heap_ref() {
+    // cold-path: as_heap_ref retained — TypedObject multi-field extraction for aggregation spec
+    let agg_spec = match arg2_nb.as_heap_ref() { // cold-path
         Some(HeapValue::TypedObject {
             schema_id,
             slots,

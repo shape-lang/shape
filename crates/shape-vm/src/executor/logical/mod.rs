@@ -6,7 +6,7 @@ use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,
 };
-use shape_value::heap_value::HeapValue;
+use crate::executor::objects::raw_helpers;
 use shape_value::{FilterNode, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -23,8 +23,8 @@ impl VirtualMachine {
                 let a = self.pop_raw_u64()?;
                 // FilterExpr AND FilterExpr → compound FilterExpr (HeapValue path)
                 if a.is_heap() || b.is_heap() {
-                    if let (Some(HeapValue::FilterExpr(left)), Some(HeapValue::FilterExpr(right))) =
-                        (a.as_heap_ref(), b.as_heap_ref())
+                    if let (Some(left), Some(right)) =
+                        (raw_helpers::extract_filter_expr(a.raw_bits()), raw_helpers::extract_filter_expr(b.raw_bits()))
                     {
                         self.push_raw_u64(ValueWord::from_filter_expr(Arc::new(FilterNode::And(
                             Box::new(left.as_ref().clone()),
@@ -43,8 +43,8 @@ impl VirtualMachine {
                 let a = self.pop_raw_u64()?;
                 // FilterExpr OR FilterExpr → compound FilterExpr (HeapValue path)
                 if a.is_heap() || b.is_heap() {
-                    if let (Some(HeapValue::FilterExpr(left)), Some(HeapValue::FilterExpr(right))) =
-                        (a.as_heap_ref(), b.as_heap_ref())
+                    if let (Some(left), Some(right)) =
+                        (raw_helpers::extract_filter_expr(a.raw_bits()), raw_helpers::extract_filter_expr(b.raw_bits()))
                     {
                         self.push_raw_u64(ValueWord::from_filter_expr(Arc::new(FilterNode::Or(
                             Box::new(left.as_ref().clone()),
@@ -62,7 +62,7 @@ impl VirtualMachine {
                 let val = self.pop_raw_u64()?;
                 // FilterExpr NOT → compound FilterExpr (HeapValue path)
                 if val.is_heap() {
-                    if let Some(HeapValue::FilterExpr(node)) = val.as_heap_ref() {
+                    if let Some(node) = raw_helpers::extract_filter_expr(val.raw_bits()) {
                         self.push_raw_u64(ValueWord::from_filter_expr(Arc::new(FilterNode::Not(
                             Box::new(node.as_ref().clone()),
                         ))))?;

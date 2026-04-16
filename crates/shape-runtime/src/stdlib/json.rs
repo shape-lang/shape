@@ -690,7 +690,6 @@ mod tests {
     #[test]
     fn test_parse_typed_with_alias() {
         use crate::type_schema::{FieldAnnotation, TypeSchemaBuilder};
-        use shape_value::heap_value::HeapValue;
 
         let mut registry = crate::type_schema::TypeSchemaRegistry::new();
         let mut schema = TypeSchemaBuilder::new("Trade")
@@ -732,7 +731,7 @@ mod tests {
         let inner = result.as_ok_inner().expect("should be Ok");
 
         // Verify it's a TypedObject with correct field values
-        if let Some(HeapValue::TypedObject { slots, .. }) = inner.as_heap_ref() {
+        if let Some((_sid, slots, _hm)) = inner.as_typed_object() {
             // Field 0 ("close", aliased from "Close Price") should be 100.5
             let close_val = f64::from_bits(slots[0].raw());
             assert!(
@@ -783,7 +782,6 @@ mod tests {
     #[test]
     fn test_parse_typed_alias_string_field() {
         use crate::type_schema::{FieldAnnotation, FieldType};
-        use shape_value::heap_value::HeapValue;
 
         let mut registry = crate::type_schema::TypeSchemaRegistry::new();
         let annotations = vec![
@@ -824,7 +822,7 @@ mod tests {
         let inner = result.as_ok_inner().expect("should be Ok");
 
         // Verify it's a TypedObject and the name field was populated from the aliased key
-        if let Some(HeapValue::TypedObject { slots, .. }) = inner.as_heap_ref() {
+        if let Some((_sid, slots, _hm)) = inner.as_typed_object() {
             // Field 0 ("name") should be a heap string "Bob"
             let name_nb = slots[0].as_heap_nb();
             assert_eq!(name_nb.as_str(), Some("Bob"), "name field should be 'Bob'");
@@ -840,7 +838,6 @@ mod tests {
     #[test]
     fn test_parse_typed_no_alias_uses_field_name() {
         use crate::type_schema::FieldType;
-        use shape_value::heap_value::HeapValue;
 
         let mut registry = crate::type_schema::TypeSchemaRegistry::new();
         let schema_id = registry.register_type(
@@ -871,7 +868,7 @@ mod tests {
         let result = parse_typed_fn(&[text, sid], &ctx).unwrap();
         let inner = result.as_ok_inner().expect("should be Ok");
 
-        if let Some(HeapValue::TypedObject { slots, .. }) = inner.as_heap_ref() {
+        if let Some((_sid, slots, _hm)) = inner.as_typed_object() {
             let name_nb = slots[0].as_heap_nb();
             assert_eq!(name_nb.as_str(), Some("test"));
             let value_val = f64::from_bits(slots[1].raw());
@@ -883,11 +880,7 @@ mod tests {
 
     /// Extract variant_id from a Json enum TypedObject.
     fn extract_enum_variant(nb: &ValueWord) -> (i64, Option<ValueWord>) {
-        use shape_value::heap_value::HeapValue;
-        if let Some(HeapValue::TypedObject {
-            slots, heap_mask, ..
-        }) = nb.as_heap_ref()
-        {
+        if let Some((_sid, slots, heap_mask)) = nb.as_typed_object() {
             let variant_id = slots[0].as_i64();
             let payload = if slots.len() > 1 {
                 // Only dereference as heap pointer if the heap_mask says slot 1 is a pointer

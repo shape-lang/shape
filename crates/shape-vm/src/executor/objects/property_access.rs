@@ -5,6 +5,7 @@
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::VirtualMachine;
+use crate::executor::objects::raw_helpers;
 use crate::memory::{record_heap_write, write_barrier_slot, write_barrier_vw};
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt, heap_value::NativeScalar};
@@ -367,9 +368,11 @@ impl VirtualMachine {
         }
 
         // Unwrap TypeAnnotatedValue once at the top so all dispatch sees the inner value.
-        let obj_ref = match obj_nb.as_heap_ref() {
-            Some(HeapValue::TypeAnnotatedValue { value, .. }) => value.as_ref(),
-            _ => &obj_nb,
+        let unwrapped = raw_helpers::unwrap_annotated_bits(obj_nb.raw_bits());
+        let obj_ref = if unwrapped != obj_nb.raw_bits() {
+            &unwrapped
+        } else {
+            &obj_nb
         };
 
         // Extract key string once (used by most paths).
@@ -406,7 +409,8 @@ impl VirtualMachine {
         }
 
         // Primary dispatch: check if obj is a heap value.
-        if let Some(hv) = obj_ref.as_heap_ref() {
+        // cold-path: multi-variant match requires full HeapValue ref
+        if let Some(hv) = unsafe { raw_helpers::extract_heap_ref(obj_ref.raw_bits()) } {
             match hv {
                 // TypedObject: perform runtime schema lookup for field access
                 HeapValue::TypedObject {
@@ -892,7 +896,7 @@ impl VirtualMachine {
                 // NativeView writes to raw C memory, not GC-tracked heap — no barrier needed.
                 return write_native_view_field(view, &field, &value_nb);
             }
-            if matches!(object_nb.as_heap_ref(), Some(HeapValue::TypedObject { .. })) {
+            if raw_helpers::extract_typed_object(object_nb.raw_bits()).is_some() {
                 return Err(VMError::RuntimeError(format!(
                     "Compiler bug: generic SetProp used for typed object field '{}'. Expected SetFieldTyped.",
                     key_str
@@ -1138,8 +1142,8 @@ impl VirtualMachine {
                 return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
             }
         }
-        // Fast path: inspect HeapValue directly without materializing ValueWord
-        if let Some(hv) = nb.as_heap_ref() {
+        // cold-path: multi-variant match requires full HeapValue ref
+        if let Some(hv) = unsafe { raw_helpers::extract_heap_ref(nb.raw_bits()) } {
             let length = match hv {
                 HeapValue::Array(arr) => arr.len(),
                 HeapValue::IntArray(arr) => arr.len(),

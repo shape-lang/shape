@@ -4,7 +4,6 @@
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use shape_value::{ValueWord, ValueWordExt};
-use shape_value::heap_value::HeapValue;
 use std::sync::Arc;
 use super::byte_utils::{bytes_from_array, bytes_to_array};
 
@@ -28,10 +27,7 @@ fn extract_entries(val: &ValueWord) -> Result<Vec<(String, String)>, String> {
 /// Extract `name` and `data` fields from a single entry (TypedObject or HashMap).
 fn extract_entry_fields(val: &ValueWord) -> Result<(String, String), String> {
     // Try TypedObject first
-    if let Some(HeapValue::TypedObject {
-        slots, heap_mask, ..
-    }) = val.as_heap_ref()
-    {
+    if let Some((_sid, slots, heap_mask)) = val.as_typed_object() {
         // Convention: slot 0 = name, slot 1 = data (both heap/string)
         if slots.len() >= 2 {
             let name_nb = if heap_mask & 1 != 0 {

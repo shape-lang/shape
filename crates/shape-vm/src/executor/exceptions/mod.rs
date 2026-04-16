@@ -13,6 +13,8 @@ use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
+use crate::executor::objects::raw_helpers;
+
 // =========================================================================
 // Slot-based field access helpers for error/trace TypedObjects
 // =========================================================================
@@ -181,11 +183,8 @@ impl VirtualMachine {
         // Unwrap TypeAnnotatedValue wrappers (e.g. from `as int | string`)
         // so type checks see the underlying value, not the wrapper.
         if let Some(HeapKind::TypeAnnotatedValue) = value.heap_kind() {
-            if let Some(heap_ref) = value.as_heap_ref() {
-                if let HeapValue::TypeAnnotatedValue { value: inner, .. } = heap_ref {
-                    return self.check_instanceof_nb(inner, type_annotation);
-                }
-            }
+            let inner_bits = raw_helpers::unwrap_annotated_bits(*value);
+            return self.check_instanceof_nb(&inner_bits, type_annotation);
         }
 
         let as_int = |nb: &ValueWord| -> Option<i64> {
@@ -422,7 +421,7 @@ impl VirtualMachine {
 
         // Slots: [kind, frame]
         let mut heap_mask: u64 = 0b01; // slot 0 (kind) is always heap
-        let frame_slot = if let Some(hv) = frame_nb.as_heap_ref() {
+        let frame_slot = if let Some(hv) = unsafe { raw_helpers::extract_heap_ref(frame_nb) } {
             heap_mask |= 1u64 << 1;
             ValueSlot::from_heap(hv.clone())
         } else {
@@ -463,11 +462,8 @@ impl VirtualMachine {
     }
 
     fn is_any_error_nb(value: &ValueWord) -> bool {
-        if let Some(HeapValue::TypedObject {
-            slots, heap_mask, ..
-        }) = value.as_heap_ref()
-        {
-            if slots.is_empty() || *heap_mask & 1 == 0 {
+        if let Some((_schema_id, slots, heap_mask)) = raw_helpers::extract_typed_object(*value) {
+            if slots.is_empty() || heap_mask & 1 == 0 {
                 return false;
             }
             let nb = slots[ANYERROR_CATEGORY].as_heap_nb();
@@ -546,46 +542,40 @@ impl VirtualMachine {
 
     /// Format a trace frame directly from a ValueWord TypedObject.
     fn format_trace_frame_nb(frame: &ValueWord) -> Option<String> {
-        if let Some(HeapValue::TypedObject {
-            slots, heap_mask, ..
-        }) = frame.as_heap_ref()
-        {
-            let function = typed_string_field_from_slots(slots, *heap_mask, TRACEFRAME_FUNCTION)
-                .unwrap_or_else(|| "<anonymous>".to_string());
+        let (_schema_id, slots, heap_mask) = raw_helpers::extract_typed_object(*frame)?;
 
-            let file = typed_string_field_from_slots(slots, *heap_mask, TRACEFRAME_FILE);
-            let line = slot_as_i64(slots, *heap_mask, TRACEFRAME_LINE);
-            let ip = slot_as_i64(slots, *heap_mask, TRACEFRAME_IP);
+        let function = typed_string_field_from_slots(slots, heap_mask, TRACEFRAME_FUNCTION)
+            .unwrap_or_else(|| "<anonymous>".to_string());
 
-            let mut rendered = format!("  at {}", function);
-            match (file, line) {
-                (Some(file), Some(line)) => rendered.push_str(&format!(" ({}:{})", file, line)),
-                (Some(file), None) => rendered.push_str(&format!(" ({})", file)),
-                (None, Some(line)) => rendered.push_str(&format!(" (line {})", line)),
-                (None, None) => {}
-            }
-            if let Some(ip) = ip {
-                rendered.push_str(&format!(" [ip {}]", ip));
-            }
-            Some(rendered)
-        } else {
-            None
+        let file = typed_string_field_from_slots(slots, heap_mask, TRACEFRAME_FILE);
+        let line = slot_as_i64(slots, heap_mask, TRACEFRAME_LINE);
+        let ip = slot_as_i64(slots, heap_mask, TRACEFRAME_IP);
+
+        let mut rendered = format!("  at {}", function);
+        match (file, line) {
+            (Some(file), Some(line)) => rendered.push_str(&format!(" ({}:{})", file, line)),
+            (Some(file), None) => rendered.push_str(&format!(" ({})", file)),
+            (None, Some(line)) => rendered.push_str(&format!(" (line {})", line)),
+            (None, None) => {}
         }
+        if let Some(ip) = ip {
+            rendered.push_str(&format!(" [ip {}]", ip));
+        }
+        Some(rendered)
     }
 
     /// Format trace info from a ValueWord TypedObject.
     fn format_trace_info_nb(trace_info: &ValueWord) -> Vec<String> {
         let mut lines = Vec::new();
 
-        if let Some(HeapValue::TypedObject {
-            slots, heap_mask, ..
-        }) = trace_info.as_heap_ref()
+        if let Some((_schema_id, slots, heap_mask)) =
+            raw_helpers::extract_typed_object(*trace_info)
         {
-            let kind = typed_string_field_from_slots(slots, *heap_mask, TRACEINFO_SINGLE_KIND);
+            let kind = typed_string_field_from_slots(slots, heap_mask, TRACEINFO_SINGLE_KIND);
             if kind.as_deref() == Some("single") {
                 // Single frame in slot 1 — read as heap value, wrap in ValueWord
                 if TRACEINFO_SINGLE_FRAME < slots.len()
-                    && *heap_mask & (1u64 << TRACEINFO_SINGLE_FRAME) != 0
+                    && heap_mask & (1u64 << TRACEINFO_SINGLE_FRAME) != 0
                 {
                     let frame_nb = slots[TRACEINFO_SINGLE_FRAME].as_heap_nb();
                     if let Some(line) = Self::format_trace_frame_nb(&frame_nb) {
@@ -595,7 +585,7 @@ impl VirtualMachine {
             } else {
                 // "full" — slot 1 is frames array
                 if TRACEINFO_FULL_FRAMES < slots.len()
-                    && *heap_mask & (1u64 << TRACEINFO_FULL_FRAMES) != 0
+                    && heap_mask & (1u64 << TRACEINFO_FULL_FRAMES) != 0
                 {
                     let frames_nb = slots[TRACEINFO_FULL_FRAMES].as_heap_nb();
                     if let Some(view) = frames_nb.as_any_array() {
@@ -625,21 +615,18 @@ impl VirtualMachine {
             return output;
         }
 
-        if let Some(HeapValue::TypedObject {
-            slots, heap_mask, ..
-        }) = error.as_heap_ref()
-        {
-            let message = typed_string_field_from_slots(slots, *heap_mask, ANYERROR_MESSAGE)
+        if let Some((_schema_id, slots, heap_mask)) = raw_helpers::extract_typed_object(*error) {
+            let message = typed_string_field_from_slots(slots, heap_mask, ANYERROR_MESSAGE)
                 .unwrap_or_else(|| {
                     if ANYERROR_PAYLOAD < slots.len() {
-                        let is_heap = *heap_mask & (1u64 << ANYERROR_PAYLOAD) != 0;
+                        let is_heap = heap_mask & (1u64 << ANYERROR_PAYLOAD) != 0;
                         let payload_nb = slots[ANYERROR_PAYLOAD].as_value_word(is_heap);
                         Self::error_message_from_nb(&payload_nb)
                     } else {
                         "Unknown error".to_string()
                     }
                 });
-            let code = typed_string_field_from_slots(slots, *heap_mask, ANYERROR_CODE);
+            let code = typed_string_field_from_slots(slots, heap_mask, ANYERROR_CODE);
 
             if let Some(code) = code {
                 output.push_str(&format!("\nError [{}]: {}", code, message));
@@ -648,7 +635,7 @@ impl VirtualMachine {
             }
 
             // Format trace info
-            if ANYERROR_TRACE_INFO < slots.len() && *heap_mask & (1u64 << ANYERROR_TRACE_INFO) != 0
+            if ANYERROR_TRACE_INFO < slots.len() && heap_mask & (1u64 << ANYERROR_TRACE_INFO) != 0
             {
                 let trace_nb = slots[ANYERROR_TRACE_INFO].as_heap_nb();
                 if !trace_nb.is_none() {
@@ -660,7 +647,7 @@ impl VirtualMachine {
             }
 
             // Follow the cause chain
-            if ANYERROR_CAUSE < slots.len() && *heap_mask & (1u64 << ANYERROR_CAUSE) != 0 {
+            if ANYERROR_CAUSE < slots.len() && heap_mask & (1u64 << ANYERROR_CAUSE) != 0 {
                 let cause_nb = slots[ANYERROR_CAUSE].as_heap_nb();
                 if !cause_nb.is_none() {
                     output.push_str(&self.format_error_chain_tail_nb(&cause_nb, 1));
@@ -685,14 +672,13 @@ impl VirtualMachine {
                 break;
             }
 
-            if let Some(HeapValue::TypedObject {
-                slots, heap_mask, ..
-            }) = current.as_heap_ref()
+            if let Some((_schema_id, slots, heap_mask)) =
+                raw_helpers::extract_typed_object(current)
             {
-                let message = typed_string_field_from_slots(slots, *heap_mask, ANYERROR_MESSAGE)
+                let message = typed_string_field_from_slots(slots, heap_mask, ANYERROR_MESSAGE)
                     .unwrap_or_else(|| {
                         if ANYERROR_PAYLOAD < slots.len()
-                            && *heap_mask & (1u64 << ANYERROR_PAYLOAD) != 0
+                            && heap_mask & (1u64 << ANYERROR_PAYLOAD) != 0
                         {
                             let payload_nb = slots[ANYERROR_PAYLOAD].as_heap_nb();
                             Self::error_message_from_nb(&payload_nb)
@@ -700,7 +686,7 @@ impl VirtualMachine {
                             "Unknown error".to_string()
                         }
                     });
-                let code = typed_string_field_from_slots(slots, *heap_mask, ANYERROR_CODE);
+                let code = typed_string_field_from_slots(slots, heap_mask, ANYERROR_CODE);
 
                 if let Some(code) = code {
                     output.push_str(&format!("\nCaused by [{}]: {}", code, message));
@@ -710,7 +696,7 @@ impl VirtualMachine {
 
                 // Format trace info
                 if ANYERROR_TRACE_INFO < slots.len()
-                    && *heap_mask & (1u64 << ANYERROR_TRACE_INFO) != 0
+                    && heap_mask & (1u64 << ANYERROR_TRACE_INFO) != 0
                 {
                     let trace_nb = slots[ANYERROR_TRACE_INFO].as_heap_nb();
                     if !trace_nb.is_none() {
@@ -722,7 +708,7 @@ impl VirtualMachine {
                 }
 
                 let has_cause =
-                    ANYERROR_CAUSE < slots.len() && *heap_mask & (1u64 << ANYERROR_CAUSE) != 0;
+                    ANYERROR_CAUSE < slots.len() && heap_mask & (1u64 << ANYERROR_CAUSE) != 0;
                 let next_cause_nb = if has_cause {
                     slots[ANYERROR_CAUSE].as_heap_nb()
                 } else {
@@ -796,16 +782,17 @@ impl VirtualMachine {
             return self.push_raw_u64(ValueWord::from_err(wrapped));
         }
 
-        let result = match value_nb.as_heap_ref() {
-            Some(HeapValue::Ok(inner)) => ValueWord::from_ok(inner.as_ref().clone()),
-            Some(HeapValue::Some(inner)) => ValueWord::from_ok(inner.as_ref().clone()),
-            Some(HeapValue::Err(inner)) => {
-                let cause = self.normalize_err_payload_nb(inner.as_ref().clone());
-                let trace = self.trace_info_single_nb();
-                let wrapped = self.build_any_error_nb(context_nb, Some(cause), trace, None);
-                ValueWord::from_err(wrapped)
-            }
-            _ => ValueWord::from_ok(value_nb),
+        let result = if let Some(inner) = raw_helpers::extract_ok_inner(value_nb) {
+            ValueWord::from_ok(inner.clone())
+        } else if let Some(inner) = raw_helpers::extract_some_inner(value_nb) {
+            ValueWord::from_ok(inner.clone())
+        } else if let Some(inner) = raw_helpers::extract_err_inner(value_nb) {
+            let cause = self.normalize_err_payload_nb(inner.clone());
+            let trace = self.trace_info_single_nb();
+            let wrapped = self.build_any_error_nb(context_nb, Some(cause), trace, None);
+            ValueWord::from_err(wrapped)
+        } else {
+            ValueWord::from_ok(value_nb)
         };
 
         self.push_raw_u64(result)
@@ -839,21 +826,18 @@ impl VirtualMachine {
             return return_early_with_err(self, err);
         }
         // Heap types: Ok/Err/Some
-        match nb.as_heap_ref() {
-            Some(HeapValue::Ok(inner)) => {
-                self.push_raw_u64(inner.as_ref().clone())?;
-                Ok(())
-            }
-            Some(HeapValue::Err(inner)) => return_early_with_err(self, inner.as_ref().clone()),
-            Some(HeapValue::Some(inner)) => {
-                self.push_raw_u64(inner.as_ref().clone())?;
-                Ok(())
-            }
-            _ => {
-                // All non-None, non-Err values are successful payloads
-                self.push_raw_u64(nb)?;
-                Ok(())
-            }
+        if let Some(inner) = raw_helpers::extract_ok_inner(nb) {
+            self.push_raw_u64(inner.clone())?;
+            Ok(())
+        } else if let Some(inner) = raw_helpers::extract_err_inner(nb) {
+            return_early_with_err(self, inner.clone())
+        } else if let Some(inner) = raw_helpers::extract_some_inner(nb) {
+            self.push_raw_u64(inner.clone())?;
+            Ok(())
+        } else {
+            // All non-None, non-Err values are successful payloads
+            self.push_raw_u64(nb)?;
+            Ok(())
         }
     }
 
@@ -864,17 +848,14 @@ impl VirtualMachine {
                 "Cannot unwrap None value".to_string(),
             ));
         }
-        match nb.as_heap_ref() {
-            Some(HeapValue::Some(inner)) => {
-                self.push_raw_u64(inner.as_ref().clone())?;
-                Ok(())
-            }
-            _ => {
-                // Some() constructor returns the value unwrapped (not wrapped in
-                // HeapValue::Some), so non-None values are already the inner value.
-                self.push_raw_u64(nb)?;
-                Ok(())
-            }
+        if let Some(inner) = raw_helpers::extract_some_inner(nb) {
+            self.push_raw_u64(inner.clone())?;
+            Ok(())
+        } else {
+            // Some() constructor returns the value unwrapped (not wrapped in
+            // HeapValue::Some), so non-None values are already the inner value.
+            self.push_raw_u64(nb)?;
+            Ok(())
         }
     }
 
@@ -895,44 +876,43 @@ impl VirtualMachine {
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_ok(&mut self) -> Result<(), VMError> {
         let nb = self.pop_raw_u64()?;
-        match nb.as_heap_ref() {
-            Some(HeapValue::Ok(inner)) => self.push_raw_u64(inner.as_ref().clone()),
-            _ => Err(VMError::RuntimeError(format!(
+        if let Some(inner) = raw_helpers::extract_ok_inner(nb) {
+            self.push_raw_u64(inner.clone())
+        } else {
+            Err(VMError::RuntimeError(format!(
                 "UnwrapOk can only be applied to Ok(value), got {}",
                 nb.type_name()
-            ))),
+            )))
         }
     }
 
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_err(&mut self) -> Result<(), VMError> {
         let nb = self.pop_raw_u64()?;
-        match nb.as_heap_ref() {
-            Some(HeapValue::Err(inner)) => {
-                let inner_val = inner.as_ref().clone();
-                // If the inner value is an AnyError TypedObject (created by
-                // normalize_err_payload_nb), extract and return the original
-                // payload rather than exposing the full AnyError struct.
-                // This ensures `match Err("fail") { Err(msg) => msg }` returns
-                // "fail" instead of the AnyError wrapper.
-                if Self::is_any_error_nb(&inner_val) {
-                    if let Some(HeapValue::TypedObject {
-                        slots, heap_mask, ..
-                    }) = inner_val.as_heap_ref()
-                    {
-                        if ANYERROR_PAYLOAD < slots.len() {
-                            let is_heap = *heap_mask & (1u64 << ANYERROR_PAYLOAD) != 0;
-                            let payload = slots[ANYERROR_PAYLOAD].as_value_word(is_heap);
-                            return self.push_raw_u64(payload);
-                        }
+        if let Some(inner) = raw_helpers::extract_err_inner(nb) {
+            let inner_val = inner.clone();
+            // If the inner value is an AnyError TypedObject (created by
+            // normalize_err_payload_nb), extract and return the original
+            // payload rather than exposing the full AnyError struct.
+            // This ensures `match Err("fail") { Err(msg) => msg }` returns
+            // "fail" instead of the AnyError wrapper.
+            if Self::is_any_error_nb(&inner_val) {
+                if let Some((_schema_id, slots, heap_mask)) =
+                    raw_helpers::extract_typed_object(inner_val)
+                {
+                    if ANYERROR_PAYLOAD < slots.len() {
+                        let is_heap = heap_mask & (1u64 << ANYERROR_PAYLOAD) != 0;
+                        let payload = slots[ANYERROR_PAYLOAD].as_value_word(is_heap);
+                        return self.push_raw_u64(payload);
                     }
                 }
-                self.push_raw_u64(inner_val)
             }
-            _ => Err(VMError::RuntimeError(format!(
+            self.push_raw_u64(inner_val)
+        } else {
+            Err(VMError::RuntimeError(format!(
                 "UnwrapErr can only be applied to Err(value), got {}",
                 nb.type_name()
-            ))),
+            )))
         }
     }
 }

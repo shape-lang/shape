@@ -57,7 +57,8 @@ fn source_len(source: &ValueWord) -> Option<usize> {
         }
         return std::option::Option::None;
     }
-    match source.as_heap_ref()? {
+    // cold-path: as_heap_ref retained — multi-variant source length dispatch
+    match source.as_heap_ref()? { // cold-path
         HeapValue::Array(arr) => Some(arr.len()),
         HeapValue::String(s) => Some(s.chars().count()),
         HeapValue::Range {
@@ -98,7 +99,8 @@ fn source_element_at(source: &ValueWord, position: usize) -> Option<ValueWord> {
         }
         return std::option::Option::None;
     }
-    match source.as_heap_ref()? {
+    // cold-path: as_heap_ref retained — multi-variant source element dispatch
+    match source.as_heap_ref()? { // cold-path
         HeapValue::Array(arr) => arr.get(position).cloned(),
         HeapValue::String(s) => s
             .chars()

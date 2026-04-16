@@ -5,6 +5,7 @@
 use crate::{
     bytecode::{Instruction, NumericWidth, OpCode, Operand},
     executor::VirtualMachine,
+    executor::objects::raw_helpers,
 };
 use shape_value::heap_value::HeapValue;
 use shape_value::{VMError, ValueWord, ValueWordExt};
@@ -30,7 +31,10 @@ fn ic_tag(v: &ValueWord) -> u8 {
 /// Non-slice values pass through unmodified.
 #[inline]
 fn materialize_float_slice(vw: ValueWord) -> ValueWord {
-    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) = vw.as_heap_ref() {
+    if let Some(HeapValue::FloatArraySlice { parent, offset, len }) =
+        // SAFETY: vw is a live stack/arg value; pointer is valid.
+        unsafe { raw_helpers::extract_heap_ref(vw.raw_bits()) }
+    {
         let off = *offset as usize;
         let slice_len = *len as usize;
         let data = &parent.data[off..off + slice_len];
@@ -72,11 +76,7 @@ enum NumericDomain {
 /// Heap tag doesn't match any arithmetic dispatch case.
 #[inline(always)]
 fn unwrap_annotated(nb: ValueWord) -> ValueWord {
-    if let Some(HeapValue::TypeAnnotatedValue { value, .. }) = nb.as_heap_ref() {
-        value.as_ref().clone()
-    } else {
-        nb
-    }
+    raw_helpers::unwrap_annotated_bits(nb.raw_bits())
 }
 
 macro_rules! define_compact_width_dispatch {
@@ -1255,7 +1255,8 @@ impl VirtualMachine {
                     }
                     // Both heap: string concat, decimal, bigint, array concat, typed object merge
                     (IC_HEAP, IC_HEAP) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        // cold-path
+                        match unsafe { (raw_helpers::extract_heap_ref(a_nb.raw_bits()).unwrap(), raw_helpers::extract_heap_ref(b_nb.raw_bits()).unwrap()) } {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_add(*b_big).ok_or_else(|| {
@@ -1537,7 +1538,7 @@ impl VirtualMachine {
                                 }
                             }
                         }
-                        if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
+                        if let Some(a_big) = raw_helpers::extract_big_int(a_nb.raw_bits()) {
                             if let Some(b_i) = b_nb.as_i64() {
                                 return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_add(b_i).ok_or_else(|| {
@@ -1546,7 +1547,7 @@ impl VirtualMachine {
                                 ));
                             }
                             if let Some(b_f) = b_nb.as_f64() {
-                                return self.push_raw_u64(ValueWord::from_f64(*a_big as f64 + b_f));
+                                return self.push_raw_u64(ValueWord::from_f64(a_big as f64 + b_f));
                             }
                         }
                         if let Some(s) = a_nb.as_str() {
@@ -1626,16 +1627,16 @@ impl VirtualMachine {
                                 }
                             }
                         }
-                        if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
+                        if let Some(b_big) = raw_helpers::extract_big_int(b_nb.raw_bits()) {
                             if let Some(a_i) = a_nb.as_i64() {
                                 return self.push_raw_u64(ValueWord::from_i64(
-                                    a_i.checked_add(*b_big).ok_or_else(|| {
+                                    a_i.checked_add(b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_raw_u64(ValueWord::from_f64(a_f + *b_big as f64));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f + b_big as f64));
                             }
                         }
                         if let Some(s) = b_nb.as_str() {
@@ -1742,7 +1743,8 @@ impl VirtualMachine {
                         }
                     }
                     (IC_HEAP, IC_HEAP) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        // cold-path
+                        match unsafe { (raw_helpers::extract_heap_ref(a_nb.raw_bits()).unwrap(), raw_helpers::extract_heap_ref(b_nb.raw_bits()).unwrap()) } {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_sub(*b_big).ok_or_else(|| {
@@ -1867,7 +1869,7 @@ impl VirtualMachine {
                         }
                     }
                     (IC_HEAP, _) => {
-                        if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
+                        if let Some(a_big) = raw_helpers::extract_big_int(a_nb.raw_bits()) {
                             if let Some(b_i) = b_nb.as_i64() {
                                 return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_sub(b_i).ok_or_else(|| {
@@ -1876,7 +1878,7 @@ impl VirtualMachine {
                                 ));
                             }
                             if let Some(b_f) = b_nb.as_f64() {
-                                return self.push_raw_u64(ValueWord::from_f64(*a_big as f64 - b_f));
+                                return self.push_raw_u64(ValueWord::from_f64(a_big as f64 - b_f));
                             }
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
@@ -1896,16 +1898,16 @@ impl VirtualMachine {
                         }
                     }
                     (_, IC_HEAP) => {
-                        if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
+                        if let Some(b_big) = raw_helpers::extract_big_int(b_nb.raw_bits()) {
                             if let Some(a_i) = a_nb.as_i64() {
                                 return self.push_raw_u64(ValueWord::from_i64(
-                                    a_i.checked_sub(*b_big).ok_or_else(|| {
+                                    a_i.checked_sub(b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_raw_u64(ValueWord::from_f64(a_f - *b_big as f64));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f - b_big as f64));
                             }
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {
@@ -1981,7 +1983,8 @@ impl VirtualMachine {
                         }
                     }
                     (IC_HEAP, IC_HEAP) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        // cold-path
+                        match unsafe { (raw_helpers::extract_heap_ref(a_nb.raw_bits()).unwrap(), raw_helpers::extract_heap_ref(b_nb.raw_bits()).unwrap()) } {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_mul(*b_big).ok_or_else(|| {
@@ -2114,7 +2117,7 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                         }
-                        if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
+                        if let Some(a_big) = raw_helpers::extract_big_int(a_nb.raw_bits()) {
                             if let Some(b_i) = b_nb.as_i64() {
                                 return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_mul(b_i).ok_or_else(|| {
@@ -2123,7 +2126,7 @@ impl VirtualMachine {
                                 ));
                             }
                             if let Some(b_f) = b_nb.as_f64() {
-                                return self.push_raw_u64(ValueWord::from_f64(*a_big as f64 * b_f));
+                                return self.push_raw_u64(ValueWord::from_f64(a_big as f64 * b_f));
                             }
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
@@ -2164,16 +2167,16 @@ impl VirtualMachine {
                                 return self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                         }
-                        if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
+                        if let Some(b_big) = raw_helpers::extract_big_int(b_nb.raw_bits()) {
                             if let Some(a_i) = a_nb.as_i64() {
                                 return self.push_raw_u64(ValueWord::from_i64(
-                                    a_i.checked_mul(*b_big).ok_or_else(|| {
+                                    a_i.checked_mul(b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_raw_u64(ValueWord::from_f64(a_f * *b_big as f64));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f * b_big as f64));
                             }
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {
@@ -2275,7 +2278,8 @@ impl VirtualMachine {
                         }
                     }
                     (IC_HEAP, IC_HEAP) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        // cold-path
+                        match unsafe { (raw_helpers::extract_heap_ref(a_nb.raw_bits()).unwrap(), raw_helpers::extract_heap_ref(b_nb.raw_bits()).unwrap()) } {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 if *b_big == 0 {
                                     return Err(VMError::DivisionByZero);
@@ -2376,7 +2380,7 @@ impl VirtualMachine {
                                     .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                         }
-                        if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
+                        if let Some(a_big) = raw_helpers::extract_big_int(a_nb.raw_bits()) {
                             if let Some(b_i) = b_nb.as_i64() {
                                 if b_i == 0 {
                                     return Err(VMError::DivisionByZero);
@@ -2391,7 +2395,7 @@ impl VirtualMachine {
                                 if b_f == 0.0 {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_raw_u64(ValueWord::from_f64(*a_big as f64 / b_f));
+                                return self.push_raw_u64(ValueWord::from_f64(a_big as f64 / b_f));
                             }
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
@@ -2417,19 +2421,19 @@ impl VirtualMachine {
                         }
                     }
                     (_, IC_HEAP) => {
-                        if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
-                            if *b_big == 0 {
+                        if let Some(b_big) = raw_helpers::extract_big_int(b_nb.raw_bits()) {
+                            if b_big == 0 {
                                 return Err(VMError::DivisionByZero);
                             }
                             if let Some(a_i) = a_nb.as_i64() {
                                 return self.push_raw_u64(ValueWord::from_i64(
-                                    a_i.checked_div(*b_big).ok_or_else(|| {
+                                    a_i.checked_div(b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_raw_u64(ValueWord::from_f64(a_f / *b_big as f64));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f / b_big as f64));
                             }
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {
@@ -2489,7 +2493,8 @@ impl VirtualMachine {
                         }
                     }
                     (IC_HEAP, IC_HEAP) => {
-                        match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
+                        // cold-path
+                        match unsafe { (raw_helpers::extract_heap_ref(a_nb.raw_bits()).unwrap(), raw_helpers::extract_heap_ref(b_nb.raw_bits()).unwrap()) } {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 if *b_big == 0 {
                                     return Err(VMError::DivisionByZero);
@@ -2510,7 +2515,7 @@ impl VirtualMachine {
                         }
                     }
                     (IC_HEAP, _) => {
-                        if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
+                        if let Some(a_big) = raw_helpers::extract_big_int(a_nb.raw_bits()) {
                             if let Some(b_i) = b_nb.as_i64() {
                                 if b_i == 0 {
                                     return Err(VMError::DivisionByZero);
@@ -2542,13 +2547,13 @@ impl VirtualMachine {
                         }
                     }
                     (_, IC_HEAP) => {
-                        if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
-                            if *b_big == 0 {
+                        if let Some(b_big) = raw_helpers::extract_big_int(b_nb.raw_bits()) {
+                            if b_big == 0 {
                                 return Err(VMError::DivisionByZero);
                             }
                             if let Some(a_i) = a_nb.as_i64() {
                                 return self.push_raw_u64(ValueWord::from_i64(
-                                    a_i.checked_rem(*b_big).ok_or_else(|| {
+                                    a_i.checked_rem(b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
@@ -2604,7 +2609,7 @@ impl VirtualMachine {
                         }
                     }
                     (IC_HEAP, _) => {
-                        if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
+                        if let Some(a_big) = raw_helpers::extract_big_int(a_nb.raw_bits()) {
                             if let Some(b_i) = b_nb.as_i64() {
                                 if b_i >= 0 && b_i < u32::MAX as i64 {
                                     return self.push_raw_u64(ValueWord::from_i64(
@@ -2614,12 +2619,12 @@ impl VirtualMachine {
                                     ));
                                 }
                                 return self.push_raw_u64(ValueWord::from_f64(
-                                    (*a_big as f64).powf(b_i as f64),
+                                    (a_big as f64).powf(b_i as f64),
                                 ));
                             }
                             if let Some(b_f) = b_nb.as_f64() {
                                 return self
-                                    .push_raw_u64(ValueWord::from_f64((*a_big as f64).powf(b_f)));
+                                    .push_raw_u64(ValueWord::from_f64((a_big as f64).powf(b_f)));
                             }
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
@@ -2644,21 +2649,21 @@ impl VirtualMachine {
                         }
                     }
                     (_, IC_HEAP) => {
-                        if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
+                        if let Some(b_big) = raw_helpers::extract_big_int(b_nb.raw_bits()) {
                             if let Some(a_i) = a_nb.as_i64() {
-                                if *b_big >= 0 && *b_big < u32::MAX as i64 {
+                                if b_big >= 0 && b_big < u32::MAX as i64 {
                                     return self.push_raw_u64(ValueWord::from_i64(
-                                        a_i.checked_pow(*b_big as u32).ok_or_else(|| {
+                                        a_i.checked_pow(b_big as u32).ok_or_else(|| {
                                             VMError::RuntimeError("Integer overflow".into())
                                         })?,
                                     ));
                                 }
                                 return self.push_raw_u64(ValueWord::from_f64(
-                                    (a_i as f64).powf(*b_big as f64),
+                                    (a_i as f64).powf(b_big as f64),
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_raw_u64(ValueWord::from_f64(a_f.powf(*b_big as f64)));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f.powf(b_big as f64)));
                             }
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {

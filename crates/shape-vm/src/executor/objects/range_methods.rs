@@ -9,7 +9,7 @@
 //! - `args[0]` is the receiver (a Range)
 //! - Returns a raw `u64` result
 
-use crate::executor::objects::raw_helpers::{extract_number_coerce, type_error};
+use crate::executor::objects::raw_helpers::{extract_number_coerce, extract_range, type_error};
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
@@ -55,25 +55,19 @@ pub fn range_to_array(
 ) -> Result<u64, VMError> {
     let receiver = args[0];
 
-    if let Some(HeapValue::Range {
-        start,
-        end,
-        inclusive,
-    }) = receiver.as_heap_ref()
+    if let Some((start, end, inclusive)) = extract_range(receiver)
     {
         let start_val = start
-            .as_ref()
             .and_then(|s| s.as_i64())
             .unwrap_or(0);
         let end_val = end
-            .as_ref()
             .and_then(|e| e.as_i64())
             .ok_or_else(|| {
                 VMError::RuntimeError("Range.toArray() requires a finite end bound".to_string())
             })?;
 
         let mut result = Vec::new();
-        if *inclusive {
+        if inclusive {
             for i in start_val..=end_val {
                 result.push(vw_from_i64(i));
             }
