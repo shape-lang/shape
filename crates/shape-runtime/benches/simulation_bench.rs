@@ -81,7 +81,7 @@ fn bench_parallel_sweep(c: &mut Criterion) {
 
 fn bench_simulation_engine_value(c: &mut Criterion) {
     use shape_runtime::simulation::{SimulationEngine, SimulationEngineConfig, StepResult};
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     let data: Vec<ValueWord> = (0..50_000).map(|i| ValueWord::from_f64(i as f64)).collect();
     let engine = SimulationEngine::new(SimulationEngineConfig::default());

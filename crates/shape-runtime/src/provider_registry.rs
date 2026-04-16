@@ -13,7 +13,7 @@ use crate::plugins::{
     PluginDataSource, PluginLoader, PluginModule,
 };
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_wire::WireValue;
 use std::collections::HashMap;
 use std::path::Path;

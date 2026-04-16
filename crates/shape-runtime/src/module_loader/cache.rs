@@ -3,6 +3,7 @@
 //! Handles module caching, dependency tracking, and import resolution.
 
 use shape_ast::ast::ImportStmt;
+use shape_value::ValueWordExt;
 use shape_ast::error::{Result, ShapeError};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -15,6 +15,7 @@ use shape_abi_v1::binary_format::{
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_value::DataTableBuilder;
+use shape_value::ValueWordExt;
 
 /// Read binary columnar data and convert to a DataTable.
 pub fn read_binary_to_datatable(data: &[u8]) -> Result<shape_value::DataTable> {

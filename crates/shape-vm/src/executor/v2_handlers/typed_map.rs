@@ -20,7 +20,7 @@ use shape_value::v2::typed_map::{
     TypedMap, TypedMapI64F64, TypedMapI64I64, TypedMapI64Ptr, TypedMapStringF64, TypedMapStringI64,
     TypedMapStringPtr,
 };
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::super::VirtualMachine;
 

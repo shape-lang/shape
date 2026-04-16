@@ -2,7 +2,7 @@
 mod typed_object_regression_tests {
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     /// Helper that compiles and executes a Shape snippet through the VM.
     fn eval(code: &str) -> ValueWord {

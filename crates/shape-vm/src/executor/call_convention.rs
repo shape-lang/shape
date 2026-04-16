@@ -1,6 +1,6 @@
 //! Function and closure call convention, execution wrappers, and async resolution.
 
-use shape_value::{Upvalue, VMError, ValueWord};
+use shape_value::{Upvalue, VMError, ValueWord, ValueWordExt};
 
 use super::{CallFrame, ExecutionResult, VirtualMachine, task_scheduler};
 
@@ -127,7 +127,7 @@ impl VirtualMachine {
         value: ValueWord,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<ExecutionResult, VMError> {
-        self.push_vw(value)?;
+        self.push_raw_u64(value)?;
         self.execute_with_suspend(ctx)
     }
 
@@ -149,7 +149,7 @@ impl VirtualMachine {
                     // Try to resolve via the task scheduler
                     let result = self.resolve_spawned_task(future_id)?;
                     // Push the result so the resumed VM finds it on the stack
-                    self.push_vw(result)?;
+                    self.push_raw_u64(result)?;
                     // Loop continues with execute_with_suspend
                 }
             }
@@ -159,7 +159,7 @@ impl VirtualMachine {
     /// Resolve a spawned task by executing its callable synchronously.
     ///
     /// Looks up the callable in the TaskScheduler, then executes it:
-    /// - NanTag::Function -> calls via call_function_with_nb_args
+    /// - Function -> calls via call_function_with_nb_args
     /// - HeapValue::Closure -> calls via call_closure_with_nb_args
     /// - Other values -> returns them directly (already-resolved value)
     ///
@@ -206,54 +206,50 @@ impl VirtualMachine {
         // Execute based on callable type.
         // We save/restore the instruction pointer and stack depth so the
         // nested execution doesn't corrupt the outer (suspended) state.
-        use shape_value::NanTag;
+        let result_nb = if callable_nb.is_function() {
+            let func_id = callable_nb.as_function_id().ok_or(VMError::InvalidCall)?;
+            let saved_ip = self.ip;
+            let saved_sp = self.sp;
 
-        let result_nb = match callable_nb.tag() {
-            NanTag::Function => {
-                let func_id = callable_nb.as_function().ok_or(VMError::InvalidCall)?;
+            self.ip = self.program.instructions.len();
+            self.call_function_with_nb_args(func_id, &[])?;
+            let res = self.execute_fast(None);
+
+            self.ip = saved_ip;
+            // Restore stack pointer (clear anything left above saved_sp)
+            for i in saved_sp..self.sp {
+                // Drop the old occupant, then write the none sentinel.
+                drop(ValueWord::from_raw_bits(self.stack[i]));
+                self.stack[i] = Self::NONE_BITS;
+            }
+            self.sp = saved_sp;
+
+            res?
+        } else if callable_nb.is_heap() {
+            if let Some((function_id, upvalues)) = callable_nb.as_closure() {
+                let upvalues = upvalues.to_vec();
                 let saved_ip = self.ip;
                 let saved_sp = self.sp;
 
                 self.ip = self.program.instructions.len();
-                self.call_function_with_nb_args(func_id, &[])?;
+                self.call_closure_with_nb_args(function_id, upvalues, &[])?;
                 let res = self.execute_fast(None);
 
                 self.ip = saved_ip;
-                // Restore stack pointer (clear anything left above saved_sp)
                 for i in saved_sp..self.sp {
-                    // Drop the old occupant, then write the none sentinel.
                     drop(ValueWord::from_raw_bits(self.stack[i]));
                     self.stack[i] = Self::NONE_BITS;
                 }
                 self.sp = saved_sp;
 
                 res?
+            } else {
+                // If someone spawned an already-resolved value, just return it
+                callable_nb
             }
-            NanTag::Heap => {
-                if let Some((function_id, upvalues)) = callable_nb.as_closure() {
-                    let upvalues = upvalues.to_vec();
-                    let saved_ip = self.ip;
-                    let saved_sp = self.sp;
-
-                    self.ip = self.program.instructions.len();
-                    self.call_closure_with_nb_args(function_id, upvalues, &[])?;
-                    let res = self.execute_fast(None);
-
-                    self.ip = saved_ip;
-                    for i in saved_sp..self.sp {
-                        drop(ValueWord::from_raw_bits(self.stack[i]));
-                        self.stack[i] = Self::NONE_BITS;
-                    }
-                    self.sp = saved_sp;
-
-                    res?
-                } else {
-                    // If someone spawned an already-resolved value, just return it
-                    callable_nb
-                }
-            }
+        } else {
             // If someone spawned an already-resolved value, just return it
-            _ => callable_nb,
+            callable_nb
         };
 
         // Cache the result
@@ -302,7 +298,7 @@ impl VirtualMachine {
         for i in 0..param_count {
             if i < locals_count {
                 let vw = args.get(i).cloned().unwrap_or_else(ValueWord::none);
-                self.stack_write_vw(bp + i, vw);
+                self.stack_write_raw(bp + i, vw);
             }
         }
 
@@ -314,9 +310,9 @@ impl VirtualMachine {
         for (i, &is_ref) in ref_params.iter().enumerate() {
             if is_ref && i < param_count && i < locals_count {
                 let shadow_slot = bp + locals_count + shadow_idx;
-                let cloned = self.stack_read_vw(bp + i);
-                self.stack_write_vw(shadow_slot, cloned);
-                self.stack_write_vw(bp + i, ValueWord::from_ref(shadow_slot));
+                let cloned = self.stack_read_raw(bp + i);
+                self.stack_write_raw(shadow_slot, cloned);
+                self.stack_write_raw(bp + i, ValueWord::from_ref(shadow_slot));
                 shadow_idx += 1;
             }
         }
@@ -368,7 +364,7 @@ impl VirtualMachine {
         // Bind upvalue values as the first N locals
         for (i, upvalue) in upvalues.iter().enumerate() {
             if i < locals_count {
-                self.stack_write_vw(bp + i, upvalue.get());
+                self.stack_write_raw(bp + i, upvalue.get());
             }
         }
 
@@ -376,13 +372,13 @@ impl VirtualMachine {
         for (i, arg) in args.iter().enumerate() {
             let local_idx = captures_count + i;
             if local_idx < locals_count {
-                self.stack_write_vw(bp + local_idx, arg.clone());
+                self.stack_write_raw(bp + local_idx, arg.clone());
             }
         }
 
         // Fill remaining parameters with None
         for i in (captures_count + args.len())..arity.min(locals_count) {
-            self.stack_write_vw(bp + i, ValueWord::none());
+            self.stack_write_raw(bp + i, ValueWord::none());
         }
 
         self.sp = needed;
@@ -401,7 +397,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// ValueWord-native call_value_immediate: dispatches on NanTag/HeapKind.
+    /// ValueWord-native call_value_immediate: dispatches on tag/HeapKind.
     ///
     /// Returns ValueWord directly.
     pub fn call_value_immediate_nb(
@@ -410,15 +406,19 @@ impl VirtualMachine {
         args: &[ValueWord],
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<ValueWord, VMError> {
-        use shape_value::NanTag;
+        use shape_value::tags::{is_tagged, get_tag, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
         let target_depth = self.call_stack.len();
 
-        match callee.tag() {
-            NanTag::Function => {
-                let func_id = callee.as_function().ok_or(VMError::InvalidCall)?;
+        let bits = callee.raw_bits();
+        if !is_tagged(bits) {
+            return Err(VMError::InvalidCall);
+        }
+        match get_tag(bits) {
+            TAG_FUNCTION => {
+                let func_id = callee.as_function_id().ok_or(VMError::InvalidCall)?;
                 self.call_function_with_nb_args(func_id, args)?;
             }
-            NanTag::ModuleFunction => {
+            TAG_MODULE_FN => {
                 let func_id = callee.as_module_function().ok_or(VMError::InvalidCall)?;
                 let module_fn = self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
                     VMError::RuntimeError(format!(
@@ -430,7 +430,7 @@ impl VirtualMachine {
                 let result_nb = self.invoke_module_fn(&module_fn, &args_vec)?;
                 return Ok(result_nb);
             }
-            NanTag::Heap => match callee.as_heap_ref() {
+            TAG_HEAP => match callee.as_heap_ref() {
                 Some(shape_value::HeapValue::Closure {
                     function_id,
                     upvalues,
@@ -448,12 +448,12 @@ impl VirtualMachine {
         }
 
         self.execute_until_call_depth(target_depth, ctx)?;
-        self.pop_vw()
+        self.pop_raw_u64()
     }
 
     // ─── Raw u64 call API (v2) ─────────────────────────────────────────────
 
-    /// Raw-bits closure/function call: dispatches on NanTag/HeapKind.
+    /// Raw-bits closure/function call: dispatches on tag/HeapKind.
     ///
     /// v2 equivalent of `call_value_immediate_nb` — callers pass raw `u64`
     /// NaN-boxed bits instead of constructing `ValueWord` values.
@@ -620,7 +620,7 @@ impl VirtualMachine {
 
         for (i, upvalue) in upvalues.iter().enumerate() {
             if i < locals_count {
-                self.stack_write_vw(bp + i, upvalue.get());
+                self.stack_write_raw(bp + i, upvalue.get());
             }
         }
 
@@ -694,7 +694,7 @@ impl VirtualMachine {
         // may intentionally represent as null sentinels for default params).
         let copy_count = arg_count.min(arity).min(locals_count);
         for i in copy_count..locals_count {
-            self.stack_write_vw(bp + i, ValueWord::none());
+            self.stack_write_raw(bp + i, ValueWord::none());
         }
 
         // Advance sp past all locals

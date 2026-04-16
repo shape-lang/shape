@@ -1,6 +1,7 @@
 //! Sandbox configuration for shape.toml `[sandbox]`.
 
 use serde::{Deserialize, Serialize};
+use shape_value::ValueWordExt;
 use std::collections::HashMap;
 
 /// [sandbox] section — isolation settings for deterministic/testing modes.

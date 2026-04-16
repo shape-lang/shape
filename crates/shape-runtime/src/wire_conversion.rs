@@ -13,7 +13,7 @@
 use crate::Context;
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
 use shape_value::heap_value::HeapValue;
-use shape_value::{DataTable, ValueSlot, ValueWord};
+use shape_value::{DataTable, ValueSlot, ValueWord, ValueWordExt};
 use shape_wire::{
     DurationUnit as WireDurationUnit, ValueEnvelope, WireTable, WireValue,
     metadata::{TypeInfo, TypeRegistry},
@@ -201,33 +201,33 @@ fn value_to_wire(value: &ValueWord, ctx: &Context) -> WireValue {
 /// (f64, i48, bool, None, Unit) it avoids heap allocation entirely. For heap types
 /// it dispatches on HeapValue directly.
 pub fn nb_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
-    use shape_value::value_word::NanTag;
+    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
 
-    match nb.tag() {
-        NanTag::None | NanTag::Unit => WireValue::Null,
+    let bits = nb.raw_bits();
+    if !is_tagged(bits) {
+        let n = nb.as_f64().unwrap_or(0.0);
+        return WireValue::Number(n);
+    }
+    match get_tag(bits) {
+        TAG_NONE | TAG_UNIT => WireValue::Null,
 
-        NanTag::Bool => WireValue::Bool(nb.as_bool().unwrap_or(false)),
+        TAG_BOOL => WireValue::Bool(nb.as_bool().unwrap_or(false)),
 
-        NanTag::F64 => {
-            let n = nb.as_f64().unwrap_or(0.0);
-            WireValue::Number(n)
-        }
+        TAG_INT => WireValue::Integer(nb.as_i64().unwrap_or(0)),
 
-        NanTag::I48 => WireValue::Integer(nb.as_i64().unwrap_or(0)),
-
-        NanTag::Function => {
-            let id = nb.as_function().unwrap_or(0);
+        TAG_FUNCTION => {
+            let id = nb.as_function_id().unwrap_or(0);
             WireValue::String(format!("<function#{}>", id))
         }
 
-        NanTag::ModuleFunction => {
+        TAG_MODULE_FN => {
             let idx = nb.as_module_function().unwrap_or(0);
             WireValue::String(format!("<native:{}>", idx))
         }
 
-        NanTag::Heap => nb_heap_to_wire(nb, ctx),
+        TAG_HEAP => nb_heap_to_wire(nb, ctx),
 
-        NanTag::Ref => WireValue::Null, // References should not appear in wire output
+        _ => WireValue::Null, // References and other tags should not appear in wire output
     }
 }
 
@@ -549,7 +549,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
                 .keys
                 .iter()
                 .zip(d.values.iter())
-                .map(|(k, v)| (format!("{}", k), nb_to_wire(v, ctx)))
+                .map(|(k, v)| (format!("{}", shape_value::ValueWordDisplay(*k)), nb_to_wire(v, ctx)))
                 .collect();
             WireValue::Object(pairs.into_iter().collect())
         }
@@ -1412,7 +1412,7 @@ mod tests {
                 wire_from_vmv,
                 wire_from_nb,
                 "Mismatch for ValueWord type {:?}: ValueWord path = {:?}, ValueWord path = {:?}",
-                nb.tag(),
+                nb.type_name(),
                 wire_from_vmv,
                 wire_from_nb
             );

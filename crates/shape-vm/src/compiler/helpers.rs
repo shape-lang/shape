@@ -1,6 +1,7 @@
 //! Helper methods for bytecode compilation
 
 use super::BorrowMode;
+use shape_value::ValueWordExt;
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
 use crate::type_tracking::{NumericType, StorageHint, TypeTracker, VariableTypeInfo};
 use shape_ast::ast::{Spanned, TypeAnnotation};

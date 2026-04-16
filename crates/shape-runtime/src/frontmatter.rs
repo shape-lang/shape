@@ -8,6 +8,7 @@
 //! Packaging/build sections like `[project]` and `[build]` still belong in `shape.toml`.
 
 use crate::project::{ModulesSection, ShapeProject};
+use shape_value::ValueWordExt;
 use serde::Deserialize;
 
 /// Script-level frontmatter configuration.

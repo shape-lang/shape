@@ -12,7 +12,7 @@
 //! - `Content.fragment(parts)` — composition of content nodes
 
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::content::{
     BorderStyle, ChartSpec, ChartType, ContentNode, ContentTable, NamedColor,
 };
@@ -214,7 +214,7 @@ pub fn content_kv(args: &[ValueWord]) -> Result<ValueWord> {
         } else if let Some(s) = value_nb.as_str() {
             ContentNode::plain(s)
         } else {
-            ContentNode::plain(format!("{}", value_nb))
+            ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*value_nb)))
         };
 
         pairs.push((key, value));
@@ -243,7 +243,7 @@ pub fn content_fragment(args: &[ValueWord]) -> Result<ValueWord> {
         } else if let Some(s) = part_nb.as_str() {
             parts.push(ContentNode::plain(s));
         } else {
-            parts.push(ContentNode::plain(format!("{}", part_nb)));
+            parts.push(ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*part_nb))));
         }
     }
 

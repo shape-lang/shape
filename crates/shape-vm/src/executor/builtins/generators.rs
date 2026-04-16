@@ -3,7 +3,7 @@
 //! Handles: range, slice
 
 use crate::executor::VirtualMachine;
-use shape_value::{NanTag, VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -17,7 +17,7 @@ impl VirtualMachine {
         args: Vec<ValueWord>,
     ) -> Result<ValueWord, VMError> {
         // Check if all arguments are integers — if so, produce Int output
-        let all_int = args.iter().all(|a| a.tag() == NanTag::I48);
+        let all_int = args.iter().all(|a| a.is_i64());
 
         if all_int {
             return self.builtin_range_int_nb(&args);

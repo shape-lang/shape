@@ -13,7 +13,7 @@ use crate::context::VMError;
 use crate::datatable::DataTable;
 use crate::slot::ValueSlot;
 use crate::value::Upvalue;
-use crate::value_word::{ArrayView, ValueWord};
+use crate::value_word::{ArrayView, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Extract a string reference from a ValueWord, or return a type error.
@@ -97,7 +97,7 @@ pub fn require_closure(nb: &ValueWord) -> Result<(u16, &[Upvalue]), VMError> {
 /// Uses the Display impl which dispatches through HeapValue.
 #[inline]
 pub fn nb_to_display_string(nb: &ValueWord) -> String {
-    format!("{}", nb)
+    format!("{}", crate::value_word::ValueWordDisplay(*nb))
 }
 
 #[cfg(test)]

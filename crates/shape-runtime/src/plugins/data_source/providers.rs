@@ -8,6 +8,7 @@ use std::ptr;
 
 use serde_json::Value;
 use shape_abi_v1::DataSourceVTable;
+use shape_value::ValueWordExt;
 use shape_ast::error::{Result, ShapeError};
 
 use super::query;

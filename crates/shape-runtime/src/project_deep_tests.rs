@@ -7,6 +7,7 @@
 #[cfg(test)]
 mod tests {
     use crate::frontmatter::{
+use shape_value::ValueWordExt;
         FrontmatterDiagnosticSeverity, parse_frontmatter, parse_frontmatter_validated,
     };
     use crate::project::*;

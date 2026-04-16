@@ -3,6 +3,7 @@
 //! Without `gc` feature: stub using Arc reference counting (no-op GC).
 //! With `gc` feature: delegates to shape-gc's GcHeap for real collection.
 
+use shape_value::ValueWordExt;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 

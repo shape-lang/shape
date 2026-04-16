@@ -4,6 +4,7 @@
 //! for querying JIT compiler state.
 
 use super::setup::JITCompiler;
+use shape_value::ValueWordExt;
 use crate::context::JittedStrategyFn;
 use shape_vm::bytecode::{BuiltinFunction, BytecodeProgram, Instruction, OpCode, Operand};
 

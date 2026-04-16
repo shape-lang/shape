@@ -5,7 +5,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::objects::raw_helpers;
 use arrow_array::Float64Array;
 use shape_value::datatable::DataTable;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use super::common::{append_f64_column, extract_dt_nb, wrap_result_table_nb};

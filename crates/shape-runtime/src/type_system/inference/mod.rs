@@ -43,6 +43,7 @@ pub use bidirectional::CheckMode;
 pub use hoisting::{PropertyAssignment, PropertyAssignmentCollector};
 
 use super::checking::MethodTable;
+use shape_value::ValueWordExt;
 use super::constraints::ConstraintSolver;
 use super::environment::TypeEnvironment;
 use super::unification::Unifier;

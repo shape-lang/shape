@@ -6,7 +6,7 @@ use shape_runtime::snapshot::{
     SerializableCallFrame, SerializableExceptionHandler, SerializableLoopContext, SnapshotStore,
     VmSnapshot, nanboxed_to_serializable, serializable_to_nanboxed,
 };
-use shape_value::{Upvalue, VMError, ValueWord};
+use shape_value::{Upvalue, VMError, ValueWord, ValueWordExt};
 
 use super::{CallFrame, ExceptionHandler, LoopContext, VMConfig, VirtualMachine};
 use crate::bytecode::{Function, FunctionHash};
@@ -82,7 +82,7 @@ impl VirtualMachine {
     pub fn snapshot(&self, store: &SnapshotStore) -> Result<VmSnapshot, VMError> {
         let mut stack = Vec::with_capacity(self.sp);
         for i in 0..self.sp {
-            let nb = self.stack_read_vw(i);
+            let nb = self.stack_read_raw(i);
             stack.push(
                 nanboxed_to_serializable(&nb, store)
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?,
@@ -92,7 +92,7 @@ impl VirtualMachine {
         let locals = Vec::new();
         let mut module_bindings = Vec::with_capacity(self.module_bindings.len());
         for i in 0..self.module_bindings.len() {
-            let nb = self.binding_read_vw(i);
+            let nb = self.binding_read_raw(i);
             module_bindings.push(
                 nanboxed_to_serializable(&nb, store)
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?,

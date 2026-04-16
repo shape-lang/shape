@@ -11,7 +11,7 @@ use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
 use crate::{VMConfig, VMError};
 use shape_ast::parser::parse_program;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Extract a numeric value from ValueWord, accepting both Number and Int variants
 fn as_f64(v: &ValueWord) -> Option<f64> {

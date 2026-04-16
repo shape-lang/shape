@@ -13,6 +13,7 @@
 //! At runtime, NaN sentinel is used for Option<f64>, so propagation is zero-cost.
 
 use super::TypeInferenceEngine;
+use shape_value::ValueWordExt;
 use crate::type_system::*;
 use shape_ast::ast::{BinaryOp, Literal, Span, TypeAnnotation, UnaryOp};
 

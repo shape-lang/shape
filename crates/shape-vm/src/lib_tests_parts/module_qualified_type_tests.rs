@@ -2,7 +2,7 @@
 mod module_qualified_type_tests {
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     fn eval(code: &str) -> ValueWord {
         let program = shape_ast::parser::parse_program(code).expect("parse failed");

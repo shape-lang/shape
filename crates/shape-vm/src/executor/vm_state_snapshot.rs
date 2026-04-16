@@ -6,7 +6,7 @@
 //! borrow on it.
 
 use shape_runtime::module_exports::{FrameInfo, VmStateAccessor};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 use super::VirtualMachine;
 
@@ -56,7 +56,7 @@ impl VirtualMachine {
             let locals: Vec<ValueWord> = if frame.locals_count > 0 {
                 let start = frame.base_pointer;
                 let end = (start + frame.locals_count).min(self.sp);
-                (start..end).map(|i| self.stack_read_vw(i)).collect()
+                (start..end).map(|i| self.stack_read_raw(i)).collect()
             } else {
                 Vec::new()
             };
@@ -79,7 +79,7 @@ impl VirtualMachine {
                         .saturating_add(arity)
                         .min(frame.base_pointer + frame.locals_count)
                         .min(self.sp);
-                    (start..end).map(|i| self.stack_read_vw(i)).collect()
+                    (start..end).map(|i| self.stack_read_raw(i)).collect()
                 })
                 .unwrap_or_default();
 
@@ -120,7 +120,7 @@ impl VirtualMachine {
             current_locals,
             module_binding_names: self.program.module_binding_names.clone(),
             module_binding_values: (0..self.module_bindings.len())
-                .map(|i| self.binding_read_vw(i))
+                .map(|i| self.binding_read_raw(i))
                 .collect(),
             instruction_count: self.instruction_count,
         }

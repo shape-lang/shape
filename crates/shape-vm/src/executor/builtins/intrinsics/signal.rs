@@ -2,7 +2,7 @@
 //! implementations for rolling operations, EMA, and array transforms
 //! (shift, diff, pct_change, fillna, cumsum, cumprod, clip).
 
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::NbIntrinsicResult;
 

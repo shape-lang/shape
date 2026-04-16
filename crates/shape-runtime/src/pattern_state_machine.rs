@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 
 use shape_ast::error::Result;
-use shape_value::{NanTag, ValueWord};
+use shape_value::{ValueWord, ValueWordExt};
 
 /// A condition for pattern matching
 #[derive(Debug, Clone)]
@@ -65,11 +65,10 @@ impl PatternCondition {
             | ComparisonOp::Gt
             | ComparisonOp::Ge
             | ComparisonOp::Lt
-            | ComparisonOp::Le => match (field_value.tag(), self.value.tag()) {
-                (NanTag::F64, NanTag::F64)
-                | (NanTag::I48, NanTag::I48)
-                | (NanTag::F64, NanTag::I48)
-                | (NanTag::I48, NanTag::F64) => {
+            | ComparisonOp::Le => {
+                let a_numeric = field_value.is_f64() || field_value.is_i64();
+                let b_numeric = self.value.is_f64() || self.value.is_i64();
+                if a_numeric && b_numeric {
                     if let (Some(a), Some(b)) = (field_value.as_f64(), self.value.as_f64()) {
                         match self.operator {
                             ComparisonOp::Eq => (a - b).abs() < f64::EPSILON,
@@ -83,8 +82,7 @@ impl PatternCondition {
                     } else {
                         false
                     }
-                }
-                (NanTag::Heap, NanTag::Heap) => {
+                } else if field_value.is_heap() && self.value.is_heap() {
                     if let (Some(a), Some(b)) = (field_value.as_str(), self.value.as_str()) {
                         match self.operator {
                             ComparisonOp::Eq => a == b,
@@ -94,14 +92,16 @@ impl PatternCondition {
                     } else {
                         false
                     }
+                } else if field_value.is_bool() && self.value.is_bool() {
+                    match self.operator {
+                        ComparisonOp::Eq => field_value.as_bool() == self.value.as_bool(),
+                        ComparisonOp::Ne => field_value.as_bool() != self.value.as_bool(),
+                        _ => false,
+                    }
+                } else {
+                    false
                 }
-                (NanTag::Bool, NanTag::Bool) => match self.operator {
-                    ComparisonOp::Eq => field_value.as_bool() == self.value.as_bool(),
-                    ComparisonOp::Ne => field_value.as_bool() != self.value.as_bool(),
-                    _ => false,
-                },
-                _ => false,
-            },
+            }
             // String-specific operations
             ComparisonOp::Contains => {
                 if let (Some(a), Some(b)) = (field_value.as_str(), self.value.as_str()) {

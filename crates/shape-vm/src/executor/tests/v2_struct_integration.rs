@@ -4,6 +4,7 @@
 //! bytecode compiler (with typed field opcodes) → VM execution.
 
 use super::test_utils::{eval, eval_result};
+use shape_value::ValueWordExt;
 
 // ===== Basic struct field access =====
 

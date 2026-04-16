@@ -4,7 +4,7 @@
 //! argument-count validation and typed argument extraction with uniform
 //! error messages.
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Validate that `args` has exactly `expected` elements.
 ///

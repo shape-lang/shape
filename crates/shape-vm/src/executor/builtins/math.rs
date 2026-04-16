@@ -3,7 +3,7 @@
 //! Direct builtin methods — no string-based dispatch.
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 /// Extract a number (f64) from a ValueWord
 fn nb_to_f64(nb: &ValueWord) -> Result<f64, VMError> {

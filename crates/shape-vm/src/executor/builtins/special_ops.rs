@@ -12,7 +12,7 @@ use arrow_array::{
 use arrow_schema::DataType;
 use shape_ast::interpolation::{FormatAlignment, FormatColor, TableFormatSpec};
 use shape_runtime::context::ExecutionContext;
-use shape_value::{DataTable, PrintResult, PrintSpan, VMError, ValueWord, heap_value::HeapValue};
+use shape_value::{DataTable, PrintResult, PrintSpan, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
 
 const FORMAT_SPEC_FIXED: i64 = 1;
 const FORMAT_SPEC_TABLE: i64 = 2;
@@ -113,10 +113,7 @@ impl VirtualMachine {
 
         // Non-content values: check for Content trait dispatch
         // If the value type has a Content impl, render it as content first
-        if !matches!(
-            value.tag(),
-            shape_value::value_word::NanTag::None | shape_value::value_word::NanTag::Unit
-        ) {
+        if !(value.is_none() || value.is_unit()) {
             let content_node = shape_runtime::content_dispatch::render_as_content(value);
             // Only use content dispatch if it produced structured content (Table, KeyValue, Fragment with >1 part)
             // For plain text, fall through to the normal formatting path to preserve Display behavior
@@ -450,7 +447,7 @@ impl VirtualMachine {
             .into_boxed_slice(),
             heap_mask: 0b11,
         };
-        self.push_vw(ValueWord::from_heap_value(result))?;
+        self.push_raw_u64(ValueWord::from_heap_value(result))?;
         Ok(())
     }
 

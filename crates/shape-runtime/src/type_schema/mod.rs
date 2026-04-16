@@ -19,7 +19,7 @@
 //! Supports merging multiple schemas for intersection types (`A + B`).
 //! Field collisions are detected at compile time and result in errors.
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -339,7 +339,7 @@ pub fn typed_object_from_nb_pairs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     #[test]
     fn typed_object_from_nb_pairs_is_order_insensitive_for_builtin_schema() {
@@ -420,11 +420,10 @@ pub fn typed_object_to_hashmap_nb(
 /// For non-heap slots, use `slot_to_nb_inline(slot)` to reconstruct the
 /// ValueWord from raw bits.
 pub(crate) fn nb_to_slot(nb: &shape_value::ValueWord) -> (shape_value::slot::ValueSlot, bool) {
-    use shape_value::NanTag;
     use shape_value::slot::ValueSlot;
 
-    match nb.tag() {
-        NanTag::Heap => {
+    if nb.is_heap() {
+        {
             // Handle unified heap values (bit-47): materialize to HeapValue.
             if shape_value::tags::is_unified_heap(nb.raw_bits()) {
                 if let Some(view) = nb.as_any_array() {
@@ -437,9 +436,8 @@ pub(crate) fn nb_to_slot(nb: &shape_value::ValueWord) -> (shape_value::slot::Val
             let hv = nb.as_heap_ref().unwrap().clone();
             (ValueSlot::from_heap(hv), true)
         }
-        _ => {
-            // Store raw ValueWord bits — reconstructible via ValueWord::from_raw_bits()
-            (ValueSlot::from_raw(nb.raw_bits()), false)
-        }
+    } else {
+        // Store raw ValueWord bits — reconstructible via ValueWord::from_raw_bits()
+        (ValueSlot::from_raw(nb.raw_bits()), false)
     }
 }

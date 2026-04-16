@@ -3,7 +3,7 @@
 //! This allows different execution modes (script vs REPL) to control
 //! how print() output is handled without heuristics.
 
-use shape_value::{PrintResult, ValueWord};
+use shape_value::{PrintResult, ValueWord, ValueWordExt};
 use std::sync::{Arc, Mutex};
 
 /// Trait for handling print() output

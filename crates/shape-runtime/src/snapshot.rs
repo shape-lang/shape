@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use shape_value::{EnumPayload, EnumValue, PrintResult, PrintSpan, Upvalue, ValueWord};
+use shape_value::{EnumPayload, EnumValue, PrintResult, PrintSpan, Upvalue, ValueWord, ValueWordExt};
 
 use crate::event_queue::WaitCondition;
 use crate::hashing::{HashDigest, hash_bytes};
@@ -634,20 +634,23 @@ pub fn nanboxed_to_serializable(
     nb: &ValueWord,
     store: &SnapshotStore,
 ) -> Result<SerializableVMValue> {
-    use shape_value::value_word::NanTag;
+    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
 
-    match nb.tag() {
-        NanTag::F64 => Ok(SerializableVMValue::Number(nb.as_f64().unwrap())),
-        NanTag::I48 => Ok(SerializableVMValue::Int(nb.as_i64().unwrap())),
-        NanTag::Bool => Ok(SerializableVMValue::Bool(nb.as_bool().unwrap())),
-        NanTag::None => Ok(SerializableVMValue::None),
-        NanTag::Unit => Ok(SerializableVMValue::Unit),
-        NanTag::Function => Ok(SerializableVMValue::Function(nb.as_function().unwrap())),
-        NanTag::ModuleFunction => Ok(SerializableVMValue::ModuleFunction(format!(
+    let bits = nb.raw_bits();
+    if !is_tagged(bits) {
+        return Ok(SerializableVMValue::Number(nb.as_f64().unwrap()));
+    }
+    match get_tag(bits) {
+        TAG_INT => Ok(SerializableVMValue::Int(nb.as_i64().unwrap())),
+        TAG_BOOL => Ok(SerializableVMValue::Bool(nb.as_bool().unwrap())),
+        TAG_NONE => Ok(SerializableVMValue::None),
+        TAG_UNIT => Ok(SerializableVMValue::Unit),
+        TAG_FUNCTION => Ok(SerializableVMValue::Function(nb.as_function_id().unwrap())),
+        TAG_MODULE_FN => Ok(SerializableVMValue::ModuleFunction(format!(
             "native#{}",
             nb.as_module_function().unwrap()
         ))),
-        NanTag::Heap => {
+        TAG_HEAP => {
             // Handle unified arrays (bit-47 tagged) only.
             if shape_value::tags::is_unified_heap(nb.raw_bits()) {
                 let kind = unsafe { shape_value::tags::unified_heap_kind(nb.raw_bits()) };
@@ -668,7 +671,7 @@ pub fn nanboxed_to_serializable(
             let hv = nb.as_heap_ref().unwrap();
             heap_value_to_serializable(hv, store)
         }
-        NanTag::Ref => Ok(SerializableVMValue::None), // References should not appear in snapshots
+        _ => Ok(SerializableVMValue::None), // References and other tags should not appear in snapshots
     }
 }
 

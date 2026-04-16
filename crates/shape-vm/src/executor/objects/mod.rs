@@ -84,7 +84,7 @@ use crate::{
     executor::VirtualMachine,
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -160,7 +160,7 @@ impl VirtualMachine {
 
         let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
-        self.push_vw(ValueWord::from_type_annotated_value(type_name, value_nb))?;
+        self.push_raw_u64(ValueWord::from_type_annotated_value(type_name, value_nb))?;
 
         Ok(())
     }
@@ -286,9 +286,9 @@ impl VirtualMachine {
                 });
             }
             // Reuse existing type resolution path (typed-object schema lookup included).
-            self.push_vw(ValueWord::from_raw_bits(receiver_bits))?;
+            self.push_raw_u64(ValueWord::from_raw_bits(receiver_bits))?;
             let result = self.builtin_type_of(vec![])?;
-            self.push_vw(result)?;
+            self.push_raw_u64(result)?;
             // Drop the popped args to release refcounts
             for bits in raw_args {
                 drop(ValueWord::from_raw_bits(bits));
@@ -297,9 +297,10 @@ impl VirtualMachine {
         }
 
         // Save receiver type info before moving it into args.
-        use shape_value::NanTag;
         use shape_value::heap_value::HeapKind;
-        let receiver_tag = as_vw_ref(&receiver_bits).tag();
+        let receiver_is_numeric = as_vw_ref(&receiver_bits).is_i64() || as_vw_ref(&receiver_bits).is_f64();
+        let receiver_is_bool = as_vw_ref(&receiver_bits).is_bool();
+        let receiver_is_heap = as_vw_ref(&receiver_bits).is_heap();
         let receiver_heap_kind = as_vw_ref(&receiver_bits).heap_kind();
 
         // Prepend receiver to args — raw bits, no ValueWord clone.
@@ -332,7 +333,7 @@ impl VirtualMachine {
         }
 
         // Type-tagged fast dispatch: when the compiler resolved the receiver's
-        // ConcreteType at compile time, skip the NanTag/HeapKind cascade entirely.
+        // ConcreteType at compile time, skip the tag/HeapKind cascade entirely.
         if receiver_type_tag != 0xFF {
             let phf_result = match receiver_type_tag {
                 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 22 => // F64, I64, int widths, Decimal
@@ -357,35 +358,33 @@ impl VirtualMachine {
                 self.dispatch_method_handler(handler, raw_args, ctx)?;
                 return Ok(());
             }
-            // Fall through to NanTag/HeapKind cascade for unresolved types
+            // Fall through to tag/HeapKind cascade for unresolved types
         }
 
-        // Legacy NanTag/HeapKind dispatch — fallback when receiver_type_tag is 0xFF
+        // Legacy tag/HeapKind dispatch — fallback when receiver_type_tag is 0xFF
         // or for types that need HeapKind specialization (e.g. FloatArray vs IntArray).
-        match receiver_tag {
-            NanTag::I48 | NanTag::F64 => {
-                let handler = method_registry::NUMBER_METHODS
-                    .get(method_name.as_str())
-                    .ok_or_else(|| {
-                        VMError::RuntimeError(format!(
-                            "Unknown method '{}' on Number type",
-                            method_name
-                        ))
-                    })?;
-                self.dispatch_method_handler(handler, raw_args, ctx)?;
-            }
-            NanTag::Bool => {
-                let handler = method_registry::BOOL_METHODS
-                    .get(method_name.as_str())
-                    .ok_or_else(|| {
-                        VMError::RuntimeError(format!(
-                            "Unknown method '{}' on Boolean type",
-                            method_name
-                        ))
-                    })?;
-                self.dispatch_method_handler(handler, raw_args, ctx)?;
-            }
-            NanTag::Heap => match receiver_heap_kind.unwrap() {
+        if receiver_is_numeric {
+            let handler = method_registry::NUMBER_METHODS
+                .get(method_name.as_str())
+                .ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "Unknown method '{}' on Number type",
+                        method_name
+                    ))
+                })?;
+            self.dispatch_method_handler(handler, raw_args, ctx)?;
+        } else if receiver_is_bool {
+            let handler = method_registry::BOOL_METHODS
+                .get(method_name.as_str())
+                .ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "Unknown method '{}' on Boolean type",
+                        method_name
+                    ))
+                })?;
+            self.dispatch_method_handler(handler, raw_args, ctx)?;
+        } else if receiver_is_heap {
+            match receiver_heap_kind.unwrap() {
                 HeapKind::Array => {
                     let handler = method_registry::ARRAY_METHODS
                         .get(method_name.as_str())
@@ -854,14 +853,13 @@ impl VirtualMachine {
                         as_vw_ref(&raw_args[0]).type_name()
                     )));
                 }
-            },
-            _ => {
-                return Err(VMError::RuntimeError(format!(
-                    "Method '{}' not available on type '{}'",
-                    method_name,
-                    as_vw_ref(&raw_args[0]).type_name()
-                )));
             }
+        } else {
+            return Err(VMError::RuntimeError(format!(
+                "Method '{}' not available on type '{}'",
+                method_name,
+                as_vw_ref(&raw_args[0]).type_name()
+            )));
         }
 
         Ok(())
@@ -881,7 +879,7 @@ impl VirtualMachine {
         use crate::executor::v2_handlers::v2_array_detect as v2;
         match method {
             "len" | "length" => {
-                self.push_vw(ValueWord::from_i64(view.len as i64))?;
+                self.push_raw_u64(ValueWord::from_i64(view.len as i64))?;
                 Ok(true)
             }
             "first" => {
@@ -890,7 +888,7 @@ impl VirtualMachine {
                 } else {
                     v2::read_element(view, 0).unwrap_or_else(ValueWord::none)
                 };
-                self.push_vw(val)?;
+                self.push_raw_u64(val)?;
                 Ok(true)
             }
             "last" => {
@@ -899,16 +897,16 @@ impl VirtualMachine {
                 } else {
                     v2::read_element(view, view.len - 1).unwrap_or_else(ValueWord::none)
                 };
-                self.push_vw(val)?;
+                self.push_raw_u64(val)?;
                 Ok(true)
             }
             "is_empty" | "isEmpty" => {
-                self.push_vw(ValueWord::from_bool(view.len == 0))?;
+                self.push_raw_u64(ValueWord::from_bool(view.len == 0))?;
                 Ok(true)
             }
             "sum" => {
                 if let Some(val) = v2::sum_elements(view) {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                     Ok(true)
                 } else {
                     Err(VMError::RuntimeError(
@@ -918,7 +916,7 @@ impl VirtualMachine {
             }
             "avg" | "mean" => {
                 if let Some(val) = v2::avg_elements(view) {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                     Ok(true)
                 } else {
                     Err(VMError::RuntimeError(
@@ -928,7 +926,7 @@ impl VirtualMachine {
             }
             "min" => {
                 if let Some(val) = v2::min_elements(view) {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                     Ok(true)
                 } else {
                     Err(VMError::RuntimeError(
@@ -938,7 +936,7 @@ impl VirtualMachine {
             }
             "max" => {
                 if let Some(val) = v2::max_elements(view) {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                     Ok(true)
                 } else {
                     Err(VMError::RuntimeError(
@@ -948,7 +946,7 @@ impl VirtualMachine {
             }
             "variance" => {
                 if let Some(val) = v2::variance_elements(view) {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                     Ok(true)
                 } else {
                     Err(VMError::RuntimeError(
@@ -958,7 +956,7 @@ impl VirtualMachine {
             }
             "std" => {
                 if let Some(val) = v2::std_elements(view) {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                     Ok(true)
                 } else {
                     Err(VMError::RuntimeError(
@@ -981,7 +979,7 @@ impl VirtualMachine {
                         )));
                     }
                     if let Some(val) = v2::dot_elements(view, vb) {
-                        self.push_vw(val)?;
+                        self.push_raw_u64(val)?;
                         return Ok(true);
                     }
                 }
@@ -990,7 +988,7 @@ impl VirtualMachine {
             }
             "norm" => {
                 if let Some(val) = v2::norm_elements(view) {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                     Ok(true)
                 } else {
                     Err(VMError::RuntimeError(
@@ -1000,7 +998,7 @@ impl VirtualMachine {
             }
             "count" => {
                 if let Some(val) = v2::count_true_elements(view) {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                     Ok(true)
                 } else {
                     Ok(false) // fall through for non-bool
@@ -1008,7 +1006,7 @@ impl VirtualMachine {
             }
             "clone" => {
                 let new_ptr = v2::clone_array(view);
-                self.push_vw(ValueWord::from_native_ptr(new_ptr as usize))?;
+                self.push_raw_u64(ValueWord::from_native_ptr(new_ptr as usize))?;
                 Ok(true)
             }
             "push" => {
@@ -1021,12 +1019,12 @@ impl VirtualMachine {
                 }
                 v2::push_element(view, as_vw_ref(&raw_args[1]))
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-                self.push_vw(ValueWord::none())?;
+                self.push_raw_u64(ValueWord::none())?;
                 Ok(true)
             }
             "pop" => {
                 let val = v2::pop_element(view).unwrap_or_else(ValueWord::none);
-                self.push_vw(val)?;
+                self.push_raw_u64(val)?;
                 Ok(true)
             }
             "map" | "filter" | "reduce" | "fold" | "forEach" | "for_each" | "find"
@@ -1115,7 +1113,7 @@ impl VirtualMachine {
                 })
                 .collect();
             let result_nb = self.invoke_module_fn(&intrinsic_fn, &call_args_nb)?;
-            self.push_vw(result_nb)?;
+            self.push_raw_u64(result_nb)?;
             return Ok(());
         }
 
@@ -1205,7 +1203,7 @@ impl VirtualMachine {
             Some(Box::new(end_nb))
         };
 
-        self.push_vw(ValueWord::from_heap_value(
+        self.push_raw_u64(ValueWord::from_heap_value(
             shape_value::heap_value::HeapValue::Range {
                 start: start_opt,
                 end: end_opt,

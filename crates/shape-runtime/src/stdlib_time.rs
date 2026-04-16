@@ -4,7 +4,7 @@
 
 use crate::module_exports::{ModuleExports, ModuleFunction, ModuleParam};
 use crate::type_schema::typed_object_from_pairs;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Create the `time` module with precision timing functions.
 pub fn create_time_module() -> ModuleExports {

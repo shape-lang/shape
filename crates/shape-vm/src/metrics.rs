@@ -5,6 +5,7 @@
 //! histogram for GC pause latencies.
 
 use std::mem::MaybeUninit;
+use shape_value::ValueWordExt;
 
 // ---------------------------------------------------------------------------
 // RingBuffer<T, N>

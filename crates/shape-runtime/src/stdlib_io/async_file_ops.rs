@@ -3,7 +3,7 @@
 //! Provides non-blocking file read/write using tokio's async file API.
 //! These integrate with the VM's async/await system via `AsyncModuleFn`.
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// io.read_file_async(path: string) -> string

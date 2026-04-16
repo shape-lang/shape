@@ -4,7 +4,7 @@
 //!          msgpack.encode_bytes(value), msgpack.decode_bytes(data)
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Convert a `serde_json::Value` into an untyped `ValueWord`.

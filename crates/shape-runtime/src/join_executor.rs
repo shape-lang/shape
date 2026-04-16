@@ -11,7 +11,7 @@
 use crate::context::ExecutionContext;
 use shape_ast::ast::{JoinClause, JoinCondition, JoinType};
 use shape_ast::error::Result;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 /// Execute JOINs between data sources
@@ -336,40 +336,35 @@ impl JoinExecutor {
 
 /// Check if two ValueWord values are equal
 fn nb_values_equal(a: &ValueWord, b: &ValueWord) -> bool {
-    use shape_value::NanTag;
-    match (a.tag(), b.tag()) {
-        (NanTag::F64, NanTag::F64)
-        | (NanTag::I48, NanTag::I48)
-        | (NanTag::F64, NanTag::I48)
-        | (NanTag::I48, NanTag::F64) => {
-            if let (Some(an), Some(bn)) = (a.as_f64(), b.as_f64()) {
-                if an.is_nan() && bn.is_nan() {
-                    true
-                } else {
-                    (an - bn).abs() < f64::EPSILON
-                }
+    let a_numeric = a.is_f64() || a.is_i64();
+    let b_numeric = b.is_f64() || b.is_i64();
+    if a_numeric && b_numeric {
+        if let (Some(an), Some(bn)) = (a.as_f64(), b.as_f64()) {
+            if an.is_nan() && bn.is_nan() {
+                return true;
             } else {
-                false
+                return (an - bn).abs() < f64::EPSILON;
             }
         }
-        (NanTag::Heap, NanTag::Heap) => {
-            if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
-                sa == sb
-            } else {
-                false
-            }
-        }
-        (NanTag::Bool, NanTag::Bool) => a.as_bool() == b.as_bool(),
-        (NanTag::None, NanTag::None) => true,
-        _ => {
-            // For Time values, fall back
-            if let (Some(ta), Some(tb)) = (a.as_time(), b.as_time()) {
-                ta == tb
-            } else {
-                false
-            }
-        }
+        return false;
     }
+    if a.is_heap() && b.is_heap() {
+        if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
+            return sa == sb;
+        }
+        return false;
+    }
+    if a.is_bool() && b.is_bool() {
+        return a.as_bool() == b.as_bool();
+    }
+    if a.is_none() && b.is_none() {
+        return true;
+    }
+    // For Time values, fall back
+    if let (Some(ta), Some(tb)) = (a.as_time(), b.as_time()) {
+        return ta == tb;
+    }
+    false
 }
 
 /// Extract timestamp as milliseconds from a ValueWord value

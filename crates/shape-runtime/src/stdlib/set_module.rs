@@ -6,7 +6,7 @@
 //!          set.difference(a, b), set.to_array(s), set.size(s)
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Create an empty set (HashMap with no entries).
 fn empty_set() -> ValueWord {

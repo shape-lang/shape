@@ -5,7 +5,7 @@ use crate::bytecode::*;
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
 use shape_ast::parser::parse_program;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 

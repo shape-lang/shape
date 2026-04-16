@@ -3,7 +3,7 @@
 //! Handles: len, length, first, last, push, pop, get, set, reverse, clone
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 

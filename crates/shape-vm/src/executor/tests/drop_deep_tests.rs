@@ -11,7 +11,7 @@
 
 use crate::bytecode::OpCode;
 use crate::executor::tests::test_utils::{compile, eval};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Count occurrences of a specific opcode in compiled bytecode.
 fn count_opcode(source: &str, opcode: OpCode) -> usize {

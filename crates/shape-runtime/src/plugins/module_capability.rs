@@ -8,7 +8,7 @@ use shape_abi_v1::{
     PluginError,
 };
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_wire::{WireValue, render_any_error_plain};
 use std::collections::HashSet;
 use std::ffi::c_void;

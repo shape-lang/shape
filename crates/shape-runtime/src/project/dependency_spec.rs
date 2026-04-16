@@ -1,6 +1,7 @@
 //! Dependency specification types for shape.toml `[dependencies]`.
 
 use serde::{Deserialize, Serialize};
+use shape_value::ValueWordExt;
 
 use super::permissions::PermissionPreset;
 

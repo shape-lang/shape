@@ -11,7 +11,7 @@
 
 use crate::heap_value::HeapValue;
 use crate::tags;
-use crate::value_word::ValueWord;
+use crate::value_word::{ValueWord, ValueWordExt};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -581,7 +581,7 @@ impl fmt::Display for ExternalValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value_word::ValueWord;
+    use crate::value_word::{ValueWord, ValueWordExt};
 
     #[test]
     fn test_number_roundtrip() {

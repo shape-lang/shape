@@ -10,7 +10,7 @@ use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use crate::memory::{record_heap_write, write_barrier_vw};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HashMapData;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -532,7 +532,7 @@ pub fn v2_iter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
     use shape_value::heap_value::HashMapData;
     use std::sync::Arc;
 

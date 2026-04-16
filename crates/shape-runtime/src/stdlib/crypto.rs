@@ -6,7 +6,7 @@
 //!          crypto.ed25519_generate_keypair, crypto.ed25519_sign, crypto.ed25519_verify
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Create the `crypto` module with hashing and encoding functions.

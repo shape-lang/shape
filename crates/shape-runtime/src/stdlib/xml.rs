@@ -8,7 +8,7 @@
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::io::Cursor;
 use std::sync::Arc;
 

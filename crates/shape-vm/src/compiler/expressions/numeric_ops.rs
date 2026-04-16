@@ -1,6 +1,7 @@
 //! Numeric binary-op helpers shared by expression lowering.
 
 use crate::bytecode::{Instruction, OpCode};
+use shape_value::ValueWordExt;
 use crate::type_tracking::NumericType;
 use shape_ast::ast::{BinaryOp, TypeAnnotation};
 use shape_runtime::type_system::{BuiltinTypes, Type};

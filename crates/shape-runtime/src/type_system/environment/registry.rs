@@ -4,6 +4,7 @@
 //! for the type system.
 
 use serde::{Deserialize, Serialize};
+use shape_value::ValueWordExt;
 use shape_ast::ast::{EnumDef, Expr, InterfaceDef, TraitDef, TypeAnnotation};
 use std::collections::HashMap;
 

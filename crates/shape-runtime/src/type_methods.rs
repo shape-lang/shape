@@ -5,7 +5,7 @@
 
 use crate::type_system::annotation_to_string;
 use shape_ast::ast::{MethodDef, TypeName};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 

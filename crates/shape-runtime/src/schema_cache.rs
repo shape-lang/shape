@@ -9,7 +9,7 @@ use crate::type_schema::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_wire::WireValue;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};

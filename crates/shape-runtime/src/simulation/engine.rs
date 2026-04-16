@@ -4,7 +4,7 @@
 //! processing over time series data.
 
 use shape_ast::error::Result;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Type alias: simulation engine uses ValueWord as its runtime Value type.

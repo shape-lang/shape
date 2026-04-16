@@ -10,6 +10,7 @@ mod schema;
 pub use schema::{ParsedOutputField, ParsedOutputSchema, ParsedQueryParam, ParsedQuerySchema};
 
 use std::ffi::c_void;
+use shape_value::ValueWordExt;
 
 use serde_json::Value;
 use shape_abi_v1::DataSourceVTable;

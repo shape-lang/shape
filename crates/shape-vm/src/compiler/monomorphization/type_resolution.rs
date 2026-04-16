@@ -121,6 +121,7 @@
 
 use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
 use shape_value::v2::ConcreteType;
+use shape_value::ValueWordExt;
 use std::collections::HashMap;
 
 use crate::compiler::BytecodeCompiler;

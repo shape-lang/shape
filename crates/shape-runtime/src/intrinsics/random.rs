@@ -8,7 +8,7 @@ use crate::context::ExecutionContext;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::cell::RefCell;
 
 thread_local! {

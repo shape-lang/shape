@@ -17,7 +17,7 @@ pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
 use shape_runtime::type_schema::{register_predeclared_any_schema, typed_object_from_nb_pairs};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Check if a type string looks like `Option<T>` or `T?`.

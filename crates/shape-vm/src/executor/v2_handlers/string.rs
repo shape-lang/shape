@@ -6,7 +6,7 @@
 use crate::bytecode::{Instruction, OpCode, Operand};
 use shape_value::heap_value::NativeScalar;
 use shape_value::v2::string_obj::StringObj;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::super::VirtualMachine;
 
@@ -49,14 +49,14 @@ impl VirtualMachine {
                     .cloned()
                     .unwrap_or_default();
                 let ptr = StringObj::new(&s);
-                self.push_vw(ValueWord::from_native_ptr(ptr as usize))?;
+                self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
                 Ok(())
             }
 
             // ── String length ──────────────────────────────────────────
 
             OpCode::StringLenV2 => {
-                let str_vw = self.pop_vw()?;
+                let str_vw = self.pop_raw_u64()?;
                 let str_ptr = extract_ptr(&str_vw) as *const StringObj;
                 // Safety: str_ptr was created by NewStringV2 or string FFI.
                 let len = unsafe { StringObj::len(str_ptr) };
@@ -67,21 +67,21 @@ impl VirtualMachine {
             // ── String concatenation ───────────────────────────────────
 
             OpCode::StringConcatV2 => {
-                let b_vw = self.pop_vw()?;
-                let a_vw = self.pop_vw()?;
+                let b_vw = self.pop_raw_u64()?;
+                let a_vw = self.pop_raw_u64()?;
                 let a_ptr = extract_ptr(&a_vw) as *const StringObj;
                 let b_ptr = extract_ptr(&b_vw) as *const StringObj;
                 // Safety: both pointers were created by NewStringV2 or string FFI.
                 let result = unsafe { StringObj::concat(a_ptr, b_ptr) };
-                self.push_vw(ValueWord::from_native_ptr(result as usize))?;
+                self.push_raw_u64(ValueWord::from_native_ptr(result as usize))?;
                 Ok(())
             }
 
             // ── String equality ────────────────────────────────────────
 
             OpCode::StringEqV2 => {
-                let b_vw = self.pop_vw()?;
-                let a_vw = self.pop_vw()?;
+                let b_vw = self.pop_raw_u64()?;
+                let a_vw = self.pop_raw_u64()?;
                 let a_ptr = extract_ptr(&a_vw) as *const StringObj;
                 let b_ptr = extract_ptr(&b_vw) as *const StringObj;
                 // Safety: both pointers were created by NewStringV2 or string FFI.

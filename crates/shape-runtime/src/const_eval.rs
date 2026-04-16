@@ -61,7 +61,7 @@
 
 use shape_ast::ast::{Expr, Literal, ObjectEntry};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -383,10 +383,7 @@ mod tests {
         let evaluator = ConstEvaluator::new();
         let expr = Expr::Literal(Literal::String("hello".to_string()), Span::DUMMY);
         let result = evaluator.eval(&expr).unwrap();
-        assert_eq!(
-            result,
-            ValueWord::from_string(Arc::new("hello".to_string()))
-        );
+        assert_eq!(result.as_str(), Some("hello"));
     }
 
     #[test]
@@ -400,10 +397,7 @@ mod tests {
             Span::DUMMY,
         );
         let result = evaluator.eval(&expr).unwrap();
-        assert_eq!(
-            result,
-            ValueWord::from_string(Arc::new("value: {x}".to_string()))
-        );
+        assert_eq!(result.as_str(), Some("value: {x}"));
     }
 
     #[test]
@@ -490,8 +484,8 @@ mod tests {
         };
         let result = evaluator.eval(&expr).unwrap();
         assert_eq!(
-            result,
-            ValueWord::from_string(Arc::new("hello world".to_string()))
+            result.as_str(),
+            Some("hello world")
         );
     }
 

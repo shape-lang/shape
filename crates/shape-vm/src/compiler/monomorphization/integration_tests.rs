@@ -1,4 +1,3 @@
-//! End-to-end integration tests for monomorphized stdlib functions.
 //!
 //! These tests exercise the full monomorphization pipeline: compile generic
 //! stdlib calls (`map`, `filter`, `reduce`, …) for concrete element types and
@@ -15,6 +14,7 @@
 //! - `test_user_defined_generic_function`: regular (non-method) function calls
 //!   do not yet trigger monomorphization.
 
+use shape_value::ValueWordExt;
 // ---------------------------------------------------------------------------
 // Meta-test: confirm the monomorphization module is reachable.
 // ---------------------------------------------------------------------------
@@ -118,6 +118,7 @@ mod mono_key_tests {
 
 #[cfg(test)]
 mod e2e_tests {
+    use shape_value::ValueWordExt;
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
     #[allow(unused_imports)]

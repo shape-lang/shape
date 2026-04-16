@@ -3,7 +3,7 @@
 //! Direct builtin methods — no string-based dispatch.
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord, heap_value::HeapValue};
+use shape_value::{VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
 use std::sync::Arc;
 
 impl VirtualMachine {

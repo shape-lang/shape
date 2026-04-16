@@ -11,7 +11,7 @@ use crate::context::ExecutionContext;
 use crate::type_schema::typed_object_from_nb_pairs;
 use rustfft::{FftPlanner, num_complex::Complex};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// FFT intrinsic - compute forward Fast Fourier Transform
 ///

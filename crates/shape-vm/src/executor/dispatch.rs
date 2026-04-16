@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::bytecode::{Instruction, OpCode};
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::debugger_integration::DebuggerIntegration;
 use super::{DebugVMState, ExecutionResult, VirtualMachine, async_ops};
@@ -198,7 +198,7 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_vw(self.sp)
+            self.stack_take_raw(self.sp)
         } else {
             ValueWord::none()
         }))
@@ -306,7 +306,7 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_vw(self.sp)
+            self.stack_take_raw(self.sp)
         } else {
             ValueWord::none()
         }))
@@ -360,7 +360,7 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_vw(self.sp)
+            self.stack_take_raw(self.sp)
         } else {
             ValueWord::none()
         })

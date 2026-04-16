@@ -18,7 +18,7 @@
 
 use shape_jit::nan_boxing::TAG_NULL;
 use shape_jit::{JITCompiler, JITConfig, JITContext};
-use shape_value::{ScalarKind, TypedScalar};
+use shape_value::{ScalarKind, TypedScalar, ValueWordExt, ValueWordScalarExt};
 use shape_vm::bytecode::{BytecodeProgram, Constant, DebugInfo, Instruction, OpCode, Operand};
 use shape_vm::{VMConfig, VirtualMachine};
 

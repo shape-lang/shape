@@ -7,7 +7,7 @@
 //! tests).
 
 use shape_ast::parser::parse_program;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_vm::VMConfig;
 use shape_vm::compiler::BytecodeCompiler;
 use shape_vm::executor::VirtualMachine;

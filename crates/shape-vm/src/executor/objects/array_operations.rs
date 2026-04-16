@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_value::nanboxed::RefTarget;
-use shape_value::{HeapValue, VMError, ValueWord};
+use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -20,7 +20,7 @@ impl VirtualMachine {
         {
             crate::executor::v2_handlers::v2_array_detect::push_element(&view, &value_nb)
                 .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-            self.push_vw(array_nb)?;
+            self.push_raw_u64(array_nb)?;
             return Ok(());
         }
 
@@ -34,7 +34,7 @@ impl VirtualMachine {
                 let new_bits = value_nb.raw_bits();
                 std::mem::forget(value_nb);
                 arr.push(new_bits);
-                self.push_vw(array_nb)?;
+                self.push_raw_u64(array_nb)?;
                 return Ok(());
             }
         }
@@ -44,43 +44,43 @@ impl VirtualMachine {
             match &mut view {
                 shape_value::ArrayViewMut::Generic(arc_vec) => {
                     Arc::make_mut(arc_vec).push(value_nb);
-                    self.push_vw(array_nb)?;
+                    self.push_raw_u64(array_nb)?;
                     return Ok(());
                 }
                 shape_value::ArrayViewMut::Int(arc_vec) => {
                     if let Some(i) = value_nb.as_i64() {
                         Arc::make_mut(arc_vec).push(i);
-                        self.push_vw(array_nb)?;
+                        self.push_raw_u64(array_nb)?;
                         return Ok(());
                     }
                     let generic = array_nb.as_any_array().unwrap().to_generic();
                     let mut vec = (*generic).clone();
                     vec.push(value_nb);
-                    self.push_vw(ValueWord::from_array(Arc::new(vec)))?;
+                    self.push_raw_u64(ValueWord::from_array(Arc::new(vec)))?;
                     return Ok(());
                 }
                 shape_value::ArrayViewMut::Float(arc_vec) => {
                     if let Some(f) = value_nb.as_f64() {
                         Arc::make_mut(arc_vec).push(f);
-                        self.push_vw(array_nb)?;
+                        self.push_raw_u64(array_nb)?;
                         return Ok(());
                     }
                     let generic = array_nb.as_any_array().unwrap().to_generic();
                     let mut vec = (*generic).clone();
                     vec.push(value_nb);
-                    self.push_vw(ValueWord::from_array(Arc::new(vec)))?;
+                    self.push_raw_u64(ValueWord::from_array(Arc::new(vec)))?;
                     return Ok(());
                 }
                 shape_value::ArrayViewMut::Bool(arc_vec) => {
                     if let Some(b) = value_nb.as_bool() {
                         Arc::make_mut(arc_vec).push(if b { 1 } else { 0 });
-                        self.push_vw(array_nb)?;
+                        self.push_raw_u64(array_nb)?;
                         return Ok(());
                     }
                     let generic = array_nb.as_any_array().unwrap().to_generic();
                     let mut vec = (*generic).clone();
                     vec.push(value_nb);
-                    self.push_vw(ValueWord::from_array(Arc::new(vec)))?;
+                    self.push_raw_u64(ValueWord::from_array(Arc::new(vec)))?;
                     return Ok(());
                 }
             }
@@ -108,12 +108,12 @@ impl VirtualMachine {
             Some(Operand::Local(idx)) => {
                 let bp = self.current_locals_base();
                 let slot = bp + idx as usize;
-                let ref_target = self.stack_peek_vw(slot, |vw| vw.as_ref_target());
+                let ref_target = self.stack_peek_raw(slot, |vw| vw.as_ref_target());
                 match ref_target {
                     Some(RefTarget::Stack(target)) => {
-                        let mut arr = self.stack_take_vw(target);
+                        let mut arr = self.stack_take_raw(target);
                         let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.stack_write_vw(target, arr);
+                        self.stack_write_raw(target, arr);
                         r
                     }
                     Some(RefTarget::ModuleBinding(target)) => {
@@ -123,9 +123,9 @@ impl VirtualMachine {
                                 target
                             )));
                         }
-                        let mut arr = self.binding_take_vw(target);
+                        let mut arr = self.binding_take_raw(target);
                         let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.binding_write_vw(target, arr);
+                        self.binding_write_raw(target, arr);
                         r
                     }
                     Some(target) => {
@@ -134,9 +134,9 @@ impl VirtualMachine {
                         self.write_ref_target(&target, array_nb)
                     }
                     None => {
-                        let mut arr = self.stack_take_vw(slot);
+                        let mut arr = self.stack_take_raw(slot);
                         let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.stack_write_vw(slot, arr);
+                        self.stack_write_raw(slot, arr);
                         r
                     }
                 }
@@ -158,9 +158,9 @@ impl VirtualMachine {
                 };
                 match ref_target {
                     Some(RefTarget::Stack(target)) => {
-                        let mut arr = self.stack_take_vw(target);
+                        let mut arr = self.stack_take_raw(target);
                         let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.stack_write_vw(target, arr);
+                        self.stack_write_raw(target, arr);
                         r
                     }
                     Some(RefTarget::ModuleBinding(target)) => {
@@ -170,9 +170,9 @@ impl VirtualMachine {
                                 target
                             )));
                         }
-                        let mut arr = self.binding_take_vw(target);
+                        let mut arr = self.binding_take_raw(target);
                         let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.binding_write_vw(target, arr);
+                        self.binding_write_raw(target, arr);
                         r
                     }
                     Some(target) => {
@@ -181,9 +181,9 @@ impl VirtualMachine {
                         self.write_ref_target(&target, array_nb)
                     }
                     None => {
-                        let mut arr = self.binding_take_vw(slot);
+                        let mut arr = self.binding_take_raw(slot);
                         let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.binding_write_vw(slot, arr);
+                        self.binding_write_raw(slot, arr);
                         r
                     }
                 }
@@ -304,7 +304,7 @@ impl VirtualMachine {
         {
             let val = crate::executor::v2_handlers::v2_array_detect::pop_element(&view)
                 .unwrap_or_else(ValueWord::none);
-            self.push_vw(val)?;
+            self.push_raw_u64(val)?;
             return Ok(());
         }
 
@@ -314,7 +314,7 @@ impl VirtualMachine {
         })?;
 
         let value = arr.last_nb().unwrap_or_else(ValueWord::none);
-        self.push_vw(value)?;
+        self.push_raw_u64(value)?;
         Ok(())
     }
 
@@ -358,7 +358,7 @@ impl VirtualMachine {
                 } else {
                     Vec::new()
                 };
-                self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
                 return Ok(());
             }
         }
@@ -385,7 +385,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
             Some(HeapValue::IntArray(arr)) => {
                 let len = arr.len() as i32;
@@ -410,7 +410,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
             Some(HeapValue::FloatArray(arr)) => {
                 let len = arr.len() as i32;
@@ -435,7 +435,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
             Some(HeapValue::FloatArraySlice { parent, offset, len: slice_len }) => {
                 let total = *slice_len as usize;
@@ -463,7 +463,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
             Some(HeapValue::BoolArray(arr)) => {
                 let len = arr.len() as i32;
@@ -488,7 +488,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_vw(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
             }
             Some(HeapValue::String(s)) => {
                 let len = s.len() as i32;
@@ -509,7 +509,7 @@ impl VirtualMachine {
                     String::new()
                 };
 
-                self.push_vw(ValueWord::from_string(Arc::new(slice_str)))?;
+                self.push_raw_u64(ValueWord::from_string(Arc::new(slice_str)))?;
             }
             _ => {
                 return Err(VMError::TypeError {

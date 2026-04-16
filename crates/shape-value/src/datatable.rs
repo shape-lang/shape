@@ -10,7 +10,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use std::sync::Arc;
 
-use crate::ValueWord;
+use crate::{ValueWord, ValueWordExt};
 
 /// Raw pointers to Arrow column buffers for zero-cost field access.
 ///
@@ -209,22 +209,28 @@ impl DataTable {
                 // Convert ValueWord to (ValueSlot, is_heap) pair.
                 // Heap values go through ValueSlot::from_heap; inline values store raw bits.
                 let nb_to_slot = |nb: &ValueWord| -> (ValueSlot, bool) {
-                    use crate::value_word::NanTag;
-                    match nb.tag() {
-                        NanTag::Heap => {
-                            let hv = nb.as_heap_ref().cloned().unwrap_or_else(|| {
-                                HeapValue::String(std::sync::Arc::new(String::new()))
-                            });
-                            (ValueSlot::from_heap(hv), true)
-                        }
-                        NanTag::F64 => (ValueSlot::from_number(nb.as_f64().unwrap_or(0.0)), false),
-                        NanTag::I48 => (ValueSlot::from_int(nb.as_i64().unwrap_or(0)), false),
-                        NanTag::Bool => {
-                            (ValueSlot::from_bool(nb.as_bool().unwrap_or(false)), false)
-                        }
-                        NanTag::None | NanTag::Unit | NanTag::Ref => (ValueSlot::none(), false),
-                        NanTag::Function | NanTag::ModuleFunction => {
-                            (ValueSlot::from_raw(nb.raw_bits()), false)
+                    use crate::tags::{is_tagged, get_tag, TAG_HEAP, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_REF, TAG_FUNCTION, TAG_MODULE_FN};
+                    use crate::value_word::ValueWordExt as _;
+                    let bits = nb.raw_bits();
+                    if !is_tagged(bits) {
+                        (ValueSlot::from_number(nb.as_f64().unwrap_or(0.0)), false)
+                    } else {
+                        match get_tag(bits) {
+                            TAG_HEAP => {
+                                let hv = nb.as_heap_ref().cloned().unwrap_or_else(|| {
+                                    HeapValue::String(std::sync::Arc::new(String::new()))
+                                });
+                                (ValueSlot::from_heap(hv), true)
+                            }
+                            TAG_INT => (ValueSlot::from_int(nb.as_i64().unwrap_or(0)), false),
+                            TAG_BOOL => {
+                                (ValueSlot::from_bool(nb.as_bool().unwrap_or(false)), false)
+                            }
+                            TAG_NONE | TAG_UNIT | TAG_REF => (ValueSlot::none(), false),
+                            TAG_FUNCTION | TAG_MODULE_FN => {
+                                (ValueSlot::from_raw(nb.raw_bits()), false)
+                            }
+                            _ => (ValueSlot::none(), false),
                         }
                     }
                 };

@@ -7,6 +7,7 @@ use arrow_array::{Float64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use shape_value::DataTable;
+use shape_value::ValueWordExt;
 use shape_vm::bytecode::{Constant, Operand};
 use shape_vm::{BytecodeProgram, Instruction, OpCode, VMConfig, VirtualMachine};
 use std::sync::Arc;

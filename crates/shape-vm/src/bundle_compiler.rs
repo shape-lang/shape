@@ -3,6 +3,7 @@
 //! Takes a ProjectRoot and compiles all .shape files into a PackageBundle.
 
 use crate::bytecode;
+use shape_value::ValueWordExt;
 use crate::compiler::BytecodeCompiler;
 use crate::module_resolution::annotate_program_native_abi_package_key;
 use sha2::{Digest, Sha256};

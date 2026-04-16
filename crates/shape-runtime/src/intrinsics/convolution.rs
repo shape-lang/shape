@@ -8,7 +8,7 @@
 use super::{extract_f64_array, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use wide::f64x4;
 
 /// Intrinsic: 1D Stencil/Convolution

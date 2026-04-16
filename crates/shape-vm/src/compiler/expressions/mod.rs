@@ -2,6 +2,7 @@
 //!
 //! This module contains the main expression compilation logic, organized by expression type.
 
+use shape_value::ValueWordExt;
 use shape_ast::ast::{Expr, Span};
 use shape_ast::error::{Result, ShapeError};
 

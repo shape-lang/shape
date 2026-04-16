@@ -975,7 +975,7 @@ pub enum Operand {
         /// and error messages)
         string_id: u16,
         /// Compile-time resolved receiver type tag (ConcreteType::type_tag()).
-        /// 0xFF = unknown (triggers runtime NanTag/HeapKind dispatch fallback).
+        /// 0xFF = unknown (triggers runtime tag/HeapKind dispatch fallback).
         receiver_type_tag: u8,
     },
     /// Foreign function index — indexes into program.foreign_functions

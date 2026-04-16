@@ -9,7 +9,7 @@
 //! they feed values back into the VM.
 
 use crate::debugger::VMDebugger;
-use shape_value::{ExternalValue, ValueWord};
+use shape_value::{ExternalValue, ValueWord, ValueWordExt};
 
 /// Debugger integration for VirtualMachine
 pub trait DebuggerIntegration {
@@ -59,7 +59,7 @@ pub trait DebuggerIntegration {
 impl DebuggerIntegration for super::VirtualMachine {
     fn trace_state(&self) {
         let schemas = &self.program.type_schema_registry;
-        let stack_vals: Vec<_> = self.stack_slice_vw(0..self.sp)
+        let stack_vals: Vec<_> = self.stack_slice_raw(0..self.sp)
             .iter()
             .map(|nb| shape_value::nb_to_external(nb, schemas))
             .collect();
@@ -73,7 +73,7 @@ impl DebuggerIntegration for super::VirtualMachine {
         let schemas = &self.program.type_schema_registry;
         println!("=== DEBUG BREAK ===");
         println!("IP: {}, SP: {}", self.ip, self.sp);
-        let stack_vals: Vec<_> = self.stack_slice_vw(0..self.sp)
+        let stack_vals: Vec<_> = self.stack_slice_raw(0..self.sp)
             .iter()
             .map(|nb| shape_value::nb_to_external(nb, schemas))
             .collect();
@@ -81,14 +81,14 @@ impl DebuggerIntegration for super::VirtualMachine {
         if let Some(frame) = self.call_stack.last() {
             let bp = frame.base_pointer;
             let end = (bp + frame.locals_count).min(self.sp);
-            let locals: Vec<_> = self.stack_slice_vw(bp..end)
+            let locals: Vec<_> = self.stack_slice_raw(bp..end)
                 .iter()
                 .map(|nb| shape_value::nb_to_external(nb, schemas))
                 .collect();
             println!("Locals (bp={}): {:?}", bp, locals);
         }
         let module_bindings: Vec<_> = self
-            .bindings_slice_vw()
+            .bindings_slice_raw()
             .iter()
             .map(|nb| shape_value::nb_to_external(nb, schemas))
             .collect();
@@ -109,7 +109,7 @@ impl DebuggerIntegration for super::VirtualMachine {
     fn stack_top(&self) -> Option<ExternalValue> {
         if self.sp > 0 {
             let schemas = &self.program.type_schema_registry;
-            let vw_slice = self.stack_slice_vw((self.sp - 1)..self.sp);
+            let vw_slice = self.stack_slice_raw((self.sp - 1)..self.sp);
             Some(shape_value::nb_to_external(&vw_slice[0], schemas))
         } else {
             None
@@ -118,7 +118,7 @@ impl DebuggerIntegration for super::VirtualMachine {
 
     fn stack_values_vec(&self) -> Vec<ExternalValue> {
         let schemas = &self.program.type_schema_registry;
-        self.stack_slice_vw(0..self.sp)
+        self.stack_slice_raw(0..self.sp)
             .iter()
             .map(|nb| shape_value::nb_to_external(nb, schemas))
             .collect()
@@ -137,7 +137,7 @@ impl DebuggerIntegration for super::VirtualMachine {
         if let Some(frame) = self.call_stack.last() {
             let bp = frame.base_pointer;
             let end = (bp + frame.locals_count).min(self.sp);
-            self.stack_slice_vw(bp..end)
+            self.stack_slice_raw(bp..end)
                 .iter()
                 .map(|nb| shape_value::nb_to_external(nb, schemas))
                 .collect()
@@ -148,18 +148,18 @@ impl DebuggerIntegration for super::VirtualMachine {
 
     fn module_binding_values(&self) -> Vec<ValueWord> {
         (0..self.module_bindings.len())
-            .map(|i| self.binding_read_vw(i))
+            .map(|i| self.binding_read_raw(i))
             .collect()
     }
 
     fn set_module_binding(&mut self, index: usize, value: ValueWord) {
         if index < self.module_bindings.len() {
             // BARRIER: heap write site — debugger overwrites module binding slot
-            self.binding_write_vw(index, value);
+            self.binding_write_raw(index, value);
         } else {
             self.module_bindings.resize_with(index + 1, || Self::NONE_BITS);
             // BARRIER: heap write site — debugger overwrites module binding slot (after resize)
-            self.binding_write_vw(index, value);
+            self.binding_write_raw(index, value);
         }
     }
 

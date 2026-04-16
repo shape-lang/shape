@@ -43,6 +43,7 @@ use shape_ast::ast::types::{
     ExtendStatement, FunctionParam, MethodDef, ObjectTypeField, TypeAnnotation,
 };
 use shape_value::v2::ConcreteType;
+use shape_value::ValueWordExt;
 use std::collections::HashMap;
 
 use crate::compiler::monomorphization::type_resolution::ComptimeConstValue;

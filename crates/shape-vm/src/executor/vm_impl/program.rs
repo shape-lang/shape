@@ -1,4 +1,5 @@
 use super::super::*;
+use shape_value::ValueWordExt;
 
 impl VirtualMachine {
     /// Load a program into the VM
@@ -428,7 +429,7 @@ impl VirtualMachine {
     /// Get a snapshot of all module binding values.
     pub fn module_bindings_snapshot(&self) -> Vec<ValueWord> {
         (0..self.module_bindings.len())
-            .map(|i| self.binding_read_vw(i))
+            .map(|i| self.binding_read_raw(i))
             .collect()
     }
 
@@ -515,7 +516,7 @@ impl VirtualMachine {
         if self.sp >= self.stack.len() {
             self.stack.resize_with(self.sp * 2 + 1, || Self::NONE_BITS);
         }
-        self.stack_write_vw(self.sp, value);
+        self.stack_write_raw(self.sp, value);
         self.sp += 1;
     }
 }

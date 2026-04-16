@@ -9,7 +9,7 @@
 use crate::context::ExecutionContext;
 use parking_lot::RwLock;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 

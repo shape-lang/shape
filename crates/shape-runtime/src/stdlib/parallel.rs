@@ -13,7 +13,7 @@
 //! and reassembled using Rayon when no callback is involved.
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// parallel.map(array, fn) -> Array

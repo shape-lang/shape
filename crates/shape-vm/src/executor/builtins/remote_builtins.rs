@@ -11,7 +11,7 @@
 
 use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use shape_runtime::wire_conversion::wire_to_nb;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_wire::transport::Transport;
 use shape_wire::transport::factory::TransportKind;
 use std::cell::RefCell;
@@ -268,16 +268,20 @@ fn remote_ping(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, Str
 /// Falls back to `None` only for truly unsupported types (BlobRef-backed, IoHandle, etc.).
 fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVMValue {
     use shape_runtime::snapshot::SerializableVMValue;
-    use shape_value::NanTag;
+    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_HEAP};
 
-    match nb.tag() {
-        NanTag::F64 => SerializableVMValue::Number(nb.as_f64().unwrap()),
-        NanTag::I48 => SerializableVMValue::Int(nb.as_i64().unwrap()),
-        NanTag::Bool => SerializableVMValue::Bool(nb.as_bool().unwrap()),
-        NanTag::None => SerializableVMValue::None,
-        NanTag::Unit => SerializableVMValue::Unit,
-        NanTag::Function => SerializableVMValue::Function(nb.as_function().unwrap()),
-        NanTag::Heap => {
+    let bits = nb.raw_bits();
+    if !is_tagged(bits) {
+        return SerializableVMValue::Number(nb.as_f64().unwrap());
+    }
+    match get_tag(bits) {
+        TAG_INT => SerializableVMValue::Number(nb.as_f64().unwrap()),
+        TAG_INT => SerializableVMValue::Int(nb.as_i64().unwrap()),
+        TAG_BOOL => SerializableVMValue::Bool(nb.as_bool().unwrap()),
+        TAG_NONE => SerializableVMValue::None,
+        TAG_UNIT => SerializableVMValue::Unit,
+        TAG_FUNCTION => SerializableVMValue::Function(nb.as_function_id().unwrap()),
+        TAG_HEAP => {
             use shape_value::HeapValue;
             match nb.as_heap_ref() {
                 Some(HeapValue::String(s)) => SerializableVMValue::String((**s).clone()),
@@ -479,7 +483,7 @@ fn remote_call(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, Str
     // fn_ref can be a Function (u16 ID) or a number (function index from annotation ctx)
     let func_id = args
         .get(1)
-        .and_then(|a| a.as_function().or_else(|| a.as_f64().map(|n| n as u16)))
+        .and_then(|a| a.as_function_id().or_else(|| a.as_f64().map(|n| n as u16)))
         .ok_or_else(|| {
             "remote.__call(): second argument must be a function reference".to_string()
         })?;

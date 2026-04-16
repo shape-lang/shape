@@ -8,7 +8,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 impl VirtualMachine {
     #[inline(always)]
     pub(in crate::executor) fn exec_stack_ops(
@@ -18,9 +18,9 @@ impl VirtualMachine {
         use OpCode::*;
         match instruction.opcode {
             PushConst => self.op_push_const(instruction)?,
-            PushNull => self.push_vw(ValueWord::none())?,
+            PushNull => self.push_raw_u64(ValueWord::none())?,
             Pop => {
-                self.pop_vw()?;
+                self.pop_raw_u64()?;
             }
             Dup => {
                 // Clone the ValueWord directly from the stack, avoiding ValueWord round-trip
@@ -28,14 +28,14 @@ impl VirtualMachine {
                 if index >= self.stack.len() {
                     return Err(VMError::StackUnderflow);
                 }
-                let val = self.stack_read_vw(index);
-                self.push_vw(val)?;
+                let val = self.stack_read_raw(index);
+                self.push_raw_u64(val)?;
             }
             Swap => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(b)?;
-                self.push_vw(a)?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
+                self.push_raw_u64(b)?;
+                self.push_raw_u64(a)?;
             }
             _ => unreachable!(
                 "exec_stack_ops called with non-stack opcode: {:?}",
@@ -72,7 +72,7 @@ impl VirtualMachine {
                     if *i >= shape_value::tags::I48_MIN && *i <= shape_value::tags::I48_MAX {
                         return self.push_raw_i64(*i);
                     }
-                    return self.push_vw(ValueWord::from_i64(*i));
+                    return self.push_raw_u64(ValueWord::from_i64(*i));
                 }
                 crate::bytecode::Constant::UInt(u) => {
                     // In-range i48 (u <= I48_MAX): push raw tagged bits.
@@ -81,18 +81,18 @@ impl VirtualMachine {
                         return self.push_raw_i64(*u as i64);
                     }
                     return if *u <= i64::MAX as u64 {
-                        self.push_vw(ValueWord::from_i64(*u as i64))
+                        self.push_raw_u64(ValueWord::from_i64(*u as i64))
                     } else {
-                        self.push_vw(ValueWord::from_native_u64(*u))
+                        self.push_raw_u64(ValueWord::from_native_u64(*u))
                     };
                 }
                 crate::bytecode::Constant::Bool(b) => {
                     return self.push_raw_bool(*b);
                 }
-                crate::bytecode::Constant::Null => return self.push_vw(ValueWord::none()),
-                crate::bytecode::Constant::Unit => return self.push_vw(ValueWord::unit()),
+                crate::bytecode::Constant::Null => return self.push_raw_u64(ValueWord::none()),
+                crate::bytecode::Constant::Unit => return self.push_raw_u64(ValueWord::unit()),
                 crate::bytecode::Constant::Function(id) => {
-                    return self.push_vw(ValueWord::from_function(*id));
+                    return self.push_raw_u64(ValueWord::from_function(*id));
                 }
                 _ => {}
             }
@@ -100,13 +100,13 @@ impl VirtualMachine {
             // For types with direct ValueWord constructors, skip ValueWord
             match constant {
                 crate::bytecode::Constant::String(s) => {
-                    return self.push_vw(ValueWord::from_string(Arc::new(s.clone())));
+                    return self.push_raw_u64(ValueWord::from_string(Arc::new(s.clone())));
                 }
                 crate::bytecode::Constant::Char(c) => {
-                    return self.push_vw(ValueWord::from_char(*c));
+                    return self.push_raw_u64(ValueWord::from_char(*c));
                 }
                 crate::bytecode::Constant::Decimal(d) => {
-                    return self.push_vw(ValueWord::from_decimal(*d));
+                    return self.push_raw_u64(ValueWord::from_decimal(*d));
                 }
                 _ => {}
             }
@@ -137,13 +137,13 @@ impl VirtualMachine {
                     HeapValue::TypeAnnotation(Box::new(type_annotation.clone()))
                 }
                 crate::bytecode::Constant::Value(val) => {
-                    return self.push_vw(val.clone());
+                    return self.push_raw_u64(val.clone());
                 }
                 // Simple types and String/Decimal already handled above
                 _ => unreachable!(),
             };
 
-            self.push_vw(ValueWord::from_heap_value(heap_val))?;
+            self.push_raw_u64(ValueWord::from_heap_value(heap_val))?;
         } else {
             return Err(VMError::InvalidOperand);
         }

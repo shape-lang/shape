@@ -11,7 +11,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::objects::method_registry::{MethodFnV2, MethodHandler};
 use crate::feedback::{FeedbackSlot, ICState};
 #[cfg(test)]
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::HeapKind;
 
 // ---------------------------------------------------------------------------
@@ -152,9 +152,10 @@ pub(crate) fn megamorphic_property_insert(
 // Arithmetic IC fast path
 // ---------------------------------------------------------------------------
 
-/// NanTag constants for IC comparison. These must match `NanTag as u8` values.
-const NANTAG_I48: u8 = 1; // NanTag::I48
-const NANTAG_F64: u8 = 0; // NanTag::F64
+/// Tag constants for IC comparison.
+/// F64 is untagged (0xFF sentinel), I48 matches TAG_INT.
+const NANTAG_I48: u8 = shape_value::tags::TAG_INT as u8;
+const NANTAG_F64: u8 = 0xFF; // F64 is untagged — sentinel value
 
 /// Arithmetic IC specialization hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -9,6 +9,7 @@
 //! structs that the compiler consults during IR emission.
 
 use std::collections::{HashMap, HashSet};
+use shape_value::ValueWordExt;
 
 use cranelift::prelude::IntCC;
 use shape_vm::bytecode::{BytecodeProgram, Instruction, OpCode, Operand};

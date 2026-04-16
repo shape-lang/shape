@@ -1,6 +1,6 @@
 //! Custom enum types for Shape
 
-use crate::value_word::ValueWord;
+use crate::value_word::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 /// Payload for custom enum variants

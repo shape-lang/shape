@@ -43,11 +43,11 @@ impl VirtualMachine {
         {
             if idx < self.module_bindings.len() {
                 // BARRIER: heap write site — overwrites module binding by name
-                self.binding_write_vw(idx, value);
+                self.binding_write_raw(idx, value);
             } else {
                 self.module_bindings.resize_with(idx + 1, || Self::NONE_BITS);
                 // BARRIER: heap write site — overwrites module binding by name (after resize)
-                self.binding_write_vw(idx, value);
+                self.binding_write_raw(idx, value);
             }
         }
     }

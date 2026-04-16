@@ -9,7 +9,7 @@
 //!   push receiver, push args..., push method_name, push arg_count, CallMethod
 
 use super::*;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::IteratorState;
 use std::collections::HashMap;
 use std::sync::Arc;

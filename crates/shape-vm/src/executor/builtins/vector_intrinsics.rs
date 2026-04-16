@@ -37,7 +37,7 @@ impl VirtualMachine {
         }
         .map_err(|e| VMError::RuntimeError(e.to_string()))?;
 
-        self.push_vw(result)?;
+        self.push_raw_u64(result)?;
         Ok(())
     }
 }

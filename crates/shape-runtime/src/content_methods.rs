@@ -10,7 +10,7 @@
 //! - Chart: `series(label, data)`, `title(s)`, `x_label(s)`, `y_label(s)`
 
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::content::{BorderStyle, ChartChannel, Color, ContentNode, NamedColor};
 
 /// Look up and call a content method by name.

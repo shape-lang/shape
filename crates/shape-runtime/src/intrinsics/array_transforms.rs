@@ -7,7 +7,7 @@ use super::{
 use crate::context::ExecutionContext;
 use crate::simd_i64;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 pub fn intrinsic_column_select(
     args: &[ValueWord],

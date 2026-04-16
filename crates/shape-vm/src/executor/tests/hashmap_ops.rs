@@ -4,7 +4,7 @@
 //!   push receiver, push args..., push method_name, push arg_count, CallMethod
 
 use super::*;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 fn nb_str(s: &str) -> ValueWord {

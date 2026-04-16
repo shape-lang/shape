@@ -7,7 +7,7 @@
 use super::{extract_f64_array, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use wide::f64x4;
 
 // Threshold for SIMD: arrays smaller than this use scalar fallback
@@ -460,7 +460,7 @@ pub fn i64_slice_to_f64(data: &[i64]) -> AlignedVec<f64> {
 mod tests {
     use super::*;
     use crate::context::ExecutionContext;
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     fn make_array(vals: &[f64]) -> ValueWord {
         f64_vec_to_nb_array(vals.to_vec())

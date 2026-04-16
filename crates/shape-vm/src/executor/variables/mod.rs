@@ -11,7 +11,7 @@ use crate::{
 };
 use shape_value::heap_value::HeapValue;
 use shape_value::nanboxed::RefTarget;
-use shape_value::{RefProjection, VMError, ValueWord};
+use shape_value::{RefProjection, VMError, ValueWord, ValueWordExt};
 use std::sync::{Arc, RwLock};
 impl VirtualMachine {
     pub(in crate::executor) fn read_ref_target(
@@ -21,14 +21,14 @@ impl VirtualMachine {
         match target {
             RefTarget::Stack(slot) => {
                 if *slot < self.stack.len() {
-                    Ok(self.stack_read_vw(*slot))
+                    Ok(self.stack_read_raw(*slot))
                 } else {
                     Ok(ValueWord::none())
                 }
             }
             RefTarget::ModuleBinding(slot) => {
                 if *slot < self.module_bindings.len() {
-                    Ok(self.binding_read_vw(*slot))
+                    Ok(self.binding_read_raw(*slot))
                 } else {
                     Ok(ValueWord::none())
                 }
@@ -137,7 +137,7 @@ impl VirtualMachine {
         match target {
             RefTarget::Stack(target) => {
                 write_barrier_slot(self.stack[*target], value.raw_bits());
-                self.stack_write_vw(*target, value);
+                self.stack_write_raw(*target, value);
                 Ok(())
             }
             RefTarget::ModuleBinding(target) => {
@@ -146,7 +146,7 @@ impl VirtualMachine {
                         .resize_with(*target + 1, || Self::NONE_BITS);
                 }
                 write_barrier_slot(self.module_bindings[*target], value.raw_bits());
-                self.binding_write_vw(*target, value);
+                self.binding_write_raw(*target, value);
                 Ok(())
             }
             RefTarget::Projected(data) => match &data.projection {
@@ -288,9 +288,9 @@ impl VirtualMachine {
         match base_target {
             RefTarget::Stack(slot) => {
                 // Temporarily take the ValueWord out for mutation, then write it back.
-                let mut matrix_vw = self.stack_take_vw(slot);
+                let mut matrix_vw = self.stack_take_raw(slot);
                 let result = Self::cow_matrix_write(&mut matrix_vw, row_index, col_idx, val_f64);
-                self.stack_write_vw(slot, matrix_vw);
+                self.stack_write_raw(slot, matrix_vw);
                 result
             }
             RefTarget::ModuleBinding(slot) => {
@@ -300,9 +300,9 @@ impl VirtualMachine {
                         slot
                     )));
                 }
-                let mut matrix_vw = self.binding_take_vw(slot);
+                let mut matrix_vw = self.binding_take_raw(slot);
                 let result = Self::cow_matrix_write(&mut matrix_vw, row_index, col_idx, val_f64);
-                self.binding_write_vw(slot, matrix_vw);
+                self.binding_write_raw(slot, matrix_vw);
                 result
             }
             RefTarget::Projected(_) => Err(VMError::RuntimeError(
@@ -394,7 +394,7 @@ impl VirtualMachine {
                 if let Some(upvalues) = &frame.upvalues {
                     if let Some(upvalue) = upvalues.get(upvalue_idx as usize) {
                         let value_nb = upvalue.get();
-                        self.push_vw(value_nb)?;
+                        self.push_raw_u64(value_nb)?;
                         return Ok(());
                     }
                 }
@@ -413,7 +413,7 @@ impl VirtualMachine {
     /// If the upvalue is `Immutable`, it is upgraded to `Mutable` on the first write.
     fn op_store_closure(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         if let Some(Operand::Local(upvalue_idx)) = instruction.operand {
-            let value_nb = self.pop_vw()?;
+            let value_nb = self.pop_raw_u64()?;
             // Get the current call frame's upvalues (mutable for potential upgrade)
             if let Some(frame) = self.call_stack.last_mut() {
                 if let Some(upvalues) = &mut frame.upvalues {
@@ -522,9 +522,9 @@ impl VirtualMachine {
             // Auto-deref SharedCell: read the inner value through the Arc
             if let Some(HeapValue::SharedCell(arc)) = nb.as_heap_ref() {
                 let inner = arc.read().unwrap().clone();
-                self.push_vw(inner)?;
+                self.push_raw_u64(inner)?;
             } else {
-                self.push_vw(nb)?;
+                self.push_raw_u64(nb)?;
             }
         } else {
             return Err(VMError::InvalidOperand);
@@ -594,7 +594,7 @@ impl VirtualMachine {
                 _ => {
                     // Heap or unknown slot — preserve legacy refcount-aware path.
                     let nb = unsafe { ValueWord::clone_from_bits(bits) };
-                    self.push_vw(nb)?;
+                    self.push_raw_u64(nb)?;
                 }
             }
         } else {
@@ -666,14 +666,14 @@ impl VirtualMachine {
             }
 
             // Legacy path: pop ValueWord and handle SharedCell auto-deref.
-            let nb = self.pop_vw()?;
+            let nb = self.pop_raw_u64()?;
 
             // Auto-deref SharedCell: write through the Arc
-            let is_shared_cell = self.stack_peek_vw(slot, |vw| {
+            let is_shared_cell = self.stack_peek_raw(slot, |vw| {
                 vw.as_heap_ref().is_some_and(|hv| matches!(hv, HeapValue::SharedCell(_)))
             });
             if is_shared_cell {
-                let slot_vw = self.stack_read_vw(slot);
+                let slot_vw = self.stack_read_raw(slot);
                 if let Some(HeapValue::SharedCell(arc)) = slot_vw.as_heap_ref() {
                     let arc = arc.clone();
                     let old = arc.read().unwrap().clone();
@@ -684,7 +684,7 @@ impl VirtualMachine {
             } else {
                 record_heap_write();
                 write_barrier_slot(self.stack[slot], nb.raw_bits());
-                self.stack_write_vw(slot, nb);
+                self.stack_write_raw(slot, nb);
             }
         } else {
             return Err(VMError::InvalidOperand);
@@ -704,7 +704,7 @@ impl VirtualMachine {
     /// Operand: TypedLocal(idx, width)
     fn op_store_local_typed(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         if let Some(Operand::TypedLocal(idx, width)) = instruction.operand {
-            let nb = self.pop_vw()?;
+            let nb = self.pop_raw_u64()?;
             let bp = self.current_locals_base();
             let slot = bp + idx as usize;
 
@@ -721,11 +721,11 @@ impl VirtualMachine {
                 nb
             };
 
-            let is_shared_cell = self.stack_peek_vw(slot, |vw| {
+            let is_shared_cell = self.stack_peek_raw(slot, |vw| {
                 vw.as_heap_ref().is_some_and(|hv| matches!(hv, HeapValue::SharedCell(_)))
             });
             if is_shared_cell {
-                let slot_vw = self.stack_read_vw(slot);
+                let slot_vw = self.stack_read_raw(slot);
                 if let Some(HeapValue::SharedCell(arc)) = slot_vw.as_heap_ref() {
                     let arc = arc.clone();
                     let old = arc.read().unwrap().clone();
@@ -736,7 +736,7 @@ impl VirtualMachine {
             } else {
                 record_heap_write();
                 write_barrier_slot(self.stack[slot], truncated.raw_bits());
-                self.stack_write_vw(slot, truncated);
+                self.stack_write_raw(slot, truncated);
             }
         } else {
             return Err(VMError::InvalidOperand);
@@ -753,16 +753,16 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         if let Some(Operand::ModuleBinding(idx)) = instruction.operand {
             let nb = if (idx as usize) < self.module_bindings.len() {
-                self.binding_read_vw(idx as usize)
+                self.binding_read_raw(idx as usize)
             } else {
                 ValueWord::none()
             };
             // Auto-deref SharedCell
             if let Some(HeapValue::SharedCell(arc)) = nb.as_heap_ref() {
                 let inner = arc.read().unwrap().clone();
-                self.push_vw(inner)?;
+                self.push_raw_u64(inner)?;
             } else {
-                self.push_vw(nb)?;
+                self.push_raw_u64(nb)?;
             }
         } else {
             return Err(VMError::InvalidOperand);
@@ -782,10 +782,10 @@ impl VirtualMachine {
             Some(Operand::Local(idx)) => {
                 let bp = self.current_locals_base();
                 let absolute_slot = bp + idx as usize;
-                self.push_vw(ValueWord::from_ref(absolute_slot))?;
+                self.push_raw_u64(ValueWord::from_ref(absolute_slot))?;
             }
             Some(Operand::ModuleBinding(idx)) => {
-                self.push_vw(ValueWord::from_module_binding_ref(idx as usize))?;
+                self.push_raw_u64(ValueWord::from_module_binding_ref(idx as usize))?;
             }
             _ => {
                 return Err(VMError::InvalidOperand);
@@ -799,7 +799,7 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let base_ref = self.pop_vw()?;
+        let base_ref = self.pop_raw_u64()?;
         if base_ref.as_ref_target().is_none() {
             return Err(VMError::RuntimeError(
                 "internal error: MakeFieldRef expected a base reference".to_string(),
@@ -810,7 +810,7 @@ impl VirtualMachine {
                 type_id,
                 field_idx,
                 field_type_tag,
-            }) => self.push_vw(ValueWord::from_projected_ref(
+            }) => self.push_raw_u64(ValueWord::from_projected_ref(
                 base_ref,
                 RefProjection::TypedField {
                     type_id,
@@ -831,8 +831,8 @@ impl VirtualMachine {
         &mut self,
         _instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let index = self.pop_vw()?;
-        let base_ref = self.pop_vw()?;
+        let index = self.pop_raw_u64()?;
+        let base_ref = self.pop_raw_u64()?;
         if base_ref.as_ref_target().is_none() {
             return Err(VMError::RuntimeError(
                 "internal error: MakeIndexRef expected a base reference".to_string(),
@@ -871,7 +871,7 @@ impl VirtualMachine {
             RefProjection::Index { index }
         };
 
-        self.push_vw(ValueWord::from_projected_ref(base_ref, projection))?;
+        self.push_raw_u64(ValueWord::from_projected_ref(base_ref, projection))?;
         Ok(())
     }
 
@@ -886,7 +886,7 @@ impl VirtualMachine {
         if let Some(Operand::Local(ref_slot)) = instruction.operand {
             let bp = self.current_locals_base();
             let slot = bp + ref_slot as usize;
-            let ref_val = self.stack_read_vw(slot);
+            let ref_val = self.stack_read_raw(slot);
             let target = ref_val.as_ref_target().ok_or_else(|| {
                 VMError::RuntimeError(
                     "internal error: expected a reference value (&) but found a regular value. \
@@ -895,7 +895,7 @@ impl VirtualMachine {
                 )
             })?;
             let nb = self.read_ref_target(&target)?;
-            self.push_vw(nb)?;
+            self.push_raw_u64(nb)?;
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -911,10 +911,10 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Local(ref_slot)) = instruction.operand {
-            let value = self.pop_vw()?;
+            let value = self.pop_raw_u64()?;
             let bp = self.current_locals_base();
             let slot = bp + ref_slot as usize;
-            let ref_vw = self.stack_read_vw(slot);
+            let ref_vw = self.stack_read_raw(slot);
             self.write_ref_value(&ref_vw, value)?;
         } else {
             return Err(VMError::InvalidOperand);
@@ -935,11 +935,11 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Local(ref_slot)) = instruction.operand {
-            let value = self.pop_vw()?;
-            let index_nb = self.pop_vw()?;
+            let value = self.pop_raw_u64()?;
+            let index_nb = self.pop_raw_u64()?;
             let bp = self.current_locals_base();
             let slot = bp + ref_slot as usize;
-            let ref_vw = self.stack_read_vw(slot);
+            let ref_vw = self.stack_read_raw(slot);
             let target = ref_vw.as_ref_target().ok_or_else(|| {
                 VMError::RuntimeError(
                     "internal error: expected a reference value (&) but found a regular value. \
@@ -950,11 +950,11 @@ impl VirtualMachine {
 
             match target {
                 RefTarget::Stack(target) => {
-                    let mut object_nb = self.stack_take_vw(target);
+                    let mut object_nb = self.stack_take_raw(target);
                     let result = Self::set_array_index_on_object(&mut object_nb, &index_nb, value);
                     record_heap_write();
                     write_barrier_slot(Self::NONE_BITS, object_nb.raw_bits());
-                    self.stack_write_vw(target, object_nb);
+                    self.stack_write_raw(target, object_nb);
                     result
                 }
                 RefTarget::ModuleBinding(target) => {
@@ -964,11 +964,11 @@ impl VirtualMachine {
                             target
                         )));
                     }
-                    let mut object_nb = self.binding_take_vw(target);
+                    let mut object_nb = self.binding_take_raw(target);
                     let result = Self::set_array_index_on_object(&mut object_nb, &index_nb, value);
                     record_heap_write();
                     write_barrier_slot(Self::NONE_BITS, object_nb.raw_bits());
-                    self.binding_write_vw(target, object_nb);
+                    self.binding_write_raw(target, object_nb);
                     result
                 }
                 RefTarget::Projected(ref proj_data) => {
@@ -995,7 +995,7 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::ModuleBinding(idx)) = instruction.operand {
-            let nb = self.pop_vw()?;
+            let nb = self.pop_raw_u64()?;
             let index = idx as usize;
 
             // Ensure module_bindings vector is large enough
@@ -1012,7 +1012,7 @@ impl VirtualMachine {
                 r
             };
             if is_shared_cell {
-                let slot_vw = self.binding_read_vw(index);
+                let slot_vw = self.binding_read_raw(index);
                 if let Some(HeapValue::SharedCell(arc)) = slot_vw.as_heap_ref() {
                     let arc = arc.clone();
                     let old = arc.read().unwrap().clone();
@@ -1023,7 +1023,7 @@ impl VirtualMachine {
             } else {
                 record_heap_write();
                 write_barrier_slot(self.module_bindings[index], nb.raw_bits());
-                self.binding_write_vw(index, nb);
+                self.binding_write_raw(index, nb);
             }
         } else {
             return Err(VMError::InvalidOperand);
@@ -1039,7 +1039,7 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::TypedModuleBinding(idx, width)) = instruction.operand {
-            let nb = self.pop_vw()?;
+            let nb = self.pop_raw_u64()?;
             let index = idx as usize;
 
             // Truncate the value to the declared width
@@ -1064,7 +1064,7 @@ impl VirtualMachine {
                 r
             };
             if is_shared_cell {
-                let slot_vw = self.binding_read_vw(index);
+                let slot_vw = self.binding_read_raw(index);
                 if let Some(HeapValue::SharedCell(arc)) = slot_vw.as_heap_ref() {
                     let arc = arc.clone();
                     let old = arc.read().unwrap().clone();
@@ -1075,7 +1075,7 @@ impl VirtualMachine {
             } else {
                 record_heap_write();
                 write_barrier_slot(self.module_bindings[index], truncated.raw_bits());
-                self.binding_write_vw(index, truncated);
+                self.binding_write_raw(index, truncated);
             }
         } else {
             return Err(VMError::InvalidOperand);
@@ -1097,7 +1097,7 @@ impl VirtualMachine {
             let slot = bp + idx as usize;
 
             // If not already a SharedCell, wrap the value in one
-            let is_cell = self.stack_peek_vw(slot, |vw| {
+            let is_cell = self.stack_peek_raw(slot, |vw| {
                 vw.as_heap_ref()
                     .map(|hv| matches!(hv, HeapValue::SharedCell(_)))
                     .unwrap_or(false)
@@ -1105,17 +1105,17 @@ impl VirtualMachine {
 
             if !is_cell {
                 let old_bits = self.stack[slot];
-                let value = self.stack_take_vw(slot);
+                let value = self.stack_take_raw(slot);
                 let cell_vw =
                     ValueWord::from_heap_value(HeapValue::SharedCell(Arc::new(RwLock::new(value))));
                 record_heap_write();
                 write_barrier_slot(old_bits, cell_vw.raw_bits());
-                self.stack_write_vw(slot, cell_vw);
+                self.stack_write_raw(slot, cell_vw);
             }
 
             // Push the SharedCell onto the stack for MakeClosure to consume
-            let nb = self.stack_read_vw(slot);
-            self.push_vw(nb)?;
+            let nb = self.stack_read_raw(slot);
+            self.push_raw_u64(nb)?;
             Ok(())
         } else {
             Err(VMError::InvalidOperand)
@@ -1150,17 +1150,17 @@ impl VirtualMachine {
 
             if !is_cell {
                 let old_bits = self.module_bindings[index];
-                let value = self.binding_take_vw(index);
+                let value = self.binding_take_raw(index);
                 let cell_vw =
                     ValueWord::from_heap_value(HeapValue::SharedCell(Arc::new(RwLock::new(value))));
                 record_heap_write();
                 write_barrier_slot(old_bits, cell_vw.raw_bits());
-                self.binding_write_vw(index, cell_vw);
+                self.binding_write_raw(index, cell_vw);
             }
 
             // Push the SharedCell onto the stack for MakeClosure to consume
-            let nb = self.binding_read_vw(index);
-            self.push_vw(nb)?;
+            let nb = self.binding_read_raw(index);
+            self.push_raw_u64(nb)?;
             Ok(())
         } else {
             Err(VMError::InvalidOperand)
@@ -1174,7 +1174,7 @@ mod tests {
         BytecodeProgram, Constant, Instruction, NumericWidth, OpCode, Operand,
     };
     use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     /// Helper: build a program, load it, execute, return the top-of-stack value.
     fn run_program(program: BytecodeProgram) -> ValueWord {

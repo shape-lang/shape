@@ -7,8 +7,8 @@
 use crate::hashing::HashDigest;
 use crate::type_schema::TypeSchemaRegistry;
 use sha2::{Digest, Sha256};
-use shape_value::NanTag;
-use shape_value::ValueWord;
+use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -157,44 +157,46 @@ pub fn content_hash_value(value: &ValueWord, schemas: &TypeSchemaRegistry) -> Ha
 }
 
 fn hash_value_into(hasher: &mut Sha256, value: &ValueWord, schemas: &TypeSchemaRegistry) {
-    match value.tag() {
-        NanTag::F64 => {
-            hasher.update(b"f64:");
-            if let Some(f) = value.as_f64() {
-                hasher.update(f.to_le_bytes());
-            }
+    let bits = value.raw_bits();
+    if !is_tagged(bits) {
+        hasher.update(b"f64:");
+        if let Some(f) = value.as_f64() {
+            hasher.update(f.to_le_bytes());
         }
-        NanTag::I48 => {
+        return;
+    }
+    match get_tag(bits) {
+        TAG_INT => {
             hasher.update(b"i48:");
             if let Some(i) = value.as_i64() {
                 hasher.update(i.to_le_bytes());
             }
         }
-        NanTag::Bool => {
+        TAG_BOOL => {
             hasher.update(b"bool:");
             if let Some(b) = value.as_bool() {
                 hasher.update(if b { &[1u8] } else { &[0u8] });
             }
         }
-        NanTag::None => {
+        TAG_NONE => {
             hasher.update(b"none");
         }
-        NanTag::Unit => {
+        TAG_UNIT => {
             hasher.update(b"unit");
         }
-        NanTag::Function => {
+        TAG_FUNCTION => {
             hasher.update(b"fn:");
             hasher.update(value.raw_bits().to_le_bytes());
         }
-        NanTag::ModuleFunction => {
+        TAG_MODULE_FN => {
             hasher.update(b"modfn:");
             hasher.update(value.raw_bits().to_le_bytes());
         }
-        NanTag::Ref => {
+        TAG_REF => {
             hasher.update(b"ref:");
             hasher.update(value.raw_bits().to_le_bytes());
         }
-        NanTag::Heap => {
+        TAG_HEAP => {
             // Heap values: differentiate by content
             if let Some(s) = value.as_str() {
                 hasher.update(b"str:");
@@ -225,6 +227,10 @@ fn hash_value_into(hasher: &mut Sha256, value: &ValueWord, schemas: &TypeSchemaR
                 hasher.update(b"heap:");
                 hasher.update(value.raw_bits().to_le_bytes());
             }
+        }
+        _ => {
+            hasher.update(b"other:");
+            hasher.update(value.raw_bits().to_le_bytes());
         }
     }
 }
@@ -273,13 +279,20 @@ fn diff_recursive(
     }
 
     // If tags differ, the whole subtree changed
-    if old.tag() != new.tag() {
+    let old_bits = old.raw_bits();
+    let new_bits = new.raw_bits();
+    let old_is_tagged = is_tagged(old_bits);
+    let new_is_tagged = is_tagged(new_bits);
+    if old_is_tagged != new_is_tagged {
+        delta.changed.insert(root_path(prefix), new.clone());
+        return;
+    }
+    if old_is_tagged && get_tag(old_bits) != get_tag(new_bits) {
         delta.changed.insert(root_path(prefix), new.clone());
         return;
     }
 
-    match old.tag() {
-        NanTag::Heap => {
+    if old_is_tagged && get_tag(old_bits) == TAG_HEAP {
             // Try typed object diff
             if let (Some((old_sid, old_slots, old_hm)), Some((new_sid, new_slots, new_hm))) =
                 (old.as_typed_object(), new.as_typed_object())
@@ -397,13 +410,10 @@ fn diff_recursive(
             }
 
             // Different heap subtypes: whole value changed
-            delta.changed.insert(root_path(prefix), new.clone());
-        }
-
-        _ => {
-            // Primitive types: already checked raw bits above, so they differ
-            delta.changed.insert(root_path(prefix), new.clone());
-        }
+        delta.changed.insert(root_path(prefix), new.clone());
+    } else {
+        // Primitive types: already checked raw bits above, so they differ
+        delta.changed.insert(root_path(prefix), new.clone());
     }
 }
 

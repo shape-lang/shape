@@ -6,7 +6,7 @@
 
 use crate::bytecode::OpCode;
 use crate::executor::tests::test_utils::{compile, eval};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 #[test]
 fn test_auto_drop_at_scope_exit() {

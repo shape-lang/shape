@@ -17,7 +17,7 @@ use crate::ffi::object::conversion::{jit_bits_to_nanboxed_with_ctx, nanboxed_to_
 use crate::jit_array::JitArray;
 use crate::nan_boxing::*;
 use shape_runtime::module_exports::RawCallableInvoker;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::ffi::c_void;
 use std::sync::Arc;
 

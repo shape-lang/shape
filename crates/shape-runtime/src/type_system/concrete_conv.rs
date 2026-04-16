@@ -22,6 +22,7 @@
 use shape_ast::ast::TypeAnnotation;
 use shape_ast::error::ShapeError;
 use shape_value::v2::{ConcreteType, StructLayoutId};
+use shape_value::ValueWordExt;
 
 use super::types::Type;
 use super::unification::Unifier;

@@ -4,7 +4,7 @@ use crate::executor::objects::object_creation::read_slot_nb;
 use rust_decimal::prelude::ToPrimitive;
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord};
+use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Serialize a slice of ValueWord args to msgpack bytes (as an array).
@@ -317,25 +317,26 @@ fn marshal_typed_object(
 
 /// Convert a ValueWord value to an rmpv::Value.
 fn nanboxed_to_msgpack_value(nb: &ValueWord, schemas: &TypeSchemaRegistry) -> rmpv::Value {
-    use shape_value::NanTag;
-    match nb.tag() {
-        NanTag::F64 => {
-            if let Some(f) = nb.as_f64() {
-                rmpv::Value::F64(f)
-            } else {
-                rmpv::Value::Nil
-            }
+    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_HEAP};
+    let bits = nb.raw_bits();
+    if !is_tagged(bits) {
+        if let Some(f) = nb.as_f64() {
+            return rmpv::Value::F64(f);
+        } else {
+            return rmpv::Value::Nil;
         }
-        NanTag::I48 => {
+    }
+    match get_tag(bits) {
+        TAG_INT => {
             if let Some(i) = nb.as_i64() {
                 rmpv::Value::Integer(rmpv::Integer::from(i))
             } else {
                 rmpv::Value::Nil
             }
         }
-        NanTag::Bool => rmpv::Value::Boolean(nb.as_bool().unwrap_or(false)),
-        NanTag::None => rmpv::Value::Nil,
-        NanTag::Heap => {
+        TAG_BOOL => rmpv::Value::Boolean(nb.as_bool().unwrap_or(false)),
+        TAG_NONE => rmpv::Value::Nil,
+        TAG_HEAP => {
             // Handle unified arrays.
             if let Some(view) = nb.as_any_array() {
                 return rmpv::Value::Array(

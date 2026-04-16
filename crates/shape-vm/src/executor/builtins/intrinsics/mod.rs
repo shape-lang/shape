@@ -15,7 +15,7 @@ pub mod math;
 pub mod signal;
 pub mod statistical;
 
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 /// Result type for ValueWord-native intrinsics
 pub type NbIntrinsicResult = Result<ValueWord, VMError>;

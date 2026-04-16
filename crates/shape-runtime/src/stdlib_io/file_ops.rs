@@ -1,6 +1,6 @@
 //! File operation implementations for the io module.
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::{IoHandleData, IoResource};
 use std::io::{Read, Seek, Write};
 

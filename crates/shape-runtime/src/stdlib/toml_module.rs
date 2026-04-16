@@ -3,7 +3,7 @@
 //! Exports: toml.parse(text), toml.stringify(value), toml.is_valid(text)
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Convert a `toml::Value` into a `ValueWord`.
@@ -71,10 +71,10 @@ fn nanboxed_to_toml_value(nb: &ValueWord) -> toml::Value {
         if let HeapValue::TypedObject { slots, .. } = heap {
             // Fall back to string representation for complex types
             let _ = slots;
-            return toml::Value::String(format!("{}", nb));
+            return toml::Value::String(format!("{}", shape_value::ValueWordDisplay(*nb)));
         }
     }
-    toml::Value::String(format!("{}", nb))
+    toml::Value::String(format!("{}", shape_value::ValueWordDisplay(*nb)))
 }
 
 /// Create the `toml` module with TOML parsing and serialization functions.

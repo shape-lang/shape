@@ -3,7 +3,7 @@
 //! Handles: sum, avg, min, max, count, reduce
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MethodFnV2 (native ABI) handlers

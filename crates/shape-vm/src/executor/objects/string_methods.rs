@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 use crate::executor::objects::raw_helpers;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════════════════

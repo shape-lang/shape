@@ -9,6 +9,7 @@
 #[cfg(test)]
 mod tests {
     use shape_value::heap_header::{HeapHeader, FLAG_MARKED, FLAG_PINNED};
+use shape_value::ValueWordExt;
     use shape_value::heap_value::HeapKind;
     use shape_value::v2_struct_layout::{
         V2FieldType, V2_STRUCT_HEADER_SIZE, compute_struct_layout, v2_struct_alloc,

@@ -3,7 +3,7 @@
 use crate::executor::VirtualMachine;
 use crate::executor::objects::raw_helpers;
 use shape_value::datatable::DataTable;
-use shape_value::{NanTag, VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use super::common::{extract_array_value_nb, extract_dt_nb, extract_schema_id_nb};
@@ -11,19 +11,20 @@ use std::mem::ManuallyDrop;
 
 /// Compare two ValueWord values for equality (for probing column values).
 fn nb_values_equal(a: &ValueWord, b: &ValueWord) -> bool {
-    match (a.tag(), b.tag()) {
-        (NanTag::F64, NanTag::F64) => a.as_f64() == b.as_f64(),
-        (NanTag::I48, NanTag::I48) => a.as_i64() == b.as_i64(),
-        (NanTag::I48, NanTag::F64) => a.as_i64().map(|i| i as f64) == b.as_f64(),
-        (NanTag::F64, NanTag::I48) => a.as_f64() == b.as_i64().map(|i| i as f64),
-        (NanTag::Bool, NanTag::Bool) => a.as_bool() == b.as_bool(),
-        _ => {
-            if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
-                sa == sb
-            } else {
-                false
-            }
-        }
+    if a.is_f64() && b.is_f64() {
+        a.as_f64() == b.as_f64()
+    } else if a.is_i64() && b.is_i64() {
+        a.as_i64() == b.as_i64()
+    } else if a.is_i64() && b.is_f64() {
+        a.as_i64().map(|i| i as f64) == b.as_f64()
+    } else if a.is_f64() && b.is_i64() {
+        a.as_f64() == b.as_i64().map(|i| i as f64)
+    } else if a.is_bool() && b.is_bool() {
+        a.as_bool() == b.as_bool()
+    } else if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
+        sa == sb
+    } else {
+        false
     }
 }
 

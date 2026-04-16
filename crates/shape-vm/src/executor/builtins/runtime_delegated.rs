@@ -7,7 +7,7 @@
 use super::intrinsics;
 use crate::{bytecode::BuiltinFunction, executor::VirtualMachine};
 use shape_runtime::context::ExecutionContext;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 impl VirtualMachine {
     /// Handle Intrinsic function builtins (37+ variants)
@@ -111,7 +111,7 @@ impl VirtualMachine {
             }
         };
 
-        self.push_vw(result?)?;
+        self.push_raw_u64(result?)?;
         Ok(())
     }
 
@@ -144,7 +144,7 @@ impl VirtualMachine {
         }
         .map_err(|e| VMError::RuntimeError(format!("Intrinsic failed: {}", e)))?;
 
-        self.push_vw(result)?;
+        self.push_raw_u64(result)?;
         Ok(())
     }
 }

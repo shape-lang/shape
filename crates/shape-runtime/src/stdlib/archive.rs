@@ -3,7 +3,7 @@
 //! Exports: archive.zip_create, archive.zip_extract, archive.tar_create, archive.tar_extract
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::HeapValue;
 use std::sync::Arc;
 use super::byte_utils::{bytes_from_array, bytes_to_array};

@@ -2,6 +2,7 @@
 
 use super::*;
 use shape_value::heap_value::ChannelData;
+use shape_value::ValueWordExt;
 
 /// Create a sender/receiver pair as ValueWords.
 fn test_channel_pair() -> (ValueWord, ValueWord) {

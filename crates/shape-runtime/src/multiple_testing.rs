@@ -78,7 +78,7 @@ pub struct MultipleTestingStats {
 impl MultipleTestingStats {
     /// Convert to a ValueWord TypedObject for Shape
     pub fn to_value(&self) -> shape_value::ValueWord {
-        use shape_value::ValueWord;
+        use shape_value::{ValueWord, ValueWordExt};
 
         let warning_msg = self
             .warning_message

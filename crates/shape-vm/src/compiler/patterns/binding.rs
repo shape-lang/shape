@@ -1,6 +1,7 @@
 //! Pattern binding - binding pattern matches to variables
 
 use crate::bytecode::{Constant, Instruction, NumericWidth, OpCode, Operand};
+use shape_value::ValueWordExt;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::VariableTypeInfo;
 use shape_ast::ast::{Literal, Pattern, PatternConstructorFields, TypeAnnotation};

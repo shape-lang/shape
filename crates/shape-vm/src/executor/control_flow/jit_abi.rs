@@ -12,7 +12,7 @@
 #[cfg(any(test, feature = "jit"))]
 use crate::type_tracking::SlotKind;
 #[cfg(any(test, feature = "jit"))]
-use shape_value::{NanTag, ValueWord};
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Marshal a single VM argument into JIT-compatible u64 bits, guided by the
 /// callee's `SlotKind` for that parameter slot.
@@ -37,21 +37,15 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
         | SlotKind::NullableInt64
         | SlotKind::IntSize
         | SlotKind::NullableIntSize => {
-            match vw.tag() {
-                NanTag::I48 => {
-                    // Fast path: inline i48 → i64
-                    let i = unsafe { vw.as_i64_unchecked() };
-                    i as u64
-                }
-                NanTag::F64 => {
-                    // Float that should be int: truncate
-                    let f = unsafe { vw.as_f64_unchecked() };
-                    (f as i64) as u64
-                }
-                _ => {
-                    // Heap-backed NativeScalar — extract i64 payload
-                    vw.as_i64().unwrap_or(0) as u64
-                }
+            if vw.is_i64() {
+                // Fast path: inline i48 -> i64
+                let i = unsafe { vw.as_i64_unchecked() };
+                i as u64
+            } else if vw.is_f64() {
+                let f = unsafe { vw.as_f64_unchecked() };
+                (f as i64) as u64
+            } else {
+                vw.as_i64().unwrap_or(0) as u64
             }
         }
 
@@ -61,17 +55,15 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
         | SlotKind::Int16
         | SlotKind::NullableInt16
         | SlotKind::Int32
-        | SlotKind::NullableInt32 => match vw.tag() {
-            NanTag::I48 => {
-                let i = unsafe { vw.as_i64_unchecked() };
-                i as u64
+        | SlotKind::NullableInt32 => {
+            if vw.is_i64() {
+                (unsafe { vw.as_i64_unchecked() }) as u64
+            } else if vw.is_f64() {
+                (unsafe { vw.as_f64_unchecked() } as i64) as u64
+            } else {
+                vw.as_i64().unwrap_or(0) as u64
             }
-            NanTag::F64 => {
-                let f = unsafe { vw.as_f64_unchecked() };
-                (f as i64) as u64
-            }
-            _ => vw.as_i64().unwrap_or(0) as u64,
-        },
+        }
 
         // Unsigned integer types
         SlotKind::UInt8
@@ -84,20 +76,14 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
         | SlotKind::NullableUInt64
         | SlotKind::UIntSize
         | SlotKind::NullableUIntSize => {
-            match vw.tag() {
-                NanTag::I48 => {
-                    let i = unsafe { vw.as_i64_unchecked() };
-                    i as u64
-                }
-                NanTag::F64 => {
-                    let f = unsafe { vw.as_f64_unchecked() };
-                    f as u64
-                }
-                _ => {
-                    // Heap-backed NativeScalar::U64 — extract the u64 payload,
-                    // not the raw NaN-boxed pointer bits.
-                    vw.as_u64().unwrap_or(0)
-                }
+            if vw.is_i64() {
+                (unsafe { vw.as_i64_unchecked() }) as u64
+            } else if vw.is_f64() {
+                (unsafe { vw.as_f64_unchecked() }) as u64
+            } else {
+                // Heap-backed NativeScalar::U64 — extract the u64 payload,
+                // not the raw NaN-boxed pointer bits.
+                vw.as_u64_value().unwrap_or(0)
             }
         }
 
@@ -106,12 +92,10 @@ pub fn marshal_arg_to_jit(vw: &ValueWord, kind: SlotKind) -> u64 {
 
         // Bool: extract boolean and store as 0/1
         SlotKind::Bool => {
-            match vw.tag() {
-                NanTag::Bool => {
-                    let b = unsafe { vw.as_bool_unchecked() };
-                    b as u64
-                }
-                _ => vw.raw_bits(), // fallback: NaN-boxed passthrough
+            if vw.is_bool() {
+                (unsafe { vw.as_bool_unchecked() }) as u64
+            } else {
+                vw.raw_bits()
             }
         }
 
@@ -186,7 +170,7 @@ pub fn unmarshal_jit_result(bits: u64, kind: SlotKind) -> ValueWord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     // ========================================================================
     // marshal_arg_to_jit tests

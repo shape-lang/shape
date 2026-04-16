@@ -13,7 +13,7 @@ mod types;
 // Re-export public types
 pub use crate::query_result::QueryType;
 pub use builder::ShapeEngineBuilder;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 pub use types::{
     EngineBootstrapState, ExecutionMetrics, ExecutionResult, ExecutionType, Message, MessageLevel,
 };

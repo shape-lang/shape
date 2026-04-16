@@ -9,6 +9,7 @@
 
 use crate::content_renderer::{ContentRenderer, RenderContext, RendererCapabilities};
 use shape_value::content::{ChartSpec, Color, ContentNode, ContentTable, NamedColor, Style};
+use shape_value::ValueWordExt;
 use std::fmt::Write;
 
 /// Renders ContentNode trees to HTML.

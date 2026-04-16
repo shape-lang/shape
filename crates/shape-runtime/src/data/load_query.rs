@@ -5,7 +5,7 @@
 
 use super::{DataQuery, Timeframe};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 /// Generic data load request (industry-agnostic)

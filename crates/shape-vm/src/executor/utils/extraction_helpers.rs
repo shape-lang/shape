@@ -3,7 +3,7 @@
 //! Common patterns like "get array from first arg" and "coerce ValueWord to string"
 //! are centralized here so every call site is a single function call.
 
-use shape_value::{ArrayView, VMError, ValueWord};
+use shape_value::{ArrayView, VMError, ValueWord, ValueWordExt};
 
 // ─── Arg-count and type-mismatch helpers ─────────────────────────────
 

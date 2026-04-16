@@ -1,5 +1,5 @@
 use shape_runtime::module_exports::ModuleContext;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 // ===========================================================================
@@ -138,7 +138,7 @@ pub(crate) fn state_capture_call_stub(
         .ok_or("state.capture_call: second argument must be an array of args")?;
 
     // Resolve function hash via fn_hash logic
-    let func_id = if let Some(fid) = f.as_function() {
+    let func_id = if let Some(fid) = f.as_function_id() {
         Some(fid as usize)
     } else if let Some(heap_ref) = f.as_heap_ref() {
         if let shape_value::HeapValue::Closure { function_id, .. } = heap_ref {

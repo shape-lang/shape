@@ -1,4 +1,5 @@
 use super::super::*;
+use shape_value::ValueWordExt;
 
 impl VirtualMachine {
     pub fn create_typed_enum(
@@ -34,30 +35,24 @@ impl VirtualMachine {
         // Payload slots
         for (i, nb) in payload.into_iter().enumerate() {
             let slot_idx = 1 + i;
-            match nb.tag() {
-                shape_value::NanTag::F64 => {
-                    slots.push(ValueSlot::from_number(nb.as_f64().unwrap_or(0.0)))
-                }
-                shape_value::NanTag::I48 => {
-                    slots.push(ValueSlot::from_number(nb.as_i64().unwrap_or(0) as f64))
-                }
-                shape_value::NanTag::Bool => {
-                    slots.push(ValueSlot::from_bool(nb.as_bool().unwrap_or(false)))
-                }
-                shape_value::NanTag::None => slots.push(ValueSlot::none()),
-                _ => {
-                    if let Some(hv) = nb.as_heap_ref() {
-                        slots.push(ValueSlot::from_heap(hv.clone()));
-                        heap_mask |= 1u64 << slot_idx;
-                    } else {
-                        // Function/ModuleFunction/Unit/other inline types: store as int slot
-                        let id = nb
-                            .as_function()
-                            .or_else(|| nb.as_module_function().map(|u| u as u16))
-                            .unwrap_or(0);
-                        slots.push(ValueSlot::from_int(id as i64));
-                    }
-                }
+            if nb.is_f64() {
+                slots.push(ValueSlot::from_number(nb.as_f64().unwrap_or(0.0)));
+            } else if nb.is_i64() {
+                slots.push(ValueSlot::from_number(nb.as_i64().unwrap_or(0) as f64));
+            } else if nb.is_bool() {
+                slots.push(ValueSlot::from_bool(nb.as_bool().unwrap_or(false)));
+            } else if nb.is_none() {
+                slots.push(ValueSlot::none());
+            } else if let Some(hv) = nb.as_heap_ref() {
+                slots.push(ValueSlot::from_heap(hv.clone()));
+                heap_mask |= 1u64 << slot_idx;
+            } else {
+                // Function/ModuleFunction/Unit/other inline types: store as int slot
+                let id = nb
+                    .as_function_id()
+                    .or_else(|| nb.as_module_function().map(|u| u as u16))
+                    .unwrap_or(0);
+                slots.push(ValueSlot::from_int(id as i64));
             }
         }
 
@@ -79,34 +74,10 @@ impl VirtualMachine {
     /// This is `TAG_BASE | (TAG_NONE << 48) = 0xFFFB_0000_0000_0000`.
     pub(crate) const NONE_BITS: u64 = 0xFFFB_0000_0000_0000u64;
 
-    // --- ValueWord-direct stack ops (compatibility shims over Vec<u64>) ---
-
-    /// Push a ValueWord onto the `Vec<u64>` stack.
-    ///
-    /// Transfers ownership of any embedded Arc refcount into the stack slot
-    /// by using `into_raw_bits()` (which `mem::forget`s the ValueWord).
-    ///
-    /// Hot path: single bounds check + write.  The stack growth and overflow
-    /// checks are split into a cold `push_vw_slow` to keep the hot path tight.
-    #[inline(always)]
-    pub fn push_vw(&mut self, value: ValueWord) -> Result<(), VMError> {
-        let bits = value.into_raw_bits();
-        if self.sp >= self.stack.len() {
-            return self.push_vw_slow(bits);
-        }
-        // The old slot is a u64; overwriting it does NOT run any Drop.
-        // We must manually drop the old ValueWord if it was heap-tagged.
-        // However, stack slots above `sp` are always dead (NONE_BITS sentinel)
-        // so there is nothing to drop.
-        self.stack[self.sp] = bits;
-        self.sp += 1;
-        Ok(())
-    }
-
-    /// Cold path for push_vw: grow the stack or return StackOverflow.
+    /// Cold path for push_raw_u64: grow the stack or return StackOverflow.
     #[cold]
     #[inline(never)]
-    pub fn push_vw_slow(&mut self, bits: u64) -> Result<(), VMError> {
+    pub fn push_raw_u64_slow(&mut self, bits: u64) -> Result<(), VMError> {
         if self.sp >= self.config.max_stack_size {
             // Reconstruct ValueWord so its Drop runs (releases any heap ref).
             drop(ValueWord::from_raw_bits(bits));
@@ -122,34 +93,9 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// Pop a ValueWord from the `Vec<u64>` stack.
-    ///
-    /// Reads the raw u64 bits and reconstructs a `ValueWord` that owns the
-    /// embedded refcount.  The slot is overwritten with `NONE_BITS` so a
-    /// subsequent `drop_stack_range` / VM teardown doesn't double-free.
-    #[inline(always)]
-    pub fn pop_vw(&mut self) -> Result<ValueWord, VMError> {
-        if self.sp == 0 {
-            return Self::pop_vw_underflow();
-        }
-        self.sp -= 1;
-        let bits = self.stack[self.sp];
-        self.stack[self.sp] = Self::NONE_BITS;
-        // SAFETY: The bits were produced by `into_raw_bits()` in `push_vw`
-        // (or by one of the `stack_write_vw` helpers) and represent a valid
-        // ValueWord with exactly one outstanding refcount.
-        Ok(ValueWord::from_raw_bits(bits))
-    }
-
-    #[cold]
-    #[inline(never)]
-    pub fn pop_vw_underflow() -> Result<ValueWord, VMError> {
-        Err(VMError::StackUnderflow)
-    }
-
     /// Pop and materialize a ValueWord from the stack (convenience for tests and legacy callers).
     pub fn pop(&mut self) -> Result<ValueWord, VMError> {
-        self.pop_vw()
+        self.pop_raw_u64()
     }
 
     // === Indexed stack access helpers (ValueWord ↔ u64) ===
@@ -158,7 +104,7 @@ impl VirtualMachine {
     ///
     /// This bumps the Arc refcount for heap-tagged values (clone semantics).
     #[inline(always)]
-    pub(crate) fn stack_read_vw(&self, idx: usize) -> ValueWord {
+    pub(crate) fn stack_read_raw(&self, idx: usize) -> ValueWord {
         let bits = self.stack[idx];
         // Construct a temporary to call `.clone()`, which bumps the refcount,
         // then forget the temporary so its Drop doesn't decrement.
@@ -171,7 +117,7 @@ impl VirtualMachine {
     /// Write a `ValueWord` into `stack[idx]`, dropping the previous occupant
     /// and transferring ownership of `value` into the slot.
     #[inline(always)]
-    pub(crate) fn stack_write_vw(&mut self, idx: usize, value: ValueWord) {
+    pub(crate) fn stack_write_raw(&mut self, idx: usize, value: ValueWord) {
         // Drop the old occupant (may decrement Arc refcount).
         let old_bits = self.stack[idx];
         drop(ValueWord::from_raw_bits(old_bits));
@@ -181,7 +127,7 @@ impl VirtualMachine {
     /// Take ownership of the `ValueWord` at `stack[idx]`, replacing the slot
     /// with `NONE_BITS`.  Does NOT drop the old value — the caller owns it.
     #[inline(always)]
-    pub(crate) fn stack_take_vw(&mut self, idx: usize) -> ValueWord {
+    pub(crate) fn stack_take_raw(&mut self, idx: usize) -> ValueWord {
         let bits = self.stack[idx];
         self.stack[idx] = Self::NONE_BITS;
         ValueWord::from_raw_bits(bits)
@@ -197,7 +143,7 @@ impl VirtualMachine {
     /// # Safety
     /// The closure must NOT store the `&ValueWord` reference beyond the call.
     #[inline(always)]
-    pub(crate) fn stack_peek_vw<F, R>(&self, idx: usize, f: F) -> R
+    pub(crate) fn stack_peek_raw<F, R>(&self, idx: usize, f: F) -> R
     where
         F: FnOnce(&ValueWord) -> R,
     {
@@ -217,7 +163,7 @@ impl VirtualMachine {
     /// The returned slice must NOT be used to take ownership or drop ValueWords —
     /// it is a borrow-only view.
     #[inline(always)]
-    pub(crate) fn stack_slice_vw(&self, range: std::ops::Range<usize>) -> &[ValueWord] {
+    pub(crate) fn stack_slice_raw(&self, range: std::ops::Range<usize>) -> &[ValueWord] {
         let slice = &self.stack[range];
         // SAFETY: ValueWord is #[repr(transparent)] over u64.
         unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const ValueWord, slice.len()) }
@@ -243,7 +189,7 @@ impl VirtualMachine {
 
     /// Get a read-only `&[ValueWord]` view of the module_bindings.
     #[inline(always)]
-    pub(crate) fn bindings_slice_vw(&self) -> &[ValueWord] {
+    pub(crate) fn bindings_slice_raw(&self) -> &[ValueWord] {
         let slice = &self.module_bindings;
         unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const ValueWord, slice.len()) }
     }
@@ -252,7 +198,7 @@ impl VirtualMachine {
 
     /// Read a clone of the `ValueWord` at `module_bindings[idx]`.
     #[inline(always)]
-    pub(crate) fn binding_read_vw(&self, idx: usize) -> ValueWord {
+    pub(crate) fn binding_read_raw(&self, idx: usize) -> ValueWord {
         let bits = self.module_bindings[idx];
         let tmp = ValueWord::from_raw_bits(bits);
         let c = tmp.clone();
@@ -262,7 +208,7 @@ impl VirtualMachine {
 
     /// Write a `ValueWord` into `module_bindings[idx]`, dropping the old value.
     #[inline(always)]
-    pub(crate) fn binding_write_vw(&mut self, idx: usize, value: ValueWord) {
+    pub(crate) fn binding_write_raw(&mut self, idx: usize, value: ValueWord) {
         let old_bits = self.module_bindings[idx];
         drop(ValueWord::from_raw_bits(old_bits));
         self.module_bindings[idx] = value.into_raw_bits();
@@ -271,7 +217,7 @@ impl VirtualMachine {
     /// Take ownership of the `ValueWord` at `module_bindings[idx]`, replacing
     /// the slot with `NONE_BITS`.
     #[inline(always)]
-    pub(crate) fn binding_take_vw(&mut self, idx: usize) -> ValueWord {
+    pub(crate) fn binding_take_raw(&mut self, idx: usize) -> ValueWord {
         let bits = self.module_bindings[idx];
         self.module_bindings[idx] = Self::NONE_BITS;
         ValueWord::from_raw_bits(bits)
@@ -390,8 +336,8 @@ impl VirtualMachine {
     #[inline(always)]
     pub(crate) fn push_raw_i64(&mut self, value: i64) -> Result<(), VMError> {
         if self.sp >= self.stack.len() {
-            // Cold path: grow via push_vw_slow
-            return self.push_vw(ValueWord::from_i64(value));
+            // Cold path: grow via push_raw_u64_slow
+            return self.push_raw_u64(ValueWord::from_i64(value));
         }
         unsafe {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
@@ -437,7 +383,7 @@ impl VirtualMachine {
     /// ValueWord), or the caller must be otherwise aware that no Arc refcount
     /// is being released.
     #[inline(always)]
-    pub(crate) fn pop_raw_u64(&mut self) -> Result<u64, VMError> {
+    pub fn pop_raw_u64(&mut self) -> Result<u64, VMError> {
         if self.sp == 0 {
             return Err(VMError::StackUnderflow);
         }
@@ -455,9 +401,9 @@ impl VirtualMachine {
     /// Companion to `pop_raw_u64` — used by v2 typed handlers that store
     /// raw native pointers / values in stack slots.
     #[inline(always)]
-    pub(crate) fn push_raw_u64(&mut self, bits: u64) -> Result<(), VMError> {
+    pub fn push_raw_u64(&mut self, bits: u64) -> Result<(), VMError> {
         if self.sp >= self.stack.len() {
-            return self.push_vw_slow(bits);
+            return self.push_raw_u64_slow(bits);
         }
         unsafe {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
@@ -497,8 +443,8 @@ impl VirtualMachine {
     #[inline(always)]
     pub(crate) fn push_raw_bool(&mut self, value: bool) -> Result<(), VMError> {
         if self.sp >= self.stack.len() {
-            // Cold path: grow via push_vw_slow
-            return self.push_vw(ValueWord::from_bool(value));
+            // Cold path: grow via push_raw_u64_slow
+            return self.push_raw_u64(ValueWord::from_bool(value));
         }
         unsafe {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
@@ -511,8 +457,8 @@ impl VirtualMachine {
 
     pub(crate) fn push_raw_f64(&mut self, value: f64) -> Result<(), VMError> {
         if self.sp >= self.stack.len() {
-            // Cold path: grow via push_vw_slow
-            return self.push_vw(ValueWord::from_f64(value));
+            // Cold path: grow via push_raw_u64_slow
+            return self.push_raw_u64(ValueWord::from_f64(value));
         }
         unsafe {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
@@ -591,7 +537,7 @@ mod raw_stack_tests {
         // pop_vw on a raw_bool slot must materialize a bool ValueWord
         let mut vm = make_vm();
         vm.push_raw_bool(true).unwrap();
-        let vw = vm.pop_vw().unwrap();
+        let vw = vm.pop_raw_u64().unwrap();
         assert!(vw.is_bool());
         assert_eq!(unsafe { vw.as_bool_unchecked() }, true);
     }
@@ -600,7 +546,7 @@ mod raw_stack_tests {
     fn vw_bool_compatible_with_raw_pop() {
         // push_vw of a bool followed by pop_raw_bool must yield same value
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_bool(true)).unwrap();
+        vm.push_raw_u64(ValueWord::from_bool(true)).unwrap();
         assert!(vm.stack_top_is_bool());
         assert_eq!(vm.pop_raw_bool().unwrap(), true);
     }

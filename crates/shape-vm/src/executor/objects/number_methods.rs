@@ -13,7 +13,7 @@ use crate::executor::objects::raw_helpers::{
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::tags::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_INT};
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Decoded receiver: the f64 value and whether the original was an inline i48.

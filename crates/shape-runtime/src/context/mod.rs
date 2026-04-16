@@ -37,7 +37,7 @@ use crate::snapshot::{
 };
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Execution context for evaluating expressions
 #[derive(Clone)]

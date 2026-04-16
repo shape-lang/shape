@@ -1,6 +1,7 @@
 //! Statement and item compilation
 
 use crate::bytecode::{Function, Instruction, OpCode, Operand};
+use shape_value::ValueWordExt;
 use shape_ast::ast::{
     AnnotationTargetKind, DestructurePattern, EnumDef, EnumMemberKind, ExportItem, Expr,
     FunctionDef, FunctionParameter, Item, Literal, ModuleDecl, ObjectEntry, Query, Span, Spanned,
@@ -885,7 +886,7 @@ impl BytecodeCompiler {
                     (&base_type_name, &type_alias.meta_param_overrides)
                 {
                     use shape_ast::ast::Literal;
-                    use shape_value::ValueWord;
+                    use shape_value::{ValueWord, ValueWordExt};
                     use std::sync::Arc;
 
                     // Start with base type's comptime fields (if any)
@@ -4788,6 +4789,7 @@ impl BytecodeCompiler {
 
 #[cfg(test)]
 mod tests {
+    use shape_value::ValueWordExt;
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
     use shape_ast::ast::{Item, Span, Statement};

@@ -6,7 +6,7 @@ use shape_runtime::intrinsics::matrix_kernels;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::heap_value::MatrixData;
 use shape_value::typed_buffer::AlignedTypedBuffer;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use super::raw_helpers::{extract_matrix, extract_matrix_arc, extract_number_coerce};

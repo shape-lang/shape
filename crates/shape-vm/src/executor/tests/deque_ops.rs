@@ -1,7 +1,7 @@
 //! Deque method tests — bytecode-level integration tests for Deque methods.
 
 use super::*;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Build a test Deque: [1, 2, 3]
 fn test_deque() -> ValueWord {

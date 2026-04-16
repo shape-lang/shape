@@ -4,7 +4,7 @@
 
 use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::nb_to_string_coerce;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 

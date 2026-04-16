@@ -5,7 +5,7 @@
 //!
 //! All operations use blocking std::net (not tokio).
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::{IoHandleData, IoResource};
 use std::io::{Read, Write};
 use std::sync::Arc;

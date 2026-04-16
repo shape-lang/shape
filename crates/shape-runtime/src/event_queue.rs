@@ -8,7 +8,7 @@
 //! allowing Shape to run on any platform.
 
 use serde::{Deserialize, Serialize};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Events that can be queued for processing

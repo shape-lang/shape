@@ -10,7 +10,7 @@ use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use arrow_select::filter::filter_record_batch;
 use shape_value::datatable::DataTable;
-use shape_value::{VMError, ValueWord, heap_value::HeapValue};
+use shape_value::{VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::mem::ManuallyDrop;
@@ -96,46 +96,34 @@ fn nanboxed_to_arrow_column(
     name: &str,
     values: &[ValueWord],
 ) -> Result<(Field, arrow_array::ArrayRef), VMError> {
-    use shape_value::NanTag;
+    let first_typed = values.iter().find(|nb| !nb.is_none());
 
-    let first_typed = values.iter().find(|nb| nb.tag() != NanTag::None);
-
-    let first_tag = first_typed.map(|nb| nb.tag());
-
-    match first_tag {
-        Some(NanTag::I48) => {
-            let arr: Vec<Option<i64>> = values
-                .iter()
-                .map(|nb| match nb.tag() {
-                    NanTag::I48 => nb.as_i64(),
-                    NanTag::F64 => nb.as_f64().map(|n| n as i64),
-                    _ => None,
-                })
-                .collect();
-            Ok((
-                Field::new(name, DataType::Int64, true),
-                Arc::new(Int64Array::from(arr)) as arrow_array::ArrayRef,
-            ))
-        }
-        Some(NanTag::Heap) if first_typed.and_then(|nb| nb.as_str()).is_some() => {
-            let strings: Vec<Option<String>> = values
-                .iter()
-                .map(|nb| nb.as_str().map(|s| s.to_string()))
-                .collect();
-            let string_arr: StringArray = strings.iter().map(|o| o.as_deref()).collect();
-            Ok((
-                Field::new(name, DataType::Utf8, true),
-                Arc::new(string_arr) as arrow_array::ArrayRef,
-            ))
-        }
+    if first_typed.map_or(false, |nb| nb.is_i64()) {
+        let arr: Vec<Option<i64>> = values
+            .iter()
+            .map(|nb| if nb.is_i64() { nb.as_i64() } else if nb.is_f64() { nb.as_f64().map(|n| n as i64) } else { None })
+            .collect();
+        Ok((
+            Field::new(name, DataType::Int64, true),
+            Arc::new(Int64Array::from(arr)) as arrow_array::ArrayRef,
+        ))
+    } else if first_typed.and_then(|nb| nb.as_str()).is_some() {
+        let strings: Vec<Option<String>> = values
+            .iter()
+            .map(|nb| nb.as_str().map(|s| s.to_string()))
+            .collect();
+        let string_arr: StringArray = strings.iter().map(|o| o.as_deref()).collect();
+        Ok((
+            Field::new(name, DataType::Utf8, true),
+            Arc::new(string_arr) as arrow_array::ArrayRef,
+        ))
+    } else {
         // Default: f64 (handles Number, None-only columns, and fallback)
-        _ => {
-            let arr: Vec<Option<f64>> = values.iter().map(|nb| nb.as_number_coerce()).collect();
-            Ok((
-                Field::new(name, DataType::Float64, true),
-                Arc::new(Float64Array::from(arr)) as arrow_array::ArrayRef,
-            ))
-        }
+        let arr: Vec<Option<f64>> = values.iter().map(|nb| nb.as_number_coerce()).collect();
+        Ok((
+            Field::new(name, DataType::Float64, true),
+            Arc::new(Float64Array::from(arr)) as arrow_array::ArrayRef,
+        ))
     }
 }
 

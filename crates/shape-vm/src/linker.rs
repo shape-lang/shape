@@ -13,7 +13,7 @@ use crate::bytecode::{
     LinkedFunction, LinkedProgram, Operand, Program, SourceMap,
 };
 use shape_abi_v1::PermissionSet;
-use shape_value::{FunctionId, StringId};
+use shape_value::{FunctionId, StringId, ValueWordExt};
 
 // ---------------------------------------------------------------------------
 // Error type

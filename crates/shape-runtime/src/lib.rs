@@ -132,7 +132,7 @@ pub use progress::{
     LoadPhase, ProgressEvent, ProgressGranularity, ProgressHandle, ProgressRegistry,
 };
 pub use query_result::{AlertResult, QueryResult, QueryType};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 pub use shape_value::ValueWord as Value;
 pub use stream_executor::{StreamEvent, StreamExecutor, StreamState};
 pub use sync_bridge::{

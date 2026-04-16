@@ -3,7 +3,7 @@
 //! Exports: spawn, exec, process_wait, process_kill, process_write,
 //!          process_read, process_read_err, process_read_line
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::{IoHandleData, IoResource};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};

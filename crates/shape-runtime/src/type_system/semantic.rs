@@ -9,6 +9,7 @@
 //! - `Result<T>` defaults to universal Error (no explicit E required)
 
 use shape_wire::metadata::{FieldInfo, TypeInfo, TypeKind};
+use shape_value::ValueWordExt;
 use std::fmt;
 use std::hash::Hash;
 

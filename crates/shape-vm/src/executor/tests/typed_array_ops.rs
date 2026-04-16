@@ -5,7 +5,7 @@
 //!   push receiver, push args..., push method_name, push arg_count, CallMethod
 
 use super::*;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::aligned_vec::AlignedVec;
 use std::sync::Arc;
 

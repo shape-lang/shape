@@ -12,7 +12,7 @@
 
 use crate::Result;
 use shape_ast::error::ShapeError;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 /// Single source of truth for all module binding values.

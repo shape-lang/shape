@@ -13,7 +13,7 @@ use crate::configuration::BytecodeExecutor;
 use crate::executor::SNAPSHOT_FUTURE_ID;
 use crate::executor::debugger_integration::DebuggerIntegration;
 use crate::executor::{ForeignFunctionHandle, VMConfig, VirtualMachine};
-use shape_value::{HeapValue, ValueWord};
+use shape_value::{HeapValue, ValueWord, ValueWordExt};
 
 use shape_ast::Program;
 use shape_runtime::context::ExecutionContext;
@@ -116,7 +116,7 @@ impl BytecodeExecutor {
 
             if first_run {
                 if let Some(ref val) = initial_value {
-                    let _ = vm.push_vw(val.clone());
+                    let _ = vm.push_raw_u64(val.clone());
                 }
                 first_run = false;
             }
@@ -172,7 +172,7 @@ impl BytecodeExecutor {
                                     payload: EnumPayload::Tuple(vec![hash_nb]),
                                 })
                             });
-                        let _ = vm.push_vw(hash_nb);
+                        let _ = vm.push_raw_u64(hash_nb);
                         continue;
                     }
 
@@ -1092,7 +1092,7 @@ checkpointed(41)
         let resumed = vm
             .create_typed_enum_nb("Snapshot", "Resumed", vec![])
             .expect("typed resumed marker");
-        vm.push_vw(resumed).expect("push marker");
+        vm.push_raw_u64(resumed).expect("push marker");
 
         let result = vm.execute_with_suspend(None).expect("vm execute");
         let value = match result {

@@ -3,6 +3,7 @@
 //! Handles resolving module paths to actual file paths on disk.
 
 use shape_ast::ast::{Item, Program};
+use shape_value::ValueWordExt;
 use shape_ast::error::{Result, ShapeError};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

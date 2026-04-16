@@ -4,6 +4,7 @@
 //! supporting queries like "last(5 days)" or "between(@yesterday, @today)".
 
 use chrono::{DateTime, Duration, Timelike, Utc};
+use shape_value::ValueWordExt;
 use shape_ast::error::{Result, ShapeError};
 
 use super::context::ExecutionContext;

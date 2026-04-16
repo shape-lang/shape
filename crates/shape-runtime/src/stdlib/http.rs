@@ -6,7 +6,7 @@
 //! Policy gated: requires NetConnect permission.
 
 use crate::module_exports::{ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Build an HttpResponse ValueWord HashMap from the response parts.

@@ -47,7 +47,7 @@ use crate::{
     executor::VirtualMachine,
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 /// Result of executing an async operation
 #[derive(Debug, Clone)]
@@ -165,7 +165,7 @@ impl VirtualMachine {
         // In the VM, we don't have direct access to the event queue
         // This is handled via the VMContext passed from the runtime
         // For now, push None to indicate no event
-        self.push_vw(ValueWord::none()).map_err(|e| e)?;
+        self.push_raw_u64(ValueWord::none()).map_err(|e| e)?;
         Ok(AsyncExecutionResult::Continue)
     }
 
@@ -220,7 +220,7 @@ impl VirtualMachine {
     /// Pops an alert object from the stack and sends it to
     /// the alert router for processing.
     fn op_emit_alert(&mut self) -> Result<AsyncExecutionResult, VMError> {
-        let _alert_nb = self.pop_vw()?;
+        let _alert_nb = self.pop_raw_u64()?;
         // Alert pipeline integration pending — consume and continue
         Ok(AsyncExecutionResult::Continue)
     }
@@ -234,7 +234,7 @@ impl VirtualMachine {
     /// If the value is not a Future, pushes it back (sync shortcut).
     fn op_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         match nb.as_heap_ref() {
             Some(HeapValue::Future(id)) => {
                 let id = *id;
@@ -252,7 +252,7 @@ impl VirtualMachine {
 
                 match resolved {
                     Ok(value) => {
-                        self.push_vw(value)?;
+                        self.push_raw_u64(value)?;
                         // Await consumes a Future and pushes a result: net stack effect is 0.
                         debug_assert_eq!(
                             self.sp, sp_before,
@@ -272,7 +272,7 @@ impl VirtualMachine {
             }
             _ => {
                 // Sync shortcut: value is already resolved, push it back
-                self.push_vw(nb)?;
+                self.push_raw_u64(nb)?;
                 debug_assert_eq!(
                     self.sp, sp_before,
                     "op_await (sync shortcut): stack depth changed (before={}, after={})",
@@ -294,7 +294,7 @@ impl VirtualMachine {
     /// If inside an async scope, the spawned future ID is tracked for cancellation.
     fn op_spawn_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
-        let callable_nb = self.pop_vw()?;
+        let callable_nb = self.pop_raw_u64()?;
 
         let task_id = self.next_future_id();
         self.task_scheduler.register(task_id, callable_nb);
@@ -303,7 +303,7 @@ impl VirtualMachine {
             scope.push(task_id);
         }
 
-        self.push_vw(ValueWord::from_future(task_id))?;
+        self.push_raw_u64(ValueWord::from_future(task_id))?;
         // SpawnTask replaces a callable with a Future: net stack effect is 0.
         debug_assert_eq!(
             self.sp, sp_before,
@@ -337,7 +337,7 @@ impl VirtualMachine {
 
         let mut task_ids = Vec::with_capacity(arity);
         for _ in 0..arity {
-            let nb = self.pop_vw()?;
+            let nb = self.pop_raw_u64()?;
             match nb.as_heap_ref() {
                 Some(HeapValue::Future(id)) => task_ids.push(*id),
                 _ => {
@@ -351,7 +351,7 @@ impl VirtualMachine {
         // Reverse so task_ids[0] corresponds to first branch
         task_ids.reverse();
 
-        self.push_vw(ValueWord::from_heap_value(
+        self.push_raw_u64(ValueWord::from_heap_value(
             shape_value::heap_value::HeapValue::TaskGroup { kind, task_ids },
         ))?;
         Ok(AsyncExecutionResult::Continue)
@@ -365,7 +365,7 @@ impl VirtualMachine {
     /// Pushes the result value onto the stack according to the join strategy.
     fn op_join_await(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         match nb.as_heap_ref() {
             Some(HeapValue::TaskGroup { kind, task_ids }) => {
                 let kind = *kind;
@@ -377,7 +377,7 @@ impl VirtualMachine {
 
                 match result {
                     Ok(value) => {
-                        self.push_vw(value)?;
+                        self.push_raw_u64(value)?;
                         // JoinAwait consumes a TaskGroup and pushes a result: net effect is 0.
                         debug_assert_eq!(
                             self.sp, sp_before,
@@ -407,7 +407,7 @@ impl VirtualMachine {
     /// Pops a Future(task_id) from the stack and signals cancellation.
     /// The host runtime is responsible for actually cancelling the task.
     fn op_cancel_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         match nb.as_heap_ref() {
             Some(HeapValue::Future(id)) => {
                 self.task_scheduler.cancel(*id);
@@ -461,7 +461,7 @@ impl VirtualMachine {
     /// Pops an event object from the stack and pushes it to
     /// the event queue for external consumers.
     fn op_emit_event(&mut self) -> Result<AsyncExecutionResult, VMError> {
-        let _event_nb = self.pop_vw()?;
+        let _event_nb = self.pop_raw_u64()?;
         // Event queue integration pending — consume and continue
         Ok(AsyncExecutionResult::Continue)
     }

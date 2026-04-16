@@ -5,7 +5,7 @@
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use crate::type_schema::{SchemaId, TypeSchemaRegistry, nb_to_slot};
 use shape_value::heap_value::HeapValue;
-use shape_value::{ValueSlot, ValueWord};
+use shape_value::{ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Convert a `serde_json::Value` into an untyped `ValueWord` (legacy fallback).

@@ -1,7 +1,7 @@
 use super::*;
 use shape_runtime::module_exports::ModuleContext;
 use shape_runtime::type_schema::{FieldType, TypeSchemaRegistry};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 fn test_ctx() -> ModuleContext<'static> {

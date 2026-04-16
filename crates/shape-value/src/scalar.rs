@@ -6,7 +6,8 @@
 //! integers and plain f64 numbers.
 
 use crate::slot::ValueSlot;
-use crate::value_word::{NanTag, ValueWord};
+use crate::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use crate::value_word::{ValueWord, ValueWordExt};
 
 /// Scalar type discriminator.
 ///
@@ -309,33 +310,39 @@ impl TypedScalar {
 // ValueWord <-> TypedScalar conversions
 // ============================================================================
 
-impl ValueWord {
+/// Extension: scalar conversion methods for ValueWord.
+pub trait ValueWordScalarExt {
+    fn to_typed_scalar(&self) -> Option<TypedScalar>;
+    fn from_typed_scalar(ts: TypedScalar) -> ValueWord;
+}
+impl ValueWordScalarExt for u64 {
     /// Convert this ValueWord to a TypedScalar, preserving type identity.
     ///
     /// Returns `None` for heap-allocated values (strings, arrays, objects, etc.)
     /// which are not representable as scalars.
     #[inline]
-    pub fn to_typed_scalar(&self) -> Option<TypedScalar> {
-        match self.tag() {
-            NanTag::F64 => {
-                let bits = self.raw_bits();
-                Some(TypedScalar {
-                    kind: ScalarKind::F64,
-                    payload_lo: bits,
-                    payload_hi: 0,
-                })
-            }
-            NanTag::I48 => {
+    fn to_typed_scalar(&self) -> Option<TypedScalar> {
+        let bits = self.raw_bits();
+        if !is_tagged(bits) {
+            return Some(TypedScalar {
+                kind: ScalarKind::F64,
+                payload_lo: bits,
+                payload_hi: 0,
+            });
+        }
+        match get_tag(bits) {
+            TAG_INT => {
                 let i = unsafe { self.as_i64_unchecked() };
                 Some(TypedScalar::i64(i))
             }
-            NanTag::Bool => {
+            TAG_BOOL => {
                 let b = unsafe { self.as_bool_unchecked() };
                 Some(TypedScalar::bool(b))
             }
-            NanTag::None => Some(TypedScalar::none()),
-            NanTag::Unit => Some(TypedScalar::unit()),
-            NanTag::Heap | NanTag::Function | NanTag::ModuleFunction | NanTag::Ref => Option::None,
+            TAG_NONE => Some(TypedScalar::none()),
+            TAG_UNIT => Some(TypedScalar::unit()),
+            TAG_HEAP | TAG_FUNCTION | TAG_MODULE_FN | TAG_REF => Option::None,
+            _ => Option::None,
         }
     }
 
@@ -346,7 +353,7 @@ impl ValueWord {
     /// Float kinds are stored as plain f64. Bool/None/Unit use their direct
     /// ValueWord constructors.
     #[inline]
-    pub fn from_typed_scalar(ts: TypedScalar) -> Self {
+    fn from_typed_scalar(ts: TypedScalar) -> ValueWord {
         match ts.kind {
             ScalarKind::I64 => ValueWord::from_i64(ts.payload_lo as i64),
             ScalarKind::I8 | ScalarKind::I16 | ScalarKind::I32 => {

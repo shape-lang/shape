@@ -11,7 +11,7 @@
 use super::*;
 use crate::executor::{VMConfig, VirtualMachine};
 use arrow_schema::{DataType, Field, Schema};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::datatable::{DataTable, DataTableBuilder};
 use std::sync::Arc;
 
@@ -210,10 +210,10 @@ fn test_iter_done_datatable_false_when_in_bounds() {
     let table = make_sample_table();
     let mut vm = VirtualMachine::new(VMConfig::default());
     // Push table and idx=0, call IterDone
-    vm.push_vw(ValueWord::from_datatable(table)).unwrap();
-    vm.push_vw(ValueWord::from_i64(0)).unwrap();
+    vm.push_raw_u64(ValueWord::from_datatable(table)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
     vm.op_iter_done().unwrap();
-    let result = vm.pop_vw().unwrap();
+    let result = vm.pop_raw_u64().unwrap();
     assert_eq!(
         result.as_bool(),
         Some(false),
@@ -225,10 +225,10 @@ fn test_iter_done_datatable_false_when_in_bounds() {
 fn test_iter_done_datatable_true_at_end() {
     let table = make_sample_table();
     let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.push_vw(ValueWord::from_datatable(table)).unwrap();
-    vm.push_vw(ValueWord::from_i64(3)).unwrap();
+    vm.push_raw_u64(ValueWord::from_datatable(table)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(3)).unwrap();
     vm.op_iter_done().unwrap();
-    let result = vm.pop_vw().unwrap();
+    let result = vm.pop_raw_u64().unwrap();
     assert_eq!(
         result.as_bool(),
         Some(true),
@@ -241,28 +241,28 @@ fn test_iter_done_typed_table_boundary() {
     let table = make_sample_table();
     let mut vm = VirtualMachine::new(VMConfig::default());
     // idx=2 (last valid) should not be done
-    vm.push_vw(ValueWord::from_typed_table(10, table.clone()))
+    vm.push_raw_u64(ValueWord::from_typed_table(10, table.clone()))
         .unwrap();
-    vm.push_vw(ValueWord::from_i64(2)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(2)).unwrap();
     vm.op_iter_done().unwrap();
-    assert_eq!(vm.pop_vw().unwrap().as_bool(), Some(false));
+    assert_eq!(vm.pop_raw_u64().unwrap().as_bool(), Some(false));
 
     // idx=3 should be done
-    vm.push_vw(ValueWord::from_typed_table(10, table)).unwrap();
-    vm.push_vw(ValueWord::from_i64(3)).unwrap();
+    vm.push_raw_u64(ValueWord::from_typed_table(10, table)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(3)).unwrap();
     vm.op_iter_done().unwrap();
-    assert_eq!(vm.pop_vw().unwrap().as_bool(), Some(true));
+    assert_eq!(vm.pop_raw_u64().unwrap().as_bool(), Some(true));
 }
 
 #[test]
 fn test_iter_done_negative_index() {
     let table = make_sample_table();
     let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.push_vw(ValueWord::from_datatable(table)).unwrap();
-    vm.push_vw(ValueWord::from_i64(-1)).unwrap();
+    vm.push_raw_u64(ValueWord::from_datatable(table)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(-1)).unwrap();
     vm.op_iter_done().unwrap();
     assert_eq!(
-        vm.pop_vw().unwrap().as_bool(),
+        vm.pop_raw_u64().unwrap().as_bool(),
         Some(true),
         "negative index should be treated as done"
     );
@@ -272,11 +272,11 @@ fn test_iter_done_negative_index() {
 fn test_iter_next_datatable_returns_row_view() {
     let table = make_sample_table();
     let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.push_vw(ValueWord::from_datatable(table.clone()))
+    vm.push_raw_u64(ValueWord::from_datatable(table.clone()))
         .unwrap();
-    vm.push_vw(ValueWord::from_i64(0)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
     vm.op_iter_next().unwrap();
-    let result = vm.pop_vw().unwrap();
+    let result = vm.pop_raw_u64().unwrap();
     let (schema_id, rv_table, row_idx) = result.as_row_view().expect("Expected RowView");
     assert_eq!(schema_id, 0, "plain DataTable uses schema_id=0");
     assert_eq!(row_idx, 0);
@@ -288,11 +288,11 @@ fn test_iter_next_typed_table_preserves_schema_id() {
     let table = make_sample_table();
     let schema_id = 77u64;
     let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.push_vw(ValueWord::from_typed_table(schema_id, table.clone()))
+    vm.push_raw_u64(ValueWord::from_typed_table(schema_id, table.clone()))
         .unwrap();
-    vm.push_vw(ValueWord::from_i64(1)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
     vm.op_iter_next().unwrap();
-    let result = vm.pop_vw().unwrap();
+    let result = vm.pop_raw_u64().unwrap();
     let (sid, _, row_idx) = result.as_row_view().expect("Expected RowView");
     assert_eq!(
         sid, schema_id,
@@ -305,10 +305,10 @@ fn test_iter_next_typed_table_preserves_schema_id() {
 fn test_iter_next_out_of_bounds_returns_none() {
     let table = make_sample_table();
     let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.push_vw(ValueWord::from_datatable(table)).unwrap();
-    vm.push_vw(ValueWord::from_i64(99)).unwrap();
+    vm.push_raw_u64(ValueWord::from_datatable(table)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(99)).unwrap();
     vm.op_iter_next().unwrap();
-    let result = vm.pop_vw().unwrap();
+    let result = vm.pop_raw_u64().unwrap();
     assert!(
         result.is_none(),
         "out-of-bounds IterNext should return None"
@@ -319,10 +319,10 @@ fn test_iter_next_out_of_bounds_returns_none() {
 fn test_iter_next_negative_index_returns_none() {
     let table = make_sample_table();
     let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.push_vw(ValueWord::from_datatable(table)).unwrap();
-    vm.push_vw(ValueWord::from_i64(-1)).unwrap();
+    vm.push_raw_u64(ValueWord::from_datatable(table)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(-1)).unwrap();
     vm.op_iter_next().unwrap();
-    let result = vm.pop_vw().unwrap();
+    let result = vm.pop_raw_u64().unwrap();
     assert!(
         result.is_none(),
         "negative index IterNext should return None"
@@ -334,11 +334,11 @@ fn test_iter_next_all_rows_sequential() {
     let table = make_sample_table();
     let mut vm = VirtualMachine::new(VMConfig::default());
     for i in 0..3 {
-        vm.push_vw(ValueWord::from_datatable(table.clone()))
+        vm.push_raw_u64(ValueWord::from_datatable(table.clone()))
             .unwrap();
-        vm.push_vw(ValueWord::from_i64(i)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(i)).unwrap();
         vm.op_iter_next().unwrap();
-        let result = vm.pop_vw().unwrap();
+        let result = vm.pop_raw_u64().unwrap();
         let (_, _, row_idx) = result.as_row_view().expect("Expected RowView");
         assert_eq!(row_idx, i as usize);
     }
@@ -352,8 +352,8 @@ fn test_iter_next_all_rows_sequential() {
 fn test_iter_done_error_message_includes_table() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     // Use a non-iterable type (bool)
-    vm.push_vw(ValueWord::from_bool(true)).unwrap();
-    vm.push_vw(ValueWord::from_i64(0)).unwrap();
+    vm.push_raw_u64(ValueWord::from_bool(true)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
     let err = vm.op_iter_done().unwrap_err();
     match err {
         VMError::TypeError { expected, .. } => {
@@ -378,10 +378,10 @@ fn test_row_view_from_iter_next_has_correct_data() {
     let mut vm = VirtualMachine::new(VMConfig::default());
 
     // Get row 1 (price=20.0, name="b")
-    vm.push_vw(ValueWord::from_datatable(table)).unwrap();
-    vm.push_vw(ValueWord::from_i64(1)).unwrap();
+    vm.push_raw_u64(ValueWord::from_datatable(table)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
     vm.op_iter_next().unwrap();
-    let row = vm.pop_vw().unwrap();
+    let row = vm.pop_raw_u64().unwrap();
 
     let (_, rv_table, row_idx) = row.as_row_view().expect("Expected RowView");
     assert_eq!(row_idx, 1);

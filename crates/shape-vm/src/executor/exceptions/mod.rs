@@ -10,7 +10,7 @@ use crate::{
 use shape_ast::TypeAnnotation;
 use shape_runtime::type_schema::builtin_schemas::*;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord};
+use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 // =========================================================================
@@ -98,7 +98,7 @@ impl VirtualMachine {
             self.call_stack.truncate(handler.call_depth);
 
             // Push error value for catch block
-            self.push_vw(error)?;
+            self.push_raw_u64(error)?;
 
             // Jump to catch handler
             self.ip = handler.catch_ip;
@@ -152,7 +152,7 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let value_nb = self.pop_vw()?;
+        let value_nb = self.pop_raw_u64()?;
         let type_annotation = match instruction.operand {
             Some(Operand::Const(idx)) => match self.program.constants.get(idx as usize) {
                 Some(crate::bytecode::Constant::TypeAnnotation(annotation)) => annotation.clone(),
@@ -166,7 +166,7 @@ impl VirtualMachine {
         };
 
         let result = self.check_instanceof_nb(&value_nb, &type_annotation);
-        self.push_vw(ValueWord::from_bool(result))?;
+        self.push_raw_u64(ValueWord::from_bool(result))?;
         Ok(())
     }
 
@@ -176,7 +176,6 @@ impl VirtualMachine {
         value: &ValueWord,
         type_annotation: &TypeAnnotation,
     ) -> bool {
-        use shape_value::NanTag;
         use shape_value::heap_value::HeapKind;
 
         // Unwrap TypeAnnotatedValue wrappers (e.g. from `as int | string`)
@@ -203,12 +202,12 @@ impl VirtualMachine {
         match type_annotation {
             TypeAnnotation::Basic(type_name) => match type_name.as_str() {
                 "number" => {
-                    matches!(value.tag(), NanTag::F64)
+                    value.is_f64()
                         || matches!(value.heap_kind(), Some(HeapKind::Decimal))
                 }
-                "f32" | "f64" | "float" => matches!(value.tag(), NanTag::F64),
+                "f32" | "f64" | "float" => value.is_f64(),
                 "int" => {
-                    matches!(value.tag(), NanTag::I48)
+                    value.is_i64()
                         || matches!(value.heap_kind(), Some(HeapKind::BigInt))
                 }
                 "i64" | "i32" | "i16" | "isize" | "u32" | "u64" | "usize" | "integer" => {
@@ -221,12 +220,12 @@ impl VirtualMachine {
                 "u8" | "byte" => as_int(value).is_some_and(|v| (0..=u8::MAX as i64).contains(&v)),
                 "u16" => as_int(value).is_some_and(|v| (0..=u16::MAX as i64).contains(&v)),
                 "string" => value.as_str().is_some(),
-                "boolean" | "bool" => matches!(value.tag(), NanTag::Bool),
+                "boolean" | "bool" => value.is_bool(),
                 "null" => value.is_none(),
                 "array" => value.as_any_array().is_some(),
                 "object" => matches!(value.heap_kind(), Some(HeapKind::TypedObject)),
                 "function" => {
-                    matches!(value.tag(), NanTag::Function | NanTag::ModuleFunction)
+                    (value.is_function() || value.is_module_function())
                         || matches!(
                             value.heap_kind(),
                             Some(HeapKind::Closure | HeapKind::HostClosure)
@@ -258,7 +257,7 @@ impl VirtualMachine {
             TypeAnnotation::Intersection(types) => types
                 .iter()
                 .all(|inner| self.check_instanceof_nb(value, inner)),
-            TypeAnnotation::Void => matches!(value.tag(), NanTag::Unit),
+            TypeAnnotation::Void => value.is_unit(),
             TypeAnnotation::Never => false,
             TypeAnnotation::Tuple(types) => {
                 if let Some(view) = value.as_any_array() {
@@ -274,7 +273,7 @@ impl VirtualMachine {
             }
             TypeAnnotation::Object(_) => matches!(value.heap_kind(), Some(HeapKind::TypedObject)),
             TypeAnnotation::Function { .. } => {
-                matches!(value.tag(), NanTag::Function | NanTag::ModuleFunction)
+                (value.is_function() || value.is_module_function())
                     || matches!(
                         value.heap_kind(),
                         Some(HeapKind::Closure | HeapKind::HostClosure)
@@ -289,7 +288,7 @@ impl VirtualMachine {
                 _ => false,
             },
             TypeAnnotation::Null => value.is_none(),
-            TypeAnnotation::Undefined => value.is_none() || matches!(value.tag(), NanTag::Unit),
+            TypeAnnotation::Undefined => value.is_none() || value.is_unit(),
             TypeAnnotation::Dyn(_) => true,
         }
     }
@@ -317,7 +316,7 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_throw(&mut self) -> Result<(), VMError> {
-        let error_nb = self.pop_vw()?;
+        let error_nb = self.pop_raw_u64()?;
         self.handle_exception_nb(error_nb)
     }
 
@@ -786,15 +785,15 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_error_context(&mut self) -> Result<(), VMError> {
-        let context_nb = self.pop_vw()?;
-        let value_nb = self.pop_vw()?;
+        let context_nb = self.pop_raw_u64()?;
+        let value_nb = self.pop_raw_u64()?;
 
         // Fast path: inline None
         if value_nb.is_none() {
             let none_cause = self.build_try_none_error_nb();
             let trace = self.trace_info_single_nb();
             let wrapped = self.build_any_error_nb(context_nb, Some(none_cause), trace, None);
-            return self.push_vw(ValueWord::from_err(wrapped));
+            return self.push_raw_u64(ValueWord::from_err(wrapped));
         }
 
         let result = match value_nb.as_heap_ref() {
@@ -809,7 +808,7 @@ impl VirtualMachine {
             _ => ValueWord::from_ok(value_nb),
         };
 
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// Try operator for unified Result/Option propagation.
@@ -828,12 +827,12 @@ impl VirtualMachine {
             if vm.call_stack.is_empty() {
                 vm.handle_exception_nb(payload)
             } else {
-                vm.push_vw(ValueWord::from_err(payload))?;
+                vm.push_raw_u64(ValueWord::from_err(payload))?;
                 vm.op_return_value()
             }
         }
 
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         // Fast path: inline None
         if nb.is_none() {
             let err = self.build_try_none_error_nb();
@@ -842,24 +841,24 @@ impl VirtualMachine {
         // Heap types: Ok/Err/Some
         match nb.as_heap_ref() {
             Some(HeapValue::Ok(inner)) => {
-                self.push_vw(inner.as_ref().clone())?;
+                self.push_raw_u64(inner.as_ref().clone())?;
                 Ok(())
             }
             Some(HeapValue::Err(inner)) => return_early_with_err(self, inner.as_ref().clone()),
             Some(HeapValue::Some(inner)) => {
-                self.push_vw(inner.as_ref().clone())?;
+                self.push_raw_u64(inner.as_ref().clone())?;
                 Ok(())
             }
             _ => {
                 // All non-None, non-Err values are successful payloads
-                self.push_vw(nb)?;
+                self.push_raw_u64(nb)?;
                 Ok(())
             }
         }
     }
 
     pub(in crate::executor) fn op_unwrap_option(&mut self) -> Result<(), VMError> {
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         if nb.is_none() {
             return Err(VMError::RuntimeError(
                 "Cannot unwrap None value".to_string(),
@@ -867,13 +866,13 @@ impl VirtualMachine {
         }
         match nb.as_heap_ref() {
             Some(HeapValue::Some(inner)) => {
-                self.push_vw(inner.as_ref().clone())?;
+                self.push_raw_u64(inner.as_ref().clone())?;
                 Ok(())
             }
             _ => {
                 // Some() constructor returns the value unwrapped (not wrapped in
                 // HeapValue::Some), so non-None values are already the inner value.
-                self.push_vw(nb)?;
+                self.push_raw_u64(nb)?;
                 Ok(())
             }
         }
@@ -881,23 +880,23 @@ impl VirtualMachine {
 
     #[inline(always)]
     pub(in crate::executor) fn op_is_ok(&mut self) -> Result<(), VMError> {
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         let is_ok = nb.as_ok_inner().is_some();
-        self.push_vw(ValueWord::from_bool(is_ok))
+        self.push_raw_u64(ValueWord::from_bool(is_ok))
     }
 
     #[inline(always)]
     pub(in crate::executor) fn op_is_err(&mut self) -> Result<(), VMError> {
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         let is_err = nb.as_err_inner().is_some();
-        self.push_vw(ValueWord::from_bool(is_err))
+        self.push_raw_u64(ValueWord::from_bool(is_err))
     }
 
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_ok(&mut self) -> Result<(), VMError> {
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         match nb.as_heap_ref() {
-            Some(HeapValue::Ok(inner)) => self.push_vw(inner.as_ref().clone()),
+            Some(HeapValue::Ok(inner)) => self.push_raw_u64(inner.as_ref().clone()),
             _ => Err(VMError::RuntimeError(format!(
                 "UnwrapOk can only be applied to Ok(value), got {}",
                 nb.type_name()
@@ -907,7 +906,7 @@ impl VirtualMachine {
 
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_err(&mut self) -> Result<(), VMError> {
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         match nb.as_heap_ref() {
             Some(HeapValue::Err(inner)) => {
                 let inner_val = inner.as_ref().clone();
@@ -924,11 +923,11 @@ impl VirtualMachine {
                         if ANYERROR_PAYLOAD < slots.len() {
                             let is_heap = *heap_mask & (1u64 << ANYERROR_PAYLOAD) != 0;
                             let payload = slots[ANYERROR_PAYLOAD].as_value_word(is_heap);
-                            return self.push_vw(payload);
+                            return self.push_raw_u64(payload);
                         }
                     }
                 }
-                self.push_vw(inner_val)
+                self.push_raw_u64(inner_val)
             }
             _ => Err(VMError::RuntimeError(format!(
                 "UnwrapErr can only be applied to Err(value), got {}",

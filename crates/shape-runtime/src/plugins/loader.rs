@@ -3,6 +3,7 @@
 //! Handles dynamic loading of plugin shared libraries using libloading.
 
 use std::collections::HashMap;
+use shape_value::ValueWordExt;
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;

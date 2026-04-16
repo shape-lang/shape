@@ -26,6 +26,7 @@ pub(crate) use project_config::toml_to_json;
 #[cfg(test)]
 mod tests {
     use super::*;
+use shape_value::ValueWordExt;
     use std::io::Write;
     use std::path::PathBuf;
 

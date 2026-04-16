@@ -113,7 +113,7 @@ use shape_ast::data::Timeframe;
 
 use crate::constants::{DEFAULT_GC_TRIGGER_THRESHOLD, MAX_CALL_STACK_DEPTH, MAX_STACK_SIZE};
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord};
+use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 /// VM configuration
 #[derive(Debug, Clone)]
 pub struct VMConfig {
@@ -212,8 +212,8 @@ pub struct VirtualMachine {
     /// Locals live in register windows on this stack.
     /// Each slot stores the raw bit pattern of a `ValueWord` (which is
     /// `#[repr(transparent)]` over `u64`).  Ownership of any embedded
-    /// Arc refcounts is managed manually via `push_vw`/`pop_vw`/
-    /// `stack_read_vw`/`stack_write_vw` helpers.
+    /// Arc refcounts is managed manually via `push_raw_u64`/`pop_raw_u64`/
+    /// `stack_read_raw`/`stack_write_raw` helpers.
     stack: Vec<u64>,
 
     /// Stack pointer — logical top of the value stack.

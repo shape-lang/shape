@@ -1,4 +1,5 @@
 use super::*;
+use shape_value::ValueWordExt;
 use crate::bytecode::{OpCode, SourceMap};
 use shape_abi_v1::PermissionSet;
 

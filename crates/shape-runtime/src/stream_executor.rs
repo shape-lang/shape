@@ -12,7 +12,7 @@ use crate::plugins::PluginLoader;
 use parking_lot::RwLock;
 use shape_ast::ast::{Statement, StreamDef, VariableDecl};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;

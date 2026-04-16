@@ -10,7 +10,7 @@
 //! can be converted to Shape source-level tests.
 
 use shape_runtime::stdlib::csv_module::create_csv_module;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 fn test_ctx() -> shape_runtime::module_exports::ModuleContext<'static> {

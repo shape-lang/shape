@@ -10,7 +10,7 @@
 //! This module is industry-agnostic and works with any timestamped data.
 
 use chrono::{DateTime, Duration, Utc};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 use shape_ast::error::Result;

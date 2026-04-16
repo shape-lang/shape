@@ -11,7 +11,7 @@
 //! complex per-variant logic (e.g. cross-type numeric comparison).
 
 use crate::aligned_vec::AlignedVec;
-use crate::value_word::ValueWord;
+use crate::value_word::{ValueWord, ValueWordExt};
 use chrono::{DateTime, FixedOffset};
 use shape_ast::data::Timeframe;
 use std::collections::HashMap;

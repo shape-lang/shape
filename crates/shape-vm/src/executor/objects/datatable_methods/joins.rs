@@ -1,7 +1,7 @@
 //! DataTable join methods: innerJoin, leftJoin.
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 use std::mem::ManuallyDrop;
 
@@ -9,32 +9,24 @@ use super::common::{build_datatable_from_objects_nb, extract_dt_nb};
 
 /// Compare two ValueWord join key values for equality.
 fn nb_join_keys_equal(a: &ValueWord, b: &ValueWord) -> bool {
-    use shape_value::NanTag;
-    match (a.tag(), b.tag()) {
-        (NanTag::F64, NanTag::F64) => {
-            let (na, nb) = (a.as_f64().unwrap(), b.as_f64().unwrap());
-            if na.is_nan() && nb.is_nan() {
-                true
-            } else {
-                (na - nb).abs() < f64::EPSILON
-            }
+    if a.is_f64() && b.is_f64() {
+        let (na, nb) = (a.as_f64().unwrap(), b.as_f64().unwrap());
+        if na.is_nan() && nb.is_nan() { true } else { (na - nb).abs() < f64::EPSILON }
+    } else if a.is_i64() && b.is_i64() {
+        a.as_i64() == b.as_i64()
+    } else if (a.is_f64() || a.is_i64()) && (b.is_f64() || b.is_i64()) {
+        match (a.as_number_coerce(), b.as_number_coerce()) {
+            (Some(na), Some(nb)) => (na - nb).abs() < f64::EPSILON,
+            _ => false,
         }
-        (NanTag::I48, NanTag::I48) => a.as_i64() == b.as_i64(),
-        (NanTag::F64, NanTag::I48) | (NanTag::I48, NanTag::F64) => {
-            match (a.as_number_coerce(), b.as_number_coerce()) {
-                (Some(na), Some(nb)) => (na - nb).abs() < f64::EPSILON,
-                _ => false,
-            }
-        }
-        (NanTag::Bool, NanTag::Bool) => a.as_bool() == b.as_bool(),
-        (NanTag::None, NanTag::None) => true,
-        _ => {
-            if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
-                sa == sb
-            } else {
-                false
-            }
-        }
+    } else if a.is_bool() && b.is_bool() {
+        a.as_bool() == b.as_bool()
+    } else if a.is_none() && b.is_none() {
+        true
+    } else if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
+        sa == sb
+    } else {
+        false
     }
 }
 

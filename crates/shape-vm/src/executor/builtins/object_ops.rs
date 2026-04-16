@@ -3,7 +3,7 @@
 //! Handles: objectRest
 
 use crate::executor::VirtualMachine;
-use shape_value::{HeapValue, VMError, ValueWord};
+use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt};
 
 impl VirtualMachine {
     /// ObjectRest: Create new object excluding specified keys

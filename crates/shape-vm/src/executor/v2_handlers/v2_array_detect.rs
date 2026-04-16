@@ -20,7 +20,7 @@
 //! Allocation handlers in `array.rs` stamp the byte after allocating;
 //! consumer paths in this module read the byte to dispatch.
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::NativeScalar;
 use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
 use shape_value::v2::typed_array::TypedArray;

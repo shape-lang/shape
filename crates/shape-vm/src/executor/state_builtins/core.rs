@@ -17,7 +17,7 @@ use super::introspection::{
 use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use shape_runtime::state_diff;
 use shape_runtime::type_schema::{FieldType, TypeSchema};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -368,7 +368,7 @@ pub(crate) fn state_hash(args: &[ValueWord], ctx: &ModuleContext) -> Result<Valu
 pub(crate) fn state_fn_hash(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, String> {
     let f = args.first().ok_or("state.fn_hash requires 1 argument")?;
 
-    let func_id = if let Some(fid) = f.as_function() {
+    let func_id = if let Some(fid) = f.as_function_id() {
         Some(fid as usize)
     } else if let Some(heap_ref) = f.as_heap_ref() {
         if let shape_value::HeapValue::Closure { function_id, .. } = heap_ref {

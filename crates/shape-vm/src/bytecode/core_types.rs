@@ -1,4 +1,5 @@
 use super::*;
+use shape_value::ValueWordExt;
 use crate::type_tracking::{FrameDescriptor, SlotKind, StorageHint};
 use std::sync::Arc;
 

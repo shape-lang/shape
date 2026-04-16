@@ -3,7 +3,7 @@
 //! Handles: inner_join, left_join, cross_join
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -55,29 +55,29 @@ pub(crate) fn handle_inner_join_v2(
 
     for (l_idx, left_nb) in left.iter().enumerate() {
         // Compute left key
-        vm.push_vw(left_key_fn.clone())?;
-        vm.push_vw(left_nb.clone())?;
-        vm.push_vw(ValueWord::from_f64(l_idx as f64))?;
-        vm.push_vw(ValueWord::from_f64(2.0))?;
+        vm.push_raw_u64(left_key_fn.clone())?;
+        vm.push_raw_u64(left_nb.clone())?;
+        vm.push_raw_u64(ValueWord::from_f64(l_idx as f64))?;
+        vm.push_raw_u64(ValueWord::from_f64(2.0))?;
         vm.op_call_value()?;
-        let left_key = vm.pop_vw()?;
+        let left_key = vm.pop_raw_u64()?;
 
         for (r_idx, right_nb) in right.iter().enumerate() {
             // Compute right key
-            vm.push_vw(right_key_fn.clone())?;
-            vm.push_vw(right_nb.clone())?;
-            vm.push_vw(ValueWord::from_f64(r_idx as f64))?;
-            vm.push_vw(ValueWord::from_f64(2.0))?;
+            vm.push_raw_u64(right_key_fn.clone())?;
+            vm.push_raw_u64(right_nb.clone())?;
+            vm.push_raw_u64(ValueWord::from_f64(r_idx as f64))?;
+            vm.push_raw_u64(ValueWord::from_f64(2.0))?;
             vm.op_call_value()?;
-            let right_key = vm.pop_vw()?;
+            let right_key = vm.pop_raw_u64()?;
 
             if left_key.vw_equals(&right_key) {
-                vm.push_vw(result_selector.clone())?;
-                vm.push_vw(left_nb.clone())?;
-                vm.push_vw(right_nb.clone())?;
-                vm.push_vw(ValueWord::from_f64(2.0))?;
+                vm.push_raw_u64(result_selector.clone())?;
+                vm.push_raw_u64(left_nb.clone())?;
+                vm.push_raw_u64(right_nb.clone())?;
+                vm.push_raw_u64(ValueWord::from_f64(2.0))?;
                 vm.op_call_value()?;
-                let result = vm.pop_vw()?;
+                let result = vm.pop_raw_u64()?;
                 results.push(result);
             }
         }
@@ -126,42 +126,42 @@ pub(crate) fn handle_left_join_v2(
     let mut results: Vec<ValueWord> = Vec::new();
 
     for (l_idx, left_nb) in left.iter().enumerate() {
-        vm.push_vw(left_key_fn.clone())?;
-        vm.push_vw(left_nb.clone())?;
-        vm.push_vw(ValueWord::from_f64(l_idx as f64))?;
-        vm.push_vw(ValueWord::from_f64(2.0))?;
+        vm.push_raw_u64(left_key_fn.clone())?;
+        vm.push_raw_u64(left_nb.clone())?;
+        vm.push_raw_u64(ValueWord::from_f64(l_idx as f64))?;
+        vm.push_raw_u64(ValueWord::from_f64(2.0))?;
         vm.op_call_value()?;
-        let left_key = vm.pop_vw()?;
+        let left_key = vm.pop_raw_u64()?;
 
         let mut found_match = false;
 
         for (r_idx, right_nb) in right.iter().enumerate() {
-            vm.push_vw(right_key_fn.clone())?;
-            vm.push_vw(right_nb.clone())?;
-            vm.push_vw(ValueWord::from_f64(r_idx as f64))?;
-            vm.push_vw(ValueWord::from_f64(2.0))?;
+            vm.push_raw_u64(right_key_fn.clone())?;
+            vm.push_raw_u64(right_nb.clone())?;
+            vm.push_raw_u64(ValueWord::from_f64(r_idx as f64))?;
+            vm.push_raw_u64(ValueWord::from_f64(2.0))?;
             vm.op_call_value()?;
-            let right_key = vm.pop_vw()?;
+            let right_key = vm.pop_raw_u64()?;
 
             if left_key.vw_equals(&right_key) {
-                vm.push_vw(result_selector.clone())?;
-                vm.push_vw(left_nb.clone())?;
-                vm.push_vw(right_nb.clone())?;
-                vm.push_vw(ValueWord::from_f64(2.0))?;
+                vm.push_raw_u64(result_selector.clone())?;
+                vm.push_raw_u64(left_nb.clone())?;
+                vm.push_raw_u64(right_nb.clone())?;
+                vm.push_raw_u64(ValueWord::from_f64(2.0))?;
                 vm.op_call_value()?;
-                let result = vm.pop_vw()?;
+                let result = vm.pop_raw_u64()?;
                 results.push(result);
                 found_match = true;
             }
         }
 
         if !found_match {
-            vm.push_vw(result_selector.clone())?;
-            vm.push_vw(left_nb.clone())?;
-            vm.push_vw(ValueWord::none())?;
-            vm.push_vw(ValueWord::from_f64(2.0))?;
+            vm.push_raw_u64(result_selector.clone())?;
+            vm.push_raw_u64(left_nb.clone())?;
+            vm.push_raw_u64(ValueWord::none())?;
+            vm.push_raw_u64(ValueWord::from_f64(2.0))?;
             vm.op_call_value()?;
-            let result = vm.pop_vw()?;
+            let result = vm.pop_raw_u64()?;
             results.push(result);
         }
     }
@@ -207,12 +207,12 @@ pub(crate) fn handle_cross_join_v2(
 
     for left_nb in left.iter() {
         for right_nb in right.iter() {
-            vm.push_vw(result_selector.clone())?;
-            vm.push_vw(left_nb.clone())?;
-            vm.push_vw(right_nb.clone())?;
-            vm.push_vw(ValueWord::from_f64(2.0))?;
+            vm.push_raw_u64(result_selector.clone())?;
+            vm.push_raw_u64(left_nb.clone())?;
+            vm.push_raw_u64(right_nb.clone())?;
+            vm.push_raw_u64(ValueWord::from_f64(2.0))?;
             vm.op_call_value()?;
-            let result = vm.pop_vw()?;
+            let result = vm.pop_raw_u64()?;
             results.push(result);
         }
     }

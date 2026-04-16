@@ -4,6 +4,7 @@
 //! instruction patterns, and structural properties.
 
 use std::collections::{HashMap, HashSet};
+use shape_value::ValueWordExt;
 
 /// A searchable index over a set of function blobs.
 pub struct CodeIndex {

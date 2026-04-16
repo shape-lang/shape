@@ -23,7 +23,7 @@ use shape_value::v2_typed_array::{
     typed_array_push_i32, typed_array_push_i64, typed_array_set_f64, typed_array_set_i32,
     typed_array_set_i64,
 };
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use crate::executor::VirtualMachine;
 
@@ -307,7 +307,7 @@ mod tests {
         op_typed_array_alloc_f64(&mut vm, 8).unwrap();
         // The array pointer is on the stack; duplicate it for len check
         // Pop it, check len, then free
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
         let ptr = u64_to_ptr(arr_bits);
         assert_eq!(unsafe { typed_array_len(ptr) }, 0);
@@ -320,7 +320,7 @@ mod tests {
         let mut vm = make_test_vm();
         op_typed_array_alloc_i64(&mut vm, 4).unwrap();
         op_typed_array_len(&mut vm).unwrap();
-        let len_vw = vm.pop_vw().unwrap();
+        let len_vw = vm.pop_raw_u64().unwrap();
         assert_eq!(len_vw.as_i64(), Some(0));
     }
 
@@ -334,60 +334,60 @@ mod tests {
         op_typed_array_alloc_f64(&mut vm, 4).unwrap();
 
         // Push 3 values: each push pops (arr, val) and pushes updated arr
-        vm.push_vw(ValueWord::from_f64(1.5)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(1.5)).unwrap();
         // Stack: [arr, 1.5] -- but push expects [arr, val]
         // We need to swap since alloc leaves arr on stack, then we push val on top
         // Actually the stack is: [..., arr_ptr, 1.5] which is correct for push
         op_typed_array_push_f64(&mut vm).unwrap();
         // Stack: [arr_ptr (possibly new)]
 
-        vm.push_vw(ValueWord::from_f64(2.7)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(2.7)).unwrap();
         op_typed_array_push_f64(&mut vm).unwrap();
 
-        vm.push_vw(ValueWord::from_f64(3.14)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(3.14)).unwrap();
         op_typed_array_push_f64(&mut vm).unwrap();
 
         // Check length: duplicate the arr pointer first
         // We need the pointer for both len and get, so let's peek
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Push arr back for len
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
         op_typed_array_len(&mut vm).unwrap();
-        let len = vm.pop_vw().unwrap();
+        let len = vm.pop_raw_u64().unwrap();
         assert_eq!(len.as_i64(), Some(3));
 
         // Get element 0
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
-        let v0 = vm.pop_vw().unwrap();
+        let v0 = vm.pop_raw_u64().unwrap();
         assert_eq!(v0.as_f64(), Some(1.5));
 
         // Get element 1
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
-        let v1 = vm.pop_vw().unwrap();
+        let v1 = vm.pop_raw_u64().unwrap();
         assert_eq!(v1.as_f64(), Some(2.7));
 
         // Get element 2
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(2)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(2)).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
-        let v2 = vm.pop_vw().unwrap();
+        let v2 = vm.pop_raw_u64().unwrap();
         assert_eq!(v2.as_f64(), Some(3.14));
 
         // Out of bounds
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(3)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(3)).unwrap();
         let err = op_typed_array_get_f64(&mut vm);
         assert!(err.is_err());
 
         // Negative index
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(-1)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(-1)).unwrap();
         let err = op_typed_array_get_f64(&mut vm);
         assert!(err.is_err());
 
@@ -404,40 +404,40 @@ mod tests {
 
         op_typed_array_alloc_i64(&mut vm, 4).unwrap();
 
-        vm.push_vw(ValueWord::from_i64(100)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(100)).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
 
-        vm.push_vw(ValueWord::from_i64(-200)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(-200)).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
 
-        vm.push_vw(ValueWord::from_i64(i64::MAX)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(i64::MAX)).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
 
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Len
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(3));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(3));
 
         // Get elements
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(100));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(100));
 
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(-200));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(-200));
 
         // Note: i64::MAX exceeds i48 range, so ValueWord::from_i64 will heap-box it.
         // The push handler extracts via as_i64() which works for heap-boxed BigInt too.
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(2)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(2)).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        let v2 = vm.pop_vw().unwrap();
+        let v2 = vm.pop_raw_u64().unwrap();
         assert_eq!(v2.as_i64(), Some(i64::MAX));
 
         let ptr = u64_to_ptr(arr_bits);
@@ -452,30 +452,30 @@ mod tests {
 
         op_typed_array_alloc_i32(&mut vm, 4).unwrap();
 
-        vm.push_vw(ValueWord::from_i64(42)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(42)).unwrap();
         op_typed_array_push_i32(&mut vm).unwrap();
 
-        vm.push_vw(ValueWord::from_i64(-99)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(-99)).unwrap();
         op_typed_array_push_i32(&mut vm).unwrap();
 
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Len
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(2));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(2));
 
         // Get elements (i32 widened to i64)
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_get_i32(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(42));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(42));
 
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
         op_typed_array_get_i32(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(-99));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(-99));
 
         let ptr = u64_to_ptr(arr_bits);
         unsafe { typed_array_free(ptr) };
@@ -490,36 +490,36 @@ mod tests {
         op_typed_array_alloc_f64(&mut vm, 4).unwrap();
 
         // Push two zeros
-        vm.push_vw(ValueWord::from_f64(0.0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(0.0)).unwrap();
         op_typed_array_push_f64(&mut vm).unwrap();
-        vm.push_vw(ValueWord::from_f64(0.0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(0.0)).unwrap();
         op_typed_array_push_f64(&mut vm).unwrap();
 
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Set index 0 to 42.0
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
-        vm.push_vw(ValueWord::from_f64(42.0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(42.0)).unwrap();
         op_typed_array_set_f64(&mut vm).unwrap();
 
         // Set index 1 to -1.5
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
-        vm.push_vw(ValueWord::from_f64(-1.5)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(-1.5)).unwrap();
         op_typed_array_set_f64(&mut vm).unwrap();
 
         // Verify
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_f64(), Some(42.0));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_f64(), Some(42.0));
 
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
         op_typed_array_get_f64(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_f64(), Some(-1.5));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_f64(), Some(-1.5));
 
         let ptr = u64_to_ptr(arr_bits);
         unsafe { typed_array_free(ptr) };
@@ -531,36 +531,36 @@ mod tests {
 
         op_typed_array_alloc_i64(&mut vm, 4).unwrap();
 
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_push_i64(&mut vm).unwrap();
 
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Set index 0
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
-        vm.push_vw(ValueWord::from_i64(999)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(999)).unwrap();
         op_typed_array_set_i64(&mut vm).unwrap();
 
         // Set index 1
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
-        vm.push_vw(ValueWord::from_i64(-888)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(-888)).unwrap();
         op_typed_array_set_i64(&mut vm).unwrap();
 
         // Verify
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(999));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(999));
 
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
         op_typed_array_get_i64(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(-888));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(-888));
 
         let ptr = u64_to_ptr(arr_bits);
         unsafe { typed_array_free(ptr) };
@@ -572,23 +572,23 @@ mod tests {
 
         op_typed_array_alloc_i32(&mut vm, 4).unwrap();
 
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_push_i32(&mut vm).unwrap();
 
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Set index 0 to 777
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
-        vm.push_vw(ValueWord::from_i64(777)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(777)).unwrap();
         op_typed_array_set_i32(&mut vm).unwrap();
 
         // Verify
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         op_typed_array_get_i32(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(777));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(777));
 
         let ptr = u64_to_ptr(arr_bits);
         unsafe { typed_array_free(ptr) };
@@ -603,7 +603,7 @@ mod tests {
         // Free via handler (pops the pointer and deallocates)
         op_typed_array_free(&mut vm).unwrap();
         // Stack should be empty
-        assert!(vm.pop_vw().is_err());
+        assert!(vm.pop_raw_u64().is_err());
     }
 
     // ---- Growth under push ----
@@ -617,24 +617,24 @@ mod tests {
 
         // Push 5 elements (forces at least one realloc)
         for i in 0..5 {
-            vm.push_vw(ValueWord::from_f64(i as f64 * 1.1)).unwrap();
+            vm.push_raw_u64(ValueWord::from_f64(i as f64 * 1.1)).unwrap();
             op_typed_array_push_f64(&mut vm).unwrap();
         }
 
         // Check length
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(5));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(5));
 
         // Verify all values survived realloc
         for i in 0..5 {
-            unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-            vm.push_vw(ValueWord::from_i64(i)).unwrap();
+            unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+            vm.push_raw_u64(ValueWord::from_i64(i)).unwrap();
             op_typed_array_get_f64(&mut vm).unwrap();
-            let val = vm.pop_vw().unwrap().as_f64().unwrap();
+            let val = vm.pop_raw_u64().unwrap().as_f64().unwrap();
             let expected = i as f64 * 1.1;
             assert!(
                 (val - expected).abs() < 1e-12,
@@ -657,16 +657,16 @@ mod tests {
 
         op_typed_array_alloc_f64(&mut vm, 4).unwrap();
 
-        vm.push_vw(ValueWord::from_f64(1.0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(1.0)).unwrap();
         op_typed_array_push_f64(&mut vm).unwrap();
 
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Try to set index 1 (len is 1, so out of bounds)
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
-        vm.push_vw(ValueWord::from_f64(99.0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(99.0)).unwrap();
         let err = op_typed_array_set_f64(&mut vm);
         assert!(err.is_err());
 
@@ -686,32 +686,32 @@ mod tests {
         // Push 4 elements
         let values = [1.0, 2.0, 3.0, 4.0];
         for &v in &values {
-            vm.push_vw(ValueWord::from_f64(v)).unwrap();
+            vm.push_raw_u64(ValueWord::from_f64(v)).unwrap();
             op_typed_array_push_f64(&mut vm).unwrap();
         }
 
         // Stash the pointer
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Check len == 4
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
         op_typed_array_len(&mut vm).unwrap();
-        assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(4));
+        assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(4));
 
         // Modify index 2: 3.0 -> 30.0
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(2)).unwrap();
-        vm.push_vw(ValueWord::from_f64(30.0)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(2)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(30.0)).unwrap();
         op_typed_array_set_f64(&mut vm).unwrap();
 
         // Read back all values
         let expected = [1.0, 2.0, 30.0, 4.0];
         for (i, &exp) in expected.iter().enumerate() {
-            unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-            vm.push_vw(ValueWord::from_i64(i as i64)).unwrap();
+            unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+            vm.push_raw_u64(ValueWord::from_i64(i as i64)).unwrap();
             op_typed_array_get_f64(&mut vm).unwrap();
-            let got = vm.pop_vw().unwrap().as_f64().unwrap();
+            let got = vm.pop_raw_u64().unwrap().as_f64().unwrap();
             assert_eq!(got, exp, "mismatch at index {}", i);
         }
 
@@ -728,26 +728,26 @@ mod tests {
 
         let values: [i64; 4] = [10, 20, 30, 40];
         for &v in &values {
-            vm.push_vw(ValueWord::from_i64(v)).unwrap();
+            vm.push_raw_u64(ValueWord::from_i64(v)).unwrap();
             op_typed_array_push_i64(&mut vm).unwrap();
         }
 
-        let arr_vw = vm.pop_vw().unwrap();
+        let arr_vw = vm.pop_raw_u64().unwrap();
         let arr_bits = unsafe { value_word_to_raw_u64(&arr_vw) };
 
         // Set index 1: 20 -> -200
-        unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-        vm.push_vw(ValueWord::from_i64(1)).unwrap();
-        vm.push_vw(ValueWord::from_i64(-200)).unwrap();
+        unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(-200)).unwrap();
         op_typed_array_set_i64(&mut vm).unwrap();
 
         // Verify
         let expected: [i64; 4] = [10, -200, 30, 40];
         for (i, &exp) in expected.iter().enumerate() {
-            unsafe { vm.push_vw(value_word_from_raw_u64(arr_bits)).unwrap() };
-            vm.push_vw(ValueWord::from_i64(i as i64)).unwrap();
+            unsafe { vm.push_raw_u64(value_word_from_raw_u64(arr_bits)).unwrap() };
+            vm.push_raw_u64(ValueWord::from_i64(i as i64)).unwrap();
             op_typed_array_get_i64(&mut vm).unwrap();
-            assert_eq!(vm.pop_vw().unwrap().as_i64(), Some(exp), "mismatch at i={}", i);
+            assert_eq!(vm.pop_raw_u64().unwrap().as_i64(), Some(exp), "mismatch at i={}", i);
         }
 
         let ptr = u64_to_ptr(arr_bits);

@@ -1,4 +1,5 @@
 use super::*;
+use shape_value::ValueWordExt;
 use std::net::TcpListener;
 
 fn test_ctx() -> ModuleContext<'static> {

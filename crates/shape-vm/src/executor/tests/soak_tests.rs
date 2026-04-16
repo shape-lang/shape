@@ -4,7 +4,7 @@
 
 use super::*;
 use super::test_utils::eval;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Expected sum of 0..n using the closed-form formula.
 fn expected_sum(n: i64) -> i64 {

@@ -28,7 +28,7 @@ use shape_runtime::snapshot::{
     SerializableVMValue, SnapshotStore, nanboxed_to_serializable, serializable_to_nanboxed,
 };
 use shape_runtime::type_schema::TypeSchemaRegistry;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 use shape_wire::WireValue;
 

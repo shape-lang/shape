@@ -1,6 +1,6 @@
 use super::*;
 use crate::bytecode::*;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Shared test helpers (eval, eval_result, compile, etc.)
 pub(crate) mod test_utils;

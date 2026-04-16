@@ -7,7 +7,7 @@ use crate::{
     executor::{LoopContext, VirtualMachine},
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -96,8 +96,8 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_iter_done(&mut self) -> Result<(), VMError> {
-        let idx_nb = self.pop_vw()?;
-        let iter = self.pop_vw()?;
+        let idx_nb = self.pop_raw_u64()?;
+        let iter = self.pop_raw_u64()?;
         let idx = idx_nb.as_number_coerce().ok_or(VMError::TypeError {
             expected: "number",
             got: "unknown",
@@ -174,8 +174,8 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_iter_next(&mut self) -> Result<(), VMError> {
-        let idx_nb = self.pop_vw()?;
-        let iter = self.pop_vw()?;
+        let idx_nb = self.pop_raw_u64()?;
+        let iter = self.pop_raw_u64()?;
         let idx = idx_nb.as_number_coerce().ok_or_else(|| {
             VMError::RuntimeError("Expected number for iterator index".to_string())
         })? as i64;
@@ -189,7 +189,7 @@ impl VirtualMachine {
                 crate::executor::v2_handlers::v2_array_detect::read_element(&view, idx as u32)
                     .unwrap_or_else(ValueWord::none)
             };
-            self.push_vw(result)?;
+            self.push_raw_u64(result)?;
             return Ok(());
         }
         // Handle unified arrays (bit-47 tagged) for iteration.
@@ -205,7 +205,7 @@ impl VirtualMachine {
                     let elem_bits = *arr.get(idx as usize).unwrap();
                     unsafe { ValueWord::clone_from_bits(elem_bits) }
                 };
-                self.push_vw(result)?;
+                self.push_raw_u64(result)?;
                 return Ok(());
             }
         }
@@ -317,7 +317,7 @@ impl VirtualMachine {
                 });
             }
         };
-        self.push_vw(result)?;
+        self.push_raw_u64(result)?;
         Ok(())
     }
 }

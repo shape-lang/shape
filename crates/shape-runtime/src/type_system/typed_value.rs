@@ -18,7 +18,7 @@
 
 use super::semantic::SemanticType;
 use super::storage::StorageType;
-use shape_value::{HeapValue, NanTag, ValueWord};
+use shape_value::{HeapValue, ValueWord, ValueWordExt};
 use std::fmt;
 use std::sync::Arc;
 
@@ -230,30 +230,35 @@ impl From<ValueWord> for TypedValue {
 
 /// Infer semantic type from a ValueWord value without materializing ValueWord.
 ///
-/// Dispatches on NanTag for inline types and HeapValue for heap-allocated types.
+/// Dispatches on tag bits for inline types and HeapValue for heap-allocated types.
 /// This avoids the allocation overhead of `nb.clone()` for type inference.
 fn infer_semantic_type_nb(nb: &ValueWord) -> SemanticType {
-    match nb.tag() {
-        NanTag::F64 => SemanticType::Number,
-        NanTag::I48 => SemanticType::Integer,
-        NanTag::Bool => SemanticType::Bool,
-        NanTag::None => SemanticType::Option(Box::new(SemanticType::Named("Unknown".to_string()))),
-        NanTag::Unit => SemanticType::Void,
-        NanTag::Function | NanTag::ModuleFunction => {
+    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+    let bits = nb.raw_bits();
+    if !is_tagged(bits) {
+        return SemanticType::Number;
+    }
+    match get_tag(bits) {
+        TAG_INT => SemanticType::Integer,
+        TAG_BOOL => SemanticType::Bool,
+        TAG_NONE => SemanticType::Option(Box::new(SemanticType::Named("Unknown".to_string()))),
+        TAG_UNIT => SemanticType::Void,
+        TAG_FUNCTION | TAG_MODULE_FN => {
             SemanticType::Function(Box::new(super::semantic::FunctionSignature {
                 params: vec![],
                 return_type: SemanticType::Named("Unknown".to_string()),
                 is_fallible: false,
             }))
         }
-        NanTag::Heap => {
+        TAG_HEAP => {
             match nb.as_heap_ref() {
                 Some(hv) => infer_semantic_type_heap(hv),
                 // Should never happen: Heap tag but no heap ref
                 std::option::Option::None => SemanticType::Named("Unknown".to_string()),
             }
         }
-        NanTag::Ref => SemanticType::Named("Unknown".to_string()), // References are transparent at the type level
+        TAG_REF => SemanticType::Named("Unknown".to_string()), // References are transparent at the type level
+        _ => SemanticType::Named("Unknown".to_string()),
     }
 }
 

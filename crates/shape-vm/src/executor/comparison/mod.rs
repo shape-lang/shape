@@ -6,7 +6,8 @@ use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,
 };
-use shape_value::{FilterLiteral, FilterNode, FilterOp, NanTag, VMError, ValueWord};
+use shape_value::{FilterLiteral, FilterNode, FilterOp, VMError, ValueWord, ValueWordExt};
+use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_HEAP, TAG_REF};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -106,13 +107,16 @@ impl VirtualMachine {
 
     /// Convert a ValueWord to a FilterLiteral (for SQL pushdown)
     fn nb_to_filter_literal(value: &ValueWord) -> Option<FilterLiteral> {
-        match value.tag() {
-            NanTag::I48 => Some(FilterLiteral::Int(value.as_i64().unwrap_or(0))),
-            NanTag::F64 => value.as_f64().map(FilterLiteral::Float),
-            NanTag::Bool => Some(FilterLiteral::Bool(value.as_bool().unwrap_or(false))),
-            NanTag::None => Some(FilterLiteral::Null),
-            NanTag::Heap => value.as_str().map(|s| FilterLiteral::String(s.to_string())),
-            NanTag::Ref => None,
+        let bits = value.raw_bits();
+        if !is_tagged(bits) {
+            return value.as_f64().map(FilterLiteral::Float);
+        }
+        match get_tag(bits) {
+            TAG_INT => Some(FilterLiteral::Int(value.as_i64().unwrap_or(0))),
+            TAG_BOOL => Some(FilterLiteral::Bool(value.as_bool().unwrap_or(false))),
+            TAG_NONE => Some(FilterLiteral::Null),
+            TAG_HEAP => value.as_str().map(|s| FilterLiteral::String(s.to_string())),
+            TAG_REF => None,
             _ => None,
         }
     }
@@ -145,8 +149,8 @@ impl VirtualMachine {
                     let ai = self.pop_raw_i64()?;
                     self.push_raw_bool(ai > bi)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_i64_unchecked() > b.as_i64_unchecked()
                     })?;
@@ -158,16 +162,16 @@ impl VirtualMachine {
                     let a = self.pop_raw_f64()?;
                     self.push_raw_bool(a > b)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_f64_unchecked() > b.as_f64_unchecked()
                     })?;
                 }
             }
             GtDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 self.push_raw_bool(unsafe {
                     a.as_decimal_unchecked() > b.as_decimal_unchecked()
                 })?;
@@ -178,8 +182,8 @@ impl VirtualMachine {
                     let ai = self.pop_raw_i64()?;
                     self.push_raw_bool(ai < bi)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_i64_unchecked() < b.as_i64_unchecked()
                     })?;
@@ -191,16 +195,16 @@ impl VirtualMachine {
                     let a = self.pop_raw_f64()?;
                     self.push_raw_bool(a < b)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_f64_unchecked() < b.as_f64_unchecked()
                     })?;
                 }
             }
             LtDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 self.push_raw_bool(unsafe {
                     a.as_decimal_unchecked() < b.as_decimal_unchecked()
                 })?;
@@ -211,8 +215,8 @@ impl VirtualMachine {
                     let ai = self.pop_raw_i64()?;
                     self.push_raw_bool(ai >= bi)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_i64_unchecked() >= b.as_i64_unchecked()
                     })?;
@@ -224,16 +228,16 @@ impl VirtualMachine {
                     let a = self.pop_raw_f64()?;
                     self.push_raw_bool(a >= b)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_f64_unchecked() >= b.as_f64_unchecked()
                     })?;
                 }
             }
             GteDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 self.push_raw_bool(unsafe {
                     a.as_decimal_unchecked() >= b.as_decimal_unchecked()
                 })?;
@@ -244,8 +248,8 @@ impl VirtualMachine {
                     let ai = self.pop_raw_i64()?;
                     self.push_raw_bool(ai <= bi)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_i64_unchecked() <= b.as_i64_unchecked()
                     })?;
@@ -257,16 +261,16 @@ impl VirtualMachine {
                     let a = self.pop_raw_f64()?;
                     self.push_raw_bool(a <= b)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_f64_unchecked() <= b.as_f64_unchecked()
                     })?;
                 }
             }
             LteDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 self.push_raw_bool(unsafe {
                     a.as_decimal_unchecked() <= b.as_decimal_unchecked()
                 })?;
@@ -277,8 +281,8 @@ impl VirtualMachine {
                     let ai = self.pop_raw_i64()?;
                     self.push_raw_bool(ai == bi)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_i64_unchecked() == b.as_i64_unchecked()
                     })?;
@@ -292,8 +296,8 @@ impl VirtualMachine {
                     let a = self.pop_raw_f64()?;
                     self.push_raw_bool(a == b)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_f64_unchecked() == b.as_f64_unchecked()
                     })?;
@@ -305,8 +309,8 @@ impl VirtualMachine {
                     let ai = self.pop_raw_i64()?;
                     self.push_raw_bool(ai != bi)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_i64_unchecked() != b.as_i64_unchecked()
                     })?;
@@ -319,8 +323,8 @@ impl VirtualMachine {
                     let a = self.pop_raw_f64()?;
                     self.push_raw_bool(a != b)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     self.push_raw_bool(unsafe {
                         a.as_f64_unchecked() != b.as_f64_unchecked()
                     })?;
@@ -330,8 +334,8 @@ impl VirtualMachine {
             // decimal types. Compiler emits these only when both operands
             // are statically proven to be the matching type.
             EqString => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 let eq = match (a.as_str(), b.as_str()) {
                     (Some(a_str), Some(b_str)) => a_str == b_str,
                     _ => false,
@@ -339,8 +343,8 @@ impl VirtualMachine {
                 self.push_raw_bool(eq)?;
             }
             EqDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 let eq = match (a.as_decimal(), b.as_decimal()) {
                     (Some(ad), Some(bd)) => ad == bd,
                     _ => false,
@@ -349,26 +353,26 @@ impl VirtualMachine {
             }
             // Stage 4.2: typed ordered comparison for strings (lexicographic).
             GtString => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") > b.as_str().unwrap_or("");
                 self.push_raw_bool(result)?;
             }
             LtString => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") < b.as_str().unwrap_or("");
                 self.push_raw_bool(result)?;
             }
             GteString => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") >= b.as_str().unwrap_or("");
                 self.push_raw_bool(result)?;
             }
             LteString => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 let result = a.as_str().unwrap_or("") <= b.as_str().unwrap_or("");
                 self.push_raw_bool(result)?;
             }
@@ -384,7 +388,7 @@ impl VirtualMachine {
                 // BEFORE the ValueWord goes out of scope, so the borrow
                 // can't outlive the Drop. Avoids the SIGABRT regression
                 // from the original Phase 2.6.5 bigbang attempt.
-                let v = self.pop_vw()?;
+                let v = self.pop_raw_u64()?;
                 let is_absent = v.is_none() || v.is_unit();
                 drop(v);
                 self.push_raw_bool(is_absent)?;
@@ -407,11 +411,11 @@ impl VirtualMachine {
         use OpCode::*;
         match instruction.opcode {
             GtDynamic => {
-                let b_nb = self.pop_vw()?;
-                let a_nb = self.pop_vw()?;
+                let b_nb = self.pop_raw_u64()?;
+                let a_nb = self.pop_raw_u64()?;
                 // ValueWord-native: try ExprProxy, then numeric comparison
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Gt) {
-                    self.push_vw(expr)?;
+                    self.push_raw_u64(expr)?;
                 } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
                     self.push_raw_bool(ord == Ordering::Greater)?;
                 } else {
@@ -428,10 +432,10 @@ impl VirtualMachine {
                 }
             }
             LtDynamic => {
-                let b_nb = self.pop_vw()?;
-                let a_nb = self.pop_vw()?;
+                let b_nb = self.pop_raw_u64()?;
+                let a_nb = self.pop_raw_u64()?;
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Lt) {
-                    self.push_vw(expr)?;
+                    self.push_raw_u64(expr)?;
                 } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
                     self.push_raw_bool(ord == Ordering::Less)?;
                 } else {
@@ -447,10 +451,10 @@ impl VirtualMachine {
                 }
             }
             GteDynamic => {
-                let b_nb = self.pop_vw()?;
-                let a_nb = self.pop_vw()?;
+                let b_nb = self.pop_raw_u64()?;
+                let a_nb = self.pop_raw_u64()?;
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Gte) {
-                    self.push_vw(expr)?;
+                    self.push_raw_u64(expr)?;
                 } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
                     self.push_raw_bool(ord == Ordering::Greater || ord == Ordering::Equal)?;
                 } else {
@@ -466,10 +470,10 @@ impl VirtualMachine {
                 }
             }
             LteDynamic => {
-                let b_nb = self.pop_vw()?;
-                let a_nb = self.pop_vw()?;
+                let b_nb = self.pop_raw_u64()?;
+                let a_nb = self.pop_raw_u64()?;
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Lte) {
-                    self.push_vw(expr)?;
+                    self.push_raw_u64(expr)?;
                 } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
                     self.push_raw_bool(ord == Ordering::Less || ord == Ordering::Equal)?;
                 } else {
@@ -485,21 +489,21 @@ impl VirtualMachine {
                 }
             }
             EqDynamic => {
-                let b_nb = self.pop_vw()?;
-                let a_nb = self.pop_vw()?;
+                let b_nb = self.pop_raw_u64()?;
+                let a_nb = self.pop_raw_u64()?;
                 // Check ExprProxy first (rare SQL pushdown path)
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Eq) {
-                    self.push_vw(expr)?;
+                    self.push_raw_u64(expr)?;
                 } else {
                     // vw_equals handles all types including heap (String, Array, Decimal, etc.)
                     self.push_raw_bool(a_nb.vw_equals(&b_nb))?;
                 }
             }
             NeqDynamic => {
-                let b_nb = self.pop_vw()?;
-                let a_nb = self.pop_vw()?;
+                let b_nb = self.pop_raw_u64()?;
+                let a_nb = self.pop_raw_u64()?;
                 if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Neq) {
-                    self.push_vw(expr)?;
+                    self.push_raw_u64(expr)?;
                 } else {
                     self.push_raw_bool(!a_nb.vw_equals(&b_nb))?;
                 }
@@ -544,7 +548,7 @@ mod tests {
     fn run_typed_cmp(vm: &mut VirtualMachine, opcode: OpCode) -> bool {
         let instr = Instruction { opcode, operand: None };
         vm.exec_typed_comparison(&instr).unwrap();
-        unsafe { vm.pop_vw().unwrap().as_bool_unchecked() }
+        unsafe { vm.pop_raw_u64().unwrap().as_bool_unchecked() }
     }
 
     // ----- Raw Int comparison fast paths -----
@@ -685,16 +689,16 @@ mod tests {
         // Push via the legacy ValueWord path so the fast-path detector misses;
         // the slow path (as_i64_unchecked) must still produce correct results.
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_i64(100)).unwrap();
-        vm.push_vw(ValueWord::from_i64(100)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(100)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(100)).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqInt));
     }
 
     #[test]
     fn typed_number_eq_slow_path_handles_legacy_vw() {
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_f64(2.5)).unwrap();
-        vm.push_vw(ValueWord::from_f64(2.5)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(2.5)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(2.5)).unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 
@@ -703,9 +707,9 @@ mod tests {
     #[test]
     fn typed_string_eq_same_content_is_true() {
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
             .unwrap();
-        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
             .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqString));
     }
@@ -713,9 +717,9 @@ mod tests {
     #[test]
     fn typed_string_eq_different_content_is_false() {
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("foo".to_string())))
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new("foo".to_string())))
             .unwrap();
-        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("bar".to_string())))
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new("bar".to_string())))
             .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::EqString));
     }
@@ -723,9 +727,9 @@ mod tests {
     #[test]
     fn typed_string_eq_empty_strings_are_equal() {
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_string(std::sync::Arc::new(String::new())))
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new(String::new())))
             .unwrap();
-        vm.push_vw(ValueWord::from_string(std::sync::Arc::new(String::new())))
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new(String::new())))
             .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqString));
     }
@@ -735,9 +739,9 @@ mod tests {
         use rust_decimal::Decimal;
         use std::str::FromStr;
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_decimal(Decimal::from_str("12.34").unwrap()))
+        vm.push_raw_u64(ValueWord::from_decimal(Decimal::from_str("12.34").unwrap()))
             .unwrap();
-        vm.push_vw(ValueWord::from_decimal(Decimal::from_str("12.34").unwrap()))
+        vm.push_raw_u64(ValueWord::from_decimal(Decimal::from_str("12.34").unwrap()))
             .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqDecimal));
     }
@@ -747,9 +751,9 @@ mod tests {
         use rust_decimal::Decimal;
         use std::str::FromStr;
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_decimal(Decimal::from_str("1.0").unwrap()))
+        vm.push_raw_u64(ValueWord::from_decimal(Decimal::from_str("1.0").unwrap()))
             .unwrap();
-        vm.push_vw(ValueWord::from_decimal(Decimal::from_str("2.0").unwrap()))
+        vm.push_raw_u64(ValueWord::from_decimal(Decimal::from_str("2.0").unwrap()))
             .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::EqDecimal));
     }
@@ -759,27 +763,27 @@ mod tests {
     fn run_is_null(vm: &mut VirtualMachine) -> bool {
         let instr = Instruction { opcode: OpCode::IsNull, operand: None };
         vm.exec_typed_comparison(&instr).unwrap();
-        unsafe { vm.pop_vw().unwrap().as_bool_unchecked() }
+        unsafe { vm.pop_raw_u64().unwrap().as_bool_unchecked() }
     }
 
     #[test]
     fn is_null_on_none_returns_true() {
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::none()).unwrap();
+        vm.push_raw_u64(ValueWord::none()).unwrap();
         assert!(run_is_null(&mut vm));
     }
 
     #[test]
     fn is_null_on_unit_returns_true() {
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::unit()).unwrap();
+        vm.push_raw_u64(ValueWord::unit()).unwrap();
         assert!(run_is_null(&mut vm));
     }
 
     #[test]
     fn is_null_on_int_returns_false() {
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_i64(42)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(42)).unwrap();
         assert!(!run_is_null(&mut vm));
     }
 
@@ -788,14 +792,14 @@ mod tests {
         // Critical: int 0 is NOT null, even though some null encodings
         // use raw zero. IsNull must check the tag, not the bit pattern.
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_i64(0)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
         assert!(!run_is_null(&mut vm));
     }
 
     #[test]
     fn is_null_on_string_returns_false() {
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
+        vm.push_raw_u64(ValueWord::from_string(std::sync::Arc::new("hello".to_string())))
             .unwrap();
         assert!(!run_is_null(&mut vm));
     }
@@ -805,7 +809,7 @@ mod tests {
         // Critical: bool false is NOT null. The is_truthy check would
         // conflate them but is_none() / is_unit() correctly distinguish.
         let mut vm = make_vm();
-        vm.push_vw(ValueWord::from_bool(false)).unwrap();
+        vm.push_raw_u64(ValueWord::from_bool(false)).unwrap();
         assert!(!run_is_null(&mut vm));
     }
 }

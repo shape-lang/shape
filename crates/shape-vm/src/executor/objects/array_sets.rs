@@ -3,7 +3,7 @@
 //! Handles: union, intersect, except, unique, distinct, distinct_by
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 

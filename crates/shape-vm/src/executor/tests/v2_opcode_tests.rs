@@ -7,6 +7,7 @@
 use super::*;
 use crate::bytecode::*;
 use shape_value::VMError;
+use shape_value::ValueWordExt;
 
 /// Helper: execute bytecode with top-level local variable slots.
 fn exec_with_locals(

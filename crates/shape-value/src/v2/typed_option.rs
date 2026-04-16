@@ -102,6 +102,7 @@ pub const PRIMITIVE_OPTION_OFFSET_VALUE: usize = 8;
 #[cfg(test)]
 mod tests {
     use super::*;
+use crate::value_word::ValueWordExt;
 
     #[test]
     fn test_primitive_option_f64_some() {

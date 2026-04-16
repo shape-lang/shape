@@ -9,7 +9,7 @@
 
 use shape_value::heap_value::{HashMapData, HeapValue};
 use shape_value::tags::{get_payload, get_tag, is_tagged, sign_extend_i48, TAG_HEAP, TAG_INT};
-use shape_value::{ArrayView, VMError, ValueWord};
+use shape_value::{ArrayView, VMError, ValueWord, ValueWordExt};
 
 // ─── Inline scalar extraction ─────────────────────────────────────────────
 

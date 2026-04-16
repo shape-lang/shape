@@ -8,7 +8,7 @@ use libffi::{
 use libloading::Library;
 use shape_runtime::module_exports::RawCallableInvoker;
 use shape_value::{
-    NanTag, ValueWord,
+    ValueWord, ValueWordExt,
     heap_value::{HeapValue, NativeLayoutField, NativeScalar, NativeTypeLayout},
 };
 use std::collections::HashMap;
@@ -680,7 +680,7 @@ fn value_to_f64(value: &ValueWord, label: &str) -> Result<f64, String> {
     }
     // Allow language `int` literals (i48) for float ABI params without opening
     // lossy conversions for native i64/u64 domains.
-    if matches!(value.tag(), NanTag::I48) {
+    if value.is_i64() {
         return Ok(value.as_i64().unwrap_or(0) as f64);
     }
     Err(format!(
@@ -737,7 +737,7 @@ fn value_to_usize(value: &ValueWord, label: &str) -> Result<usize, String> {
 }
 
 fn is_shape_callable(value: &ValueWord) -> bool {
-    value.as_function().is_some()
+    value.as_function_id().is_some()
         || value.as_module_function().is_some()
         || matches!(
             value.as_heap_ref(),

@@ -1,4 +1,5 @@
 use super::super::*;
+use shape_value::ValueWordExt;
 
 impl VirtualMachine {
     pub fn new(config: VMConfig) -> Self {

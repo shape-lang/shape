@@ -7,7 +7,7 @@ use crate::bytecode::{Instruction, Operand};
 use crate::executor::objects::object_creation::clone_slots_with_update;
 use shape_runtime::type_schema::FieldType;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord};
+use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 
 /// Compile-time field type tags for zero-cost field access.
 /// Stored in `Operand::TypedField::field_type_tag` so the executor
@@ -66,7 +66,7 @@ pub(in crate::executor) fn read_slot_fast(
         ),
         FIELD_TAG_F64 => ValueWord::from_f64(slot.as_f64()),
         // Any and non-primitive types: use as_value_word(false) to preserve
-        // all inline NanTag variants (Function, ModuleFunction, I48, etc.)
+        // all inline inline tag variants (Function, ModuleFunction, I48, etc.)
         _ => slot.as_value_word(false),
     }
 }
@@ -116,7 +116,7 @@ impl TypedObjectOps for super::VirtualMachine {
             field_type_tag,
         } = operand
         {
-            let obj_nb = self.pop_vw()?;
+            let obj_nb = self.pop_raw_u64()?;
             let obj_nb =
                 if let Some(HeapValue::TypeAnnotatedValue { value, .. }) = obj_nb.as_heap_ref() {
                     value.as_ref().clone()
@@ -149,7 +149,7 @@ impl TypedObjectOps for super::VirtualMachine {
                             let is_heap = (*heap_mask & (1u64 << src_idx)) != 0;
                             let result =
                                 read_slot_fast(&slots[src_idx], is_heap, hit.field_type_tag);
-                            return self.push_vw(result);
+                            return self.push_raw_u64(result);
                         }
                     }
 
@@ -196,7 +196,7 @@ impl TypedObjectOps for super::VirtualMachine {
                                 let is_heap = (*heap_mask & (1u64 << src_idx)) != 0;
                                 let result =
                                     read_slot_fast(&slots[src_idx], is_heap, hit.field_type_tag);
-                                return self.push_vw(result);
+                                return self.push_raw_u64(result);
                             }
                         }
                     }
@@ -224,10 +224,10 @@ impl TypedObjectOps for super::VirtualMachine {
                                 tag,
                             );
                             let result = read_slot_fast(&slots[src_idx], is_heap, tag);
-                            return self.push_vw(result);
+                            return self.push_raw_u64(result);
                         }
                     }
-                    return self.push_vw(ValueWord::none());
+                    return self.push_raw_u64(ValueWord::none());
                 }
 
                 let field_index = *field_idx as usize;
@@ -241,14 +241,14 @@ impl TypedObjectOps for super::VirtualMachine {
                 if field_index < slots.len() {
                     let is_heap = (*heap_mask & (1u64 << field_index)) != 0;
                     let result = read_slot_fast(&slots[field_index], is_heap, *field_type_tag);
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 } else {
-                    return self.push_vw(ValueWord::none());
+                    return self.push_raw_u64(ValueWord::none());
                 }
             }
 
             // Non-TypedObject: return None
-            self.push_vw(ValueWord::none())?;
+            self.push_raw_u64(ValueWord::none())?;
             Ok(())
         } else {
             Err(VMError::InvalidOperand)
@@ -268,8 +268,8 @@ impl TypedObjectOps for super::VirtualMachine {
             field_type_tag,
         } = operand
         {
-            let value_nb = self.pop_vw()?;
-            let object_nb = self.pop_vw()?;
+            let value_nb = self.pop_raw_u64()?;
+            let object_nb = self.pop_raw_u64()?;
             let object_nb = if let Some(HeapValue::TypeAnnotatedValue { value, .. }) =
                 object_nb.as_heap_ref()
             {
@@ -295,7 +295,7 @@ impl TypedObjectOps for super::VirtualMachine {
                         &value_nb,
                         field_type.as_ref(),
                     );
-                    return self.push_vw(ValueWord::from_heap_value(HeapValue::TypedObject {
+                    return self.push_raw_u64(ValueWord::from_heap_value(HeapValue::TypedObject {
                         schema_id: *schema_id,
                         slots: new_slots.into_boxed_slice(),
                         heap_mask: new_mask,
@@ -304,7 +304,7 @@ impl TypedObjectOps for super::VirtualMachine {
             }
 
             // Non-TypedObject or out-of-bounds index: preserve previous behavior.
-            self.push_vw(object_nb)?;
+            self.push_raw_u64(object_nb)?;
             Ok(())
         } else {
             Err(VMError::InvalidOperand)

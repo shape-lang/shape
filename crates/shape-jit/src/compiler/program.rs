@@ -1,6 +1,7 @@
 //! Program compilation with multiple functions
 
 use cranelift::codegen::ir::FuncRef;
+use shape_value::ValueWordExt;
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
 use std::collections::{BTreeMap, HashMap};

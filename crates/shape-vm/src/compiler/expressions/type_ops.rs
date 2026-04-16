@@ -1,6 +1,7 @@
 //! Type operation expression compilation
 
 use crate::bytecode::{Constant, Instruction, NumericWidth, OpCode, Operand};
+use shape_value::ValueWordExt;
 use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::{Type, annotation_to_string};

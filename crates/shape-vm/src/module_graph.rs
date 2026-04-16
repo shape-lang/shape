@@ -6,6 +6,7 @@
 //! name resolution.
 
 use std::collections::{HashMap, HashSet};
+use shape_value::ValueWordExt;
 use std::sync::Arc;
 
 use shape_ast::ast::FunctionDef;

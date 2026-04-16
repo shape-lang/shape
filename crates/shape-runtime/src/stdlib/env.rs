@@ -5,7 +5,7 @@
 //! Policy gated: requires Env permission at runtime.
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Create the `env` module with environment variable and system info functions.

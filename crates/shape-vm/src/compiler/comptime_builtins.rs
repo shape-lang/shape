@@ -12,7 +12,7 @@
 use shape_runtime::module_exports::ModuleExports;
 use shape_runtime::type_schema::typed_object_from_nb_pairs;
 use shape_runtime::type_system::BuiltinTypes;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -201,7 +201,7 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             let msg = match nb_args.first() {
                 Some(nb) => match nb.as_str() {
                     Some(s) => s.to_string(),
-                    None => format!("{}", nb),
+                    None => format!("{}", shape_value::ValueWordDisplay(*nb)),
                 },
                 None => "comptime error".to_string(),
             };

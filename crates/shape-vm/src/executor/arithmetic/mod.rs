@@ -7,10 +7,23 @@ use crate::{
     executor::VirtualMachine,
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use crate::constants::EXACT_F64_INT_LIMIT;
+
+/// IC profiling tag byte constants matching `ic_tag()` output.
+const IC_F64: u8 = 0xFF; // F64 is untagged — sentinel value
+const IC_INT: u8 = shape_value::tags::TAG_INT as u8;
+const IC_HEAP: u8 = shape_value::tags::TAG_HEAP as u8;
+
+/// Get the IC profiling tag byte for a ValueWord.
+/// F64 (untagged) returns IC_F64 (0xFF), otherwise returns the 3-bit tag.
+#[inline(always)]
+fn ic_tag(v: &ValueWord) -> u8 {
+    let bits = v.raw_bits();
+    if !shape_value::tags::is_tagged(bits) { IC_F64 } else { shape_value::tags::get_tag(bits) as u8 }
+}
 
 /// Materialize a `FloatArraySlice` into a `FloatArray` so that downstream
 /// arithmetic paths (which match on `HeapValue::FloatArray`) work unchanged.
@@ -102,7 +115,7 @@ impl VirtualMachine {
         }
         // Native u64 scalars (e.g. u64::MAX): reinterpret bits as i64 for
         // truncation to work correctly (all-ones pattern → -1 as i8).
-        if let Some(u) = nb.as_u64() {
+        if let Some(u) = nb.as_u64_value() {
             return Some(u as i64);
         }
         // f64 whole-number coercion (e.g. array elements compiled as Number(1.0))
@@ -453,8 +466,8 @@ impl VirtualMachine {
                     }
                 } else {
                     // Slow path: BigInt or coercible values
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "int",
                         got: a.type_name(),
@@ -475,8 +488,8 @@ impl VirtualMachine {
                     let lhs = self.pop_raw_f64()?;
                     self.push_raw_f64(lhs + rhs)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "number",
                         got: a.type_name(),
@@ -489,9 +502,9 @@ impl VirtualMachine {
                 }
             }
             AddDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_decimal(unsafe {
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
+                self.push_raw_u64(ValueWord::from_decimal(unsafe {
                     a.as_decimal_unchecked() + b.as_decimal_unchecked()
                 }))?;
             }
@@ -505,8 +518,8 @@ impl VirtualMachine {
                         _ => self.push_raw_f64(ai as f64 - bi as f64)?,
                     }
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "int",
                         got: a.type_name(),
@@ -527,8 +540,8 @@ impl VirtualMachine {
                     let lhs = self.pop_raw_f64()?;
                     self.push_raw_f64(lhs - rhs)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "number",
                         got: a.type_name(),
@@ -541,9 +554,9 @@ impl VirtualMachine {
                 }
             }
             SubDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_decimal(unsafe {
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
+                self.push_raw_u64(ValueWord::from_decimal(unsafe {
                     a.as_decimal_unchecked() - b.as_decimal_unchecked()
                 }))?;
             }
@@ -557,8 +570,8 @@ impl VirtualMachine {
                         _ => self.push_raw_f64(ai as f64 * bi as f64)?,
                     }
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "int",
                         got: a.type_name(),
@@ -579,8 +592,8 @@ impl VirtualMachine {
                     let lhs = self.pop_raw_f64()?;
                     self.push_raw_f64(lhs * rhs)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "number",
                         got: a.type_name(),
@@ -593,9 +606,9 @@ impl VirtualMachine {
                 }
             }
             MulDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
-                self.push_vw(ValueWord::from_decimal(unsafe {
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
+                self.push_raw_u64(ValueWord::from_decimal(unsafe {
                     a.as_decimal_unchecked() * b.as_decimal_unchecked()
                 }))?;
             }
@@ -609,8 +622,8 @@ impl VirtualMachine {
                     }
                     self.push_raw_i64(ai / bi)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
                         expected: "int",
                         got: b.type_name(),
@@ -634,8 +647,8 @@ impl VirtualMachine {
                     }
                     self.push_raw_f64(lhs / divisor)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let divisor = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
                         expected: "number",
                         got: b.type_name(),
@@ -651,13 +664,13 @@ impl VirtualMachine {
                 }
             }
             DivDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 let divisor = unsafe { b.as_decimal_unchecked() };
                 if divisor.is_zero() {
                     return Err(VMError::DivisionByZero);
                 }
-                self.push_vw(ValueWord::from_decimal(
+                self.push_raw_u64(ValueWord::from_decimal(
                     unsafe { a.as_decimal_unchecked() } / divisor,
                 ))?;
             }
@@ -671,8 +684,8 @@ impl VirtualMachine {
                     }
                     self.push_raw_i64(ai % bi)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
                         expected: "int",
                         got: b.type_name(),
@@ -696,8 +709,8 @@ impl VirtualMachine {
                     }
                     self.push_raw_f64(lhs % divisor)?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let divisor = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
                         expected: "number",
                         got: b.type_name(),
@@ -713,13 +726,13 @@ impl VirtualMachine {
                 }
             }
             ModDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 let divisor = unsafe { b.as_decimal_unchecked() };
                 if divisor.is_zero() {
                     return Err(VMError::DivisionByZero);
                 }
-                self.push_vw(ValueWord::from_decimal(
+                self.push_raw_u64(ValueWord::from_decimal(
                     unsafe { a.as_decimal_unchecked() } % divisor,
                 ))?;
             }
@@ -739,8 +752,8 @@ impl VirtualMachine {
                         self.push_raw_f64((base as f64).powf(exp as f64))?;
                     }
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let base = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "int",
                         got: a.type_name(),
@@ -767,8 +780,8 @@ impl VirtualMachine {
                     let base = self.pop_raw_f64()?;
                     self.push_raw_f64(base.powf(exp))?;
                 } else {
-                    let b = self.pop_vw()?;
-                    let a = self.pop_vw()?;
+                    let b = self.pop_raw_u64()?;
+                    let a = self.pop_raw_u64()?;
                     let base = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
                         expected: "number",
                         got: a.type_name(),
@@ -781,8 +794,8 @@ impl VirtualMachine {
                 }
             }
             PowDecimal => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 use rust_decimal::prelude::ToPrimitive;
                 let base = unsafe { a.as_decimal_unchecked() };
                 let exp = unsafe { b.as_decimal_unchecked() };
@@ -791,7 +804,7 @@ impl VirtualMachine {
                     .unwrap_or(0.0)
                     .powf(exp.to_f64().unwrap_or(0.0));
                 use rust_decimal::prelude::FromPrimitive;
-                self.push_vw(ValueWord::from_decimal(
+                self.push_raw_u64(ValueWord::from_decimal(
                     rust_decimal::Decimal::from_f64(result).unwrap_or_default(),
                 ))?;
             }
@@ -801,7 +814,7 @@ impl VirtualMachine {
                     let v = self.pop_raw_i64()?;
                     self.push_raw_f64(v as f64)?;
                 } else {
-                    let val = self.pop_vw()?;
+                    let val = self.pop_raw_u64()?;
                     self.push_raw_f64(unsafe { val.as_i64_unchecked() } as f64)?;
                 }
             }
@@ -810,7 +823,7 @@ impl VirtualMachine {
                     let v = self.pop_raw_f64()?;
                     self.push_raw_i64(v as i64)?;
                 } else {
-                    let val = self.pop_vw()?;
+                    let val = self.pop_raw_u64()?;
                     self.push_raw_i64(unsafe { val.as_f64_unchecked() } as i64)?;
                 }
             }
@@ -825,11 +838,11 @@ impl VirtualMachine {
             }
             NegDecimal => {
                 // Decimal is heap-backed, use ValueWord path
-                let val = self.pop_vw()?;
+                let val = self.pop_raw_u64()?;
                 if let Some(d) = val.as_decimal() {
-                    self.push_vw(ValueWord::from_decimal(-d))?;
+                    self.push_raw_u64(ValueWord::from_decimal(-d))?;
                 } else {
-                    self.push_vw(val)?;
+                    self.push_raw_u64(val)?;
                 }
             }
             _ => unreachable!(
@@ -917,8 +930,8 @@ impl VirtualMachine {
         checked: impl FnOnce(i64, i64) -> Option<i64>,
         overflow_fallback: impl FnOnce(i64, i64) -> f64,
     ) -> Result<(), VMError> {
-        let b = self.pop_vw()?;
-        let a = self.pop_vw()?;
+        let b = self.pop_raw_u64()?;
+        let a = self.pop_raw_u64()?;
 
         let (ai, bi) = if a.is_i64() && b.is_i64() {
             (unsafe { a.as_i64_unchecked() }, unsafe {
@@ -949,8 +962,8 @@ impl VirtualMachine {
         width: NumericWidth,
         op: impl FnOnce(i64, i64) -> i64,
     ) -> Result<(), VMError> {
-        let b = self.pop_vw()?;
-        let a = self.pop_vw()?;
+        let b = self.pop_raw_u64()?;
+        let a = self.pop_raw_u64()?;
 
         let bi = Self::int_operand(&b).ok_or_else(|| VMError::TypeError {
             expected: "int",
@@ -973,8 +986,8 @@ impl VirtualMachine {
 
     #[inline(always)]
     fn compact_float_binop(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<(), VMError> {
-        let b = self.pop_vw()?;
-        let a = self.pop_vw()?;
+        let b = self.pop_raw_u64()?;
+        let a = self.pop_raw_u64()?;
 
         let lhs =
             Self::number_operand(&a).ok_or_else(|| Self::compact_number_type_error(&a, &b))?;
@@ -985,8 +998,8 @@ impl VirtualMachine {
 
     #[inline(always)]
     fn compact_float_divmod(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<(), VMError> {
-        let b = self.pop_vw()?;
-        let a = self.pop_vw()?;
+        let b = self.pop_raw_u64()?;
+        let a = self.pop_raw_u64()?;
 
         let rhs = Self::number_operand(&b).ok_or_else(|| VMError::TypeError {
             expected: "number",
@@ -1004,8 +1017,8 @@ impl VirtualMachine {
 
     #[inline(always)]
     fn compact_int_cmp(&mut self, width: NumericWidth) -> Result<(), VMError> {
-        let b = self.pop_vw()?;
-        let a = self.pop_vw()?;
+        let b = self.pop_raw_u64()?;
+        let a = self.pop_raw_u64()?;
         let ai = Self::int_operand(&a).ok_or_else(|| VMError::TypeError {
             expected: "int",
             got: a.type_name(),
@@ -1025,8 +1038,8 @@ impl VirtualMachine {
 
     #[inline(always)]
     fn compact_float_cmp(&mut self) -> Result<(), VMError> {
-        let b = self.pop_vw()?;
-        let a = self.pop_vw()?;
+        let b = self.pop_raw_u64()?;
+        let a = self.pop_raw_u64()?;
         let lhs = Self::number_operand(&a).ok_or_else(|| VMError::TypeError {
             expected: "number",
             got: a.type_name(),
@@ -1123,7 +1136,7 @@ impl VirtualMachine {
             Some(Operand::Width(w)) => w,
             _ => return Err(VMError::InvalidOperand),
         };
-        let nb = self.pop_vw()?;
+        let nb = self.pop_raw_u64()?;
         let raw = Self::int_operand(&nb).unwrap_or_else(|| {
             // If not an int, try to extract from number
             nb.as_f64().map(|f| f as i64).unwrap_or(0)
@@ -1149,11 +1162,11 @@ impl VirtualMachine {
         f64_op: fn(f64, f64) -> f64,
     ) -> Result<Option<()>, VMError> {
         use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
-        use shape_value::NanTag;
+        use shape_value::tags::TAG_INT;
 
         let hint = arithmetic_ic_check(self, self.ip);
         if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {
-            let slice = self.stack_slice_vw((self.sp - 2)..self.sp);
+            let slice = self.stack_slice_raw((self.sp - 2)..self.sp);
             let a = &slice[0];
             let b = &slice[1];
             if a.is_i64() && b.is_i64() {
@@ -1161,22 +1174,22 @@ impl VirtualMachine {
                 self.sp -= 2;
                 let ip = self.ip;
                 if let Some(fv) = self.current_feedback_vector() {
-                    fv.record_arithmetic(ip, NanTag::I48 as u8, NanTag::I48 as u8);
+                    fv.record_arithmetic(ip, TAG_INT as u8, TAG_INT as u8);
                 }
-                self.push_vw(result)?;
+                self.push_raw_u64(result)?;
                 return Ok(Some(()));
             }
         } else if hint == ArithmeticIcHint::BothF64 && self.sp >= 2 {
-            let slice = self.stack_slice_vw((self.sp - 2)..self.sp);
+            let slice = self.stack_slice_raw((self.sp - 2)..self.sp);
             let a = &slice[0];
             let b = &slice[1];
             if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
                 self.sp -= 2;
                 let ip = self.ip;
                 if let Some(fv) = self.current_feedback_vector() {
-                    fv.record_arithmetic(ip, NanTag::F64 as u8, NanTag::F64 as u8);
+                    fv.record_arithmetic(ip, 0xFF, 0xFF);
                 }
-                self.push_vw(ValueWord::from_f64(f64_op(af, bf)))?;
+                self.push_raw_u64(ValueWord::from_f64(f64_op(af, bf)))?;
                 return Ok(Some(()));
             }
         }
@@ -1191,7 +1204,6 @@ impl VirtualMachine {
         use OpCode::*;
         match instruction.opcode {
             AddDynamic => {
-                use shape_value::NanTag;
                 // IC fast path for Add
                 if self.try_arithmetic_ic_fast_path(
                     ValueWord::add_i64,
@@ -1200,13 +1212,13 @@ impl VirtualMachine {
                     return Ok(());
                 }
                 // Generic path: pop, unwrap annotations, full dispatch.
-                let b_nb = unwrap_annotated(self.pop_vw()?);
-                let a_nb = unwrap_annotated(self.pop_vw()?);
+                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
+                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
                 // Record operand types for IC profiling.
                 {
                     let ip = self.ip;
                     if let Some(fv) = self.current_feedback_vector() {
-                        fv.record_arithmetic(ip, a_nb.tag() as u8, b_nb.tag() as u8);
+                        fv.record_arithmetic(ip, ic_tag(&a_nb), ic_tag(&b_nb));
                     }
                 }
                 if let Some(result) = Self::numeric_binary_result(
@@ -1216,17 +1228,17 @@ impl VirtualMachine {
                     |a, b| a.checked_add(b),
                     |a, b| a + b,
                 )? {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
                 let a_nb = materialize_float_slice(a_nb);
                 let b_nb = materialize_float_slice(b_nb);
-                match (a_nb.tag(), b_nb.tag()) {
+                match (ic_tag(&a_nb), ic_tag(&b_nb)) {
                     // Both inline numeric: int-preserving arithmetic
-                    (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
+                    (IC_INT | IC_F64, IC_INT | IC_F64) => {
                         if let (Some(a_num), Some(b_num)) =
                             (a_nb.as_number_coerce(), b_nb.as_number_coerce())
                         {
-                            return self.push_vw(ValueWord::binary_int_preserving(
+                            return self.push_raw_u64(ValueWord::binary_int_preserving(
                                 &a_nb,
                                 &b_nb,
                                 a_num,
@@ -1242,41 +1254,41 @@ impl VirtualMachine {
                         )));
                     }
                     // Both heap: string concat, decimal, bigint, array concat, typed object merge
-                    (NanTag::Heap, NanTag::Heap) => {
+                    (IC_HEAP, IC_HEAP) => {
                         match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_add(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             (HeapValue::String(s_a), HeapValue::String(s_b)) => {
-                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                return self.push_raw_u64(ValueWord::from_string(Arc::new(format!(
                                     "{}{}",
                                     s_a, s_b
                                 ))));
                             }
                             (HeapValue::String(s), HeapValue::Char(c)) => {
-                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                return self.push_raw_u64(ValueWord::from_string(Arc::new(format!(
                                     "{}{}",
                                     s, c
                                 ))));
                             }
                             (HeapValue::Char(c), HeapValue::String(s)) => {
-                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                return self.push_raw_u64(ValueWord::from_string(Arc::new(format!(
                                     "{}{}",
                                     c, s
                                 ))));
                             }
                             (HeapValue::Char(a), HeapValue::Char(b)) => {
-                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                return self.push_raw_u64(ValueWord::from_string(Arc::new(format!(
                                     "{}{}",
                                     a, b
                                 ))));
                             }
                             (HeapValue::Decimal(a_dec), HeapValue::Decimal(b_dec)) => {
-                                return self.push_vw(ValueWord::from_decimal(*a_dec + *b_dec));
+                                return self.push_raw_u64(ValueWord::from_decimal(*a_dec + *b_dec));
                             }
                             // Time + TimeSpan => Time
                             (HeapValue::Time(dt), HeapValue::TimeSpan(dur)) => {
@@ -1285,7 +1297,7 @@ impl VirtualMachine {
                                         "DateTime overflow in addition".to_string(),
                                     )
                                 })?;
-                                return self.push_vw(ValueWord::from_time(result));
+                                return self.push_raw_u64(ValueWord::from_time(result));
                             }
                             // TimeSpan + Time => Time
                             (HeapValue::TimeSpan(dur), HeapValue::Time(dt)) => {
@@ -1294,7 +1306,7 @@ impl VirtualMachine {
                                         "DateTime overflow in addition".to_string(),
                                     )
                                 })?;
-                                return self.push_vw(ValueWord::from_time(result));
+                                return self.push_raw_u64(ValueWord::from_time(result));
                             }
                             // TimeSpan + TimeSpan => TimeSpan
                             (HeapValue::TimeSpan(a_dur), HeapValue::TimeSpan(b_dur)) => {
@@ -1303,7 +1315,7 @@ impl VirtualMachine {
                                         "Duration overflow in addition".to_string(),
                                     )
                                 })?;
-                                return self.push_vw(ValueWord::from_timespan(result));
+                                return self.push_raw_u64(ValueWord::from_timespan(result));
                             }
                             // Vec<number> + Vec<number> => element-wise SIMD add
                             (HeapValue::FloatArray(a_arr), HeapValue::FloatArray(b_arr)) => {
@@ -1319,7 +1331,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<int> + Vec<int> => element-wise with overflow check
                             (HeapValue::IntArray(a_arr), HeapValue::IntArray(b_arr)) => {
@@ -1335,7 +1347,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 ) {
                                     Ok(result) => {
-                                        return self.push_vw(ValueWord::from_int_array(Arc::new(
+                                        return self.push_raw_u64(ValueWord::from_int_array(Arc::new(
                                             result.into(),
                                         )));
                                     }
@@ -1364,7 +1376,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<number> + Vec<int> => coerce to f64, element-wise add
                             (HeapValue::FloatArray(a_arr), HeapValue::IntArray(b_arr)) => {
@@ -1383,7 +1395,7 @@ impl VirtualMachine {
                                     &b_f64,
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Matrix + Matrix => element-wise add
                             (HeapValue::Matrix(a_mat), HeapValue::Matrix(b_mat)) => {
@@ -1391,13 +1403,13 @@ impl VirtualMachine {
                                     a_mat, b_mat,
                                 )
                                 .map_err(|e| VMError::RuntimeError(e))?;
-                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
+                                return self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                             (HeapValue::Array(arr_a), HeapValue::Array(arr_b)) => {
                                 let mut result_arr = Vec::with_capacity(arr_a.len() + arr_b.len());
                                 result_arr.extend_from_slice(arr_a);
                                 result_arr.extend_from_slice(arr_b);
-                                return self.push_vw(ValueWord::from_array(Arc::new(result_arr)));
+                                return self.push_raw_u64(ValueWord::from_array(Arc::new(result_arr)));
                             }
                             // Decimal + non-decimal heap (shouldn't happen but handle)
                             (HeapValue::Decimal(a_dec), _) => {
@@ -1405,7 +1417,7 @@ impl VirtualMachine {
                                     use rust_decimal::prelude::FromPrimitive;
                                     let b_dec =
                                         rust_decimal::Decimal::from_f64(b_num).unwrap_or_default();
-                                    return self.push_vw(ValueWord::from_decimal(*a_dec + b_dec));
+                                    return self.push_raw_u64(ValueWord::from_decimal(*a_dec + b_dec));
                                 }
                             }
                             (_, HeapValue::Decimal(b_dec)) => {
@@ -1413,7 +1425,7 @@ impl VirtualMachine {
                                     use rust_decimal::prelude::FromPrimitive;
                                     let a_dec =
                                         rust_decimal::Decimal::from_f64(a_num).unwrap_or_default();
-                                    return self.push_vw(ValueWord::from_decimal(a_dec + *b_dec));
+                                    return self.push_raw_u64(ValueWord::from_decimal(a_dec + *b_dec));
                                 }
                             }
                             // TypedObject + TypedObject: operator trait first, then merge
@@ -1435,7 +1447,7 @@ impl VirtualMachine {
                                     b_nb.clone(),
                                     "add",
                                 )? {
-                                    return self.push_vw(result);
+                                    return self.push_raw_u64(result);
                                 }
                                 let merged_name = format!("__intersection_{}_{}", id_a, id_b);
                                 let merged_id = self
@@ -1469,7 +1481,7 @@ impl VirtualMachine {
                                         merged_slots.push(slots_b[i]);
                                     }
                                 }
-                                return self.push_vw(ValueWord::from_heap_value(
+                                return self.push_raw_u64(ValueWord::from_heap_value(
                                     HeapValue::TypedObject {
                                         schema_id: merged_id as u64,
                                         slots: merged_slots.into_boxed_slice(),
@@ -1483,7 +1495,7 @@ impl VirtualMachine {
                         if let Some(result) =
                             self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "add")?
                         {
-                            return self.push_vw(result);
+                            return self.push_raw_u64(result);
                         }
                         return Err(VMError::RuntimeError(format!(
                             "Cannot apply '+' to {} and {}",
@@ -1492,7 +1504,7 @@ impl VirtualMachine {
                         )));
                     }
                     // Mixed: one heap, one inline — bigint+num, string+num, decimal+num coercion
-                    (NanTag::Heap, _) => {
+                    (IC_HEAP, _) => {
                         // Vec<number> + scalar => broadcast add
                         if let Some(a_arr) = a_nb.as_float_array() {
                             if let Some(scalar) = b_nb.as_number_coerce() {
@@ -1501,7 +1513,7 @@ impl VirtualMachine {
                                     &vec![scalar; a_arr.len()],
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                         }
                         // Vec<int> + scalar int => broadcast add
@@ -1513,7 +1525,7 @@ impl VirtualMachine {
                                     &b_vec,
                                 ) {
                                     Ok(result) => {
-                                        return self.push_vw(ValueWord::from_int_array(Arc::new(
+                                        return self.push_raw_u64(ValueWord::from_int_array(Arc::new(
                                             result.into(),
                                         )));
                                     }
@@ -1527,19 +1539,19 @@ impl VirtualMachine {
                         }
                         if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
                             if let Some(b_i) = b_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_add(b_i).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(b_f) = b_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(*a_big as f64 + b_f));
+                                return self.push_raw_u64(ValueWord::from_f64(*a_big as f64 + b_f));
                             }
                         }
                         if let Some(s) = a_nb.as_str() {
                             if let Some(i) = b_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                return self.push_raw_u64(ValueWord::from_string(Arc::new(format!(
                                     "{}{}",
                                     s, i
                                 ))));
@@ -1550,7 +1562,7 @@ impl VirtualMachine {
                                 } else {
                                     format!("{}", n)
                                 };
-                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                return self.push_raw_u64(ValueWord::from_string(Arc::new(format!(
                                     "{}{}",
                                     s, n_str
                                 ))));
@@ -1558,7 +1570,7 @@ impl VirtualMachine {
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
                             if let Some(b_int) = b_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     a_dec + rust_decimal::Decimal::from(b_int),
                                 ));
                             }
@@ -1566,14 +1578,14 @@ impl VirtualMachine {
                                 use rust_decimal::prelude::FromPrimitive;
                                 let b_dec =
                                     rust_decimal::Decimal::from_f64(b_num).unwrap_or_default();
-                                return self.push_vw(ValueWord::from_decimal(a_dec + b_dec));
+                                return self.push_raw_u64(ValueWord::from_decimal(a_dec + b_dec));
                             }
                         }
                         // Operator trait fallback (Add)
                         if let Some(result) =
                             self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "add")?
                         {
-                            return self.push_vw(result);
+                            return self.push_raw_u64(result);
                         }
                         return Err(VMError::RuntimeError(format!(
                             "Cannot apply '+' to {} and {}",
@@ -1581,7 +1593,7 @@ impl VirtualMachine {
                             b_nb.type_name()
                         )));
                     }
-                    (_, NanTag::Heap) => {
+                    (_, IC_HEAP) => {
                         // scalar + Vec<number> => broadcast add
                         if let Some(b_arr) = b_nb.as_float_array() {
                             if let Some(scalar) = a_nb.as_number_coerce() {
@@ -1590,7 +1602,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                         }
                         // scalar int + Vec<int> => broadcast add
@@ -1602,7 +1614,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 ) {
                                     Ok(result) => {
-                                        return self.push_vw(ValueWord::from_int_array(Arc::new(
+                                        return self.push_raw_u64(ValueWord::from_int_array(Arc::new(
                                             result.into(),
                                         )));
                                     }
@@ -1616,19 +1628,19 @@ impl VirtualMachine {
                         }
                         if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
                             if let Some(a_i) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_i.checked_add(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(a_f + *b_big as f64));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f + *b_big as f64));
                             }
                         }
                         if let Some(s) = b_nb.as_str() {
                             if let Some(i) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                return self.push_raw_u64(ValueWord::from_string(Arc::new(format!(
                                     "{}{}",
                                     i, s
                                 ))));
@@ -1639,7 +1651,7 @@ impl VirtualMachine {
                                 } else {
                                     format!("{}", n)
                                 };
-                                return self.push_vw(ValueWord::from_string(Arc::new(format!(
+                                return self.push_raw_u64(ValueWord::from_string(Arc::new(format!(
                                     "{}{}",
                                     n_str, s
                                 ))));
@@ -1647,7 +1659,7 @@ impl VirtualMachine {
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {
                             if let Some(a_int) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from(a_int) + b_dec,
                                 ));
                             }
@@ -1655,14 +1667,14 @@ impl VirtualMachine {
                                 use rust_decimal::prelude::FromPrimitive;
                                 let a_dec =
                                     rust_decimal::Decimal::from_f64(a_num).unwrap_or_default();
-                                return self.push_vw(ValueWord::from_decimal(a_dec + b_dec));
+                                return self.push_raw_u64(ValueWord::from_decimal(a_dec + b_dec));
                             }
                         }
                         // Operator trait fallback (Add)
                         if let Some(result) =
                             self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "add")?
                         {
-                            return self.push_vw(result);
+                            return self.push_raw_u64(result);
                         }
                         return Err(VMError::RuntimeError(format!(
                             "Cannot apply '+' to {} and {}",
@@ -1676,7 +1688,7 @@ impl VirtualMachine {
                         if let Some(result) =
                             self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "add")?
                         {
-                            return self.push_vw(result);
+                            return self.push_raw_u64(result);
                         }
                         return Err(VMError::RuntimeError(format!(
                             "Cannot apply '+' to {} and {}",
@@ -1687,7 +1699,6 @@ impl VirtualMachine {
                 }
             }
             SubDynamic => {
-                use shape_value::NanTag;
                 // IC fast path for Sub
                 if self.try_arithmetic_ic_fast_path(
                     ValueWord::sub_i64,
@@ -1695,13 +1706,13 @@ impl VirtualMachine {
                 )?.is_some() {
                     return Ok(());
                 }
-                let b_nb = unwrap_annotated(self.pop_vw()?);
-                let a_nb = unwrap_annotated(self.pop_vw()?);
+                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
+                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
                 // Record operand types for IC profiling.
                 {
                     let ip = self.ip;
                     if let Some(fv) = self.current_feedback_vector() {
-                        fv.record_arithmetic(ip, a_nb.tag() as u8, b_nb.tag() as u8);
+                        fv.record_arithmetic(ip, ic_tag(&a_nb), ic_tag(&b_nb));
                     }
                 }
                 if let Some(result) = Self::numeric_binary_result(
@@ -1711,16 +1722,16 @@ impl VirtualMachine {
                     |a, b| a.checked_sub(b),
                     |a, b| a - b,
                 )? {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
                 let a_nb = materialize_float_slice(a_nb);
                 let b_nb = materialize_float_slice(b_nb);
-                match (a_nb.tag(), b_nb.tag()) {
-                    (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
+                match (ic_tag(&a_nb), ic_tag(&b_nb)) {
+                    (IC_INT | IC_F64, IC_INT | IC_F64) => {
                         if let (Some(a_num), Some(b_num)) =
                             (a_nb.as_number_coerce(), b_nb.as_number_coerce())
                         {
-                            return self.push_vw(ValueWord::binary_int_preserving(
+                            return self.push_raw_u64(ValueWord::binary_int_preserving(
                                 &a_nb,
                                 &b_nb,
                                 a_num,
@@ -1730,22 +1741,22 @@ impl VirtualMachine {
                             ));
                         }
                     }
-                    (NanTag::Heap, NanTag::Heap) => {
+                    (IC_HEAP, IC_HEAP) => {
                         match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_sub(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             (HeapValue::Decimal(a_dec), HeapValue::Decimal(b_dec)) => {
-                                return self.push_vw(ValueWord::from_decimal(*a_dec - *b_dec));
+                                return self.push_raw_u64(ValueWord::from_decimal(*a_dec - *b_dec));
                             }
                             // Time - Time => TimeSpan (duration between two instants)
                             (HeapValue::Time(a_dt), HeapValue::Time(b_dt)) => {
                                 let diff = *a_dt - *b_dt;
-                                return self.push_vw(ValueWord::from_timespan(diff));
+                                return self.push_raw_u64(ValueWord::from_timespan(diff));
                             }
                             // Time - TimeSpan => Time
                             (HeapValue::Time(dt), HeapValue::TimeSpan(dur)) => {
@@ -1754,7 +1765,7 @@ impl VirtualMachine {
                                         "DateTime overflow in subtraction".to_string(),
                                     )
                                 })?;
-                                return self.push_vw(ValueWord::from_time(result));
+                                return self.push_raw_u64(ValueWord::from_time(result));
                             }
                             // TimeSpan - TimeSpan => TimeSpan
                             (HeapValue::TimeSpan(a_dur), HeapValue::TimeSpan(b_dur)) => {
@@ -1763,7 +1774,7 @@ impl VirtualMachine {
                                         "Duration overflow in subtraction".to_string(),
                                     )
                                 })?;
-                                return self.push_vw(ValueWord::from_timespan(result));
+                                return self.push_raw_u64(ValueWord::from_timespan(result));
                             }
                             // Vec<number> - Vec<number>
                             (HeapValue::FloatArray(a_arr), HeapValue::FloatArray(b_arr)) => {
@@ -1779,7 +1790,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<int> - Vec<int>
                             (HeapValue::IntArray(a_arr), HeapValue::IntArray(b_arr)) => {
@@ -1795,7 +1806,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 ) {
                                     Ok(result) => {
-                                        return self.push_vw(ValueWord::from_int_array(Arc::new(
+                                        return self.push_raw_u64(ValueWord::from_int_array(Arc::new(
                                             result.into(),
                                         )));
                                     }
@@ -1824,7 +1835,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             (HeapValue::FloatArray(a_arr), HeapValue::IntArray(b_arr)) => {
                                 if a_arr.len() != b_arr.len() {
@@ -1842,7 +1853,7 @@ impl VirtualMachine {
                                     &b_f64,
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Matrix - Matrix => element-wise sub
                             (HeapValue::Matrix(a_mat), HeapValue::Matrix(b_mat)) => {
@@ -1850,33 +1861,33 @@ impl VirtualMachine {
                                     a_mat, b_mat,
                                 )
                                 .map_err(|e| VMError::RuntimeError(e))?;
-                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
+                                return self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                             _ => {}
                         }
                     }
-                    (NanTag::Heap, _) => {
+                    (IC_HEAP, _) => {
                         if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
                             if let Some(b_i) = b_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_sub(b_i).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(b_f) = b_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(*a_big as f64 - b_f));
+                                return self.push_raw_u64(ValueWord::from_f64(*a_big as f64 - b_f));
                             }
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
                             if let Some(b_int) = b_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     a_dec - rust_decimal::Decimal::from(b_int),
                                 ));
                             }
                             if let Some(b_num) = b_nb.as_f64() {
                                 use rust_decimal::prelude::FromPrimitive;
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     a_dec
                                         - rust_decimal::Decimal::from_f64(b_num)
                                             .unwrap_or_default(),
@@ -1884,28 +1895,28 @@ impl VirtualMachine {
                             }
                         }
                     }
-                    (_, NanTag::Heap) => {
+                    (_, IC_HEAP) => {
                         if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
                             if let Some(a_i) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_i.checked_sub(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(a_f - *b_big as f64));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f - *b_big as f64));
                             }
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {
                             if let Some(a_int) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from(a_int) - b_dec,
                                 ));
                             }
                             if let Some(a_num) = a_nb.as_f64() {
                                 use rust_decimal::prelude::FromPrimitive;
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from_f64(a_num).unwrap_or_default()
                                         - b_dec,
                                 ));
@@ -1918,7 +1929,7 @@ impl VirtualMachine {
                 if let Some(result) =
                     self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "sub")?
                 {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
                 return Err(VMError::RuntimeError(format!(
                     "Cannot apply '-' to {} and {}",
@@ -1927,7 +1938,6 @@ impl VirtualMachine {
                 )));
             }
             MulDynamic => {
-                use shape_value::NanTag;
                 // IC fast path for Mul
                 if self.try_arithmetic_ic_fast_path(
                     ValueWord::mul_i64,
@@ -1935,13 +1945,13 @@ impl VirtualMachine {
                 )?.is_some() {
                     return Ok(());
                 }
-                let b_nb = unwrap_annotated(self.pop_vw()?);
-                let a_nb = unwrap_annotated(self.pop_vw()?);
+                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
+                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
                 // Record operand types for IC profiling.
                 {
                     let ip = self.ip;
                     if let Some(fv) = self.current_feedback_vector() {
-                        fv.record_arithmetic(ip, a_nb.tag() as u8, b_nb.tag() as u8);
+                        fv.record_arithmetic(ip, ic_tag(&a_nb), ic_tag(&b_nb));
                     }
                 }
                 if let Some(result) = Self::numeric_binary_result(
@@ -1951,16 +1961,16 @@ impl VirtualMachine {
                     |a, b| a.checked_mul(b),
                     |a, b| a * b,
                 )? {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
                 let a_nb = materialize_float_slice(a_nb);
                 let b_nb = materialize_float_slice(b_nb);
-                match (a_nb.tag(), b_nb.tag()) {
-                    (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
+                match (ic_tag(&a_nb), ic_tag(&b_nb)) {
+                    (IC_INT | IC_F64, IC_INT | IC_F64) => {
                         if let (Some(a_num), Some(b_num)) =
                             (a_nb.as_number_coerce(), b_nb.as_number_coerce())
                         {
-                            return self.push_vw(ValueWord::binary_int_preserving(
+                            return self.push_raw_u64(ValueWord::binary_int_preserving(
                                 &a_nb,
                                 &b_nb,
                                 a_num,
@@ -1970,17 +1980,17 @@ impl VirtualMachine {
                             ));
                         }
                     }
-                    (NanTag::Heap, NanTag::Heap) => {
+                    (IC_HEAP, IC_HEAP) => {
                         match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_mul(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             (HeapValue::Decimal(a_dec), HeapValue::Decimal(b_dec)) => {
-                                return self.push_vw(ValueWord::from_decimal(*a_dec * *b_dec));
+                                return self.push_raw_u64(ValueWord::from_decimal(*a_dec * *b_dec));
                             }
                             // Vec<number> * Vec<number>
                             (HeapValue::FloatArray(a_arr), HeapValue::FloatArray(b_arr)) => {
@@ -1996,7 +2006,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<int> * Vec<int>
                             (HeapValue::IntArray(a_arr), HeapValue::IntArray(b_arr)) => {
@@ -2012,7 +2022,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 ) {
                                     Ok(result) => {
-                                        return self.push_vw(ValueWord::from_int_array(Arc::new(
+                                        return self.push_raw_u64(ValueWord::from_int_array(Arc::new(
                                             result.into(),
                                         )));
                                     }
@@ -2039,7 +2049,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             (HeapValue::FloatArray(a_arr), HeapValue::IntArray(b_arr)) => {
                                 if a_arr.len() != b_arr.len() {
@@ -2057,7 +2067,7 @@ impl VirtualMachine {
                                     &b_f64,
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Matrix * Matrix => matmul
                             (HeapValue::Matrix(a_mat), HeapValue::Matrix(b_mat)) => {
@@ -2066,7 +2076,7 @@ impl VirtualMachine {
                                         a_mat, b_mat,
                                     )
                                     .map_err(|e| VMError::RuntimeError(e))?;
-                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
+                                return self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                             // Matrix * FloatArray => matvec
                             (HeapValue::Matrix(mat), HeapValue::FloatArray(vec_data)) => {
@@ -2077,12 +2087,12 @@ impl VirtualMachine {
                                     )
                                     .map_err(|e| VMError::RuntimeError(e))?;
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             _ => {}
                         }
                     }
-                    (NanTag::Heap, _) => {
+                    (IC_HEAP, _) => {
                         // Vec<number> * scalar => broadcast scale
                         if let Some(a_arr) = a_nb.as_float_array() {
                             if let Some(scalar) = b_nb.as_number_coerce() {
@@ -2091,7 +2101,7 @@ impl VirtualMachine {
                                     scalar,
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                         }
                         // Matrix * scalar => element-wise scale
@@ -2101,30 +2111,30 @@ impl VirtualMachine {
                                     shape_runtime::intrinsics::matrix_kernels::matrix_scale(
                                         a_mat, scalar,
                                     );
-                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
+                                return self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                         }
                         if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
                             if let Some(b_i) = b_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_mul(b_i).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(b_f) = b_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(*a_big as f64 * b_f));
+                                return self.push_raw_u64(ValueWord::from_f64(*a_big as f64 * b_f));
                             }
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
                             if let Some(b_int) = b_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     a_dec * rust_decimal::Decimal::from(b_int),
                                 ));
                             }
                             if let Some(b_num) = b_nb.as_f64() {
                                 use rust_decimal::prelude::FromPrimitive;
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     a_dec
                                         * rust_decimal::Decimal::from_f64(b_num)
                                             .unwrap_or_default(),
@@ -2132,7 +2142,7 @@ impl VirtualMachine {
                             }
                         }
                     }
-                    (_, NanTag::Heap) => {
+                    (_, IC_HEAP) => {
                         // scalar * Vec<number> => broadcast scale
                         if let Some(b_arr) = b_nb.as_float_array() {
                             if let Some(scalar) = a_nb.as_number_coerce() {
@@ -2141,7 +2151,7 @@ impl VirtualMachine {
                                     scalar,
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                         }
                         // scalar * Matrix => element-wise scale
@@ -2151,30 +2161,30 @@ impl VirtualMachine {
                                     shape_runtime::intrinsics::matrix_kernels::matrix_scale(
                                         b_mat, scalar,
                                     );
-                                return self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(result)));
+                                return self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(result)));
                             }
                         }
                         if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
                             if let Some(a_i) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_i.checked_mul(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(a_f * *b_big as f64));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f * *b_big as f64));
                             }
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {
                             if let Some(a_int) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from(a_int) * b_dec,
                                 ));
                             }
                             if let Some(a_num) = a_nb.as_f64() {
                                 use rust_decimal::prelude::FromPrimitive;
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from_f64(a_num).unwrap_or_default()
                                         * b_dec,
                                 ));
@@ -2187,7 +2197,7 @@ impl VirtualMachine {
                 if let Some(result) =
                     self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "mul")?
                 {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
                 return Err(VMError::RuntimeError(format!(
                     "Cannot apply '*' to {} and {}",
@@ -2196,13 +2206,12 @@ impl VirtualMachine {
                 )));
             }
             DivDynamic => {
-                use shape_value::NanTag;
                 // IC fast path for Div
                 {
                     use crate::executor::ic_fast_paths::{ArithmeticIcHint, arithmetic_ic_check};
                     let hint = arithmetic_ic_check(self, self.ip);
                     if hint == ArithmeticIcHint::BothI48 && self.sp >= 2 {
-                        let slice = self.stack_slice_vw((self.sp - 2)..self.sp);
+                        let slice = self.stack_slice_raw((self.sp - 2)..self.sp);
                         let a = &slice[0];
                         let b = &slice[1];
                         if let (Some(ai), Some(bi)) = (Self::int_operand(a), Self::int_operand(b)) {
@@ -2212,12 +2221,12 @@ impl VirtualMachine {
                             self.sp -= 2;
                             let ip = self.ip;
                             if let Some(fv) = self.current_feedback_vector() {
-                                fv.record_arithmetic(ip, NanTag::I48 as u8, NanTag::I48 as u8);
+                                fv.record_arithmetic(ip, shape_value::tags::TAG_INT as u8, shape_value::tags::TAG_INT as u8);
                             }
-                            return self.push_vw(ValueWord::from_i64(ai / bi));
+                            return self.push_raw_u64(ValueWord::from_i64(ai / bi));
                         }
                     } else if hint == ArithmeticIcHint::BothF64 && self.sp >= 2 {
-                        let slice = self.stack_slice_vw((self.sp - 2)..self.sp);
+                        let slice = self.stack_slice_raw((self.sp - 2)..self.sp);
                         let a = &slice[0];
                         let b = &slice[1];
                         if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
@@ -2227,35 +2236,35 @@ impl VirtualMachine {
                             self.sp -= 2;
                             let ip = self.ip;
                             if let Some(fv) = self.current_feedback_vector() {
-                                fv.record_arithmetic(ip, NanTag::F64 as u8, NanTag::F64 as u8);
+                                fv.record_arithmetic(ip, 0xFF, 0xFF);
                             }
-                            return self.push_vw(ValueWord::from_f64(af / bf));
+                            return self.push_raw_u64(ValueWord::from_f64(af / bf));
                         }
                     }
                 }
-                let b_nb = unwrap_annotated(self.pop_vw()?);
-                let a_nb = unwrap_annotated(self.pop_vw()?);
+                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
+                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
                 // Record operand types for IC profiling.
                 {
                     let ip = self.ip;
                     if let Some(fv) = self.current_feedback_vector() {
-                        fv.record_arithmetic(ip, a_nb.tag() as u8, b_nb.tag() as u8);
+                        fv.record_arithmetic(ip, ic_tag(&a_nb), ic_tag(&b_nb));
                     }
                 }
                 if let Some(result) = Self::numeric_div_result(&a_nb, &b_nb)? {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
                 let a_nb = materialize_float_slice(a_nb);
                 let b_nb = materialize_float_slice(b_nb);
-                match (a_nb.tag(), b_nb.tag()) {
-                    (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
+                match (ic_tag(&a_nb), ic_tag(&b_nb)) {
+                    (IC_INT | IC_F64, IC_INT | IC_F64) => {
                         if let (Some(a_num), Some(b_num)) =
                             (a_nb.as_number_coerce(), b_nb.as_number_coerce())
                         {
                             if b_num == 0.0 {
                                 return Err(VMError::DivisionByZero);
                             }
-                            return self.push_vw(ValueWord::binary_int_preserving(
+                            return self.push_raw_u64(ValueWord::binary_int_preserving(
                                 &a_nb,
                                 &b_nb,
                                 a_num,
@@ -2265,13 +2274,13 @@ impl VirtualMachine {
                             ));
                         }
                     }
-                    (NanTag::Heap, NanTag::Heap) => {
+                    (IC_HEAP, IC_HEAP) => {
                         match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 if *b_big == 0 {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_div(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
@@ -2281,7 +2290,7 @@ impl VirtualMachine {
                                 if b_dec.is_zero() {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_decimal(*a_dec / *b_dec));
+                                return self.push_raw_u64(ValueWord::from_decimal(*a_dec / *b_dec));
                             }
                             // Vec<number> / Vec<number>
                             (HeapValue::FloatArray(a_arr), HeapValue::FloatArray(b_arr)) => {
@@ -2297,7 +2306,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             // Vec<int> / Vec<int>
                             (HeapValue::IntArray(a_arr), HeapValue::IntArray(b_arr)) => {
@@ -2309,7 +2318,7 @@ impl VirtualMachine {
                                     )));
                                 }
                                 match shape_runtime::intrinsics::vector::simd_vec_div_i64(a_arr.as_slice(), b_arr.as_slice()) {
-                                    Ok(result) => return self.push_vw(ValueWord::from_int_array(Arc::new(result.into()))),
+                                    Ok(result) => return self.push_raw_u64(ValueWord::from_int_array(Arc::new(result.into()))),
                                     Err(()) => return Err(VMError::RuntimeError(
                                         "Division by zero or overflow in Vec<int> element-wise division".into()
                                     )),
@@ -2332,7 +2341,7 @@ impl VirtualMachine {
                                     b_arr.as_slice(),
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             (HeapValue::FloatArray(a_arr), HeapValue::IntArray(b_arr)) => {
                                 if a_arr.len() != b_arr.len() {
@@ -2350,12 +2359,12 @@ impl VirtualMachine {
                                     &b_f64,
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                             _ => {}
                         }
                     }
-                    (NanTag::Heap, _) => {
+                    (IC_HEAP, _) => {
                         // Vec<number> / scalar => broadcast divide
                         if let Some(a_arr) = a_nb.as_float_array() {
                             if let Some(scalar) = b_nb.as_number_coerce() {
@@ -2364,7 +2373,7 @@ impl VirtualMachine {
                                     1.0 / scalar,
                                 );
                                 return self
-                                    .push_vw(ValueWord::from_float_array(Arc::new(result.into())));
+                                    .push_raw_u64(ValueWord::from_float_array(Arc::new(result.into())));
                             }
                         }
                         if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
@@ -2372,7 +2381,7 @@ impl VirtualMachine {
                                 if b_i == 0 {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_div(b_i).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
@@ -2382,7 +2391,7 @@ impl VirtualMachine {
                                 if b_f == 0.0 {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_f64(*a_big as f64 / b_f));
+                                return self.push_raw_u64(ValueWord::from_f64(*a_big as f64 / b_f));
                             }
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
@@ -2390,7 +2399,7 @@ impl VirtualMachine {
                                 if b_int == 0 {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     a_dec / rust_decimal::Decimal::from(b_int),
                                 ));
                             }
@@ -2399,7 +2408,7 @@ impl VirtualMachine {
                                     return Err(VMError::DivisionByZero);
                                 }
                                 use rust_decimal::prelude::FromPrimitive;
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     a_dec
                                         / rust_decimal::Decimal::from_f64(b_num)
                                             .unwrap_or_default(),
@@ -2407,20 +2416,20 @@ impl VirtualMachine {
                             }
                         }
                     }
-                    (_, NanTag::Heap) => {
+                    (_, IC_HEAP) => {
                         if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
                             if *b_big == 0 {
                                 return Err(VMError::DivisionByZero);
                             }
                             if let Some(a_i) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_i.checked_div(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(a_f / *b_big as f64));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f / *b_big as f64));
                             }
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {
@@ -2428,13 +2437,13 @@ impl VirtualMachine {
                                 return Err(VMError::DivisionByZero);
                             }
                             if let Some(a_int) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from(a_int) / b_dec,
                                 ));
                             }
                             if let Some(a_num) = a_nb.as_f64() {
                                 use rust_decimal::prelude::FromPrimitive;
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from_f64(a_num).unwrap_or_default()
                                         / b_dec,
                                 ));
@@ -2447,7 +2456,7 @@ impl VirtualMachine {
                 if let Some(result) =
                     self.try_binary_operator_trait(a_nb.clone(), b_nb.clone(), "div")?
                 {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
                 return Err(VMError::RuntimeError(format!(
                     "Cannot apply '/' to {} and {}",
@@ -2456,21 +2465,20 @@ impl VirtualMachine {
                 )));
             }
             ModDynamic => {
-                use shape_value::NanTag;
-                let b_nb = unwrap_annotated(self.pop_vw()?);
-                let a_nb = unwrap_annotated(self.pop_vw()?);
+                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
+                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
                 if let Some(result) = Self::numeric_mod_result(&a_nb, &b_nb)? {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
-                match (a_nb.tag(), b_nb.tag()) {
-                    (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
+                match (ic_tag(&a_nb), ic_tag(&b_nb)) {
+                    (IC_INT | IC_F64, IC_INT | IC_F64) => {
                         if let (Some(a_num), Some(b_num)) =
                             (a_nb.as_number_coerce(), b_nb.as_number_coerce())
                         {
                             if b_num == 0.0 {
                                 return Err(VMError::DivisionByZero);
                             }
-                            return self.push_vw(ValueWord::binary_int_preserving(
+                            return self.push_raw_u64(ValueWord::binary_int_preserving(
                                 &a_nb,
                                 &b_nb,
                                 a_num,
@@ -2480,13 +2488,13 @@ impl VirtualMachine {
                             ));
                         }
                     }
-                    (NanTag::Heap, NanTag::Heap) => {
+                    (IC_HEAP, IC_HEAP) => {
                         match (a_nb.as_heap_ref().unwrap(), b_nb.as_heap_ref().unwrap()) {
                             (HeapValue::BigInt(a_big), HeapValue::BigInt(b_big)) => {
                                 if *b_big == 0 {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_rem(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
@@ -2496,18 +2504,18 @@ impl VirtualMachine {
                                 if b_dec.is_zero() {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_decimal(*a_dec % *b_dec));
+                                return self.push_raw_u64(ValueWord::from_decimal(*a_dec % *b_dec));
                             }
                             _ => {}
                         }
                     }
-                    (NanTag::Heap, _) => {
+                    (IC_HEAP, _) => {
                         if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
                             if let Some(b_i) = b_nb.as_i64() {
                                 if b_i == 0 {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_big.checked_rem(b_i).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
@@ -2520,26 +2528,26 @@ impl VirtualMachine {
                                 if b_dec.is_zero() {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_decimal(a_dec % b_dec));
+                                return self.push_raw_u64(ValueWord::from_decimal(a_dec % b_dec));
                             }
                             if let Some(b_num) = b_nb.as_f64() {
                                 if b_num == 0.0 {
                                     return Err(VMError::DivisionByZero);
                                 }
                                 use rust_decimal::prelude::ToPrimitive;
-                                return self.push_vw(ValueWord::from_f64(
+                                return self.push_raw_u64(ValueWord::from_f64(
                                     a_dec.to_f64().unwrap_or(f64::NAN) % b_num,
                                 ));
                             }
                         }
                     }
-                    (_, NanTag::Heap) => {
+                    (_, IC_HEAP) => {
                         if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
                             if *b_big == 0 {
                                 return Err(VMError::DivisionByZero);
                             }
                             if let Some(a_i) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_i64(
+                                return self.push_raw_u64(ValueWord::from_i64(
                                     a_i.checked_rem(*b_big).ok_or_else(|| {
                                         VMError::RuntimeError("Integer overflow".into())
                                     })?,
@@ -2551,7 +2559,7 @@ impl VirtualMachine {
                                 return Err(VMError::DivisionByZero);
                             }
                             if let Some(a_int) = a_nb.as_i64() {
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from(a_int) % b_dec,
                                 ));
                             }
@@ -2561,7 +2569,7 @@ impl VirtualMachine {
                                 if b == 0.0 {
                                     return Err(VMError::DivisionByZero);
                                 }
-                                return self.push_vw(ValueWord::from_f64(a_num % b));
+                                return self.push_raw_u64(ValueWord::from_f64(a_num % b));
                             }
                         }
                     }
@@ -2574,45 +2582,44 @@ impl VirtualMachine {
                 )));
             }
             PowDynamic => {
-                use shape_value::NanTag;
-                let b_nb = unwrap_annotated(self.pop_vw()?);
-                let a_nb = unwrap_annotated(self.pop_vw()?);
+                let b_nb = unwrap_annotated(self.pop_raw_u64()?);
+                let a_nb = unwrap_annotated(self.pop_raw_u64()?);
                 if let Some(result) = Self::numeric_pow_result(&a_nb, &b_nb)? {
-                    return self.push_vw(result);
+                    return self.push_raw_u64(result);
                 }
-                match (a_nb.tag(), b_nb.tag()) {
-                    (NanTag::I48, NanTag::I48) => {
+                match (ic_tag(&a_nb), ic_tag(&b_nb)) {
+                    (IC_INT, IC_INT) => {
                         let base = unsafe { a_nb.as_i64_unchecked() };
                         let exp = unsafe { b_nb.as_i64_unchecked() };
                         if exp >= 0 && exp < u32::MAX as i64 {
-                            return self.push_vw(ValueWord::from_i64(base.pow(exp as u32)));
+                            return self.push_raw_u64(ValueWord::from_i64(base.pow(exp as u32)));
                         }
-                        return self.push_vw(ValueWord::from_f64((base as f64).powf(exp as f64)));
+                        return self.push_raw_u64(ValueWord::from_f64((base as f64).powf(exp as f64)));
                     }
-                    (NanTag::I48 | NanTag::F64, NanTag::I48 | NanTag::F64) => {
+                    (IC_INT | IC_F64, IC_INT | IC_F64) => {
                         if let (Some(a_num), Some(b_num)) =
                             (a_nb.as_number_coerce(), b_nb.as_number_coerce())
                         {
-                            return self.push_vw(ValueWord::from_f64(a_num.powf(b_num)));
+                            return self.push_raw_u64(ValueWord::from_f64(a_num.powf(b_num)));
                         }
                     }
-                    (NanTag::Heap, _) => {
+                    (IC_HEAP, _) => {
                         if let Some(HeapValue::BigInt(a_big)) = a_nb.as_heap_ref() {
                             if let Some(b_i) = b_nb.as_i64() {
                                 if b_i >= 0 && b_i < u32::MAX as i64 {
-                                    return self.push_vw(ValueWord::from_i64(
+                                    return self.push_raw_u64(ValueWord::from_i64(
                                         a_big.checked_pow(b_i as u32).ok_or_else(|| {
                                             VMError::RuntimeError("Integer overflow".into())
                                         })?,
                                     ));
                                 }
-                                return self.push_vw(ValueWord::from_f64(
+                                return self.push_raw_u64(ValueWord::from_f64(
                                     (*a_big as f64).powf(b_i as f64),
                                 ));
                             }
                             if let Some(b_f) = b_nb.as_f64() {
                                 return self
-                                    .push_vw(ValueWord::from_f64((*a_big as f64).powf(b_f)));
+                                    .push_raw_u64(ValueWord::from_f64((*a_big as f64).powf(b_f)));
                             }
                         }
                         if let Some(a_dec) = a_nb.as_decimal() {
@@ -2621,37 +2628,37 @@ impl VirtualMachine {
                             let base = a_dec.to_f64().unwrap_or(0.0);
                             if let Some(b_dec) = b_nb.as_decimal() {
                                 let result = base.powf(b_dec.to_f64().unwrap_or(0.0));
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from_f64(result).unwrap_or_default(),
                                 ));
                             }
                             if let Some(b_int) = b_nb.as_i64() {
                                 let result = base.powf(b_int as f64);
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from_f64(result).unwrap_or_default(),
                                 ));
                             }
                             if let Some(b_num) = b_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(base.powf(b_num)));
+                                return self.push_raw_u64(<u64 as shape_value::ValueWordExt>::from_f64(base.powf(b_num)));
                             }
                         }
                     }
-                    (_, NanTag::Heap) => {
+                    (_, IC_HEAP) => {
                         if let Some(HeapValue::BigInt(b_big)) = b_nb.as_heap_ref() {
                             if let Some(a_i) = a_nb.as_i64() {
                                 if *b_big >= 0 && *b_big < u32::MAX as i64 {
-                                    return self.push_vw(ValueWord::from_i64(
+                                    return self.push_raw_u64(ValueWord::from_i64(
                                         a_i.checked_pow(*b_big as u32).ok_or_else(|| {
                                             VMError::RuntimeError("Integer overflow".into())
                                         })?,
                                     ));
                                 }
-                                return self.push_vw(ValueWord::from_f64(
+                                return self.push_raw_u64(ValueWord::from_f64(
                                     (a_i as f64).powf(*b_big as f64),
                                 ));
                             }
                             if let Some(a_f) = a_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(a_f.powf(*b_big as f64)));
+                                return self.push_raw_u64(ValueWord::from_f64(a_f.powf(*b_big as f64)));
                             }
                         }
                         if let Some(b_dec) = b_nb.as_decimal() {
@@ -2660,12 +2667,12 @@ impl VirtualMachine {
                             let exp = b_dec.to_f64().unwrap_or(0.0);
                             if let Some(a_int) = a_nb.as_i64() {
                                 let result = (a_int as f64).powf(exp);
-                                return self.push_vw(ValueWord::from_decimal(
+                                return self.push_raw_u64(ValueWord::from_decimal(
                                     rust_decimal::Decimal::from_f64(result).unwrap_or_default(),
                                 ));
                             }
                             if let Some(a_num) = a_nb.as_f64() {
-                                return self.push_vw(ValueWord::from_f64(a_num.powf(exp)));
+                                return self.push_raw_u64(<u64 as shape_value::ValueWordExt>::from_f64(a_num.powf(exp)));
                             }
                         }
                     }
@@ -2678,11 +2685,11 @@ impl VirtualMachine {
                 )));
             }
             BitXor => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 match (a.as_i64(), b.as_i64()) {
                     (Some(a_int), Some(b_int)) => {
-                        self.push_vw(ValueWord::from_i64(a_int ^ b_int))?
+                        self.push_raw_u64(ValueWord::from_i64(a_int ^ b_int))?
                     }
                     _ => {
                         return Err(VMError::RuntimeError(format!(
@@ -2694,11 +2701,11 @@ impl VirtualMachine {
                 }
             }
             BitAnd => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 match (a.as_i64(), b.as_i64()) {
                     (Some(a_int), Some(b_int)) => {
-                        self.push_vw(ValueWord::from_i64(a_int & b_int))?
+                        self.push_raw_u64(ValueWord::from_i64(a_int & b_int))?
                     }
                     _ => {
                         return Err(VMError::RuntimeError(format!(
@@ -2710,11 +2717,11 @@ impl VirtualMachine {
                 }
             }
             BitOr => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 match (a.as_i64(), b.as_i64()) {
                     (Some(a_int), Some(b_int)) => {
-                        self.push_vw(ValueWord::from_i64(a_int | b_int))?
+                        self.push_raw_u64(ValueWord::from_i64(a_int | b_int))?
                     }
                     _ => {
                         return Err(VMError::RuntimeError(format!(
@@ -2726,11 +2733,11 @@ impl VirtualMachine {
                 }
             }
             BitShl => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 match (a.as_i64(), b.as_i64()) {
                     (Some(a_int), Some(b_int)) => {
-                        self.push_vw(ValueWord::from_i64(a_int << b_int))?
+                        self.push_raw_u64(ValueWord::from_i64(a_int << b_int))?
                     }
                     _ => {
                         return Err(VMError::RuntimeError(format!(
@@ -2742,11 +2749,11 @@ impl VirtualMachine {
                 }
             }
             BitShr => {
-                let b = self.pop_vw()?;
-                let a = self.pop_vw()?;
+                let b = self.pop_raw_u64()?;
+                let a = self.pop_raw_u64()?;
                 match (a.as_i64(), b.as_i64()) {
                     (Some(a_int), Some(b_int)) => {
-                        self.push_vw(ValueWord::from_i64(a_int >> b_int))?
+                        self.push_raw_u64(ValueWord::from_i64(a_int >> b_int))?
                     }
                     _ => {
                         return Err(VMError::RuntimeError(format!(
@@ -2758,9 +2765,9 @@ impl VirtualMachine {
                 }
             }
             BitNot => {
-                let a = self.pop_vw()?;
+                let a = self.pop_raw_u64()?;
                 match a.as_i64() {
-                    Some(a_int) => self.push_vw(ValueWord::from_i64(!a_int))?,
+                    Some(a_int) => self.push_raw_u64(ValueWord::from_i64(!a_int))?,
                     _ => {
                         return Err(VMError::RuntimeError(format!(
                             "Bitwise NOT requires integer operand, got {}",
@@ -2807,10 +2814,10 @@ impl VirtualMachine {
             None => return Ok(None),
         };
         // Push args: self, other
-        self.push_vw(a)?;
-        self.push_vw(b)?;
+        self.push_raw_u64(a)?;
+        self.push_raw_u64(b)?;
         self.call_function_from_stack(func_idx, 2)?;
-        let result = self.pop_vw()?;
+        let result = self.pop_raw_u64()?;
         Ok(Some(result))
     }
 
@@ -2827,9 +2834,9 @@ impl VirtualMachine {
             Some(&idx) => idx,
             None => return Ok(None),
         };
-        self.push_vw(val)?;
+        self.push_raw_u64(val)?;
         self.call_function_from_stack(func_idx, 1)?;
-        let result = self.pop_vw()?;
+        let result = self.pop_raw_u64()?;
         Ok(Some(result))
     }
 }
@@ -2839,7 +2846,7 @@ mod tests {
     use crate::VMConfig;
     use crate::bytecode::*;
     use crate::executor::VirtualMachine;
-    use shape_value::{VMError, ValueWord};
+    use shape_value::{VMError, ValueWord, ValueWordExt};
 
     #[test]
     fn test_string_concatenation() {
@@ -3115,7 +3122,7 @@ mod tests {
         )
         .expect("numeric operation should succeed")
         .expect("numeric operation should produce value");
-        assert_eq!(result.as_u64(), Some(u64::MAX));
+        assert_eq!(result.as_u64_value(), Some(u64::MAX));
     }
 
     #[test]
@@ -3886,7 +3893,7 @@ mod tests {
     fn test_raw_push_i64_pop_as_value_word() {
         let mut vm = make_raw_vm();
         vm.push_raw_i64(99).unwrap();
-        let vw = vm.pop_vw().unwrap();
+        let vw = vm.pop_raw_u64().unwrap();
         assert_eq!(vw.as_i64(), Some(99));
     }
 
@@ -3894,21 +3901,21 @@ mod tests {
     fn test_raw_push_f64_pop_as_value_word() {
         let mut vm = make_raw_vm();
         vm.push_raw_f64(1.5).unwrap();
-        let vw = vm.pop_vw().unwrap();
+        let vw = vm.pop_raw_u64().unwrap();
         assert!((vw.as_f64().unwrap() - 1.5).abs() < 1e-15);
     }
 
     #[test]
     fn test_value_word_push_pop_raw_i64() {
         let mut vm = make_raw_vm();
-        vm.push_vw(ValueWord::from_i64(77)).unwrap();
+        vm.push_raw_u64(ValueWord::from_i64(77)).unwrap();
         assert_eq!(vm.pop_raw_i64().unwrap(), 77);
     }
 
     #[test]
     fn test_value_word_push_pop_raw_f64() {
         let mut vm = make_raw_vm();
-        vm.push_vw(ValueWord::from_f64(2.718)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(2.718)).unwrap();
         assert!((vm.pop_raw_f64().unwrap() - 2.718).abs() < 1e-15);
     }
 }

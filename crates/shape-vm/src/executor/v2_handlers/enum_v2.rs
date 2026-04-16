@@ -12,7 +12,7 @@
 use crate::bytecode::{Instruction, OpCode};
 use crate::executor::VirtualMachine;
 use shape_value::v2::enum_layout::{ENUM_PAYLOAD_OFFSET, ENUM_TAG_OFFSET};
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 impl VirtualMachine {
     /// Execute a v2 typed enum opcode (`EnumTagLoad` / `EnumPayloadField`).

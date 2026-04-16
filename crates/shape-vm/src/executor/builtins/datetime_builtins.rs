@@ -3,7 +3,7 @@
 //! Handles: DateTimeParse, DateTimeFromEpoch
 
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 impl VirtualMachine {
     /// Parse a datetime string. Supports ISO 8601, RFC 2822, RFC 3339,

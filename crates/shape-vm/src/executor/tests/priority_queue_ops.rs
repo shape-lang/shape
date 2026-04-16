@@ -1,7 +1,7 @@
 //! PriorityQueue method tests — bytecode-level integration tests.
 
 use super::*;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Build a test PriorityQueue from [3, 1, 2] (heapified to min-heap)
 fn test_pq() -> ValueWord {

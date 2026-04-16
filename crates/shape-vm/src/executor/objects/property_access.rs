@@ -7,8 +7,7 @@ use crate::bytecode::{Instruction, Operand};
 use crate::executor::VirtualMachine;
 use crate::memory::{record_heap_write, write_barrier_slot, write_barrier_vw};
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
-use shape_value::NanTag;
-use shape_value::{HeapValue, VMError, ValueWord, heap_value::NativeScalar};
+use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt, heap_value::NativeScalar};
 use std::sync::Arc;
 
 /// PHF map for Time property access — replaces sequential string comparisons.
@@ -57,7 +56,7 @@ fn read_native_f64(value: &ValueWord) -> Option<f64> {
     if let Some(n) = value.as_number_strict() {
         return Some(n);
     }
-    if matches!(value.tag(), NanTag::I48) {
+    if value.is_i64() {
         return value.as_i64().map(|v| v as f64);
     }
     None
@@ -338,7 +337,7 @@ impl VirtualMachine {
             // String key: only "length" is meaningful for typed arrays.
             if let Some(ks) = key_nb.as_str() {
                 if ks == "length" {
-                    return self.push_vw(ValueWord::from_i64(view.len as i64));
+                    return self.push_raw_u64(ValueWord::from_i64(view.len as i64));
                 }
                 return Err(VMError::UndefinedProperty(ks.to_string()));
             }
@@ -356,9 +355,9 @@ impl VirtualMachine {
                         actual as u32,
                     )
                     .unwrap_or_else(ValueWord::none);
-                    return self.push_vw(val);
+                    return self.push_raw_u64(val);
                 } else {
-                    return self.push_vw(ValueWord::none());
+                    return self.push_raw_u64(ValueWord::none());
                 }
             }
             return Err(VMError::TypeError {
@@ -385,7 +384,7 @@ impl VirtualMachine {
                 };
                 if let Some(ks) = key_str {
                     if ks == "length" {
-                        return self.push_vw(ValueWord::from_i64(arr.len() as i64));
+                        return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
                     }
                     return Err(VMError::UndefinedProperty(ks.to_string()));
                 }
@@ -398,9 +397,9 @@ impl VirtualMachine {
                     if actual >= 0 && (actual as usize) < arr.len() {
                         let elem_bits = *arr.get(actual as usize).unwrap();
                         let elem = unsafe { ValueWord::clone_from_bits(elem_bits) };
-                        return self.push_vw(elem);
+                        return self.push_raw_u64(elem);
                     } else {
-                        return self.push_vw(ValueWord::none());
+                        return self.push_raw_u64(ValueWord::none());
                     }
                 }
             }
@@ -467,14 +466,14 @@ impl VirtualMachine {
                                             }
                                         }
                                         // Any and non-primitive types: use as_value_word to
-                                        // preserve all inline NanTag variants (Function, etc.)
+                                        // preserve all inline inline tag variants (Function, etc.)
                                         _ => slots[field_index].as_value_word(is_heap),
                                     };
-                                    return self.push_vw(result);
+                                    return self.push_raw_u64(result);
                                 }
                             }
                         }
-                        return self.push_vw(ValueWord::none());
+                        return self.push_raw_u64(ValueWord::none());
                     }
                 }
 
@@ -486,7 +485,7 @@ impl VirtualMachine {
                             .field(ks)
                             .ok_or_else(|| VMError::UndefinedProperty(ks.to_string()))?;
                         let result = read_native_view_field(view, field)?;
-                        return self.push_vw(result);
+                        return self.push_raw_u64(result);
                     }
                 }
 
@@ -494,7 +493,7 @@ impl VirtualMachine {
                 HeapValue::Array(arr) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
-                            return self.push_vw(ValueWord::from_i64(arr.len() as i64));
+                            return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
@@ -506,9 +505,9 @@ impl VirtualMachine {
                         let len = arr.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
                         if actual >= 0 && (actual as usize) < arr.len() {
-                            return self.push_vw(arr[actual as usize].clone());
+                            return self.push_raw_u64(arr[actual as usize].clone());
                         } else {
-                            return self.push_vw(ValueWord::none());
+                            return self.push_raw_u64(ValueWord::none());
                         }
                     }
                 }
@@ -517,7 +516,7 @@ impl VirtualMachine {
                 HeapValue::IntArray(arr) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
-                            return self.push_vw(ValueWord::from_i64(arr.len() as i64));
+                            return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
@@ -528,9 +527,9 @@ impl VirtualMachine {
                         let len = arr.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
                         if actual >= 0 && (actual as usize) < arr.len() {
-                            return self.push_vw(ValueWord::from_i64(arr[actual as usize]));
+                            return self.push_raw_u64(ValueWord::from_i64(arr[actual as usize]));
                         } else {
-                            return self.push_vw(ValueWord::none());
+                            return self.push_raw_u64(ValueWord::none());
                         }
                     }
                 }
@@ -539,7 +538,7 @@ impl VirtualMachine {
                 HeapValue::FloatArray(arr) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
-                            return self.push_vw(ValueWord::from_i64(arr.len() as i64));
+                            return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
@@ -550,9 +549,9 @@ impl VirtualMachine {
                         let len = arr.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
                         if actual >= 0 && (actual as usize) < arr.len() {
-                            return self.push_vw(ValueWord::from_f64(arr[actual as usize]));
+                            return self.push_raw_u64(ValueWord::from_f64(arr[actual as usize]));
                         } else {
-                            return self.push_vw(ValueWord::none());
+                            return self.push_raw_u64(ValueWord::none());
                         }
                     }
                 }
@@ -563,7 +562,7 @@ impl VirtualMachine {
                     let off = *offset as usize;
                     if let Some(ks) = key_str {
                         if ks == "length" {
-                            return self.push_vw(ValueWord::from_i64(slice_len as i64));
+                            return self.push_raw_u64(ValueWord::from_i64(slice_len as i64));
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
@@ -573,9 +572,9 @@ impl VirtualMachine {
                     if let Some(idx) = idx_opt {
                         let actual = if idx < 0 { slice_len as i64 + idx } else { idx };
                         if actual >= 0 && (actual as usize) < slice_len {
-                            return self.push_vw(ValueWord::from_f64(parent.data[off + actual as usize]));
+                            return self.push_raw_u64(ValueWord::from_f64(parent.data[off + actual as usize]));
                         } else {
-                            return self.push_vw(ValueWord::none());
+                            return self.push_raw_u64(ValueWord::none());
                         }
                     }
                 }
@@ -584,7 +583,7 @@ impl VirtualMachine {
                 HeapValue::BoolArray(arr) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
-                            return self.push_vw(ValueWord::from_i64(arr.len() as i64));
+                            return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
@@ -595,9 +594,9 @@ impl VirtualMachine {
                         let len = arr.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
                         if actual >= 0 && (actual as usize) < arr.len() {
-                            return self.push_vw(ValueWord::from_bool(arr[actual as usize] != 0));
+                            return self.push_raw_u64(ValueWord::from_bool(arr[actual as usize] != 0));
                         } else {
-                            return self.push_vw(ValueWord::none());
+                            return self.push_raw_u64(ValueWord::none());
                         }
                     }
                 }
@@ -606,7 +605,7 @@ impl VirtualMachine {
                 HeapValue::String(s) => {
                     if let Some(ks) = key_str {
                         if ks == "length" {
-                            return self.push_vw(ValueWord::from_i64(s.chars().count() as i64));
+                            return self.push_raw_u64(ValueWord::from_i64(s.chars().count() as i64));
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
@@ -619,10 +618,10 @@ impl VirtualMachine {
                         let actual = if idx < 0 { char_count + idx } else { idx };
                         if actual >= 0 && actual < char_count {
                             if let Some(c) = s.chars().nth(actual as usize) {
-                                return self.push_vw(ValueWord::from_char(c));
+                                return self.push_raw_u64(ValueWord::from_char(c));
                             }
                         }
-                        return self.push_vw(ValueWord::none());
+                        return self.push_raw_u64(ValueWord::none());
                     }
                 }
 
@@ -630,10 +629,10 @@ impl VirtualMachine {
                 HeapValue::Matrix(mat) => {
                     if let Some(ks) = key_str {
                         match ks {
-                            "rows" => return self.push_vw(ValueWord::from_i64(mat.rows as i64)),
-                            "cols" => return self.push_vw(ValueWord::from_i64(mat.cols as i64)),
+                            "rows" => return self.push_raw_u64(ValueWord::from_i64(mat.rows as i64)),
+                            "cols" => return self.push_raw_u64(ValueWord::from_i64(mat.cols as i64)),
                             "length" => {
-                                return self.push_vw(ValueWord::from_i64(mat.data.len() as i64));
+                                return self.push_raw_u64(ValueWord::from_i64(mat.data.len() as i64));
                             }
                             _ => return Err(VMError::UndefinedProperty(ks.to_string())),
                         }
@@ -650,11 +649,11 @@ impl VirtualMachine {
                             let parent_arc = mat.clone();
                             let offset = actual as u32 * cols;
                             let len = cols;
-                            return self.push_vw(ValueWord::from_heap_value(
+                            return self.push_raw_u64(ValueWord::from_heap_value(
                                 HeapValue::FloatArraySlice { parent: parent_arc, offset, len },
                             ));
                         } else {
-                            return self.push_vw(ValueWord::none());
+                            return self.push_raw_u64(ValueWord::none());
                         }
                     }
                 }
@@ -663,7 +662,7 @@ impl VirtualMachine {
                 HeapValue::Time(dt) => {
                     if let Some(ks) = key_str {
                         if let Some(accessor) = TIME_PROPERTIES.get(ks) {
-                            return self.push_vw(accessor(dt));
+                            return self.push_raw_u64(accessor(dt));
                         }
                         return Err(VMError::UndefinedProperty(ks.to_string()));
                     }
@@ -678,7 +677,7 @@ impl VirtualMachine {
                             .index_of(ks)
                             .map_err(|_| VMError::UndefinedProperty(ks.to_string()))?
                             as u32;
-                        return self.push_vw(ValueWord::from_column_ref(
+                        return self.push_raw_u64(ValueWord::from_column_ref(
                             *schema_id,
                             table.clone(),
                             col_id,
@@ -695,7 +694,7 @@ impl VirtualMachine {
                             .index_of(ks)
                             .map_err(|_| VMError::UndefinedProperty(ks.to_string()))?
                             as u32;
-                        return self.push_vw(ValueWord::from_column_ref(0, table.clone(), col_id));
+                        return self.push_raw_u64(ValueWord::from_column_ref(0, table.clone(), col_id));
                     }
                 }
 
@@ -710,7 +709,7 @@ impl VirtualMachine {
                             .index_of(ks)
                             .map_err(|_| VMError::UndefinedProperty(ks.to_string()))?
                             as u32;
-                        return self.push_vw(ValueWord::from_column_ref(
+                        return self.push_raw_u64(ValueWord::from_column_ref(
                             *schema_id,
                             table.clone(),
                             col_id,
@@ -762,7 +761,7 @@ impl VirtualMachine {
                         } else {
                             ValueWord::none()
                         };
-                        return self.push_vw(result);
+                        return self.push_raw_u64(result);
                     }
                 }
 
@@ -770,7 +769,7 @@ impl VirtualMachine {
                 HeapValue::ExprProxy(col) => {
                     if let Some(ks) = key_str {
                         return self
-                            .push_vw(ValueWord::from_string(Arc::new(format!("{}.{}", col, ks))));
+                            .push_raw_u64(ValueWord::from_string(Arc::new(format!("{}.{}", col, ks))));
                     }
                 }
 
@@ -798,7 +797,7 @@ impl VirtualMachine {
                                     }
                                 }
                             }
-                            return self.push_vw(val.clone());
+                            return self.push_raw_u64(val.clone());
                         }
                         // Slow path: hash-based lookup
                         let key_vw = ValueWord::from_string(Arc::new(ks.to_string()));
@@ -807,10 +806,10 @@ impl VirtualMachine {
                             if let Some(&idx) =
                                 bucket.iter().find(|&&i| data.keys[i].vw_equals(&key_vw))
                             {
-                                return self.push_vw(data.values[idx].clone());
+                                return self.push_raw_u64(data.values[idx].clone());
                             }
                         }
-                        return self.push_vw(ValueWord::none());
+                        return self.push_raw_u64(ValueWord::none());
                     }
                     // Numeric key access
                     let idx_opt = key_nb
@@ -819,9 +818,9 @@ impl VirtualMachine {
                     if let Some(idx) = idx_opt {
                         let key_vw = ValueWord::from_i64(idx);
                         if let Some(found_idx) = data.find_key(&key_vw) {
-                            return self.push_vw(data.values[found_idx].clone());
+                            return self.push_raw_u64(data.values[found_idx].clone());
                         }
-                        return self.push_vw(ValueWord::none());
+                        return self.push_raw_u64(ValueWord::none());
                     }
                 }
 
@@ -1069,7 +1068,7 @@ impl VirtualMachine {
         let mut object_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
 
         Self::set_array_index_on_object(&mut object_nb, &key_nb, value_nb)?;
-        self.push_vw(object_nb)
+        self.push_raw_u64(object_nb)
     }
 
     pub(in crate::executor) fn op_set_local_index(
@@ -1090,11 +1089,11 @@ impl VirtualMachine {
             )));
         }
 
-        let mut object_nb = self.stack_take_vw(slot);
+        let mut object_nb = self.stack_take_raw(slot);
         let result = Self::set_array_index_on_object(&mut object_nb, &key_nb, value_nb);
         record_heap_write();
         write_barrier_slot(Self::NONE_BITS, object_nb.raw_bits());
-        self.stack_write_vw(slot, object_nb);
+        self.stack_write_raw(slot, object_nb);
         result
     }
 
@@ -1113,11 +1112,11 @@ impl VirtualMachine {
                 .resize_with(binding_idx + 1, || Self::NONE_BITS);
         }
 
-        let mut object_nb = self.binding_take_vw(binding_idx);
+        let mut object_nb = self.binding_take_raw(binding_idx);
         let result = Self::set_array_index_on_object(&mut object_nb, &key_nb, value_nb);
         record_heap_write();
         write_barrier_slot(Self::NONE_BITS, object_nb.raw_bits());
-        self.binding_write_vw(binding_idx, object_nb);
+        self.binding_write_raw(binding_idx, object_nb);
         result
     }
 
@@ -1127,7 +1126,7 @@ impl VirtualMachine {
         if let Some(view) =
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&nb)
         {
-            return self.push_vw(ValueWord::from_i64(view.len as i64));
+            return self.push_raw_u64(ValueWord::from_i64(view.len as i64));
         }
         // Handle unified arrays (bit-47 tagged).
         if shape_value::tags::is_unified_heap(nb.raw_bits()) {
@@ -1136,7 +1135,7 @@ impl VirtualMachine {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(nb.raw_bits())
                 };
-                return self.push_vw(ValueWord::from_i64(arr.len() as i64));
+                return self.push_raw_u64(ValueWord::from_i64(arr.len() as i64));
             }
         }
         // Fast path: inspect HeapValue directly without materializing ValueWord
@@ -1162,7 +1161,7 @@ impl VirtualMachine {
                     });
                 }
             };
-            return self.push_vw(ValueWord::from_i64(length as i64));
+            return self.push_raw_u64(ValueWord::from_i64(length as i64));
         }
         // Non-heap types don't have length
         Err(VMError::TypeError {

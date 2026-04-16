@@ -8,6 +8,7 @@
 //! triggers a fallback to string-based lookup.
 
 use serde::{Deserialize, Serialize};
+use crate::value_word::ValueWordExt;
 
 /// A typed method identifier. Wraps a `u16` discriminant that the compiler
 /// resolves from method name strings at compile time.

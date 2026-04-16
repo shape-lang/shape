@@ -1,4 +1,5 @@
 use super::*;
+use shape_value::ValueWordExt;
 
 /// Build a dummy `ModuleContext` for unit tests that don't need schema
 /// lookup or callable invocation.

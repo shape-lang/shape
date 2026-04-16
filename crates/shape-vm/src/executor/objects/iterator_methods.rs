@@ -10,7 +10,7 @@
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::{HeapValue, IteratorState, IteratorTransform};
-use shape_value::{HeapKind, NanTag, VMError, ValueWord};
+use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 use std::mem::ManuallyDrop;
 use super::raw_helpers;
@@ -20,14 +20,10 @@ use super::raw_helpers;
 /// Check that a ValueWord value is callable (function, closure, module function, or native closure)
 #[inline]
 fn is_callable(nb: &ValueWord) -> bool {
-    match nb.tag() {
-        NanTag::Function | NanTag::ModuleFunction => true,
-        NanTag::Heap => matches!(
-            nb.heap_kind(),
-            Some(HeapKind::Closure | HeapKind::HostClosure)
-        ),
-        _ => false,
-    }
+    nb.is_function() || nb.is_module_function() || (nb.is_heap() && matches!(
+        nb.heap_kind(),
+        Some(HeapKind::Closure | HeapKind::HostClosure)
+    ))
 }
 
 /// Create a new Iterator ValueWord by appending a transform to the existing iterator state.

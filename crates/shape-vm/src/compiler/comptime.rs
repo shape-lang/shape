@@ -11,7 +11,7 @@ use shape_ast::ast::{
     ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, VarKind, VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -823,16 +823,19 @@ pub(crate) fn vmvalue_to_literal(value: &ValueWord) -> shape_ast::ast::Literal {
 pub(crate) fn nb_to_literal(nb: &ValueWord) -> shape_ast::ast::Literal {
     use shape_ast::ast::Literal;
     use shape_runtime::type_system::annotation_to_string;
-    use shape_value::NanTag;
     use shape_value::heap_value::HeapValue;
 
-    match nb.tag() {
-        NanTag::I48 => Literal::Int(nb.as_i64().unwrap_or(0)),
-        NanTag::F64 => Literal::Number(nb.as_f64().unwrap_or(0.0)),
-        NanTag::Bool => Literal::Bool(nb.as_bool().unwrap_or(false)),
-        NanTag::None => Literal::None,
-        NanTag::Unit => Literal::Unit,
-        NanTag::Heap => {
+    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_HEAP};
+    let bits = nb.raw_bits();
+    if !is_tagged(bits) {
+        return Literal::Number(nb.as_f64().unwrap_or(0.0));
+    }
+    match get_tag(bits) {
+        TAG_INT => Literal::Int(nb.as_i64().unwrap_or(0)),
+        TAG_BOOL => Literal::Bool(nb.as_bool().unwrap_or(false)),
+        TAG_NONE => Literal::None,
+        TAG_UNIT => Literal::Unit,
+        TAG_HEAP => {
             if let Some(s) = nb.as_str() {
                 Literal::String(s.to_string())
             } else if let Some(d) = nb.as_decimal() {

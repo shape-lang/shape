@@ -4,7 +4,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::raw_helpers::extract_heap_ref;
 

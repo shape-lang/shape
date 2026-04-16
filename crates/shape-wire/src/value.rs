@@ -5,6 +5,7 @@
 //! converted to their serializable representations.
 
 use serde::{Deserialize, Serialize};
+use shape_value::ValueWordExt;
 use std::collections::BTreeMap;
 
 /// Duration unit for time spans

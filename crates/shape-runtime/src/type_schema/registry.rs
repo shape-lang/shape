@@ -4,6 +4,7 @@
 //! builder API for creating schemas.
 
 use super::SchemaId;
+use shape_value::ValueWordExt;
 use super::enum_support::EnumVariantInfo;
 use super::field_types::{FieldAnnotation, FieldType};
 use super::schema::TypeSchema;

@@ -12,6 +12,7 @@
 //! ```
 
 use super::heap_header::{HeapHeader, HEAP_KIND_V2_STRING};
+use crate::value_word::ValueWordExt;
 
 /// Refcounted, repr(C) string for v2 runtime.
 /// Total: 24 bytes (header 8 + data ptr 8 + len 4 + pad 4).

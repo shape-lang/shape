@@ -10,7 +10,7 @@ use arrow_array::{
     StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use shape_value::datatable::DataTable;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 

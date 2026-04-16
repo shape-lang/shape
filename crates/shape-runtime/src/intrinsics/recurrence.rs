@@ -4,7 +4,7 @@
 use super::{extract_f64, extract_f64_array, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Intrinsic: Linear Recurrence
 ///

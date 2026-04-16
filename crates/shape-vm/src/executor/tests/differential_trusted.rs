@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::bytecode::{BytecodeProgram, OpCode};
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 /// Compile and run a Shape program normally (trusted opcodes may be emitted).
 fn run_with_trusted(source: &str) -> Result<ValueWord, VMError> {

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use super::super::super::context::JITDuration;
 use super::super::super::jit_array::{ArrayElementKind, JitArray};
 use super::super::super::nan_boxing::*;
+use shape_value::ValueWordExt;
 
 // Thread-local accumulator for unified heap refs whose refcount was bumped
 // in nanboxed_to_jit_bits. Drained after JIT execution to balance refcounts.
@@ -146,7 +147,7 @@ impl IntoTyped<f64> for f64 { fn into_typed(self) -> f64 { self } }
 
 /// Convert JIT NaN-boxed bits directly to ValueWord (no intermediate Value/VMValue).
 pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     // NOTE: Unified heap values (bit-47 set) are NOT passed through directly.
     // The VM's as_heap_ref() returns None for unified heap, so we must convert
@@ -319,7 +320,7 @@ pub fn jit_bits_to_nanboxed_with_ctx(
     bits: u64,
     ctx: *const super::super::super::context::JITContext,
 ) -> shape_value::ValueWord {
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     // VM-format heap values (TAG_HEAP, bit-47 clear) are Arc<HeapValue> pointers.
     // Recover them directly — no conversion needed.
@@ -479,7 +480,7 @@ pub fn typed_scalar_to_jit_bits(ts: &shape_value::TypedScalar) -> u64 {
 
 /// Convert a ValueWord value directly to JIT NaN-boxed bits (no intermediate VMValue).
 pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
-    use shape_value::NanTag;
+    use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
     use shape_value::heap_value::HeapValue;
 
     // Unified heap values (bit-47 set) are already in JIT-compatible format.
@@ -498,25 +499,28 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
         return bits;
     }
 
-    match nb.tag() {
-        NanTag::F64 => box_number(unsafe { nb.as_f64_unchecked() }),
-        NanTag::I48 => box_number(unsafe { nb.as_i64_unchecked() } as f64),
-        NanTag::Bool => {
+    let bits = nb.raw_bits();
+    if !is_tagged(bits) {
+        return box_number(unsafe { nb.as_f64_unchecked() });
+    }
+    match get_tag(bits) {
+        TAG_INT => box_number(unsafe { nb.as_i64_unchecked() } as f64),
+        TAG_BOOL => {
             if unsafe { nb.as_bool_unchecked() } {
                 TAG_BOOL_TRUE
             } else {
                 TAG_BOOL_FALSE
             }
         }
-        NanTag::None => TAG_NULL,
-        NanTag::Unit => TAG_UNIT,
-        NanTag::Function => {
+        TAG_NONE => TAG_NULL,
+        TAG_UNIT => TAG_UNIT,
+        TAG_FUNCTION => {
             let func_id = unsafe { nb.as_function_unchecked() };
             box_function(func_id)
         }
-        NanTag::ModuleFunction => TAG_NULL,
-        NanTag::Ref => TAG_NULL,
-        NanTag::Heap => match nb.as_heap_ref() {
+        TAG_MODULE_FN => TAG_NULL,
+        TAG_REF => TAG_NULL,
+        TAG_HEAP => match nb.as_heap_ref() {
             Some(HeapValue::String(s)) => box_str(s),
             Some(HeapValue::Array(arr)) => {
                 // AUDIT(C4): heap island — each element converted via nanboxed_to_jit_bits
@@ -689,5 +693,6 @@ pub fn nanboxed_to_jit_bits(nb: &shape_value::ValueWord) -> u64 {
                 bits
             }
         },
+        _ => nb.raw_bits(), // Unknown tag - passthrough
     }
 }

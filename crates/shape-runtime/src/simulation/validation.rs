@@ -5,7 +5,7 @@
 
 use crate::type_schema::{SchemaId, TypeSchemaRegistry};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Checks if a Value is suitable for TypedObject optimization.
 ///

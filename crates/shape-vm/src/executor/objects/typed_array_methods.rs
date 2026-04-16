@@ -7,7 +7,7 @@ use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 use wide::f64x4;
 

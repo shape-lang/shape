@@ -8,7 +8,7 @@ use crate::{
 };
 use rust_decimal::prelude::ToPrimitive;
 use shape_runtime::type_schema::FieldType;
-use shape_value::{VMError, ValueSlot, ValueWord};
+use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -73,7 +73,7 @@ impl VirtualMachine {
             slots: slots.into_boxed_slice(),
             heap_mask,
         };
-        self.push_vw(ValueWord::from_heap_value(typed_obj))?;
+        self.push_raw_u64(ValueWord::from_heap_value(typed_obj))?;
         Ok(())
     }
 
@@ -104,7 +104,7 @@ impl VirtualMachine {
                 .map(|(k, v)| (k.as_str(), v.clone()))
                 .collect();
             let typed = self.create_typed_object_from_pairs(&pairs)?;
-            self.push_vw(typed)?;
+            self.push_raw_u64(typed)?;
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -144,7 +144,7 @@ impl VirtualMachine {
         }
 
         let mat = shape_value::heap_value::MatrixData::from_flat(data, rows, cols);
-        self.push_vw(ValueWord::from_matrix(std::sync::Arc::new(mat)))
+        self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(mat)))
     }
 
     pub(in crate::executor) fn op_new_array(
@@ -160,7 +160,7 @@ impl VirtualMachine {
             }
             elements.reverse();
 
-            self.push_vw(ValueWord::from_array(Arc::new(elements)))?;
+            self.push_raw_u64(ValueWord::from_array(Arc::new(elements)))?;
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -189,65 +189,56 @@ impl VirtualMachine {
 
         if count == 0 {
             // Empty array — default to generic array
-            return self.push_vw(ValueWord::from_array(Arc::new(elements)));
+            return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
         }
 
         // Detect element type from first element, then verify all match
-        use shape_value::NanTag;
-
-        let first_tag = elements[0].tag();
-
-        match first_tag {
-            NanTag::I48 => {
-                // Try to pack as IntArray
-                let mut ints = Vec::with_capacity(count);
-                for elem in &elements {
-                    if let Some(i) = elem.as_i64() {
-                        ints.push(i);
-                    } else if let Some(f) = elem.as_f64() {
-                        // f64 whole number coercion
-                        if f.is_finite() && f == f.trunc() && f.abs() < (i64::MAX as f64) {
-                            ints.push(f as i64);
-                        } else {
-                            // Fallback to generic
-                            return self.push_vw(ValueWord::from_array(Arc::new(elements)));
-                        }
+        if elements[0].is_i64() {
+            // Try to pack as IntArray
+            let mut ints = Vec::with_capacity(count);
+            for elem in &elements {
+                if let Some(i) = elem.as_i64() {
+                    ints.push(i);
+                } else if let Some(f) = elem.as_f64() {
+                    // f64 whole number coercion
+                    if f.is_finite() && f == f.trunc() && f.abs() < (i64::MAX as f64) {
+                        ints.push(f as i64);
                     } else {
-                        return self.push_vw(ValueWord::from_array(Arc::new(elements)));
+                        // Fallback to generic
+                        return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
                     }
+                } else {
+                    return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
                 }
-                self.push_vw(ValueWord::from_int_array(Arc::new(ints.into())))
             }
-            NanTag::F64 => {
-                // Try to pack as FloatArray
-                let mut floats = shape_value::aligned_vec::AlignedVec::with_capacity(count);
-                for elem in &elements {
-                    if let Some(f) = elem.as_f64() {
-                        floats.push(f);
-                    } else if let Some(i) = elem.as_i64() {
-                        floats.push(i as f64);
-                    } else {
-                        return self.push_vw(ValueWord::from_array(Arc::new(elements)));
-                    }
+            self.push_raw_u64(ValueWord::from_int_array(Arc::new(ints.into())))
+        } else if elements[0].is_f64() {
+            // Try to pack as FloatArray
+            let mut floats = shape_value::aligned_vec::AlignedVec::with_capacity(count);
+            for elem in &elements {
+                if let Some(f) = elem.as_f64() {
+                    floats.push(f);
+                } else if let Some(i) = elem.as_i64() {
+                    floats.push(i as f64);
+                } else {
+                    return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
                 }
-                self.push_vw(ValueWord::from_float_array(Arc::new(floats.into())))
             }
-            NanTag::Bool => {
-                // Try to pack as BoolArray
-                let mut bools = Vec::with_capacity(count);
-                for elem in &elements {
-                    if let Some(b) = elem.as_bool() {
-                        bools.push(b as u8);
-                    } else {
-                        return self.push_vw(ValueWord::from_array(Arc::new(elements)));
-                    }
+            self.push_raw_u64(ValueWord::from_float_array(Arc::new(floats.into())))
+        } else if elements[0].is_bool() {
+            // Try to pack as BoolArray
+            let mut bools = Vec::with_capacity(count);
+            for elem in &elements {
+                if let Some(b) = elem.as_bool() {
+                    bools.push(b as u8);
+                } else {
+                    return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
                 }
-                self.push_vw(ValueWord::from_bool_array(Arc::new(bools.into())))
             }
-            _ => {
-                // Not a typed-array-eligible type, fall back to generic
-                self.push_vw(ValueWord::from_array(Arc::new(elements)))
-            }
+            self.push_raw_u64(ValueWord::from_bool_array(Arc::new(bools.into())))
+        } else {
+            // Not a typed-array-eligible type, fall back to generic
+            self.push_raw_u64(ValueWord::from_array(Arc::new(elements)))
         }
     }
 }
@@ -271,7 +262,7 @@ pub(in crate::executor) fn nb_to_slot_with_field_type(
             if matches!(ft, FieldType::U64) {
                 // U64 may exceed i64::MAX — extract via as_u64() for lossless storage
                 let val = nb
-                    .as_u64()
+                    .as_u64_value()
                     .or_else(|| nb.as_i64().map(|i| i as u64))
                     .or_else(|| nb.as_f64().map(|n| n as u64))
                     .unwrap_or(0);
@@ -301,7 +292,7 @@ pub(in crate::executor) fn nb_to_slot_with_field_type(
             ),
             false,
         ),
-        // `Any` must preserve dynamic type losslessly — including inline NanTag
+        // `Any` must preserve dynamic type losslessly — including inline inline tag
         // variants like Function, ModuleFunction, I48, etc.  `from_value_word`
         // stores raw NaN-boxed bits for inline tags and clones HeapValues for
         // heap tags, so the exact tag round-trips through `as_value_word`.
@@ -359,7 +350,7 @@ pub(in crate::executor) fn read_slot_nb(
             }
         }
         // Any and non-primitive types: reconstruct via as_value_word to preserve
-        // all inline NanTag variants (Function, ModuleFunction, I48, etc.)
+        // all inline inline tag variants (Function, ModuleFunction, I48, etc.)
         Some(_) | None => slots[index].as_value_word(false),
     }
 }
@@ -396,7 +387,7 @@ pub(in crate::executor) fn read_slot_value_typed(
             }
         }
         // Any and non-primitive types: reconstruct via as_value_word to preserve
-        // all inline NanTag variants (Function, ModuleFunction, I48, etc.)
+        // all inline inline tag variants (Function, ModuleFunction, I48, etc.)
         Some(_) | None => slots[index].as_value_word(false),
     }
 }

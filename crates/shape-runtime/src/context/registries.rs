@@ -4,6 +4,7 @@
 //! and annotation lifecycle dispatch.
 
 use super::super::annotation_context::AnnotationContext;
+use shape_value::ValueWordExt;
 use super::super::type_methods::TypeMethodRegistry;
 use super::super::type_schema::TypeSchemaRegistry;
 use shape_ast::ast::{AnnotationDef, AnnotationHandlerType, FunctionDef};
@@ -164,6 +165,7 @@ impl super::ExecutionContext {
 
 #[cfg(test)]
 mod tests {
+    use shape_value::ValueWordExt;
     use super::super::ExecutionContext;
     use shape_ast::ast::{
         Annotation, AnnotationDef, AnnotationHandler, AnnotationHandlerType, Expr, FunctionDef,

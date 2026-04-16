@@ -6,7 +6,8 @@ use crate::bytecode::{BuiltinFunction, Constant, Instruction, Operand};
 use crate::executor::VirtualMachine;
 use rust_decimal::prelude::ToPrimitive;
 use shape_ast::ast::TypeAnnotation;
-use shape_value::{HeapKind, NanTag, VMError, ValueWord, heap_value::HeapValue};
+use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
+use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
 use std::sync::Arc;
 
 const INTO_DISPATCH_TAG: &str = "__IntoDispatch";
@@ -386,13 +387,13 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let (dispatch_kind, encoded_source, target_selector) =
             match Self::decode_convert_dispatch(&target) {
                 Ok(dispatch) => dispatch,
                 Err(message) => {
                     let err = self.build_try_into_error_result(message, "CONVERT_DISPATCH");
-                    self.push_vw(err)?;
+                    self.push_raw_u64(err)?;
                     return Ok(());
                 }
             };
@@ -404,10 +405,10 @@ impl VirtualMachine {
         if source_name == target_selector {
             match dispatch_kind {
                 ConvertDispatchKind::TryInto => {
-                    self.push_vw(ValueWord::from_ok(value))?;
+                    self.push_raw_u64(ValueWord::from_ok(value))?;
                 }
                 ConvertDispatchKind::Into => {
-                    self.push_vw(value)?;
+                    self.push_raw_u64(value)?;
                 }
             }
             return Ok(());
@@ -422,7 +423,7 @@ impl VirtualMachine {
                         Ok(result_nb) => ValueWord::from_ok(result_nb),
                         Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_IMPL_MISSING"),
                     };
-                    self.push_vw(converted)?;
+                    self.push_raw_u64(converted)?;
                     return Ok(());
                 };
 
@@ -434,7 +435,7 @@ impl VirtualMachine {
                         ),
                         "TRY_INTO_SYMBOL_MISSING",
                     );
-                    self.push_vw(err)?;
+                    self.push_raw_u64(err)?;
                     return Ok(());
                 };
 
@@ -463,14 +464,14 @@ impl VirtualMachine {
                     }
                 };
 
-                self.push_vw(converted)
+                self.push_raw_u64(converted)
             }
             ConvertDispatchKind::Into => {
                 let Some(symbol) = self.resolve_into_symbol(&source_name, &target_selector) else {
                     // Fallback: built-in primitive conversions
                     match self.try_convert_no_checks(&value, &target_selector) {
                         Ok(result_nb) => {
-                            self.push_vw(result_nb)?;
+                            self.push_raw_u64(result_nb)?;
                             return Ok(());
                         }
                         Err(msg) => {
@@ -501,7 +502,7 @@ impl VirtualMachine {
                     )));
                 }
 
-                self.push_vw(converted)
+                self.push_raw_u64(converted)
             }
         }
     }
@@ -511,7 +512,7 @@ impl VirtualMachine {
     /// ConvertToInt: pop any value, convert to i64, push raw i64. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_int(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let i = Self::convert_to_i64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
         self.push_raw_i64(i)
@@ -520,7 +521,7 @@ impl VirtualMachine {
     /// ConvertToNumber: pop any value, convert to f64, push raw f64. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_number(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let n = Self::convert_to_f64(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
         self.push_raw_f64(n)
@@ -532,15 +533,15 @@ impl VirtualMachine {
     /// still uses push_vw.
     #[inline]
     pub(in crate::executor) fn op_convert_to_string(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = self.convert_to_string_no_checks(&value);
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// ConvertToBool: pop any value, convert to bool, push raw bool. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_bool(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let b = Self::convert_to_bool_native(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
         self.push_raw_bool(b)
@@ -549,82 +550,82 @@ impl VirtualMachine {
     /// ConvertToDecimal: pop value, convert to decimal, push result. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_decimal(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = Self::convert_to_decimal_no_checks(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// ConvertToChar: pop value, convert to char, push result. Panics on failure.
     #[inline]
     pub(in crate::executor) fn op_convert_to_char(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = Self::convert_to_char_no_checks(&value)
             .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// TryConvertToInt: pop value, try convert to int, push Result<int, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_int(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = match Self::convert_to_int_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
         };
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// TryConvertToNumber: pop value, try convert to number, push Result<number, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_number(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = match Self::convert_to_number_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
         };
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// TryConvertToString: pop value, try convert to string, push Result<string, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_string(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = ValueWord::from_ok(self.convert_to_string_no_checks(&value));
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// TryConvertToBool: pop value, try convert to bool, push Result<bool, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_bool(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = match Self::convert_to_bool_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
         };
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// TryConvertToDecimal: pop value, try convert to decimal, push Result<decimal, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_decimal(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = match Self::convert_to_decimal_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
         };
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     /// TryConvertToChar: pop value, try convert to char, push Result<char, AnyError>.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_char(&mut self) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         let result = match Self::convert_to_char_no_checks(&value) {
             Ok(v) => ValueWord::from_ok(v),
             Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
         };
-        self.push_vw(result)
+        self.push_raw_u64(result)
     }
 
     fn type_name_to_annotation(name: &str) -> TypeAnnotation {
@@ -642,20 +643,23 @@ impl VirtualMachine {
     }
 
     fn type_annotation_for_nb(&self, nb: &ValueWord) -> TypeAnnotation {
-        match nb.tag() {
-            NanTag::F64 => TypeAnnotation::Basic("number".to_string()),
-            NanTag::I48 => TypeAnnotation::Basic("int".to_string()),
-            NanTag::Bool => TypeAnnotation::Basic("bool".to_string()),
-            NanTag::None => TypeAnnotation::Generic {
+        let bits = nb.raw_bits();
+        if !is_tagged(bits) {
+            return TypeAnnotation::Basic("number".to_string());
+        }
+        match get_tag(bits) {
+            TAG_INT => TypeAnnotation::Basic("int".to_string()),
+            TAG_BOOL => TypeAnnotation::Basic("bool".to_string()),
+            TAG_NONE => TypeAnnotation::Generic {
                 name: "Option".into(),
                 args: vec![TypeAnnotation::Basic("unknown".to_string())],
             },
-            NanTag::Unit => TypeAnnotation::Void,
-            NanTag::Function | NanTag::ModuleFunction => {
+            TAG_UNIT => TypeAnnotation::Void,
+            TAG_FUNCTION | TAG_MODULE_FN => {
                 TypeAnnotation::Basic("function".to_string())
             }
-            NanTag::Ref => TypeAnnotation::Basic("reference".to_string()),
-            NanTag::Heap => {
+            TAG_REF => TypeAnnotation::Basic("reference".to_string()),
+            TAG_HEAP => {
                 if let Some(shape_value::HeapValue::TypeAnnotation(_)) = nb.as_heap_ref() {
                     return TypeAnnotation::Reference("Type".into());
                 }
@@ -676,6 +680,7 @@ impl VirtualMachine {
 
                 Self::type_name_to_annotation(nb.type_name())
             }
+            _ => TypeAnnotation::Basic("unknown".to_string()),
         }
     }
 
@@ -686,13 +691,15 @@ impl VirtualMachine {
         args: Vec<ValueWord>,
     ) -> Result<ValueWord, VMError> {
         check_arity("is_number", &args, 1)?;
-        let result = match args[0].tag() {
-            NanTag::F64 | NanTag::I48 => true,
-            NanTag::Heap => matches!(
+        let result = if args[0].is_f64() || args[0].is_i64() {
+            true
+        } else if args[0].is_heap() {
+            matches!(
                 args[0].heap_kind(),
                 Some(HeapKind::Decimal | HeapKind::BigInt)
-            ),
-            _ => false,
+            )
+        } else {
+            false
         };
         Ok(ValueWord::from_bool(result))
     }
@@ -714,7 +721,7 @@ impl VirtualMachine {
         args: Vec<ValueWord>,
     ) -> Result<ValueWord, VMError> {
         check_arity("is_bool", &args, 1)?;
-        Ok(ValueWord::from_bool(args[0].tag() == NanTag::Bool))
+        Ok(ValueWord::from_bool(args[0].is_bool()))
     }
 
     /// IsArray: Check if value is an array
@@ -1071,8 +1078,8 @@ impl VirtualMachine {
         &mut self,
         _args: Vec<ValueWord>,
     ) -> Result<ValueWord, VMError> {
-        // Note: TypeOf uses self.pop_vw() directly, not args
-        let nb = self.pop_vw()?;
+        // Note: TypeOf uses self.pop_raw_u64() directly, not args
+        let nb = self.pop_raw_u64()?;
         let annotation = self.type_annotation_for_nb(&nb);
         Ok(ValueWord::from_type_annotation(annotation))
     }
@@ -1116,7 +1123,7 @@ impl VirtualMachine {
 mod type_ops_tests {
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     fn eval(source: &str) -> ValueWord {
         let program = shape_ast::parser::parse_program(source).expect("parse failed");

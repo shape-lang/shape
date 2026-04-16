@@ -8,7 +8,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_value::content::{Color, ContentNode, NamedColor};
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::raw_helpers::{extract_content, extract_number_coerce, extract_str};
 
@@ -24,7 +24,7 @@ fn content_or_plain(bits: u64) -> ContentNode {
     } else {
         // Fall back to Display formatting of the value
         let vw = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(bits));
-        ContentNode::plain(format!("{}", *vw))
+        ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*vw)))
     }
 }
 

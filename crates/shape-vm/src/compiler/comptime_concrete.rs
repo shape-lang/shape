@@ -65,7 +65,7 @@
 
 use shape_ast::ast::TypeAnnotation;
 use shape_runtime::type_system::annotation_to_concrete;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::v2::ConcreteType;
 use std::sync::Arc;
 

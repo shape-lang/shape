@@ -5,7 +5,7 @@ use arrow_array::{Array, Float64Array, Int64Array, StringArray};
 use arrow_ord::sort::sort_to_indices;
 use arrow_select::take::take;
 use shape_value::datatable::DataTable;
-use shape_value::{HeapKind, NanTag, VMError, ValueWord};
+use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
@@ -21,11 +21,7 @@ fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
 }
 
 fn is_callable_nb(nb: &ValueWord) -> bool {
-    match nb.tag() {
-        NanTag::Function | NanTag::ModuleFunction => true,
-        NanTag::Heap => matches!(nb.heap_kind(), Some(HeapKind::Closure | HeapKind::HostClosure)),
-        _ => false,
-    }
+    nb.is_function() || nb.is_module_function() || (nb.is_heap() && matches!(nb.heap_kind(), Some(HeapKind::Closure | HeapKind::HostClosure)))
 }
 
 fn require_string_arg(args: &mut [u64], idx: usize, method_name: &str) -> Result<String, VMError> {
@@ -237,12 +233,10 @@ fn build_aggregation_result(results: &HashMap<String, ValueWord>) -> Result<Data
     keys.sort();
     for key in keys {
         let nb = &results[key];
-        match nb.tag() {
-            NanTag::F64 => { fields.push(Field::new(key, DataType::Float64, true)); columns.push(Arc::new(Float64Array::from(vec![nb.as_f64().unwrap()])) as arrow_array::ArrayRef); }
-            NanTag::I48 => { fields.push(Field::new(key, DataType::Int64, true)); columns.push(Arc::new(Int64Array::from(vec![nb.as_i64().unwrap()])) as arrow_array::ArrayRef); }
-            NanTag::None => { fields.push(Field::new(key, DataType::Float64, true)); columns.push(Arc::new(Float64Array::from(vec![None as Option<f64>])) as arrow_array::ArrayRef); }
-            _ => { if let Some(s) = nb.as_str() { fields.push(Field::new(key, DataType::Utf8, true)); columns.push(Arc::new(StringArray::from(vec![s])) as arrow_array::ArrayRef); } else { fields.push(Field::new(key, DataType::Utf8, true)); let s = format!("{:?}", nb); columns.push(Arc::new(StringArray::from(vec![s.as_str()])) as arrow_array::ArrayRef); } }
-        }
+        if nb.is_f64() { fields.push(Field::new(key, DataType::Float64, true)); columns.push(Arc::new(Float64Array::from(vec![nb.as_f64().unwrap()])) as arrow_array::ArrayRef); }
+        else if nb.is_i64() { fields.push(Field::new(key, DataType::Int64, true)); columns.push(Arc::new(Int64Array::from(vec![nb.as_i64().unwrap()])) as arrow_array::ArrayRef); }
+        else if nb.is_none() { fields.push(Field::new(key, DataType::Float64, true)); columns.push(Arc::new(Float64Array::from(vec![None as Option<f64>])) as arrow_array::ArrayRef); }
+        else { if let Some(s) = nb.as_str() { fields.push(Field::new(key, DataType::Utf8, true)); columns.push(Arc::new(StringArray::from(vec![s])) as arrow_array::ArrayRef); } else { fields.push(Field::new(key, DataType::Utf8, true)); let s = format!("{:?}", nb); columns.push(Arc::new(StringArray::from(vec![s.as_str()])) as arrow_array::ArrayRef); } }
     }
     let schema = Schema::new(fields);
     let batch = arrow_array::RecordBatch::try_new(Arc::new(schema), columns).map_err(|e| VMError::RuntimeError(format!("aggregate() result build failed: {}", e)))?;

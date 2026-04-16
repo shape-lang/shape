@@ -8,7 +8,7 @@ use super::{extract_f64, extract_usize, f64_vec_to_nb_array};
 use crate::context::ExecutionContext;
 use rand::Rng;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 fn sample_standard_normal() -> f64 {
     random::with_rng(|rng| {

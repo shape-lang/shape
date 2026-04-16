@@ -15,6 +15,7 @@ use crate::jit_array::JitArray;
 use crate::nan_boxing::*;
 use shape_runtime::context::ExecutionContext;
 use std::collections::HashMap;
+use shape_value::ValueWordExt;
 
 // Module declarations
 pub mod array;
@@ -276,10 +277,10 @@ fn dispatch_method_via_trampoline(
         // object methods not explicitly handled above.
         {
             // Push: [receiver, arg0, ..., argN, method_name, arg_count]
-            if vm.push_vw(receiver_vw.clone()).is_ok() {
+            if vm.push_raw_u64(receiver_vw.clone()).is_ok() {
                 let mut push_ok = true;
                 for arg in &args_vw {
-                    if vm.push_vw(arg.clone()).is_err() {
+                    if vm.push_raw_u64(arg.clone()).is_err() {
                         push_ok = false;
                         break;
                     }
@@ -289,7 +290,7 @@ fn dispatch_method_via_trampoline(
                         std::sync::Arc::new(method_name.to_string()),
                     );
                     let arg_count_vw = shape_value::ValueWord::from_f64(args_vw.len() as f64);
-                    if vm.push_vw(method_vw).is_ok() && vm.push_vw(arg_count_vw).is_ok() {
+                    if vm.push_raw_u64(method_vw).is_ok() && vm.push_raw_u64(arg_count_vw).is_ok() {
                         // Use legacy stack-based calling convention (operand: None)
                         // so method name is read from the stack, not the trampoline VM's
                         // string table.
@@ -299,7 +300,7 @@ fn dispatch_method_via_trampoline(
                         };
                         match vm.op_call_method(&instr, None) {
                             Ok(()) => {
-                                if let Ok(result) = vm.pop_vw() {
+                                if let Ok(result) = vm.pop_raw_u64() {
                                     return nanboxed_to_jit_bits(&result);
                                 }
                             }

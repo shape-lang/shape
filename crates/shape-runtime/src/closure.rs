@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use shape_ast::ast::{FunctionDef, VarKind};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// A closure captures a function definition along with its environment
 #[derive(Debug, Clone)]

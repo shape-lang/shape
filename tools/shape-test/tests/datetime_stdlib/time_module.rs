@@ -6,7 +6,7 @@
 use shape_runtime::module_exports::ModuleContext;
 use shape_runtime::stdlib_time::create_time_module;
 use shape_runtime::type_schema::TypeSchemaRegistry;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::LazyLock;
 
 /// Shared schema registry for all tests in this module.

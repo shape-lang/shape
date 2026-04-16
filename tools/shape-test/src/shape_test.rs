@@ -15,7 +15,7 @@ use shape_lsp::inlay_hints::InlayHintConfig;
 use shape_runtime::engine::ShapeEngine;
 use shape_runtime::initialize_shared_runtime;
 use shape_runtime::output_adapter::OutputAdapter;
-use shape_value::PrintResult;
+use shape_value::{PrintResult, ValueWordExt};
 use shape_vm::BytecodeExecutor;
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 use super::{extract_f64, extract_f64_array};
 use crate::context::ExecutionContext;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Intrinsic: Pearson correlation coefficient
 pub fn intrinsic_correlation(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {

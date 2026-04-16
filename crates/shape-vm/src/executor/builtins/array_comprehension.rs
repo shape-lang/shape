@@ -4,20 +4,16 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{HeapKind, NanTag, VMError, ValueWord};
+use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Check that a ValueWord value is callable
 #[inline]
 fn is_callable(nb: &ValueWord) -> bool {
-    match nb.tag() {
-        NanTag::Function | NanTag::ModuleFunction => true,
-        NanTag::Heap => matches!(
-            nb.heap_kind(),
-            Some(HeapKind::Closure | HeapKind::HostClosure)
-        ),
-        _ => false,
-    }
+    nb.is_function() || nb.is_module_function() || (nb.is_heap() && matches!(
+        nb.heap_kind(),
+        Some(HeapKind::Closure | HeapKind::HostClosure)
+    ))
 }
 
 /// Extract bool from ValueWord call result
@@ -54,7 +50,7 @@ impl VirtualMachine {
             ));
         }
         // Check arity for plain functions
-        if let Some(func_id) = args[1].as_function() {
+        if let Some(func_id) = args[1].as_function_id() {
             let function = self
                 .program
                 .functions

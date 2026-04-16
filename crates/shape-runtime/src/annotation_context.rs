@@ -35,7 +35,7 @@
 //! - `emit(event, data)` - Event emission for alerts, logging
 //! - `data` - Data range manipulation (extend/restore for warmup)
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 // ============================================================================

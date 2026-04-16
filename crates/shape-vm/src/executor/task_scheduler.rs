@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 /// Completion status of a spawned task.
 #[derive(Debug, Clone)]

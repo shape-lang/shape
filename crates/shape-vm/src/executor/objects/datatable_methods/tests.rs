@@ -1,7 +1,7 @@
 use super::*;
 use crate::executor::{VMConfig, VirtualMachine};
 use arrow_schema::{DataType, Field, Schema};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::datatable::DataTableBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -272,10 +272,7 @@ fn test_group_by_string() {
     assert_eq!(groups.len(), 2);
     // Groups sorted by key: AAPL, GOOG
     let g0 = to_obj_map(&groups[0].clone(), &vm);
-    assert_eq!(
-        g0["key"],
-        ValueWord::from_string(Arc::new("AAPL".to_string()))
-    );
+    assert_eq!(g0["key"].as_str(), Some("AAPL"));
     assert_eq!(
         g0["group"]
             .as_datatable()
@@ -284,10 +281,7 @@ fn test_group_by_string() {
         2
     );
     let g1 = to_obj_map(&groups[1].clone(), &vm);
-    assert_eq!(
-        g1["key"],
-        ValueWord::from_string(Arc::new("GOOG".to_string()))
-    );
+    assert_eq!(g1["key"].as_str(), Some("GOOG"));
     assert_eq!(
         g1["group"]
             .as_datatable()
@@ -679,13 +673,10 @@ fn test_simulate_event_log_and_seed() {
     // Check first event
     let e0 = to_obj_map(&events[0].clone(), &vm);
     assert_eq!(e0["idx"], ValueWord::from_i64(0));
+    assert_eq!(e0["event_type"].as_str(), Some("trade"));
     assert_eq!(
-        e0["event_type"],
-        ValueWord::from_string(Arc::new("trade".to_string()))
-    );
-    assert_eq!(
-        e0["result"],
-        ValueWord::from_string(Arc::new("signal".to_string()))
+        e0["result"].as_str(),
+        Some("signal")
     );
     // Check last event has idx = 3
     let e3 = to_obj_map(&events[3].clone(), &vm);
@@ -696,10 +687,7 @@ fn test_simulate_event_log_and_seed() {
         .to_generic_array()
         .expect("Expected Array for results");
     assert_eq!(results.len(), 4);
-    assert_eq!(
-        results[0].clone(),
-        ValueWord::from_string(Arc::new("signal".to_string()))
-    );
+    assert_eq!(results[0].as_str(), Some("signal"));
 }
 
 #[test]

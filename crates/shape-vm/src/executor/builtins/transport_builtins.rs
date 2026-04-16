@@ -16,7 +16,7 @@
 //! - transport.memo_invalidate(handle) -> ()
 
 use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::{IoHandleData, IoHandleKind, IoResource};
 use shape_wire::transport::factory::TransportKind;
 use shape_wire::transport::memoized::{MemoConfig, MemoizedTransport};

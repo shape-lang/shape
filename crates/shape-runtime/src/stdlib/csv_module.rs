@@ -4,7 +4,7 @@
 //!          csv.read_file, csv.is_valid
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Create the `csv` module with CSV parsing and serialization functions.

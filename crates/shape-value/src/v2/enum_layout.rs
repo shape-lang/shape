@@ -20,6 +20,7 @@
 //! then reads variant fields at compile-time-known offsets within the payload.
 
 use std::alloc::{Layout, alloc};
+use shape_value::ValueWordExt;
 
 use super::heap_header::{HEAP_KIND_V2_TYPED_ENUM, HeapHeader};
 use super::struct_layout::FieldKind;

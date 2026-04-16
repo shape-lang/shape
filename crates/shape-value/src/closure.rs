@@ -3,7 +3,7 @@
 //! This module contains only the DATA STRUCTURE for Closure.
 //! All method implementations live in shape-runtime to avoid circular dependencies.
 
-use crate::value_word::ValueWord;
+use crate::value_word::{ValueWord, ValueWordExt};
 use shape_ast::ast::VarKind;
 use std::collections::HashMap;
 

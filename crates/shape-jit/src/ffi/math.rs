@@ -18,6 +18,7 @@
 //! shape-runtime for high performance vectorized computation.
 
 use super::super::nan_boxing::*;
+use shape_value::ValueWordExt;
 
 // SIMD threshold - use SIMD for arrays >= this size
 #[allow(dead_code)]

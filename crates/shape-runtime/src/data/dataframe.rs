@@ -3,6 +3,7 @@
 //! Industry-agnostic storage for any time series data with named columns.
 
 use super::Timeframe;
+use shape_value::ValueWordExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

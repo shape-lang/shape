@@ -7,7 +7,7 @@ use crate::{
     executor::VirtualMachine,
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 impl VirtualMachine {
     /// Merge two typed objects using pre-registered intersection schema
@@ -79,7 +79,7 @@ impl VirtualMachine {
             }
         }
 
-        self.push_vw(ValueWord::from_heap_value(HeapValue::TypedObject {
+        self.push_raw_u64(ValueWord::from_heap_value(HeapValue::TypedObject {
             schema_id: target_schema_id as u64,
             slots: merged_slots.into_boxed_slice(),
             heap_mask: merged_heap_mask,
@@ -161,7 +161,7 @@ impl VirtualMachine {
                 }
             }
 
-            self.push_vw(ValueWord::from_heap_value(HeapValue::TypedObject {
+            self.push_raw_u64(ValueWord::from_heap_value(HeapValue::TypedObject {
                 schema_id: merged_schema_id as u64,
                 slots: merged_slots.into_boxed_slice(),
                 heap_mask: merged_heap_mask,

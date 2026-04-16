@@ -4,7 +4,7 @@
 //!          compress.deflate, compress.inflate
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 use super::byte_utils::{bytes_from_array, bytes_to_array};
 

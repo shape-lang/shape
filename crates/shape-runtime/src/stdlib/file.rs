@@ -10,7 +10,7 @@
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use crate::stdlib::runtime_policy::{FileSystemProvider, RealFileSystem};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::path::Path;
 use std::sync::Arc;
 

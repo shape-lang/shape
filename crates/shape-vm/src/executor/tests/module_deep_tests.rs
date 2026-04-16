@@ -10,7 +10,7 @@ use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
 use crate::{VMConfig, VMError};
 use shape_ast::parser::parse_program;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 fn compile_and_execute(source: &str) -> Result<ValueWord, VMError> {
     let program =

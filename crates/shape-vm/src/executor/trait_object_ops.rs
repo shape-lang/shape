@@ -7,7 +7,7 @@ use crate::{
     executor::VirtualMachine,
 };
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, VTable, VTableEntry, ValueWord};
+use shape_value::{VMError, VTable, VTableEntry, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -58,14 +58,14 @@ impl VirtualMachine {
                 ))
             })?;
 
-        let value_nb = self.pop_vw()?;
+        let value_nb = self.pop_raw_u64()?;
 
         let vtable = VTable {
             trait_names: vec![trait_name],
             methods: HashMap::new(),
         };
 
-        self.push_vw(ValueWord::from_heap_value(
+        self.push_raw_u64(ValueWord::from_heap_value(
             shape_value::heap_value::HeapValue::TraitObject {
                 value: Box::new(value_nb),
                 vtable: Arc::new(vtable),
@@ -81,12 +81,12 @@ impl VirtualMachine {
     /// Stack: [trait_object, arg1, ..., argN, method_name, arg_count]
     fn op_dyn_method_call(&mut self) -> Result<(), VMError> {
         // Pop arg count and method name from stack (same as CallMethod)
-        let arg_count_nb = self.pop_vw()?;
+        let arg_count_nb = self.pop_raw_u64()?;
         let arg_count = arg_count_nb.as_number_coerce().ok_or_else(|| {
             VMError::RuntimeError("DynMethodCall: expected number for arg count".to_string())
         })? as usize;
 
-        let method_name_nb = self.pop_vw()?;
+        let method_name_nb = self.pop_raw_u64()?;
         let method_name = match method_name_nb.as_str() {
             Some(s) => s.to_string(),
             None => {
@@ -99,18 +99,18 @@ impl VirtualMachine {
 
         let mut args = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {
-            args.push(self.pop_vw()?);
+            args.push(self.pop_raw_u64()?);
         }
         args.reverse();
 
-        let receiver = self.pop_vw()?;
+        let receiver = self.pop_raw_u64()?;
 
         match receiver.as_heap_ref() {
             Some(HeapValue::TraitObject { value, vtable }) => {
                 let concrete_kind = value
                     .heap_kind()
                     .map(|k| k as u8)
-                    .unwrap_or(value.tag() as u8);
+                    .unwrap_or_else(|| { let b = value.raw_bits(); if !shape_value::tags::is_tagged(b) { 0xFF } else { shape_value::tags::get_tag(b) as u8 } });
                 let method_hash = {
                     let mut h: u32 = 5381;
                     for b in method_name.bytes() {
@@ -132,7 +132,7 @@ impl VirtualMachine {
                     all_args.push(value.as_ref().clone());
                     all_args.extend(args);
                     let result = self.call_value_immediate_nb(&callee, &all_args, None)?;
-                    self.push_vw(result)?;
+                    self.push_raw_u64(result)?;
                     return Ok(());
                 }
 
@@ -168,7 +168,7 @@ impl VirtualMachine {
                     );
 
                     let result = self.call_value_immediate_nb(&callee, &all_args, None)?;
-                    self.push_vw(result)?;
+                    self.push_raw_u64(result)?;
                 } else {
                     return Err(VMError::RuntimeError(format!(
                         "method '{}' not found in vtable for dyn {}",
@@ -209,7 +209,7 @@ impl VirtualMachine {
         instruction: &Instruction,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         if let Some(HeapValue::IoHandle(handle_data)) = value.as_heap_ref() {
             handle_data.close();
             return Ok(());
@@ -225,7 +225,7 @@ impl VirtualMachine {
         instruction: &Instruction,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        let value = self.pop_vw()?;
+        let value = self.pop_raw_u64()?;
         if let Some(HeapValue::IoHandle(handle_data)) = value.as_heap_ref() {
             handle_data.close();
             return Ok(());
@@ -266,7 +266,7 @@ impl VirtualMachine {
 mod tests {
     use crate::bytecode::{Instruction, OpCode, Operand};
     use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::{VMError, VTable, VTableEntry, ValueWord};
+    use shape_value::{VMError, VTable, VTableEntry, ValueWord, ValueWordExt};
     use std::collections::HashMap;
     use std::sync::Arc;
 

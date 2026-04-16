@@ -1,4 +1,5 @@
 use super::super::*;
+use shape_value::ValueWordExt;
 
 impl VirtualMachine {
     /// Register a built-in stdlib module into the VM's module registry.
@@ -289,7 +290,7 @@ impl VirtualMachine {
                     self.module_bindings.resize_with(idx + 1, || Self::NONE_BITS);
                 }
                 // BARRIER: heap write site — overwrites module binding during typed object initialization
-                self.binding_write_vw(idx, typed_nb);
+                self.binding_write_raw(idx, typed_nb);
             }
         }
     }

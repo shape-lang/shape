@@ -5,7 +5,7 @@
 use super::raw_helpers;
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 /// Extract the receiver Instant from args[0].
 #[inline]

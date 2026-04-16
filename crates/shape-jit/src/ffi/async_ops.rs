@@ -20,6 +20,7 @@
 //!   - Suspension state inspection (__shape_get_suspension_state, __shape_set_yield_threshold)
 
 use super::super::context::JITContext;
+use shape_value::ValueWordExt;
 
 // ============================================================================
 // Async Task Scheduling FFI (SpawnTask / JoinInit / JoinAwait / CancelTask)

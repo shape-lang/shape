@@ -1,4 +1,5 @@
 use crate::BytecodeExecutor;
+use shape_value::ValueWordExt;
 use crate::compiler::BytecodeCompiler;
 use shape_runtime::module_loader::ModuleLoader;
 

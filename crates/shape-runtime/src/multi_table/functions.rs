@@ -7,7 +7,7 @@ use crate::data::OwnedDataRow as RowValue;
 use crate::data::Timeframe;
 use crate::timeframe_utils::parse_timeframe_string;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 fn parse_dataset_id(id: &str, default_timeframe: Timeframe) -> Result<(String, Timeframe)> {

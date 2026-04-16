@@ -7,7 +7,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord};
+use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {

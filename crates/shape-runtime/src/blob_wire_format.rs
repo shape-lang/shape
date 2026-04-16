@@ -28,6 +28,7 @@
 //! `From<&FunctionBlob>` conversion into `EncodableBlob`.
 
 use serde::{Deserialize, Serialize};
+use shape_value::ValueWordExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 

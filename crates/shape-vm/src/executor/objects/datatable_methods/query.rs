@@ -9,7 +9,7 @@ use arrow_select::filter::filter_record_batch;
 use arrow_select::take::take;
 use shape_runtime::type_schema::FieldType;
 use shape_value::datatable::DataTable;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use super::common::{

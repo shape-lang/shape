@@ -7,7 +7,7 @@ use super::{extract_f64_array, try_extract_i64_slice};
 use crate::context::ExecutionContext;
 use crate::simd_i64;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Intrinsic: Sum of all values in a series
 pub fn intrinsic_sum(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {

@@ -1,4 +1,5 @@
 use super::*;
+use shape_value::ValueWordExt;
 
 impl BytecodeCompiler {
     pub(super) fn collect_namespace_import_bindings(program: &Program) -> Vec<String> {

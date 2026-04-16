@@ -1381,7 +1381,7 @@ mod tests {
     use crate::mir::analysis::BorrowErrorKind;
     use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
     use shape_ast::ast::{DestructurePattern, FunctionParameter, Item, Span};
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     fn eval(code: &str) -> ValueWord {
         let program = shape_ast::parser::parse_program(code).expect("parse failed");

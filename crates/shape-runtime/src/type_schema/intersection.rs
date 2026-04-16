@@ -4,6 +4,7 @@
 //! into intersection types (A + B), with field collision detection.
 
 use super::SchemaError;
+use shape_value::ValueWordExt;
 use super::field_types::{FieldDef, FieldType};
 use super::schema::TypeSchema;
 use std::collections::HashMap;

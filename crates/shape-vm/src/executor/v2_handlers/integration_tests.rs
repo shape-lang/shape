@@ -9,6 +9,7 @@
 //! (NewTypedArrayF64 etc.) is tested via direct bytecode tests in v2_opcode_tests.
 
 use crate::test_utils::eval;
+use shape_value::ValueWordExt;
 
 // ===== Array<number> (f64) =====
 

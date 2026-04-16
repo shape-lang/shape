@@ -4,7 +4,7 @@ use crate::bytecode::{BuiltinFunction, Operand};
 use crate::executor::VirtualMachine;
 use crate::type_tracking::StorageHint;
 use shape_ast::parser::parse_program;
-use shape_value::{ValueWord, heap_value::NativeScalar};
+use shape_value::{ValueWord, ValueWordExt, heap_value::NativeScalar};
 
 /// Compile and run Shape code, returning the top-level result.
 fn compile_and_run(code: &str) -> ValueWord {

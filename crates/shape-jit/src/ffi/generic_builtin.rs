@@ -133,7 +133,7 @@ pub extern "C" fn builtin_dispatch_trampoline(
         // Push all items as ValueWord onto the VM stack (args + count)
         for &bits in &jit_stack_items {
             let vw = jit_bits_to_nanboxed(bits);
-            if vm.push_vw(vw).is_err() {
+            if vm.push_raw_u64(vw).is_err() {
                 return TAG_NULL;
             }
         }
@@ -150,7 +150,7 @@ pub extern "C" fn builtin_dispatch_trampoline(
         }
 
         // Pop result from VM stack
-        match vm.pop_vw() {
+        match vm.pop_raw_u64() {
             Ok(result) => nanboxed_to_jit_bits(&result),
             Err(_) => TAG_NULL,
         }
@@ -162,7 +162,7 @@ pub extern "C" fn builtin_dispatch_trampoline(
 /// These opcodes pop `arg_count` values from ctx.stack, perform a conversion,
 /// and return a single NaN-boxed result. No arg_count suffix is on the stack.
 fn dispatch_opcode(ctx_ref: &mut JITContext, builtin_id: u16, arg_count: u16) -> u64 {
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     let pop_count = (arg_count as usize).min(ctx_ref.stack_ptr);
     if pop_count == 0 {

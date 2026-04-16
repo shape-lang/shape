@@ -7,7 +7,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::utils::extraction_helpers::type_mismatch_error;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::atomic::Ordering;
 
 use super::raw_helpers::{extract_heap_ref, extract_number_coerce};
@@ -245,10 +245,10 @@ pub fn v2_lazy_get(
             };
 
             // Call the initializer closure with 0 args
-            vm.push_vw(initializer)?;
-            vm.push_vw(ValueWord::from_i64(0))?; // arg count
+            vm.push_raw_u64(initializer)?;
+            vm.push_raw_u64(ValueWord::from_i64(0))?; // arg count
             vm.op_call_value()?;
-            let result = vm.pop_vw()?;
+            let result = vm.pop_raw_u64()?;
 
             // Store the result (clone for cache, transfer original to caller)
             let mut val_guard = data

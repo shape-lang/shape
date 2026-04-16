@@ -9,6 +9,7 @@
 //! - `Result<T>` → Tagged union (Ok is lightweight, Err is heavy)
 
 use super::semantic::SemanticType;
+use shape_value::ValueWordExt;
 use std::fmt;
 
 /// Storage types - how data is physically represented in memory

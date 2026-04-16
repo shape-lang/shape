@@ -5,7 +5,7 @@
 use crate::executor::objects::object_creation::read_slot_nb;
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use shape_value::datatable::DataTable;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use crate::executor::VirtualMachine;
@@ -423,59 +423,47 @@ pub(crate) fn build_datatable_from_objects_nb(
                 .unwrap_or_else(ValueWord::none);
 
             if !type_detected {
-                match val.tag() {
-                    shape_value::NanTag::F64 => {
-                        is_f64 = true;
-                        type_detected = true;
-                    }
-                    shape_value::NanTag::I48 => {
-                        is_i64 = true;
-                        type_detected = true;
-                    }
-                    shape_value::NanTag::Bool => {
-                        is_bool = true;
-                        type_detected = true;
-                    }
-                    _ => {
-                        if val.as_str().is_some() {
-                            is_str = true;
-                            type_detected = true;
-                        }
-                    }
+                if val.is_f64() {
+                    is_f64 = true;
+                    type_detected = true;
+                } else if val.is_i64() {
+                    is_i64 = true;
+                    type_detected = true;
+                } else if val.is_bool() {
+                    is_bool = true;
+                    type_detected = true;
+                } else if val.as_str().is_some() {
+                    is_str = true;
+                    type_detected = true;
                 }
             }
 
-            match val.tag() {
-                shape_value::NanTag::F64 => {
-                    f64_vals.push(val.as_f64());
+            if val.is_f64() {
+                f64_vals.push(val.as_f64());
+                i64_vals.push(None);
+                str_vals.push(None);
+                bool_vals.push(None);
+            } else if val.is_i64() {
+                f64_vals.push(None);
+                i64_vals.push(val.as_i64());
+                str_vals.push(None);
+                bool_vals.push(None);
+            } else if val.is_bool() {
+                f64_vals.push(None);
+                i64_vals.push(None);
+                str_vals.push(None);
+                bool_vals.push(val.as_bool());
+            } else {
+                if let Some(s) = val.as_str() {
+                    f64_vals.push(None);
+                    i64_vals.push(None);
+                    str_vals.push(Some(s.to_string()));
+                    bool_vals.push(None);
+                } else {
+                    f64_vals.push(None);
                     i64_vals.push(None);
                     str_vals.push(None);
                     bool_vals.push(None);
-                }
-                shape_value::NanTag::I48 => {
-                    f64_vals.push(None);
-                    i64_vals.push(val.as_i64());
-                    str_vals.push(None);
-                    bool_vals.push(None);
-                }
-                shape_value::NanTag::Bool => {
-                    f64_vals.push(None);
-                    i64_vals.push(None);
-                    str_vals.push(None);
-                    bool_vals.push(val.as_bool());
-                }
-                _ => {
-                    if let Some(s) = val.as_str() {
-                        f64_vals.push(None);
-                        i64_vals.push(None);
-                        str_vals.push(Some(s.to_string()));
-                        bool_vals.push(None);
-                    } else {
-                        f64_vals.push(None);
-                        i64_vals.push(None);
-                        str_vals.push(None);
-                        bool_vals.push(None);
-                    }
                 }
             }
         }

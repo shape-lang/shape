@@ -8,7 +8,7 @@
 use crate::context::ExecutionContext;
 use shape_ast::ast::{Expr, SortDirection, WindowBound, WindowExpr, WindowFrame, WindowFunction};
 use shape_ast::error::Result;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 /// Execute window functions over a dataset
@@ -31,37 +31,33 @@ struct OrderedValue(ValueWord);
 
 impl PartialEq for OrderedValue {
     fn eq(&self, other: &Self) -> bool {
-        use shape_value::NanTag;
-        match (self.0.tag(), other.0.tag()) {
-            (NanTag::F64, NanTag::F64)
-            | (NanTag::I48, NanTag::I48)
-            | (NanTag::F64, NanTag::I48)
-            | (NanTag::I48, NanTag::F64) => match (self.0.as_f64(), other.0.as_f64()) {
+        let a_numeric = self.0.is_f64() || self.0.is_i64();
+        let b_numeric = other.0.is_f64() || other.0.is_i64();
+        if a_numeric && b_numeric {
+            return match (self.0.as_f64(), other.0.as_f64()) {
                 (Some(a), Some(b)) => {
-                    if a.is_nan() && b.is_nan() {
-                        true
-                    } else {
-                        a == b
-                    }
+                    if a.is_nan() && b.is_nan() { true } else { a == b }
                 }
                 _ => false,
-            },
-            (NanTag::Heap, NanTag::Heap) => {
-                if let (Some(a), Some(b)) = (self.0.as_str(), other.0.as_str()) {
-                    a == b
-                } else {
-                    false
-                }
-            }
-            (NanTag::Bool, NanTag::Bool) => self.0.as_bool() == other.0.as_bool(),
-            (NanTag::None, NanTag::None) => true,
-            _ => {
-                if let (Some(a), Some(b)) = (self.0.as_time(), other.0.as_time()) {
-                    a == b
-                } else {
-                    false
-                }
-            }
+            };
+        }
+        if self.0.is_heap() && other.0.is_heap() {
+            return if let (Some(a), Some(b)) = (self.0.as_str(), other.0.as_str()) {
+                a == b
+            } else {
+                false
+            };
+        }
+        if self.0.is_bool() && other.0.is_bool() {
+            return self.0.as_bool() == other.0.as_bool();
+        }
+        if self.0.is_none() && other.0.is_none() {
+            return true;
+        }
+        if let (Some(a), Some(b)) = (self.0.as_time(), other.0.as_time()) {
+            a == b
+        } else {
+            false
         }
     }
 }
@@ -70,39 +66,30 @@ impl Eq for OrderedValue {}
 
 impl std::hash::Hash for OrderedValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        use shape_value::NanTag;
-        match self.0.tag() {
-            NanTag::F64 | NanTag::I48 => {
-                state.write_u8(0);
-                if let Some(n) = self.0.as_f64() {
-                    state.write_u64(n.to_bits());
-                }
+        if self.0.is_f64() || self.0.is_i64() {
+            state.write_u8(0);
+            if let Some(n) = self.0.as_f64() {
+                state.write_u64(n.to_bits());
             }
-            NanTag::Heap => {
-                if let Some(s) = self.0.as_str() {
-                    state.write_u8(1);
-                    s.hash(state);
-                } else {
-                    state.write_u8(255);
-                }
+        } else if self.0.is_heap() {
+            if let Some(s) = self.0.as_str() {
+                state.write_u8(1);
+                s.hash(state);
+            } else {
+                state.write_u8(255);
             }
-            NanTag::Bool => {
-                state.write_u8(2);
-                if let Some(b) = self.0.as_bool() {
-                    b.hash(state);
-                }
+        } else if self.0.is_bool() {
+            state.write_u8(2);
+            if let Some(b) = self.0.as_bool() {
+                b.hash(state);
             }
-            NanTag::None => {
-                state.write_u8(4);
-            }
-            _ => {
-                if let Some(t) = self.0.as_time() {
-                    state.write_u8(3);
-                    t.timestamp_nanos_opt().unwrap_or(0).hash(state);
-                } else {
-                    state.write_u8(255);
-                }
-            }
+        } else if self.0.is_none() {
+            state.write_u8(4);
+        } else if let Some(t) = self.0.as_time() {
+            state.write_u8(3);
+            t.timestamp_nanos_opt().unwrap_or(0).hash(state);
+        } else {
+            state.write_u8(255);
         }
     }
 }
@@ -459,30 +446,38 @@ fn extract_sort_value(row: &HashMap<String, ValueWord>, expr: &Expr) -> ValueWor
 
 /// Compare two ValueWord values for sorting
 fn compare_nb_values(a: &ValueWord, b: &ValueWord) -> std::cmp::Ordering {
-    use shape_value::NanTag;
-    match (a.tag(), b.tag()) {
-        (NanTag::F64, NanTag::F64)
-        | (NanTag::I48, NanTag::I48)
-        | (NanTag::F64, NanTag::I48)
-        | (NanTag::I48, NanTag::F64) => match (a.as_f64(), b.as_f64()) {
+    let a_numeric = a.is_f64() || a.is_i64();
+    let b_numeric = b.is_f64() || b.is_i64();
+    if a_numeric && b_numeric {
+        return match (a.as_f64(), b.as_f64()) {
             (Some(an), Some(bn)) => an.partial_cmp(&bn).unwrap_or(std::cmp::Ordering::Equal),
             _ => std::cmp::Ordering::Equal,
-        },
-        (NanTag::Heap, NanTag::Heap) => match (a.as_str(), b.as_str()) {
+        };
+    }
+    if a.is_heap() && b.is_heap() {
+        return match (a.as_str(), b.as_str()) {
             (Some(sa), Some(sb)) => sa.cmp(sb),
             _ => std::cmp::Ordering::Equal,
-        },
-        (NanTag::Bool, NanTag::Bool) => match (a.as_bool(), b.as_bool()) {
+        };
+    }
+    if a.is_bool() && b.is_bool() {
+        return match (a.as_bool(), b.as_bool()) {
             (Some(ba), Some(bb)) => ba.cmp(&bb),
             _ => std::cmp::Ordering::Equal,
-        },
-        (NanTag::None, NanTag::None) => std::cmp::Ordering::Equal,
-        (NanTag::None, _) => std::cmp::Ordering::Less,
-        (_, NanTag::None) => std::cmp::Ordering::Greater,
-        _ => match (a.as_time(), b.as_time()) {
-            (Some(ta), Some(tb)) => ta.cmp(&tb),
-            _ => std::cmp::Ordering::Equal,
-        },
+        };
+    }
+    if a.is_none() && b.is_none() {
+        return std::cmp::Ordering::Equal;
+    }
+    if a.is_none() {
+        return std::cmp::Ordering::Less;
+    }
+    if b.is_none() {
+        return std::cmp::Ordering::Greater;
+    }
+    match (a.as_time(), b.as_time()) {
+        (Some(ta), Some(tb)) => ta.cmp(&tb),
+        _ => std::cmp::Ordering::Equal,
     }
 }
 

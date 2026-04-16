@@ -9,6 +9,7 @@ use shape_runtime::type_schema::FieldType;
 use shape_runtime::type_system::{BuiltinTypes, Type};
 
 use shape_value::v2::struct_layout::FieldKind;
+use shape_value::ValueWordExt;
 
 use super::super::BytecodeCompiler;
 

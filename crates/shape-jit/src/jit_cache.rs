@@ -10,6 +10,7 @@
 //! changes, all dependents can be invalidated via `invalidate_by_dependency()`.
 
 use shape_vm::bytecode::FunctionHash;
+use shape_value::ValueWordExt;
 use std::collections::HashMap;
 
 use crate::optimizer::Tier2CacheKey;

@@ -4,6 +4,7 @@
 //! of a declared type, with computed field offsets for JIT optimization.
 
 use super::SchemaId;
+use shape_value::ValueWordExt;
 use super::enum_support::{EnumInfo, EnumVariantInfo};
 use super::field_types::{FieldDef, FieldType, semantic_to_field_type};
 use arrow_schema::{DataType, Schema as ArrowSchema};

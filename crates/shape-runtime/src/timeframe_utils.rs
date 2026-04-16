@@ -4,6 +4,7 @@
 //! aligned timestamps, and converting between timeframes.
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use shape_value::ValueWordExt;
 use shape_ast::ast::{Timeframe, TimeframeUnit};
 use shape_ast::error::{Result, ShapeError};
 

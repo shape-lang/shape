@@ -4,7 +4,7 @@
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use serde::Deserialize;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Convert a `serde_yaml::Value` into a `ValueWord`.

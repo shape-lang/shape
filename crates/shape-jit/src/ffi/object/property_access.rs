@@ -12,6 +12,7 @@
 //! time values, data references, and other types.
 
 use std::collections::HashMap;
+use shape_value::ValueWordExt;
 
 use super::super::super::context::{JITDataReference, JITDuration};
 use super::super::super::jit_array::JitArray;

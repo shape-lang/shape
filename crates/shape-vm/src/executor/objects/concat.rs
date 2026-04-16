@@ -11,7 +11,7 @@ use crate::executor::v2_handlers::v2_array_detect::{
 };
 use shape_value::heap_value::HeapValue;
 use shape_value::v2::typed_array::TypedArray;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -43,7 +43,7 @@ impl VirtualMachine {
                 });
             }
         };
-        self.push_vw(ValueWord::from_string(Arc::new(result)))
+        self.push_raw_u64(ValueWord::from_string(Arc::new(result)))
     }
 
     /// Concatenate two arrays, push the resulting array.
@@ -146,7 +146,7 @@ impl VirtualMachine {
                 }
             };
             unsafe { stamp_elem_type(new_ptr, elem_byte) };
-            return self.push_vw(ValueWord::from_native_ptr(new_ptr as usize));
+            return self.push_raw_u64(ValueWord::from_native_ptr(new_ptr as usize));
         }
 
         // Mismatched v2 + v1 → error.
@@ -164,7 +164,7 @@ impl VirtualMachine {
             let mut result = Vec::with_capacity(arr_a.len() + arr_b.len());
             result.extend_from_slice(arr_a);
             result.extend_from_slice(arr_b);
-            return self.push_vw(ValueWord::from_array(Arc::new(result)));
+            return self.push_raw_u64(ValueWord::from_array(Arc::new(result)));
         }
 
         Err(VMError::TypeError {

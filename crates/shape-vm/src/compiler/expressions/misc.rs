@@ -3,6 +3,7 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use shape_ast::ast::Expr;
 use shape_ast::error::{Result, ShapeError};
+use shape_value::ValueWordExt;
 
 use std::collections::HashSet;
 
@@ -887,7 +888,7 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod comptime_for_tests {
     use crate::test_utils::eval;
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     #[test]
     #[ignore = "Wave B made array literals emit v2 typed opcodes unconditionally; comptime evaluator doesn't yet recognize v2 typed arrays as iterables. Phase 5 follow-up."]
@@ -952,7 +953,7 @@ mod comptime_for_tests {
 #[cfg(test)]
 mod block_expr_tests {
     use crate::test_utils::eval;
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     // ===== MED-1: Trailing semicolon suppresses return value =====
 

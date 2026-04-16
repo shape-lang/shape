@@ -8,7 +8,7 @@
 use crate::bytecode::*;
 use crate::executor::{VMConfig, VirtualMachine};
 use shape_value::heap_value::{HeapValue, NativeScalar};
-use shape_value::{FunctionId, VMError, ValueWord};
+use shape_value::{FunctionId, VMError, ValueWord, ValueWordExt};
 
 /// Helper: create a VM, load a program, execute, return the top-of-stack result.
 fn execute_program(program: BytecodeProgram) -> Result<ValueWord, VMError> {
@@ -121,9 +121,9 @@ fn v2_stack_raw_i32_push_pop_roundtrip() {
 
     // Directly push a native i32 value
     let val = ValueWord::from_native_i32(1000);
-    vm.push_vw(val).unwrap();
+    vm.push_raw_u64(val).unwrap();
 
-    let popped = vm.pop_vw().unwrap();
+    let popped = vm.pop_raw_u64().unwrap();
     let scalar = popped.as_native_scalar().expect("expected NativeScalar");
     match scalar {
         NativeScalar::I32(v) => assert_eq!(v, 1000, "i32 value must round-trip"),
@@ -137,9 +137,9 @@ fn v2_stack_raw_i32_negative() {
     vm.load_program(BytecodeProgram::default());
 
     let val = ValueWord::from_native_i32(-999);
-    vm.push_vw(val).unwrap();
+    vm.push_raw_u64(val).unwrap();
 
-    let popped = vm.pop_vw().unwrap();
+    let popped = vm.pop_raw_u64().unwrap();
     let scalar = popped.as_native_scalar().expect("expected NativeScalar");
     match scalar {
         NativeScalar::I32(v) => assert_eq!(v, -999),
@@ -190,9 +190,9 @@ fn v2_stack_raw_pointer_push_pop() {
 
     let known_addr: usize = 0xDEAD_BEEF_CAFE;
     let val = ValueWord::from_native_ptr(known_addr);
-    vm.push_vw(val).unwrap();
+    vm.push_raw_u64(val).unwrap();
 
-    let popped = vm.pop_vw().unwrap();
+    let popped = vm.pop_raw_u64().unwrap();
     let scalar = popped.as_native_scalar().expect("expected NativeScalar");
     match scalar {
         NativeScalar::Ptr(addr) => assert_eq!(addr, known_addr, "pointer address must round-trip"),
@@ -206,9 +206,9 @@ fn v2_stack_raw_pointer_null() {
     vm.load_program(BytecodeProgram::default());
 
     let val = ValueWord::from_native_ptr(0);
-    vm.push_vw(val).unwrap();
+    vm.push_raw_u64(val).unwrap();
 
-    let popped = vm.pop_vw().unwrap();
+    let popped = vm.pop_raw_u64().unwrap();
     let scalar = popped.as_native_scalar().expect("expected NativeScalar");
     match scalar {
         NativeScalar::Ptr(addr) => assert_eq!(addr, 0, "null pointer must round-trip"),
@@ -226,14 +226,14 @@ fn v2_stack_mixed_types_push_pop_order() {
     vm.load_program(BytecodeProgram::default());
 
     // Push f64, i64, bool in order
-    vm.push_vw(ValueWord::from_f64(2.718)).unwrap();
-    vm.push_vw(ValueWord::from_i64(42)).unwrap();
-    vm.push_vw(ValueWord::from_bool(true)).unwrap();
+    vm.push_raw_u64(ValueWord::from_f64(2.718)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(42)).unwrap();
+    vm.push_raw_u64(ValueWord::from_bool(true)).unwrap();
 
     // Pop in reverse order: bool, i64, f64
-    let v_bool = vm.pop_vw().unwrap();
-    let v_int = vm.pop_vw().unwrap();
-    let v_float = vm.pop_vw().unwrap();
+    let v_bool = vm.pop_raw_u64().unwrap();
+    let v_int = vm.pop_raw_u64().unwrap();
+    let v_float = vm.pop_raw_u64().unwrap();
 
     assert_eq!(v_bool.as_bool().unwrap(), true, "bool must be popped first");
     assert_eq!(v_int.as_i64().unwrap(), 42, "i64 must be popped second");
@@ -250,24 +250,24 @@ fn v2_stack_mixed_types_with_native_scalars() {
     vm.load_program(BytecodeProgram::default());
 
     // Push a mix of inline and heap-boxed scalar values
-    vm.push_vw(ValueWord::from_f64(1.5)).unwrap();
-    vm.push_vw(ValueWord::from_native_i32(100)).unwrap();
-    vm.push_vw(ValueWord::from_i64(-7)).unwrap();
-    vm.push_vw(ValueWord::from_native_ptr(0xABCD)).unwrap();
-    vm.push_vw(ValueWord::from_bool(false)).unwrap();
+    vm.push_raw_u64(ValueWord::from_f64(1.5)).unwrap();
+    vm.push_raw_u64(ValueWord::from_native_i32(100)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(-7)).unwrap();
+    vm.push_raw_u64(ValueWord::from_native_ptr(0xABCD)).unwrap();
+    vm.push_raw_u64(ValueWord::from_bool(false)).unwrap();
 
     // Pop and verify in reverse
-    assert_eq!(vm.pop_vw().unwrap().as_bool().unwrap(), false);
-    match vm.pop_vw().unwrap().as_native_scalar().unwrap() {
+    assert_eq!(vm.pop_raw_u64().unwrap().as_bool().unwrap(), false);
+    match vm.pop_raw_u64().unwrap().as_native_scalar().unwrap() {
         NativeScalar::Ptr(addr) => assert_eq!(addr, 0xABCD),
         other => panic!("expected Ptr, got {:?}", other),
     }
-    assert_eq!(vm.pop_vw().unwrap().as_i64().unwrap(), -7);
-    match vm.pop_vw().unwrap().as_native_scalar().unwrap() {
+    assert_eq!(vm.pop_raw_u64().unwrap().as_i64().unwrap(), -7);
+    match vm.pop_raw_u64().unwrap().as_native_scalar().unwrap() {
         NativeScalar::I32(v) => assert_eq!(v, 100),
         other => panic!("expected I32, got {:?}", other),
     }
-    assert_eq!(vm.pop_vw().unwrap().as_f64().unwrap(), 1.5);
+    assert_eq!(vm.pop_raw_u64().unwrap().as_f64().unwrap(), 1.5);
 }
 
 // =========================================================================
@@ -695,12 +695,12 @@ fn v2_stack_large_push_pop_1000() {
 
     // Push 1000 f64 values
     for i in 0..count {
-        vm.push_vw(ValueWord::from_f64(i as f64 * 1.1)).unwrap();
+        vm.push_raw_u64(ValueWord::from_f64(i as f64 * 1.1)).unwrap();
     }
 
     // Pop all 1000 in reverse order and verify
     for i in (0..count).rev() {
-        let val = vm.pop_vw().unwrap();
+        let val = vm.pop_raw_u64().unwrap();
         let expected = i as f64 * 1.1;
         assert_eq!(
             val.as_f64().unwrap().to_bits(),
@@ -721,15 +721,15 @@ fn v2_stack_large_mixed_types_500() {
     // Push alternating f64 and i64 values
     for i in 0..500usize {
         if i % 2 == 0 {
-            vm.push_vw(ValueWord::from_f64(i as f64)).unwrap();
+            vm.push_raw_u64(ValueWord::from_f64(i as f64)).unwrap();
         } else {
-            vm.push_vw(ValueWord::from_i64(i as i64)).unwrap();
+            vm.push_raw_u64(ValueWord::from_i64(i as i64)).unwrap();
         }
     }
 
     // Pop in reverse and verify types match
     for i in (0..500usize).rev() {
-        let val = vm.pop_vw().unwrap();
+        let val = vm.pop_raw_u64().unwrap();
         if i % 2 == 0 {
             assert_eq!(val.as_f64().unwrap(), i as f64, "f64 mismatch at index {}", i);
         } else {
@@ -928,7 +928,7 @@ fn v2_stack_underflow_on_empty() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(BytecodeProgram::default());
 
-    let err = vm.pop_vw().unwrap_err();
+    let err = vm.pop_raw_u64().unwrap_err();
     assert!(
         matches!(err, VMError::StackUnderflow),
         "pop on empty stack must return StackUnderflow, got {:?}",
@@ -960,19 +960,19 @@ fn v2_stack_swap_preserves_types() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(BytecodeProgram::default());
 
-    vm.push_vw(ValueWord::from_i64(10)).unwrap();
-    vm.push_vw(ValueWord::from_f64(2.5)).unwrap();
+    vm.push_raw_u64(ValueWord::from_i64(10)).unwrap();
+    vm.push_raw_u64(ValueWord::from_f64(2.5)).unwrap();
 
     // Manually swap
-    let b = vm.pop_vw().unwrap(); // 2.5
-    let a = vm.pop_vw().unwrap(); // 10
-    vm.push_vw(b).unwrap();
-    vm.push_vw(a).unwrap();
+    let b = vm.pop_raw_u64().unwrap(); // 2.5
+    let a = vm.pop_raw_u64().unwrap(); // 10
+    vm.push_raw_u64(b).unwrap();
+    vm.push_raw_u64(a).unwrap();
 
     // Now top should be i64(10), beneath is f64(2.5)
-    let top = vm.pop_vw().unwrap();
+    let top = vm.pop_raw_u64().unwrap();
     assert_eq!(top.as_i64().unwrap(), 10);
-    let bottom = vm.pop_vw().unwrap();
+    let bottom = vm.pop_raw_u64().unwrap();
     assert_eq!(bottom.as_f64().unwrap(), 2.5);
 }
 

@@ -11,7 +11,7 @@ use shape_ast::ast::{BinaryOp, Expr, InterpolationMode, Literal, Span, Spanned, 
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::suggestions::suggest_function;
 use shape_runtime::type_system::{BuiltinTypes, Type};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};

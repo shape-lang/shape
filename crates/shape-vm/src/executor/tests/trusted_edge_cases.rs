@@ -5,7 +5,7 @@
 
 use super::*;
 use super::test_utils::eval_result as eval;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 // ── Integer overflow → f64 promotion ────────────────────────────────
 

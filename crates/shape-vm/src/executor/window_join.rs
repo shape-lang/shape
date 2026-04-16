@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::VirtualMachine;
 
@@ -17,7 +17,7 @@ impl VirtualMachine {
         &mut self,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        let val = self.pop_vw()?;
+        let val = self.pop_raw_u64()?;
         let dt_expr = match val.as_heap_ref() {
             Some(HeapValue::DateTimeExpr(expr)) => expr.as_ref().clone(),
             _ => {
@@ -29,7 +29,7 @@ impl VirtualMachine {
         };
 
         let dt = self.eval_datetime_expr_recursive(&dt_expr)?;
-        self.push_vw(ValueWord::from_time(dt))
+        self.push_raw_u64(ValueWord::from_time(dt))
     }
 
     /// Recursively evaluate a DateTimeExpr into a chrono DateTime.
@@ -126,23 +126,23 @@ impl VirtualMachine {
             BuiltinFunction::WindowNtile => self.push_raw_i64(1),
             BuiltinFunction::WindowLag => {
                 let default = args_nb.get(2).cloned().unwrap_or_else(ValueWord::none);
-                self.push_vw(default)
+                self.push_raw_u64(default)
             }
             BuiltinFunction::WindowLead => {
                 let default = args_nb.get(2).cloned().unwrap_or_else(ValueWord::none);
-                self.push_vw(default)
+                self.push_raw_u64(default)
             }
             BuiltinFunction::WindowFirstValue => {
                 let value = args_nb.first().cloned().unwrap_or_else(ValueWord::none);
-                self.push_vw(value)
+                self.push_raw_u64(value)
             }
             BuiltinFunction::WindowLastValue => {
                 let value = args_nb.first().cloned().unwrap_or_else(ValueWord::none);
-                self.push_vw(value)
+                self.push_raw_u64(value)
             }
             BuiltinFunction::WindowNthValue => {
                 let value = args_nb.first().cloned().unwrap_or_else(ValueWord::none);
-                self.push_vw(value)
+                self.push_raw_u64(value)
             }
             BuiltinFunction::WindowSum => {
                 let value = match args_nb.first() {
@@ -159,7 +159,7 @@ impl VirtualMachine {
                     }
                     _ => ValueWord::from_f64(0.0),
                 };
-                self.push_vw(value)
+                self.push_raw_u64(value)
             }
             BuiltinFunction::WindowAvg => {
                 let value = match args_nb.first() {
@@ -185,7 +185,7 @@ impl VirtualMachine {
                     }
                     _ => ValueWord::none(),
                 };
-                self.push_vw(value)
+                self.push_raw_u64(value)
             }
             BuiltinFunction::WindowMin => {
                 let value = match args_nb.first() {
@@ -209,7 +209,7 @@ impl VirtualMachine {
                     }
                     _ => ValueWord::none(),
                 };
-                self.push_vw(value)
+                self.push_raw_u64(value)
             }
             BuiltinFunction::WindowMax => {
                 let value = match args_nb.first() {
@@ -233,7 +233,7 @@ impl VirtualMachine {
                     }
                     _ => ValueWord::none(),
                 };
-                self.push_vw(value)
+                self.push_raw_u64(value)
             }
             BuiltinFunction::WindowCount => {
                 let value = match args_nb.first() {
@@ -250,7 +250,7 @@ impl VirtualMachine {
                     }
                     None => ValueWord::from_i64(0),
                 };
-                self.push_vw(value)
+                self.push_raw_u64(value)
             }
             _ => Err(VMError::NotImplemented(format!(
                 "window function {:?}",
@@ -313,7 +313,7 @@ impl VirtualMachine {
                 )));
             }
         };
-        self.push_vw(ValueWord::from_raw_bits(result_bits))?;
+        self.push_raw_u64(ValueWord::from_raw_bits(result_bits))?;
         Ok(())
     }
 
@@ -331,7 +331,7 @@ impl VirtualMachine {
             }
         };
 
-        let value_nb = self.pop_vw()?;
+        let value_nb = self.pop_raw_u64()?;
 
         let table = match value_nb.as_heap_ref() {
             Some(HeapValue::DataTable(dt)) => dt.clone(),
@@ -356,7 +356,7 @@ impl VirtualMachine {
         let arrow_schema = table.schema();
         match schema.bind_to_arrow_schema(&arrow_schema) {
             Ok(_binding) => {
-                self.push_vw(ValueWord::from_heap_value(HeapValue::TypedTable {
+                self.push_raw_u64(ValueWord::from_heap_value(HeapValue::TypedTable {
                     schema_id,
                     table,
                 }))?;
@@ -379,7 +379,7 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
-        let row_view_nb = self.pop_vw()?;
+        let row_view_nb = self.pop_raw_u64()?;
 
         match row_view_nb.as_heap_ref() {
             Some(HeapValue::RowView { table, row_idx, .. }) => {
@@ -461,7 +461,7 @@ impl VirtualMachine {
                     _ => unreachable!(),
                 };
 
-                self.push_vw(result_nb)
+                self.push_raw_u64(result_nb)
             }
             _ => Err(VMError::RuntimeError(format!(
                 "LoadCol* expected RowView, got {}",

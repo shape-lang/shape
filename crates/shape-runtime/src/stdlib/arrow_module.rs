@@ -7,7 +7,7 @@
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
 use arrow_ipc::reader::FileReader;
 use shape_value::datatable::DataTable;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::io::Cursor;
 use std::sync::Arc;
 

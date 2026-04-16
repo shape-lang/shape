@@ -1,7 +1,7 @@
 //! Unified specialization pipeline for generic monomorphization.
 
 use shape_ast::ast::TypeAnnotation;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
 
 /// Active bindings during specialization compilation.

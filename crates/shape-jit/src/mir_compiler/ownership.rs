@@ -6,6 +6,7 @@
 //! - Drop: arc_release for heap types, no-op for primitives
 
 use cranelift::prelude::*;
+use shape_value::ValueWordExt;
 
 use super::MirToIR;
 use shape_vm::mir::types::*;

@@ -6,6 +6,7 @@ use crate::context::JITContext;
 use crate::jit_array::JitArray;
 use crate::nan_boxing::*;
 use std::sync::Arc;
+use shape_value::ValueWordExt;
 
 // DELETED: jit_market_list_instruments - Finance-specific, moved to stdlib/finance/data.shape
 

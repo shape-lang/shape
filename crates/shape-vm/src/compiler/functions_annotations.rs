@@ -8,7 +8,7 @@ use shape_ast::ast::{
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::collections::{HashMap, HashSet};
 
 use super::BytecodeCompiler;

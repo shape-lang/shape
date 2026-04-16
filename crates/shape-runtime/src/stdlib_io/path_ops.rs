@@ -3,7 +3,7 @@
 //! All path operations are synchronous and pure string manipulation,
 //! except `resolve` which calls `fs::canonicalize`.
 
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::path::Path;
 use std::sync::Arc;
 

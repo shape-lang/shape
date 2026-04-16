@@ -9,7 +9,7 @@ use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
 use rust_decimal::Decimal;
 use shape_ast::parser::parse_program;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 /// Helper to compile and execute a Shape source program
 fn compile_and_execute(source: &str) -> Result<ValueWord, shape_value::VMError> {
     let program = parse_program(source)

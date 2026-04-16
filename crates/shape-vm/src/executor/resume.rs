@@ -3,7 +3,7 @@
 //! Extracted from `dispatch.rs` for modularity. Both methods remain
 //! `impl VirtualMachine` so the dispatch loop can call them directly.
 
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::snapshot::resolve_function_identity;
 use super::{CallFrame, VirtualMachine};
@@ -180,7 +180,7 @@ impl VirtualMachine {
                     self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
                 }
                 for (i, local) in locals.iter().enumerate() {
-                    self.stack_write_vw(bp + i, local.clone());
+                    self.stack_write_raw(bp + i, local.clone());
                 }
                 self.sp = bp + locals_count;
 
@@ -217,7 +217,7 @@ impl VirtualMachine {
                                 {
                                     if idx < self.module_bindings.len() {
                                         // BARRIER: heap write site — restores module binding from snapshot
-                                        self.binding_write_vw(idx, pair[1].clone());
+                                        self.binding_write_raw(idx, pair[1].clone());
                                     }
                                 }
                             }
@@ -265,7 +265,7 @@ impl VirtualMachine {
             self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
         }
         for (i, local) in resume_data.locals.iter().enumerate() {
-            self.stack_write_vw(bp + i, local.clone());
+            self.stack_write_raw(bp + i, local.clone());
         }
 
         Ok(())

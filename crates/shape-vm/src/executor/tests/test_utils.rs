@@ -6,7 +6,7 @@
 use crate::VMConfig;
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 /// Compile and execute Shape source code, returning the final value.
 /// Panics on parse, compile, or execution failure.

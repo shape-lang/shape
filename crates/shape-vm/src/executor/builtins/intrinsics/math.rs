@@ -3,7 +3,7 @@
 //! Each function is a thin wrapper that calls the runtime intrinsic with a
 //! temporary ExecutionContext and converts ShapeError to VMError.
 
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::NbIntrinsicResult;
 

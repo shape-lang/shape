@@ -1,4 +1,5 @@
 use super::*;
+use shape_value::ValueWordExt;
 
 impl BytecodeProgram {
     fn trait_method_symbol_key(

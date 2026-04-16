@@ -19,6 +19,7 @@
 //!    scheduler recommends `CollectionType::Full` or when no scheduler is enabled.
 
 use crate::memory::{GCResult, GCStats, GarbageCollector};
+use shape_value::ValueWordExt;
 
 /// Garbage collection integration for VirtualMachine
 pub trait GCIntegration {

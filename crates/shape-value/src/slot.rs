@@ -8,7 +8,7 @@
 //! bitmap identifies which slots contain heap pointers (bit N set = slot N is heap).
 
 use crate::heap_value::HeapValue;
-use crate::value_word::ValueWord;
+use crate::value_word::{ValueWord, ValueWordExt};
 
 /// A raw 8-byte value slot for TypedObject field storage.
 #[repr(transparent)]
@@ -98,8 +98,8 @@ impl ValueSlot {
     /// directly. For heap-tagged values, clones the HeapValue into a new Box.
     /// Returns `(slot, is_heap)` — caller must set the heap_mask bit if `is_heap`.
     pub fn from_value_word(nb: &ValueWord) -> (Self, bool) {
-        use crate::value_word::NanTag;
-        if nb.tag() == NanTag::Heap {
+        use crate::value_word::ValueWordExt as _;
+        if nb.is_heap() {
             // Handle unified heap values (bit-47): materialize to HeapValue.
             if crate::tags::is_unified_heap(nb.raw_bits()) {
                 if let Some(view) = nb.as_any_array() {

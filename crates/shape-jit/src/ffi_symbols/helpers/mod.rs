@@ -3,6 +3,7 @@
 // ============================================================================
 
 use crate::context::JITContext;
+use shape_value::ValueWordExt;
 use crate::nan_boxing::*;
 
 /// Evaluate DateTimeExpr to Time value

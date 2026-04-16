@@ -2,7 +2,7 @@
 //! for correlation, covariance, percentile, median, distributions, stochastic
 //! processes, and random number generation.
 
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 
 use super::NbIntrinsicResult;
 

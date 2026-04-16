@@ -1,6 +1,7 @@
 //! Binary operation expression compilation
 
 use crate::bytecode::{Instruction, NumericWidth, OpCode, Operand};
+use shape_value::ValueWordExt;
 use crate::type_tracking::{NumericType, VariableTypeInfo};
 use shape_ast::ast::operators::{FuzzyOp, FuzzyTolerance};
 use shape_ast::ast::{BinaryOp, Expr, Literal, Span, Spanned, UnaryOp};

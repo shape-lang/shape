@@ -68,8 +68,8 @@ pub use heap_value::{
 };
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
-pub use scalar::{ScalarKind, TypedScalar};
-pub use value_word::{ArrayView, ArrayViewMut, NanTag, RefTarget, ValueWord};
+pub use scalar::{ScalarKind, TypedScalar, ValueWordScalarExt};
+pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueWord, ValueWordDisplay, ValueWordExt, nan_tag_type_name, nan_tag_is_truthy};
 /// Backward-compatibility alias: `NanBoxed` is now `ValueWord`.
 pub type NanBoxed = ValueWord;
 pub use shape_array::ShapeArray;

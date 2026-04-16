@@ -4,7 +4,7 @@
 //!          regex.is_match, regex.split
 
 use crate::module_exports::{ModuleContext, ModuleExports, ModuleFunction, ModuleParam};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Build a match result object as a ValueWord HashMap.

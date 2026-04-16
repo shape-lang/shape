@@ -9,7 +9,7 @@
 //! - Operator trait fallback only fires when built-in paths don't match
 
 use crate::executor::tests::test_utils::{eval, eval_result};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 #[test]
 fn test_add_trait_overload() {

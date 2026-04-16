@@ -10,7 +10,8 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::{ForeignFunctionHandle, VirtualMachine},
 };
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::tags::{TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP};
 
 impl VirtualMachine {
     #[inline(always)]
@@ -70,7 +71,7 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Offset(offset)) = instruction.operand {
-            let condition = self.pop_vw()?.is_truthy();
+            let condition = self.pop_raw_u64()?.is_truthy();
             if !condition {
                 self.ip = (self.ip as i32 + offset) as usize;
             }
@@ -109,7 +110,7 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         if let Some(Operand::Offset(offset)) = instruction.operand {
-            let condition = self.pop_vw()?.is_truthy();
+            let condition = self.pop_raw_u64()?.is_truthy();
             if condition {
                 self.ip = (self.ip as i32 + offset) as usize;
             }
@@ -126,7 +127,7 @@ impl VirtualMachine {
         instruction: &Instruction,
     ) -> Result<(), VMError> {
         let arg_count = self
-            .pop_vw()?
+            .pop_raw_u64()?
             .as_number_coerce()
             .ok_or_else(|| VMError::RuntimeError("Expected number for arg count".to_string()))?
             as usize;
@@ -188,7 +189,7 @@ impl VirtualMachine {
                     let mut jit_locals = [0u64; 256];
                     let args_base = self.sp.saturating_sub(arg_count);
                     for i in 0..copy_count {
-                        let vw_slice = self.stack_slice_vw((args_base + i)..(args_base + i + 1));
+                        let vw_slice = self.stack_slice_raw((args_base + i)..(args_base + i + 1));
                         jit_locals[i] = jit_abi::marshal_arg_to_jit(&vw_slice[0], param_kinds[i]);
                     }
 
@@ -262,7 +263,7 @@ impl VirtualMachine {
                                 }
                                 // Zero-init local slots (deopt_with_info overwrites the live ones)
                                 for i in 0..locals_count {
-                                    self.stack_write_vw(bp + i, ValueWord::none());
+                                    self.stack_write_raw(bp + i, ValueWord::none());
                                 }
 
                                 let blob_hash = self.blob_hash_for_function(func_id_u16);
@@ -316,7 +317,7 @@ impl VirtualMachine {
                     }
                     self.sp = args_base;
 
-                    self.push_vw(result_vw)?;
+                    self.push_raw_u64(result_vw)?;
                     return Ok(());
                 }
             }
@@ -356,7 +357,7 @@ impl VirtualMachine {
 
     pub(in crate::executor) fn op_call_value(&mut self) -> Result<(), VMError> {
         let arg_count = self
-            .pop_vw()?
+            .pop_raw_u64()?
             .as_number_coerce()
             .ok_or_else(|| VMError::RuntimeError("Expected number for arg count".to_string()))?
             as usize;
@@ -367,13 +368,16 @@ impl VirtualMachine {
             .sp
             .checked_sub(arg_count + 1)
             .ok_or(VMError::StackUnderflow)?;
-        let callee_nb = self.stack_read_vw(callee_idx);
+        let callee_nb = self.stack_read_raw(callee_idx);
 
-        // NanTag dispatch (no ValueWord materialization)
-        use shape_value::NanTag;
-        match callee_nb.tag() {
-            NanTag::Function => {
-                let func_id = callee_nb.as_function().ok_or(VMError::InvalidCall)?;
+        // Tag dispatch (no ValueWord materialization)
+        let _bits = callee_nb.raw_bits();
+        if !shape_value::tags::is_tagged(_bits) {
+            return Err(VMError::RuntimeError("Cannot call non-function value".to_string()));
+        }
+        match shape_value::tags::get_tag(_bits) {
+            TAG_FUNCTION => {
+                let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
                 drop(callee_nb);
                 // Swap-down: shift args down by one to overwrite the callee slot.
                 // Drop the callee slot first, then move each arg down.
@@ -386,13 +390,13 @@ impl VirtualMachine {
                 self.sp -= 1;
                 self.call_function_from_stack(func_id, arg_count)
             }
-            NanTag::ModuleFunction => {
+            TAG_MODULE_FN => {
                 let func_id = callee_nb.as_module_function().ok_or(VMError::InvalidCall)?;
                 drop(callee_nb);
                 let args_base = callee_idx + 1;
                 let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
                 for i in 0..arg_count {
-                    args_nb.push(self.stack_take_vw(args_base + i));
+                    args_nb.push(self.stack_take_raw(args_base + i));
                 }
                 // Clear the callee slot.
                 drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
@@ -405,10 +409,10 @@ impl VirtualMachine {
                     ))
                 })?;
                 let result_nb = self.invoke_module_fn(&module_fn, &args_nb)?;
-                self.push_vw(result_nb)?;
+                self.push_raw_u64(result_nb)?;
                 Ok(())
             }
-            NanTag::Heap => {
+            TAG_HEAP => {
                 use shape_value::heap_value::HeapValue;
                 match callee_nb.as_heap_ref() {
                     Some(HeapValue::Closure {
@@ -422,7 +426,7 @@ impl VirtualMachine {
                         let args_base = callee_idx + 1;
                         let mut args_nb = Vec::with_capacity(arg_count);
                         for i in 0..arg_count {
-                            args_nb.push(self.stack_take_vw(args_base + i));
+                            args_nb.push(self.stack_take_raw(args_base + i));
                         }
                         drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
                         self.stack[callee_idx] = Self::NONE_BITS;
@@ -435,13 +439,13 @@ impl VirtualMachine {
                         let args_base = callee_idx + 1;
                         let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
                         for i in 0..arg_count {
-                            args_nb.push(self.stack_take_vw(args_base + i));
+                            args_nb.push(self.stack_take_raw(args_base + i));
                         }
                         drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
                         self.stack[callee_idx] = Self::NONE_BITS;
                         self.sp = callee_idx;
                         let result_nb = callable.call(&args_nb).map_err(VMError::RuntimeError)?;
-                        self.push_vw(result_nb)?;
+                        self.push_raw_u64(result_nb)?;
                         Ok(())
                     }
                     _ => Err(VMError::InvalidCall),
@@ -467,7 +471,7 @@ impl VirtualMachine {
             let mutable_captures = function.mutable_captures.clone();
             let mut upvalues = Vec::with_capacity(capture_count);
             for _ in 0..capture_count {
-                let nb = self.pop_vw()?;
+                let nb = self.pop_raw_u64()?;
                 upvalues.push(nb);
             }
             upvalues.reverse();
@@ -495,7 +499,7 @@ impl VirtualMachine {
                 })
                 .collect();
 
-            self.push_vw(ValueWord::from_heap_value(
+            self.push_raw_u64(ValueWord::from_heap_value(
                 shape_value::heap_value::HeapValue::Closure {
                     function_id: func_id.0,
                     upvalues,
@@ -520,7 +524,7 @@ impl VirtualMachine {
 
         // Pop arg count (pushed by the stub as a constant)
         let arg_count = self
-            .pop_vw()?
+            .pop_raw_u64()?
             .as_number_coerce()
             .ok_or_else(|| VMError::RuntimeError("Expected number for arg count".to_string()))?
             as usize;
@@ -528,7 +532,7 @@ impl VirtualMachine {
         // Pop args in reverse order then reverse for correct ordering
         let mut args = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {
-            args.push(self.pop_vw()?);
+            args.push(self.pop_raw_u64()?);
         }
         args.reverse();
 
@@ -598,7 +602,7 @@ impl VirtualMachine {
                                 &self.program.type_schema_registry,
                             ) {
                                 Ok(result) => {
-                                    self.push_vw(ValueWord::from_ok(result))?;
+                                    self.push_raw_u64(ValueWord::from_ok(result))?;
                                 }
                                 Err(marshal_err) => {
                                     let error_msg =
@@ -612,7 +616,7 @@ impl VirtualMachine {
                                         trace,
                                         Some("MARSHAL_ERROR"),
                                     );
-                                    self.push_vw(ValueWord::from_err(err_obj))?;
+                                    self.push_raw_u64(ValueWord::from_err(err_obj))?;
                                 }
                             }
                         }
@@ -627,7 +631,7 @@ impl VirtualMachine {
                                 trace,
                                 Some("RUNTIME_ERROR"),
                             );
-                            self.push_vw(ValueWord::from_err(err_obj))?;
+                            self.push_raw_u64(ValueWord::from_err(err_obj))?;
                         }
                     }
                 } else {
@@ -641,7 +645,7 @@ impl VirtualMachine {
                         return_type_schema_id,
                         &self.program.type_schema_registry,
                     )?;
-                    self.push_vw(result)?;
+                    self.push_raw_u64(result)?;
                 }
             }
             ForeignFunctionHandle::Native(linked) => {
@@ -677,7 +681,7 @@ impl VirtualMachine {
                 .map_err(|e| {
                     VMError::RuntimeError(format!("Native function '{}' error: {}", name, e))
                 })?;
-                self.push_vw(result)?;
+                self.push_raw_u64(result)?;
             }
         }
 
@@ -706,7 +710,7 @@ impl VirtualMachine {
     }
 
     pub(in crate::executor) fn op_return_value(&mut self) -> Result<(), VMError> {
-        let return_value = self.pop_vw()?;
+        let return_value = self.pop_raw_u64()?;
 
         if let Some(frame) = self.call_stack.pop() {
             // Restore instruction pointer
@@ -721,10 +725,10 @@ impl VirtualMachine {
             self.sp = bp;
 
             // Push return value
-            self.push_vw(return_value)?;
+            self.push_raw_u64(return_value)?;
         } else {
             // Return from main
-            self.push_vw(return_value)?;
+            self.push_raw_u64(return_value)?;
             self.ip = self.program.instructions.len();
         }
         Ok(())

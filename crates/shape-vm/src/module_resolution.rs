@@ -4,6 +4,7 @@
 //! file-based module loaders, and the module loader configuration API.
 
 use crate::configuration::BytecodeExecutor;
+use shape_value::ValueWordExt;
 
 use shape_ast::Program;
 use shape_ast::ast::{ExportItem, Item};

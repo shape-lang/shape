@@ -10,7 +10,7 @@ use crate::executor::VirtualMachine;
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueWord};
+use shape_value::{VMError, ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Helper: extract DateTime<FixedOffset> from the receiver (args[0]).

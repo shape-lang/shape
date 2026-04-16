@@ -6,6 +6,7 @@
 //! control-flow subgraphs.
 
 use super::helpers::*;
+use shape_value::ValueWordExt;
 use super::stmt::{lower_statement, lower_statements, lower_var_decl, StatementSpan};
 use super::MirBuilder;
 use super::immutable_binding_metadata;

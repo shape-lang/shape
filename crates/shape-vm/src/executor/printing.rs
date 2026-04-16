@@ -4,13 +4,14 @@
 //! runtime values. It respects TypeSchema for TypedObjects with their field names.
 //!
 //! The primary entry point is `format_nb()` which formats ValueWord values directly
-//! using NanTag/HeapValue dispatch.
+//! using tag/HeapValue dispatch.
 
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_runtime::type_schema::field_types::FieldType;
 use shape_runtime::type_system::annotation_to_string;
 use shape_value::heap_value::HeapValue;
-use shape_value::{NanTag, ValueWord};
+use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Formatter for ValueWord values
 ///
@@ -41,7 +42,7 @@ impl<'a> ValueFormatter<'a> {
 
     /// Create a formatter with a reference resolver.
     ///
-    /// The resolver is called when a `NanTag::Ref` or `HeapValue::ProjectedRef`
+    /// The resolver is called when a `tag::Ref` or `HeapValue::ProjectedRef`
     /// is encountered, allowing the formatter to print the underlying value
     /// instead of `<ref>`.
     pub fn with_deref(
@@ -63,7 +64,7 @@ impl<'a> ValueFormatter<'a> {
 
     /// Format a ValueWord value to string — primary entry point.
     ///
-    /// Uses NanTag/HeapValue dispatch for inline types (f64, i48, bool, None,
+    /// Uses tag/HeapValue dispatch for inline types (f64, i48, bool, None,
     /// Unit) and heap types (String, Array, TypedObject, Decimal, etc.).
     pub fn format_nb(&self, value: &ValueWord) -> String {
         self.format_nb_with_depth(value, 0)
@@ -76,36 +77,36 @@ impl<'a> ValueFormatter<'a> {
         }
 
         // Fast path: inline types (no heap access needed)
-        match value.tag() {
-            NanTag::F64 => {
-                if let Some(n) = value.as_f64() {
-                    return format_number(n);
-                }
-                // Shouldn't happen, but fallback
-                return "NaN".to_string();
+        let bits = value.raw_bits();
+        if !is_tagged(bits) {
+            if let Some(n) = value.as_f64() {
+                return format_number(n);
             }
-            NanTag::I48 => {
+            return "NaN".to_string();
+        }
+        match get_tag(bits) {
+            TAG_INT => {
                 if let Some(i) = value.as_i64() {
                     return i.to_string();
                 }
                 return "0".to_string();
             }
-            NanTag::Bool => {
+            TAG_BOOL => {
                 if let Some(b) = value.as_bool() {
                     return b.to_string();
                 }
                 return "false".to_string();
             }
-            NanTag::None => return "None".to_string(),
-            NanTag::Unit => return "()".to_string(),
-            NanTag::Function => {
-                if let Some(id) = value.as_function() {
+            TAG_NONE => return "None".to_string(),
+            TAG_UNIT => return "()".to_string(),
+            TAG_FUNCTION => {
+                if let Some(id) = value.as_function_id() {
                     return format!("[Function:{}]", id);
                 }
                 return "[Function]".to_string();
             }
-            NanTag::ModuleFunction => return "[ModuleFunction]".to_string(),
-            NanTag::Ref => {
+            TAG_MODULE_FN => return "[ModuleFunction]".to_string(),
+            TAG_REF => {
                 if let Some(deref) = &self.deref_fn {
                     if let Some(resolved) = deref(value) {
                         return self.format_nb_with_depth(&resolved, depth + 1);
@@ -113,7 +114,8 @@ impl<'a> ValueFormatter<'a> {
                 }
                 return "<ref>".to_string();
             }
-            NanTag::Heap => {}
+            TAG_HEAP => {}
+            _ => return format!("[Unknown tag]"),
         }
 
         // Handle unified arrays (bit-47 tagged) before HeapValue dispatch.
@@ -589,7 +591,7 @@ impl<'a> ValueFormatter<'a> {
                 FieldType::Bool => slot.as_bool().to_string(),
                 FieldType::F64 | FieldType::Decimal => format_number(slot.as_f64()),
                 // Any other non-heap type: reconstruct via as_value_word to
-                // preserve inline NanTag variants for correct Display formatting
+                // preserve inline tag variants for correct Display formatting
                 _ => {
                     let vw = slot.as_value_word(false);
                     self.format_nb_with_depth(&vw, depth)

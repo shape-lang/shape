@@ -11,6 +11,7 @@
 
 use super::super::context::JITContext;
 use super::super::nan_boxing::*;
+use shape_value::ValueWordExt;
 
 // ============================================================================
 // Generic Field Access (by compile-time column index)

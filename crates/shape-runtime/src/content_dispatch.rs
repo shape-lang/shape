@@ -2,7 +2,7 @@
 //!
 //! The `render_as_content` function implements the Content trait dispatch logic:
 //! 1. If the value IS already a ContentNode → return as-is
-//! 2. Match by NanTag/HeapValue type → built-in Content impls for primitives
+//! 2. Match by tag/HeapValue type → built-in Content impls for primitives
 //! 3. Fallback → Display as ContentNode::plain(display_string)
 //!
 //! Built-in Content implementations:
@@ -27,8 +27,8 @@ use crate::content_renderer::RendererCapabilities;
 use crate::type_schema::{SchemaId, lookup_schema_by_id_public};
 use shape_value::content::{BorderStyle, ContentNode, ContentTable};
 use shape_value::heap_value::HeapValue;
-use shape_value::value_word::NanTag;
-use shape_value::{DataTable, ValueWord};
+use shape_value::tags::{is_tagged, get_tag, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_HEAP};
+use shape_value::{DataTable, ValueWord, ValueWordExt};
 
 /// Well-known adapter names for ContentFor<Adapter> dispatch.
 pub mod adapters {
@@ -77,14 +77,17 @@ pub fn render_as_content(value: &ValueWord) -> ContentNode {
         }
     }
 
-    match value.tag() {
-        NanTag::I48 => ContentNode::plain(format!("{}", value)),
-        NanTag::F64 => ContentNode::plain(format!("{}", value)),
-        NanTag::Bool => ContentNode::plain(format!("{}", value)),
-        NanTag::None => ContentNode::plain("none".to_string()),
-        NanTag::Unit => ContentNode::plain("()".to_string()),
-        NanTag::Heap => render_heap_as_content(value),
-        _ => ContentNode::plain(format!("{}", value)),
+    let bits = value.raw_bits();
+    if !is_tagged(bits) {
+        return ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*value)));
+    }
+    match get_tag(bits) {
+        TAG_INT => ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*value))),
+        TAG_BOOL => ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*value))),
+        TAG_NONE => ContentNode::plain("none".to_string()),
+        TAG_UNIT => ContentNode::plain("()".to_string()),
+        TAG_HEAP => render_heap_as_content(value),
+        _ => ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*value))),
     }
 }
 
@@ -211,7 +214,7 @@ fn render_heap_as_content(value: &ValueWord) -> ContentNode {
                 .collect();
             ContentNode::plain(format!("[{}]", elems.join(", ")))
         }
-        _ => ContentNode::plain(format!("{}", value)),
+        _ => ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*value))),
     }
 }
 
@@ -275,7 +278,7 @@ fn render_array_as_content(arr: &[ValueWord]) -> ContentNode {
     }
 
     // Scalar array → "[1, 2, 3]"
-    let items: Vec<String> = arr.iter().map(|v| format!("{}", v)).collect();
+    let items: Vec<String> = arr.iter().map(|v| format!("{}", shape_value::ValueWordDisplay(*v))).collect();
     ContentNode::plain(format!("[{}]", items.join(", ")))
 }
 

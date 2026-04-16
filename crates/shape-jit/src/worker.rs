@@ -4,6 +4,7 @@
 //! can drive JIT compilation on a background worker thread.
 
 use shape_vm::bytecode::BytecodeProgram;
+use shape_value::ValueWordExt;
 use shape_vm::tier::{CompilationBackend, CompilationRequest, CompilationResult, Tier};
 use shape_vm::type_tracking::FrameDescriptor;
 

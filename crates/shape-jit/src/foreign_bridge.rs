@@ -2,7 +2,7 @@ use shape_runtime::context::ExecutionContext;
 use shape_runtime::module_exports::RawCallableInvoker;
 use shape_runtime::plugins::language_runtime::{CompiledForeignFunction, PluginLanguageRuntime};
 use shape_runtime::type_schema::TypeSchemaRegistry;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use shape_vm::bytecode::BytecodeProgram;
 use shape_vm::executor::{
     foreign_marshal,

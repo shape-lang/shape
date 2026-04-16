@@ -9,6 +9,7 @@
 //! `map<T, U>` are specialized per `ConcreteType` instantiation.
 
 use serde::{Deserialize, Serialize};
+use crate::value_word::ValueWordExt;
 
 /// Opaque ID into a registry of struct layouts (resolved at compile time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -6,7 +6,7 @@
 use shape_runtime::stdlib_io::create_io_module;
 use shape_runtime::stdlib_io::file_ops;
 use shape_runtime::stdlib_io::path_ops;
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
 /// Create a dummy `ModuleContext` for test-only direct function calls.

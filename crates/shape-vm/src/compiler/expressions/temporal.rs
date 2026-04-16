@@ -81,7 +81,7 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::eval;
-    use shape_value::ValueWord;
+    use shape_value::{ValueWord, ValueWordExt};
 
     // === MED-11: @"..." DateTime literals ===
 

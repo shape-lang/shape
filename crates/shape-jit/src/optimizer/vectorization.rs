@@ -5,6 +5,7 @@
 //! 2. `analyze_simd` — F64X2 SIMD lowering for eligible typed-data array loops.
 
 use std::collections::HashMap;
+use shape_value::ValueWordExt;
 
 use shape_vm::bytecode::{BytecodeProgram, OpCode, Operand};
 

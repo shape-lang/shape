@@ -4,6 +4,7 @@
 //! metadata for use in LSP completions and hover information.
 
 use crate::metadata::{FunctionCategory, FunctionInfo, ParameterInfo, TypeInfo};
+use shape_value::ValueWordExt;
 use shape_ast::ast::{
     BuiltinFunctionDecl, BuiltinTypeDecl, DocComment, FunctionDef, Item, Program, TypeAnnotation,
 };

@@ -8,7 +8,7 @@ use super::{extract_f64, extract_str, extract_usize};
 use crate::context::ExecutionContext;
 use rand::Rng;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
+use shape_value::{ValueWord, ValueWordExt};
 
 /// Intrinsic: Sample from uniform distribution [lo, hi)
 pub fn intrinsic_dist_uniform(
