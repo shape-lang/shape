@@ -1445,8 +1445,13 @@ fn compute_ownership_decisions(
 
     for block in &mir.blocks {
         for (stmt_idx, stmt) in block.statements.iter().enumerate() {
-            if let StatementKind::Assign(_, Rvalue::Use(Operand::Move(Place::Local(src_slot)))) =
-                &stmt.kind
+            // Match both Move and Copy operands — identifier loads use Copy in MIR,
+            // but the ownership decision (Move vs Clone) depends on liveness analysis.
+            let src_slot = match &stmt.kind {
+                StatementKind::Assign(_, Rvalue::Use(Operand::Move(Place::Local(s)))) => s,
+                StatementKind::Assign(_, Rvalue::Use(Operand::Copy(Place::Local(s)))) => s,
+                _ => continue,
+            };
             {
                 // Check if the source is a non-Copy type
                 let src_type = mir
