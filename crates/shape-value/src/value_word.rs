@@ -125,24 +125,240 @@ pub(crate) fn vw_heap_box(v: HeapValue) -> ValueWord {
     make_tagged(TAG_HEAP, ptr & PAYLOAD_MASK)
 }
 
+// ---------------------------------------------------------------------------
+// Macros to generate trivial heap-boxing constructors on both the trait
+// declaration and the `impl ValueWordExt for u64` block, eliminating ~700
+// lines of one-liner boilerplate.
+// ---------------------------------------------------------------------------
+
+/// Emit trait declarations for `fn $method($($arg: $ty),*) -> ValueWord`.
+macro_rules! heap_constructors_trait {
+    ($( fn $method:ident( $($arg:ident : $ty:ty),* ) => $variant:ident; )*) => {
+        $( fn $method( $($arg : $ty),* ) -> ValueWord; )*
+    };
+}
+/// Emit implementations: `heap_box(HeapValue::$variant($($arg),*))`.
+macro_rules! heap_constructors_impl {
+    ($( fn $method:ident( $($arg:ident : $ty:ty),* ) => $variant:ident; )*) => {
+        $( #[inline] fn $method( $($arg : $ty),* ) -> ValueWord {
+            ValueWord::heap_box(HeapValue::$variant($($arg),*))
+        } )*
+    };
+}
+
+/// Emit trait declarations for box-wrapped constructors.
+macro_rules! heap_box_constructors_trait {
+    ($( fn $method:ident( $arg:ident : $ty:ty ) => $variant:ident; )*) => {
+        $( fn $method( $arg : $ty ) -> ValueWord; )*
+    };
+}
+/// Emit implementations: `heap_box(HeapValue::$variant(Box::new($arg)))`.
+macro_rules! heap_box_constructors_impl {
+    ($( fn $method:ident( $arg:ident : $ty:ty ) => $variant:ident; )*) => {
+        $( #[inline] fn $method( $arg : $ty ) -> ValueWord {
+            ValueWord::heap_box(HeapValue::$variant(Box::new($arg)))
+        } )*
+    };
+}
+
+/// Emit trait declarations for native scalar sub-constructors.
+macro_rules! native_scalar_constructors_trait {
+    ($( fn $method:ident( v : $ty:ty ) => $variant:ident; )*) => {
+        $( fn $method( v : $ty ) -> ValueWord; )*
+    };
+}
+/// Emit implementations delegating to `from_native_scalar(NativeScalar::$variant(v))`.
+macro_rules! native_scalar_constructors_impl {
+    ($( fn $method:ident( v : $ty:ty ) => $variant:ident; )*) => {
+        $( #[inline] fn $method( v : $ty ) -> ValueWord {
+            ValueWord::from_native_scalar(NativeScalar::$variant(v))
+        } )*
+    };
+}
+
+// Shared invocation lists used by both trait and impl blocks.
+
+macro_rules! define_heap_constructors {
+    ($mac:ident) => { $mac! {
+        fn from_string(s: Arc<String>) => String;
+        fn from_char(c: char) => Char;
+        fn from_array(a: crate::value::VMArray) => Array;
+        fn from_decimal(d: rust_decimal::Decimal) => Decimal;
+        fn from_datatable(dt: Arc<DataTable>) => DataTable;
+        fn from_native_scalar(value: NativeScalar) => NativeScalar;
+        fn from_int_array(a: Arc<crate::typed_buffer::TypedBuffer<i64>>) => IntArray;
+        fn from_float_array(a: Arc<crate::typed_buffer::AlignedTypedBuffer>) => FloatArray;
+        fn from_bool_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) => BoolArray;
+        fn from_i8_array(a: Arc<crate::typed_buffer::TypedBuffer<i8>>) => I8Array;
+        fn from_i16_array(a: Arc<crate::typed_buffer::TypedBuffer<i16>>) => I16Array;
+        fn from_i32_array(a: Arc<crate::typed_buffer::TypedBuffer<i32>>) => I32Array;
+        fn from_u8_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) => U8Array;
+        fn from_u16_array(a: Arc<crate::typed_buffer::TypedBuffer<u16>>) => U16Array;
+        fn from_u32_array(a: Arc<crate::typed_buffer::TypedBuffer<u32>>) => U32Array;
+        fn from_u64_array(a: Arc<crate::typed_buffer::TypedBuffer<u64>>) => U64Array;
+        fn from_f32_array(a: Arc<crate::typed_buffer::TypedBuffer<f32>>) => F32Array;
+        fn from_matrix(m: Arc<crate::heap_value::MatrixData>) => Matrix;
+        fn from_iterator(state: Box<crate::heap_value::IteratorState>) => Iterator;
+        fn from_generator(state: Box<crate::heap_value::GeneratorState>) => Generator;
+        fn from_future(id: u64) => Future;
+        fn from_expr_proxy(col_name: Arc<String>) => ExprProxy;
+        fn from_filter_expr(node: Arc<FilterNode>) => FilterExpr;
+        fn from_time(t: DateTime<FixedOffset>) => Time;
+        fn from_duration(d: Duration) => Duration;
+        fn from_timespan(ts: chrono::Duration) => TimeSpan;
+        fn from_timeframe(tf: Timeframe) => Timeframe;
+        fn from_host_closure(nc: HostCallable) => HostClosure;
+    } };
+}
+
+macro_rules! define_heap_box_constructors {
+    ($mac:ident) => { $mac! {
+        fn from_enum(e: EnumValue) => Enum;
+        fn from_some(inner: ValueWord) => Some;
+        fn from_ok(inner: ValueWord) => Ok;
+        fn from_err(inner: ValueWord) => Err;
+        fn from_content(node: ContentNode) => Content;
+        fn from_print_result(pr: PrintResult) => PrintResult;
+        fn from_instant(t: std::time::Instant) => Instant;
+        fn from_io_handle(data: crate::heap_value::IoHandleData) => IoHandle;
+        fn from_channel(data: ChannelData) => Channel;
+        fn from_time_reference(tr: TimeReference) => TimeReference;
+        fn from_datetime_expr(de: DateTimeExpr) => DateTimeExpr;
+        fn from_data_datetime_ref(dr: DataDateTimeRef) => DataDateTimeRef;
+        fn from_type_annotation(ta: TypeAnnotation) => TypeAnnotation;
+    } };
+}
+
+macro_rules! define_native_scalar_constructors {
+    ($mac:ident) => { $mac! {
+        fn from_native_i8(v: i8) => I8;
+        fn from_native_u8(v: u8) => U8;
+        fn from_native_i16(v: i16) => I16;
+        fn from_native_u16(v: u16) => U16;
+        fn from_native_i32(v: i32) => I32;
+        fn from_native_u32(v: u32) => U32;
+        fn from_native_u64(v: u64) => U64;
+        fn from_native_isize(v: isize) => Isize;
+        fn from_native_usize(v: usize) => Usize;
+        fn from_native_ptr(v: usize) => Ptr;
+        fn from_native_f32(v: f32) => F32;
+    } };
+}
+
+// ---------------------------------------------------------------------------
+// Macros to generate trivial heap-ref extractors on both the trait
+// declaration and the impl block.
+// ---------------------------------------------------------------------------
+
+/// Extractors that return `&T` — direct reference into HeapValue variant.
+macro_rules! heap_ref_extractors_trait {
+    ($( fn $method:ident(&self) -> Option<& $ret:ty> => $variant:ident; )*) => {
+        $( fn $method(&self) -> Option<&$ret>; )*
+    };
+}
+macro_rules! heap_ref_extractors_impl {
+    ($( fn $method:ident(&self) -> Option<& $ret:ty> => $variant:ident; )*) => {
+        $( #[inline] fn $method(&self) -> Option<&$ret> {
+            match self.as_heap_ref()? { HeapValue::$variant(v) => Some(v), _ => None }
+        } )*
+    };
+}
+
+/// Extractors that return `&T` via `.as_ref()` (deref Box/Arc).
+macro_rules! heap_deref_extractors_trait {
+    ($( fn $method:ident(&self) -> Option<& $ret:ty> => $variant:ident; )*) => {
+        $( fn $method(&self) -> Option<&$ret>; )*
+    };
+}
+macro_rules! heap_deref_extractors_impl {
+    ($( fn $method:ident(&self) -> Option<& $ret:ty> => $variant:ident; )*) => {
+        $( #[inline] fn $method(&self) -> Option<&$ret> {
+            match self.as_heap_ref()? { HeapValue::$variant(v) => Some(v.as_ref()), _ => None }
+        } )*
+    };
+}
+
+/// Extractors that return `T` by copy (for Copy types).
+macro_rules! heap_copy_extractors_trait {
+    ($( fn $method:ident(&self) -> Option<$ret:ty> => $variant:ident; )*) => {
+        $( fn $method(&self) -> Option<$ret>; )*
+    };
+}
+macro_rules! heap_copy_extractors_impl {
+    ($( fn $method:ident(&self) -> Option<$ret:ty> => $variant:ident; )*) => {
+        $( #[inline] fn $method(&self) -> Option<$ret> {
+            match self.as_heap_ref()? { HeapValue::$variant(v) => Some(*v), _ => None }
+        } )*
+    };
+}
+
+/// Mutable extractors that return `&mut T` via `as_heap_mut()`.
+macro_rules! heap_mut_extractors_trait {
+    ($( fn $method:ident(&mut self) -> Option<&mut $ret:ty> => $variant:ident; )*) => {
+        $( fn $method(&mut self) -> Option<&mut $ret>; )*
+    };
+}
+macro_rules! heap_mut_extractors_impl {
+    ($( fn $method:ident(&mut self) -> Option<&mut $ret:ty> => $variant:ident; )*) => {
+        $( #[inline] fn $method(&mut self) -> Option<&mut $ret> {
+            match self.as_heap_mut()? { HeapValue::$variant(d) => Some(d), _ => None }
+        } )*
+    };
+}
+
+macro_rules! define_heap_ref_extractors {
+    ($mac:ident) => { $mac! {
+        fn as_datatable(&self) -> Option<& Arc<DataTable>> => DataTable;
+        fn as_some_inner(&self) -> Option<& ValueWord> => Some;
+        fn as_ok_inner(&self) -> Option<& ValueWord> => Ok;
+        fn as_err_inner(&self) -> Option<& ValueWord> => Err;
+        fn as_expr_proxy(&self) -> Option<& Arc<String>> => ExprProxy;
+        fn as_filter_expr(&self) -> Option<& Arc<FilterNode>> => FilterExpr;
+        fn as_host_closure(&self) -> Option<& HostCallable> => HostClosure;
+        fn as_duration(&self) -> Option<& shape_ast::ast::Duration> => Duration;
+        fn as_arc_string(&self) -> Option<& Arc<String>> => String;
+        fn as_int_array(&self) -> Option<& Arc<crate::typed_buffer::TypedBuffer<i64>>> => IntArray;
+        fn as_float_array(&self) -> Option<& Arc<crate::typed_buffer::AlignedTypedBuffer>> => FloatArray;
+        fn as_bool_array(&self) -> Option<& Arc<crate::typed_buffer::TypedBuffer<u8>>> => BoolArray;
+        fn as_timeframe(&self) -> Option<& Timeframe> => Timeframe;
+        fn as_datetime(&self) -> Option<& DateTime<FixedOffset>> => Time;
+    } };
+}
+
+macro_rules! define_heap_deref_extractors {
+    ($mac:ident) => { $mac! {
+        fn as_matrix(&self) -> Option<& crate::heap_value::MatrixData> => Matrix;
+        fn as_iterator(&self) -> Option<& crate::heap_value::IteratorState> => Iterator;
+        fn as_generator(&self) -> Option<& crate::heap_value::GeneratorState> => Generator;
+        fn as_instant(&self) -> Option<& std::time::Instant> => Instant;
+        fn as_io_handle(&self) -> Option<& crate::heap_value::IoHandleData> => IoHandle;
+        fn as_native_view(&self) -> Option<& NativeViewData> => NativeView;
+        fn as_content(&self) -> Option<& ContentNode> => Content;
+    } };
+}
+
+macro_rules! define_heap_copy_extractors {
+    ($mac:ident) => { $mac! {
+        fn as_time(&self) -> Option<DateTime<FixedOffset>> => Time;
+        fn as_timespan(&self) -> Option<chrono::Duration> => TimeSpan;
+        fn as_native_scalar(&self) -> Option<NativeScalar> => NativeScalar;
+    } };
+}
+
+macro_rules! define_heap_mut_extractors {
+    ($mac:ident) => { $mac! {
+        fn as_hashmap_mut(&mut self) -> Option<&mut HashMapData> => HashMap;
+        fn as_set_mut(&mut self) -> Option<&mut SetData> => Set;
+        fn as_deque_mut(&mut self) -> Option<&mut DequeData> => Deque;
+        fn as_priority_queue_mut(&mut self) -> Option<&mut PriorityQueueData> => PriorityQueue;
+    } };
+}
+
 /// Extension trait providing methods on ValueWord (u64).
 pub trait ValueWordExt {
+    // --- Inline-tag constructors (non-trivial, hand-written) ---
     fn from_f64(v: f64) -> ValueWord;
     fn from_i64(v: i64) -> ValueWord;
-    fn from_native_scalar(value: NativeScalar) -> ValueWord;
-    fn from_native_i8(v: i8) -> ValueWord;
-    fn from_native_u8(v: u8) -> ValueWord;
-    fn from_native_i16(v: i16) -> ValueWord;
-    fn from_native_u16(v: u16) -> ValueWord;
-    fn from_native_i32(v: i32) -> ValueWord;
-    fn from_native_u32(v: u32) -> ValueWord;
-    fn from_native_u64(v: u64) -> ValueWord;
-    fn from_native_isize(v: isize) -> ValueWord;
-    fn from_native_usize(v: usize) -> ValueWord;
-    fn from_native_ptr(v: usize) -> ValueWord;
-    fn from_native_f32(v: f32) -> ValueWord;
-    fn from_c_view(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord;
-    fn from_c_mut(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord;
     fn from_bool(v: bool) -> ValueWord;
     fn none() -> ValueWord;
     fn unit() -> ValueWord;
@@ -150,24 +366,24 @@ pub trait ValueWordExt {
     fn from_module_function(index: u32) -> ValueWord;
     fn from_ref(absolute_slot: usize) -> ValueWord;
     fn from_module_binding_ref(binding_idx: usize) -> ValueWord;
-    fn from_projected_ref(base: ValueWord, projection: RefProjection) -> ValueWord;
     fn heap_box(v: HeapValue) -> ValueWord;
-    fn from_string(s: Arc<String>) -> ValueWord;
-    fn from_char(c: char) -> ValueWord;
-    fn as_char(&self) -> Option<char>;
-    fn from_array(a: crate::value::VMArray) -> ValueWord;
-    fn from_decimal(d: rust_decimal::Decimal) -> ValueWord;
     fn from_heap_value(v: HeapValue) -> ValueWord;
-    fn from_datatable(dt: Arc<DataTable>) -> ValueWord;
+    fn as_char(&self) -> Option<char>;
+
+    // --- Macro-generated heap-boxing constructors ---
+    define_heap_constructors!(heap_constructors_trait);
+    define_heap_box_constructors!(heap_box_constructors_trait);
+    define_native_scalar_constructors!(native_scalar_constructors_trait);
+
+    // --- Multi-arg struct constructors ---
+    fn from_c_view(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord;
+    fn from_c_mut(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord;
+    fn from_projected_ref(base: ValueWord, projection: RefProjection) -> ValueWord;
     fn from_typed_table(schema_id: u64, table: Arc<DataTable>) -> ValueWord;
     fn from_row_view(schema_id: u64, table: Arc<DataTable>, row_idx: usize) -> ValueWord;
     fn from_column_ref(schema_id: u64, table: Arc<DataTable>, col_id: u32) -> ValueWord;
     fn from_indexed_table(schema_id: u64, table: Arc<DataTable>, index_col: u32) -> ValueWord;
     fn from_range(start: Option<ValueWord>, end: Option<ValueWord>, inclusive: bool) -> ValueWord;
-    fn from_enum(e: EnumValue) -> ValueWord;
-    fn from_some(inner: ValueWord) -> ValueWord;
-    fn from_ok(inner: ValueWord) -> ValueWord;
-    fn from_err(inner: ValueWord) -> ValueWord;
     fn from_hashmap(keys: Vec<ValueWord>, values: Vec<ValueWord>, index: HashMap<u64, Vec<usize>>) -> ValueWord;
     fn empty_hashmap() -> ValueWord;
     fn from_hashmap_pairs(keys: Vec<ValueWord>, values: Vec<ValueWord>) -> ValueWord;
@@ -177,49 +393,22 @@ pub trait ValueWordExt {
     fn empty_deque() -> ValueWord;
     fn from_priority_queue(items: Vec<ValueWord>) -> ValueWord;
     fn empty_priority_queue() -> ValueWord;
-    fn from_content(node: ContentNode) -> ValueWord;
-    fn from_int_array(a: Arc<crate::typed_buffer::TypedBuffer<i64>>) -> ValueWord;
-    fn from_float_array(a: Arc<crate::typed_buffer::AlignedTypedBuffer>) -> ValueWord;
-    fn from_bool_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) -> ValueWord;
-    fn from_i8_array(a: Arc<crate::typed_buffer::TypedBuffer<i8>>) -> ValueWord;
-    fn from_i16_array(a: Arc<crate::typed_buffer::TypedBuffer<i16>>) -> ValueWord;
-    fn from_i32_array(a: Arc<crate::typed_buffer::TypedBuffer<i32>>) -> ValueWord;
-    fn from_u8_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) -> ValueWord;
-    fn from_u16_array(a: Arc<crate::typed_buffer::TypedBuffer<u16>>) -> ValueWord;
-    fn from_u32_array(a: Arc<crate::typed_buffer::TypedBuffer<u32>>) -> ValueWord;
-    fn from_u64_array(a: Arc<crate::typed_buffer::TypedBuffer<u64>>) -> ValueWord;
-    fn from_f32_array(a: Arc<crate::typed_buffer::TypedBuffer<f32>>) -> ValueWord;
-    fn from_matrix(m: Arc<crate::heap_value::MatrixData>) -> ValueWord;
     fn from_float_array_slice(parent: Arc<crate::heap_value::MatrixData>, offset: u32, len: u32) -> ValueWord;
-    fn from_iterator(state: Box<crate::heap_value::IteratorState>) -> ValueWord;
-    fn from_generator(state: Box<crate::heap_value::GeneratorState>) -> ValueWord;
-    fn from_future(id: u64) -> ValueWord;
     fn from_task_group(kind: u8, task_ids: Vec<u64>) -> ValueWord;
     fn from_mutex(value: ValueWord) -> ValueWord;
     fn from_atomic(value: i64) -> ValueWord;
     fn from_lazy(initializer: ValueWord) -> ValueWord;
-    fn from_channel(data: ChannelData) -> ValueWord;
     fn from_trait_object(value: ValueWord, vtable: Arc<VTable>) -> ValueWord;
-    fn from_expr_proxy(col_name: Arc<String>) -> ValueWord;
-    fn from_filter_expr(node: Arc<FilterNode>) -> ValueWord;
-    fn from_instant(t: std::time::Instant) -> ValueWord;
-    fn from_io_handle(data: crate::heap_value::IoHandleData) -> ValueWord;
-    fn from_time(t: DateTime<FixedOffset>) -> ValueWord;
     fn from_time_utc(t: DateTime<Utc>) -> ValueWord;
-    fn from_duration(d: Duration) -> ValueWord;
-    fn from_timespan(ts: chrono::Duration) -> ValueWord;
-    fn from_timeframe(tf: Timeframe) -> ValueWord;
-    fn from_host_closure(nc: HostCallable) -> ValueWord;
-    fn from_print_result(pr: PrintResult) -> ValueWord;
     fn from_simulation_call(name: String, params: HashMap<String, ValueWord>) -> ValueWord;
     fn from_function_ref(name: String, closure: Option<ValueWord>) -> ValueWord;
     fn from_data_reference(datetime: DateTime<FixedOffset>, id: String, timeframe: Timeframe) -> ValueWord;
-    fn from_time_reference(tr: TimeReference) -> ValueWord;
-    fn from_datetime_expr(de: DateTimeExpr) -> ValueWord;
-    fn from_data_datetime_ref(dr: DataDateTimeRef) -> ValueWord;
-    fn from_type_annotation(ta: TypeAnnotation) -> ValueWord;
     fn from_type_annotated_value(type_name: String, value: ValueWord) -> ValueWord;
+
+    // --- Cloning ---
     unsafe fn clone_from_bits(bits: u64) -> ValueWord;
+
+    // --- Type checks & extractors ---
     fn is_f64(&self) -> bool;
     fn is_i64(&self) -> bool;
     fn is_bool(&self) -> bool;
@@ -254,46 +443,25 @@ pub trait ValueWordExt {
     fn as_array(&self) -> Option<&VMArray>;
     fn as_any_array(&self) -> Option<ArrayView<'_>>;
     fn as_any_array_mut(&mut self) -> Option<ArrayViewMut<'_>>;
-    fn as_datatable(&self) -> Option<&Arc<DataTable>>;
+    // --- Macro-generated heap extractors ---
+    define_heap_ref_extractors!(heap_ref_extractors_trait);
+    define_heap_deref_extractors!(heap_deref_extractors_trait);
+    define_heap_copy_extractors!(heap_copy_extractors_trait);
+    define_heap_mut_extractors!(heap_mut_extractors_trait);
+
+    // --- Multi-field and special extractors ---
     fn as_typed_table(&self) -> Option<(u64, &Arc<DataTable>)>;
     fn as_row_view(&self) -> Option<(u64, &Arc<DataTable>, usize)>;
     fn as_column_ref(&self) -> Option<(u64, &Arc<DataTable>, u32)>;
     fn as_indexed_table(&self) -> Option<(u64, &Arc<DataTable>, u32)>;
     fn as_typed_object(&self) -> Option<(u64, &[ValueSlot], u64)>;
     fn as_closure(&self) -> Option<(u16, &[crate::value::Upvalue])>;
-    fn as_some_inner(&self) -> Option<&ValueWord>;
-    fn as_ok_inner(&self) -> Option<&ValueWord>;
-    fn as_err_inner(&self) -> Option<&ValueWord>;
     fn as_err_payload(&self) -> Option<ValueWord>;
     fn as_future(&self) -> Option<u64>;
     fn as_trait_object(&self) -> Option<(&ValueWord, &Arc<VTable>)>;
-    fn as_expr_proxy(&self) -> Option<&Arc<String>>;
-    fn as_filter_expr(&self) -> Option<&Arc<FilterNode>>;
-    fn as_host_closure(&self) -> Option<&HostCallable>;
-    fn as_duration(&self) -> Option<&shape_ast::ast::Duration>;
     fn as_range(&self) -> Option<(Option<&ValueWord>, Option<&ValueWord>, bool)>;
-    fn as_timespan(&self) -> Option<chrono::Duration>;
-    fn as_timeframe(&self) -> Option<&Timeframe>;
     fn as_hashmap(&self) -> Option<(&Vec<ValueWord>, &Vec<ValueWord>, &HashMap<u64, Vec<usize>>)>;
     fn as_hashmap_data(&self) -> Option<&HashMapData>;
-    fn as_hashmap_mut(&mut self) -> Option<&mut HashMapData>;
-    fn as_set_mut(&mut self) -> Option<&mut SetData>;
-    fn as_deque_mut(&mut self) -> Option<&mut DequeData>;
-    fn as_priority_queue_mut(&mut self) -> Option<&mut PriorityQueueData>;
-    fn as_content(&self) -> Option<&ContentNode>;
-    fn as_time(&self) -> Option<DateTime<FixedOffset>>;
-    fn as_instant(&self) -> Option<&std::time::Instant>;
-    fn as_io_handle(&self) -> Option<&crate::heap_value::IoHandleData>;
-    fn as_native_scalar(&self) -> Option<NativeScalar>;
-    fn as_native_view(&self) -> Option<&NativeViewData>;
-    fn as_datetime(&self) -> Option<&DateTime<FixedOffset>>;
-    fn as_arc_string(&self) -> Option<&Arc<String>>;
-    fn as_int_array(&self) -> Option<&Arc<crate::typed_buffer::TypedBuffer<i64>>>;
-    fn as_float_array(&self) -> Option<&Arc<crate::typed_buffer::AlignedTypedBuffer>>;
-    fn as_bool_array(&self) -> Option<&Arc<crate::typed_buffer::TypedBuffer<u8>>>;
-    fn as_matrix(&self) -> Option<&crate::heap_value::MatrixData>;
-    fn as_iterator(&self) -> Option<&crate::heap_value::IteratorState>;
-    fn as_generator(&self) -> Option<&crate::heap_value::GeneratorState>;
     fn typed_array_len(&self) -> Option<usize>;
     fn coerce_to_float_array(&self) -> Option<Arc<crate::typed_buffer::AlignedTypedBuffer>>;
     fn to_generic_array(&self) -> Option<crate::value::VMArray>;
@@ -315,227 +483,44 @@ pub trait ValueWordExt {
 }
 
 impl ValueWordExt for u64 {
-    // ===== Constructors =====
+    // ===== Inline-tag constructors (non-trivial, hand-written) =====
 
-    /// Create a ValueWord from an f64 value.
-    ///
-    /// Normal f64 values are stored directly. NaN values are canonicalized to a single
-    /// canonical NaN to avoid collisions with our tagged range.
     #[inline]
     fn from_f64(v: f64) -> ValueWord {
         let bits = v.to_bits();
         if v.is_nan() {
-            // Canonicalize all NaN variants to one known NaN outside our tagged range.
             CANONICAL_NAN
         } else if is_tagged(bits) {
-            // Extremely rare: a valid non-NaN f64 whose bits happen to fall in our tagged range.
-            // This cannot actually happen because all values in 0x7FFC..0x7FFF range are NaN
-            // (exponent all 1s with non-zero mantissa). So this branch is dead code, but kept
-            // for safety.
             CANONICAL_NAN
         } else {
             bits
         }
     }
 
-    /// Create a ValueWord from an i64 value.
-    ///
-    /// Values in the range [-2^47, 2^47-1] are stored inline as i48.
-    /// Values outside that range are heap-boxed as `HeapValue::BigInt`.
     #[inline]
     fn from_i64(v: i64) -> ValueWord {
         if v >= I48_MIN && v <= I48_MAX {
-            // Fits in 48 bits. Store as sign-extended i48.
-            // Truncate to 48 bits by masking with PAYLOAD_MASK.
             let payload = (v as u64) & PAYLOAD_MASK;
             make_tagged(TAG_INT, payload)
         } else {
-            // Too large for inline. Heap-box as BigInt.
             ValueWord::heap_box(HeapValue::BigInt(v))
         }
     }
 
-    /// Create a ValueWord from a width-aware native scalar.
-    #[inline]
-    fn from_native_scalar(value: NativeScalar) -> ValueWord {
-        ValueWord::heap_box(HeapValue::NativeScalar(value))
-    }
+    #[inline] fn from_bool(v: bool) -> ValueWord { make_tagged(TAG_BOOL, v as u64) }
+    #[inline] fn none() -> ValueWord { make_tagged(TAG_NONE, 0) }
+    #[inline] fn unit() -> ValueWord { make_tagged(TAG_UNIT, 0) }
+    #[inline] fn from_function(id: u16) -> ValueWord { make_tagged(TAG_FUNCTION, id as u64) }
+    #[inline] fn from_module_function(index: u32) -> ValueWord { make_tagged(TAG_MODULE_FN, index as u64) }
+    #[inline] fn from_ref(absolute_slot: usize) -> ValueWord { make_tagged(TAG_REF, absolute_slot as u64) }
 
-    #[inline]
-    fn from_native_i8(v: i8) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::I8(v))
-    }
-
-    #[inline]
-    fn from_native_u8(v: u8) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::U8(v))
-    }
-
-    #[inline]
-    fn from_native_i16(v: i16) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::I16(v))
-    }
-
-    #[inline]
-    fn from_native_u16(v: u16) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::U16(v))
-    }
-
-    #[inline]
-    fn from_native_i32(v: i32) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::I32(v))
-    }
-
-    #[inline]
-    fn from_native_u32(v: u32) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::U32(v))
-    }
-
-    #[inline]
-    fn from_native_u64(v: u64) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::U64(v))
-    }
-
-    #[inline]
-    fn from_native_isize(v: isize) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::Isize(v))
-    }
-
-    #[inline]
-    fn from_native_usize(v: usize) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::Usize(v))
-    }
-
-    #[inline]
-    fn from_native_ptr(v: usize) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::Ptr(v))
-    }
-
-    #[inline]
-    fn from_native_f32(v: f32) -> ValueWord {
-        ValueWord::from_native_scalar(NativeScalar::F32(v))
-    }
-
-    /// Create a pointer-backed C view.
-    #[inline]
-    fn from_c_view(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::NativeView(Box::new(NativeViewData {
-            ptr,
-            layout,
-            mutable: false,
-        })))
-    }
-
-    /// Create a pointer-backed mutable C view.
-    #[inline]
-    fn from_c_mut(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::NativeView(Box::new(NativeViewData {
-            ptr,
-            layout,
-            mutable: true,
-        })))
-    }
-
-    /// Create a ValueWord from a bool.
-    #[inline]
-    fn from_bool(v: bool) -> ValueWord {
-        make_tagged(TAG_BOOL, v as u64)
-    }
-
-    /// Create a ValueWord representing None.
-    #[inline]
-    fn none() -> ValueWord {
-        make_tagged(TAG_NONE, 0)
-    }
-
-    /// Create a ValueWord representing Unit.
-    #[inline]
-    fn unit() -> ValueWord {
-        make_tagged(TAG_UNIT, 0)
-    }
-
-    /// Create a ValueWord from a function ID.
-    #[inline]
-    fn from_function(id: u16) -> ValueWord {
-        make_tagged(TAG_FUNCTION, id as u64)
-    }
-
-    /// Create a ValueWord from a module function index.
-    #[inline]
-    fn from_module_function(index: u32) -> ValueWord {
-        make_tagged(TAG_MODULE_FN, index as u64)
-    }
-
-    /// Create a ValueWord reference to an absolute stack slot.
-    #[inline]
-    fn from_ref(absolute_slot: usize) -> ValueWord {
-        make_tagged(TAG_REF, absolute_slot as u64)
-    }
-
-    /// Create a ValueWord reference to a module binding slot.
     #[inline]
     fn from_module_binding_ref(binding_idx: usize) -> ValueWord {
-        make_tagged(
-            TAG_REF,
-            REF_TARGET_MODULE_FLAG | (binding_idx as u64 & REF_TARGET_INDEX_MASK),
-        )
+        make_tagged(TAG_REF, REF_TARGET_MODULE_FLAG | (binding_idx as u64 & REF_TARGET_INDEX_MASK))
     }
 
-    /// Create a projected reference backed by heap metadata.
-    #[inline]
-    fn from_projected_ref(base: ValueWord, projection: RefProjection) -> ValueWord {
-        ValueWord::heap_box(HeapValue::ProjectedRef(Box::new(ProjectedRefData {
-            base,
-            projection,
-        })))
-    }
+    #[inline] fn heap_box(v: HeapValue) -> ValueWord { vw_heap_box(v) }
 
-    /// Heap-box a HeapValue. Delegates to free function.
-    #[inline]
-    fn heap_box(v: HeapValue) -> ValueWord {
-        vw_heap_box(v)
-    }
-
-    // ===== Typed constructors =====
-
-    /// Create a ValueWord from an Arc<String>.
-    #[inline]
-    fn from_string(s: Arc<String>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::String(s))
-    }
-
-    /// Create a ValueWord from a char.
-    #[inline]
-    fn from_char(c: char) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Char(c))
-    }
-
-    /// Extract a char if this is a HeapValue::Char.
-    #[inline]
-    fn as_char(&self) -> Option<char> {
-        if let Some(HeapValue::Char(c)) = self.as_heap_ref() {
-            Some(*c)
-        } else {
-            std::option::Option::None
-        }
-    }
-
-    /// Create a ValueWord from a VMArray directly (no intermediate conversion).
-    #[inline]
-    fn from_array(a: crate::value::VMArray) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Array(a))
-    }
-
-    /// Create a ValueWord from Decimal directly (no intermediate conversion).
-    #[inline]
-    fn from_decimal(d: rust_decimal::Decimal) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Decimal(d))
-    }
-
-    /// Create a ValueWord from any HeapValue directly (no intermediate conversion).
-    ///
-    /// BigInt that fits i48 is unwrapped to its native ValueWord inline tag instead
-    /// of being heap-allocated. All other variants are heap-boxed.
     #[inline]
     fn from_heap_value(v: HeapValue) -> ValueWord {
         match v {
@@ -544,482 +529,136 @@ impl ValueWordExt for u64 {
         }
     }
 
-    // ===== DataTable family constructors =====
-
-    /// Create a ValueWord from a DataTable directly.
     #[inline]
-    fn from_datatable(dt: Arc<DataTable>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::DataTable(dt))
+    fn as_char(&self) -> Option<char> {
+        if let Some(HeapValue::Char(c)) = self.as_heap_ref() { Some(*c) } else { std::option::Option::None }
     }
 
-    /// Create a ValueWord TypedTable directly.
+    // ===== Macro-generated trivial constructors =====
+
+    define_heap_constructors!(heap_constructors_impl);
+    define_heap_box_constructors!(heap_box_constructors_impl);
+    define_native_scalar_constructors!(native_scalar_constructors_impl);
+
+    // ===== Multi-arg struct constructors (not macro-friendly) =====
+
+    #[inline]
+    fn from_c_view(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::NativeView(Box::new(NativeViewData { ptr, layout, mutable: false })))
+    }
+    #[inline]
+    fn from_c_mut(ptr: usize, layout: Arc<NativeTypeLayout>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::NativeView(Box::new(NativeViewData { ptr, layout, mutable: true })))
+    }
+    #[inline]
+    fn from_projected_ref(base: ValueWord, projection: RefProjection) -> ValueWord {
+        ValueWord::heap_box(HeapValue::ProjectedRef(Box::new(ProjectedRefData { base, projection })))
+    }
     #[inline]
     fn from_typed_table(schema_id: u64, table: Arc<DataTable>) -> ValueWord {
         ValueWord::heap_box(HeapValue::TypedTable { schema_id, table })
     }
-
-    /// Create a ValueWord RowView directly.
     #[inline]
     fn from_row_view(schema_id: u64, table: Arc<DataTable>, row_idx: usize) -> ValueWord {
-        ValueWord::heap_box(HeapValue::RowView {
-            schema_id,
-            table,
-            row_idx,
-        })
+        ValueWord::heap_box(HeapValue::RowView { schema_id, table, row_idx })
     }
-
-    /// Create a ValueWord ColumnRef directly.
     #[inline]
     fn from_column_ref(schema_id: u64, table: Arc<DataTable>, col_id: u32) -> ValueWord {
-        ValueWord::heap_box(HeapValue::ColumnRef {
-            schema_id,
-            table,
-            col_id,
-        })
+        ValueWord::heap_box(HeapValue::ColumnRef { schema_id, table, col_id })
     }
-
-    /// Create a ValueWord IndexedTable directly.
     #[inline]
     fn from_indexed_table(schema_id: u64, table: Arc<DataTable>, index_col: u32) -> ValueWord {
-        ValueWord::heap_box(HeapValue::IndexedTable {
-            schema_id,
-            table,
-            index_col,
-        })
+        ValueWord::heap_box(HeapValue::IndexedTable { schema_id, table, index_col })
     }
-
-    // ===== Container / wrapper constructors =====
-
-    /// Create a ValueWord Range directly.
     #[inline]
     fn from_range(start: Option<ValueWord>, end: Option<ValueWord>, inclusive: bool) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Range {
-            start: start.map(Box::new),
-            end: end.map(Box::new),
-            inclusive,
-        })
+        ValueWord::heap_box(HeapValue::Range { start: start.map(Box::new), end: end.map(Box::new), inclusive })
     }
-
-    /// Create a ValueWord Enum directly.
     #[inline]
-    fn from_enum(e: EnumValue) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Enum(Box::new(e)))
+    fn from_hashmap(keys: Vec<ValueWord>, values: Vec<ValueWord>, index: HashMap<u64, Vec<usize>>) -> ValueWord {
+        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData { keys, values, index, shape_id: None })))
     }
-
-    /// Create a ValueWord Some directly.
-    #[inline]
-    fn from_some(inner: ValueWord) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Some(Box::new(inner)))
-    }
-
-    /// Create a ValueWord Ok directly.
-    #[inline]
-    fn from_ok(inner: ValueWord) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Ok(Box::new(inner)))
-    }
-
-    /// Create a ValueWord Err directly.
-    #[inline]
-    fn from_err(inner: ValueWord) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Err(Box::new(inner)))
-    }
-
-    // ===== HashMap constructors =====
-
-    /// Create a ValueWord HashMap from keys, values, and index.
-    #[inline]
-    fn from_hashmap(
-        keys: Vec<ValueWord>,
-        values: Vec<ValueWord>,
-        index: HashMap<u64, Vec<usize>>,
-    ) -> ValueWord {
-        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData {
-            keys,
-            values,
-            index,
-            shape_id: None,
-        })))
-    }
-
-    /// Create an empty ValueWord HashMap.
     #[inline]
     fn empty_hashmap() -> ValueWord {
-        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData {
-            keys: Vec::new(),
-            values: Vec::new(),
-            index: HashMap::new(),
-            shape_id: None,
-        })))
+        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData { keys: Vec::new(), values: Vec::new(), index: HashMap::new(), shape_id: None })))
     }
-
-    /// Create a ValueWord HashMap from keys and values, auto-building the bucket
-    /// index and computing a shape for O(1) property access when all keys are strings.
     #[inline]
     fn from_hashmap_pairs(keys: Vec<ValueWord>, values: Vec<ValueWord>) -> ValueWord {
         let index = HashMapData::rebuild_index(&keys);
         let shape_id = HashMapData::compute_shape(&keys);
-        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData {
-            keys,
-            values,
-            index,
-            shape_id,
-        })))
+        ValueWord::heap_box(HeapValue::HashMap(Box::new(HashMapData { keys, values, index, shape_id })))
     }
-
-    // ===== Set constructors =====
-
-    /// Create a ValueWord Set from items (deduplicating).
     #[inline]
     fn from_set(items: Vec<ValueWord>) -> ValueWord {
         ValueWord::heap_box(HeapValue::Set(Box::new(SetData::from_items(items))))
     }
-
-    /// Create an empty ValueWord Set.
     #[inline]
     fn empty_set() -> ValueWord {
-        ValueWord::heap_box(HeapValue::Set(Box::new(SetData {
-            items: Vec::new(),
-            index: HashMap::new(),
-        })))
+        ValueWord::heap_box(HeapValue::Set(Box::new(SetData { items: Vec::new(), index: HashMap::new() })))
     }
-
-    // ===== Deque constructors =====
-
-    /// Create a ValueWord Deque from items.
     #[inline]
     fn from_deque(items: Vec<ValueWord>) -> ValueWord {
         ValueWord::heap_box(HeapValue::Deque(Box::new(DequeData::from_items(items))))
     }
-
-    /// Create an empty ValueWord Deque.
     #[inline]
     fn empty_deque() -> ValueWord {
         ValueWord::heap_box(HeapValue::Deque(Box::new(DequeData::new())))
     }
-
-    // ===== PriorityQueue constructors =====
-
-    /// Create a ValueWord PriorityQueue from items (heapified).
     #[inline]
     fn from_priority_queue(items: Vec<ValueWord>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::PriorityQueue(Box::new(
-            PriorityQueueData::from_items(items),
-        )))
+        ValueWord::heap_box(HeapValue::PriorityQueue(Box::new(PriorityQueueData::from_items(items))))
     }
-
-    /// Create an empty ValueWord PriorityQueue.
     #[inline]
     fn empty_priority_queue() -> ValueWord {
         ValueWord::heap_box(HeapValue::PriorityQueue(Box::new(PriorityQueueData::new())))
     }
-
-    // ===== Content constructors =====
-
-    /// Create a ValueWord from a ContentNode directly.
     #[inline]
-    fn from_content(node: ContentNode) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Content(Box::new(node)))
+    fn from_float_array_slice(parent: Arc<crate::heap_value::MatrixData>, offset: u32, len: u32) -> ValueWord {
+        ValueWord::heap_box(HeapValue::FloatArraySlice { parent, offset, len })
     }
-
-    // ===== Typed collection constructors =====
-
-    /// Create a ValueWord IntArray from an Arc<TypedBuffer<i64>>.
-    #[inline]
-    fn from_int_array(a: Arc<crate::typed_buffer::TypedBuffer<i64>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::IntArray(a))
-    }
-
-    /// Create a ValueWord FloatArray from an Arc<AlignedTypedBuffer>.
-    #[inline]
-    fn from_float_array(a: Arc<crate::typed_buffer::AlignedTypedBuffer>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::FloatArray(a))
-    }
-
-    /// Create a ValueWord BoolArray from an Arc<TypedBuffer<u8>>.
-    #[inline]
-    fn from_bool_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::BoolArray(a))
-    }
-
-    /// Create a ValueWord I8Array.
-    #[inline]
-    fn from_i8_array(a: Arc<crate::typed_buffer::TypedBuffer<i8>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::I8Array(a))
-    }
-
-    /// Create a ValueWord I16Array.
-    #[inline]
-    fn from_i16_array(a: Arc<crate::typed_buffer::TypedBuffer<i16>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::I16Array(a))
-    }
-
-    /// Create a ValueWord I32Array.
-    #[inline]
-    fn from_i32_array(a: Arc<crate::typed_buffer::TypedBuffer<i32>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::I32Array(a))
-    }
-
-    /// Create a ValueWord U8Array.
-    #[inline]
-    fn from_u8_array(a: Arc<crate::typed_buffer::TypedBuffer<u8>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::U8Array(a))
-    }
-
-    /// Create a ValueWord U16Array.
-    #[inline]
-    fn from_u16_array(a: Arc<crate::typed_buffer::TypedBuffer<u16>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::U16Array(a))
-    }
-
-    /// Create a ValueWord U32Array.
-    #[inline]
-    fn from_u32_array(a: Arc<crate::typed_buffer::TypedBuffer<u32>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::U32Array(a))
-    }
-
-    /// Create a ValueWord U64Array.
-    #[inline]
-    fn from_u64_array(a: Arc<crate::typed_buffer::TypedBuffer<u64>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::U64Array(a))
-    }
-
-    /// Create a ValueWord F32Array.
-    #[inline]
-    fn from_f32_array(a: Arc<crate::typed_buffer::TypedBuffer<f32>>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::F32Array(a))
-    }
-
-    /// Create a ValueWord Matrix from MatrixData.
-    #[inline]
-    fn from_matrix(m: Arc<crate::heap_value::MatrixData>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Matrix(m))
-    }
-
-    /// Create a ValueWord FloatArraySlice — a zero-copy view into a parent matrix.
-    #[inline]
-    fn from_float_array_slice(
-        parent: Arc<crate::heap_value::MatrixData>,
-        offset: u32,
-        len: u32,
-    ) -> ValueWord {
-        ValueWord::heap_box(HeapValue::FloatArraySlice {
-            parent,
-            offset,
-            len,
-        })
-    }
-
-    /// Create a ValueWord Iterator from IteratorState.
-    #[inline]
-    fn from_iterator(state: Box<crate::heap_value::IteratorState>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Iterator(state))
-    }
-
-    /// Create a ValueWord Generator from GeneratorState.
-    #[inline]
-    fn from_generator(state: Box<crate::heap_value::GeneratorState>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Generator(state))
-    }
-
-    // ===== Async / concurrency constructors =====
-
-    /// Create a ValueWord Future directly.
-    #[inline]
-    fn from_future(id: u64) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Future(id))
-    }
-
-    /// Create a ValueWord TaskGroup directly.
     #[inline]
     fn from_task_group(kind: u8, task_ids: Vec<u64>) -> ValueWord {
         ValueWord::heap_box(HeapValue::TaskGroup { kind, task_ids })
     }
-
-    /// Create a ValueWord Mutex wrapping a value.
     #[inline]
     fn from_mutex(value: ValueWord) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Mutex(Box::new(
-            crate::heap_value::MutexData::new(value),
-        )))
+        ValueWord::heap_box(HeapValue::Mutex(Box::new(crate::heap_value::MutexData::new(value))))
     }
-
-    /// Create a ValueWord Atomic with an initial integer value.
     #[inline]
     fn from_atomic(value: i64) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Atomic(Box::new(
-            crate::heap_value::AtomicData::new(value),
-        )))
+        ValueWord::heap_box(HeapValue::Atomic(Box::new(crate::heap_value::AtomicData::new(value))))
     }
-
-    /// Create a ValueWord Lazy with an initializer closure.
     #[inline]
     fn from_lazy(initializer: ValueWord) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Lazy(Box::new(crate::heap_value::LazyData::new(
-            initializer,
-        ))))
+        ValueWord::heap_box(HeapValue::Lazy(Box::new(crate::heap_value::LazyData::new(initializer))))
     }
-
-    /// Create a ValueWord Channel endpoint.
-    #[inline]
-    fn from_channel(data: ChannelData) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Channel(Box::new(data)))
-    }
-
-    // ===== Trait dispatch constructors =====
-
-    /// Create a ValueWord TraitObject directly.
     #[inline]
     fn from_trait_object(value: ValueWord, vtable: Arc<VTable>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::TraitObject {
-            value: Box::new(value),
-            vtable,
-        })
+        ValueWord::heap_box(HeapValue::TraitObject { value: Box::new(value), vtable })
     }
-
-    // ===== SQL pushdown constructors =====
-
-    /// Create a ValueWord ExprProxy directly.
-    #[inline]
-    fn from_expr_proxy(col_name: Arc<String>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::ExprProxy(col_name))
-    }
-
-    /// Create a ValueWord FilterExpr directly.
-    #[inline]
-    fn from_filter_expr(node: Arc<FilterNode>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::FilterExpr(node))
-    }
-
-    // ===== Instant constructors =====
-
-    /// Create a ValueWord Instant directly.
-    #[inline]
-    fn from_instant(t: std::time::Instant) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Instant(Box::new(t)))
-    }
-
-    // ===== IoHandle constructors =====
-
-    /// Create a ValueWord IoHandle.
-    #[inline]
-    fn from_io_handle(data: crate::heap_value::IoHandleData) -> ValueWord {
-        ValueWord::heap_box(HeapValue::IoHandle(Box::new(data)))
-    }
-
-    // ===== Time constructors =====
-
-    /// Create a ValueWord Time directly from a DateTime<FixedOffset>.
-    #[inline]
-    fn from_time(t: DateTime<FixedOffset>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Time(t))
-    }
-
-    /// Create a ValueWord Time from a DateTime<Utc> (converts to FixedOffset).
     #[inline]
     fn from_time_utc(t: DateTime<Utc>) -> ValueWord {
         ValueWord::heap_box(HeapValue::Time(t.fixed_offset()))
     }
-
-    /// Create a ValueWord Duration directly.
-    #[inline]
-    fn from_duration(d: Duration) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Duration(d))
-    }
-
-    /// Create a ValueWord TimeSpan directly.
-    #[inline]
-    fn from_timespan(ts: chrono::Duration) -> ValueWord {
-        ValueWord::heap_box(HeapValue::TimeSpan(ts))
-    }
-
-    /// Create a ValueWord Timeframe directly.
-    #[inline]
-    fn from_timeframe(tf: Timeframe) -> ValueWord {
-        ValueWord::heap_box(HeapValue::Timeframe(tf))
-    }
-
-    // ===== Other constructors =====
-
-    /// Create a ValueWord HostClosure directly.
-    #[inline]
-    fn from_host_closure(nc: HostCallable) -> ValueWord {
-        ValueWord::heap_box(HeapValue::HostClosure(nc))
-    }
-
-    /// Create a ValueWord PrintResult directly.
-    #[inline]
-    fn from_print_result(pr: PrintResult) -> ValueWord {
-        ValueWord::heap_box(HeapValue::PrintResult(Box::new(pr)))
-    }
-
-    /// Create a ValueWord SimulationCall directly.
     #[inline]
     fn from_simulation_call(name: String, params: HashMap<String, ValueWord>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::SimulationCall(Box::new(
-            crate::heap_value::SimulationCallData { name, params },
-        )))
+        ValueWord::heap_box(HeapValue::SimulationCall(Box::new(crate::heap_value::SimulationCallData { name, params })))
     }
-
-    /// Create a ValueWord FunctionRef directly.
     #[inline]
     fn from_function_ref(name: String, closure: Option<ValueWord>) -> ValueWord {
-        ValueWord::heap_box(HeapValue::FunctionRef {
-            name,
-            closure: closure.map(Box::new),
-        })
+        ValueWord::heap_box(HeapValue::FunctionRef { name, closure: closure.map(Box::new) })
     }
-
-    /// Create a ValueWord DataReference directly.
     #[inline]
-    fn from_data_reference(
-        datetime: DateTime<FixedOffset>,
-        id: String,
-        timeframe: Timeframe,
-    ) -> ValueWord {
-        ValueWord::heap_box(HeapValue::DataReference(Box::new(
-            crate::heap_value::DataReferenceData {
-                datetime,
-                id,
-                timeframe,
-            },
-        )))
+    fn from_data_reference(datetime: DateTime<FixedOffset>, id: String, timeframe: Timeframe) -> ValueWord {
+        ValueWord::heap_box(HeapValue::DataReference(Box::new(crate::heap_value::DataReferenceData { datetime, id, timeframe })))
     }
-
-    /// Create a ValueWord TimeReference directly.
-    #[inline]
-    fn from_time_reference(tr: TimeReference) -> ValueWord {
-        ValueWord::heap_box(HeapValue::TimeReference(Box::new(tr)))
-    }
-
-    /// Create a ValueWord DateTimeExpr directly.
-    #[inline]
-    fn from_datetime_expr(de: DateTimeExpr) -> ValueWord {
-        ValueWord::heap_box(HeapValue::DateTimeExpr(Box::new(de)))
-    }
-
-    /// Create a ValueWord DataDateTimeRef directly.
-    #[inline]
-    fn from_data_datetime_ref(dr: DataDateTimeRef) -> ValueWord {
-        ValueWord::heap_box(HeapValue::DataDateTimeRef(Box::new(dr)))
-    }
-
-    /// Create a ValueWord TypeAnnotation directly.
-    #[inline]
-    fn from_type_annotation(ta: TypeAnnotation) -> ValueWord {
-        ValueWord::heap_box(HeapValue::TypeAnnotation(Box::new(ta)))
-    }
-
-    /// Create a ValueWord TypeAnnotatedValue directly.
     #[inline]
     fn from_type_annotated_value(type_name: String, value: ValueWord) -> ValueWord {
-        ValueWord::heap_box(HeapValue::TypeAnnotatedValue {
-            type_name,
-            value: Box::new(value),
-        })
+        ValueWord::heap_box(HeapValue::TypeAnnotatedValue { type_name, value: Box::new(value) })
     }
 
-    /// Create a ValueWord by "cloning" from raw bits.
-    /// Bumps the Arc refcount for heap-tagged values.
+    // ===== Cloning =====
+
     #[inline(always)]
     #[cfg(not(feature = "gc"))]
     unsafe fn clone_from_bits(bits: u64) -> ValueWord {
@@ -1029,7 +668,6 @@ impl ValueWordExt for u64 {
         }
         bits
     }
-    /// Create a ValueWord by "cloning" from raw bits (GC variant — no refcount bump needed).
     #[inline(always)]
     #[cfg(feature = "gc")]
     unsafe fn clone_from_bits(bits: u64) -> ValueWord {
@@ -1038,55 +676,18 @@ impl ValueWordExt for u64 {
 
     // ===== Type checks =====
 
-    /// Returns true if this value is an inline f64 (not a tagged value).
-    #[inline(always)]
-    fn is_f64(&self) -> bool {
-        !is_tagged(*self)
-    }
+    #[inline(always)] fn is_f64(&self) -> bool { !is_tagged(*self) }
+    #[inline(always)] fn is_i64(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_INT }
+    #[inline(always)] fn is_bool(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_BOOL }
+    #[inline(always)] fn is_none(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_NONE }
+    #[inline(always)] fn is_unit(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_UNIT }
+    #[inline(always)] fn is_function(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_FUNCTION }
+    #[inline(always)] fn is_heap(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_HEAP }
 
-    /// Returns true if this value is an inline i48 integer.
-    #[inline(always)]
-    fn is_i64(&self) -> bool {
-        is_tagged(*self) && get_tag(*self) == TAG_INT
-    }
-
-    /// Returns true if this value is a bool.
-    #[inline(always)]
-    fn is_bool(&self) -> bool {
-        is_tagged(*self) && get_tag(*self) == TAG_BOOL
-    }
-
-    /// Returns true if this value is None.
-    #[inline(always)]
-    fn is_none(&self) -> bool {
-        is_tagged(*self) && get_tag(*self) == TAG_NONE
-    }
-
-    /// Returns true if this value is Unit.
-    #[inline(always)]
-    fn is_unit(&self) -> bool {
-        is_tagged(*self) && get_tag(*self) == TAG_UNIT
-    }
-
-    /// Returns true if this value is a function reference.
-    #[inline(always)]
-    fn is_function(&self) -> bool {
-        is_tagged(*self) && get_tag(*self) == TAG_FUNCTION
-    }
-
-    /// Returns true if this value is a heap-boxed HeapValue.
-    #[inline(always)]
-    fn is_heap(&self) -> bool {
-        is_tagged(*self) && get_tag(*self) == TAG_HEAP
-    }
-
-    /// Returns true if this value is a stack reference.
     #[inline(always)]
     fn is_ref(&self) -> bool {
-        if is_tagged(*self) {
-            return get_tag(*self) == TAG_REF;
-        }
-        matches!(self.as_heap_ref(), Some(HeapValue::ProjectedRef(_)))
+        if is_tagged(*self) { get_tag(*self) == TAG_REF }
+        else { matches!(self.as_heap_ref(), Some(HeapValue::ProjectedRef(_))) }
     }
 
     /// Extract the reference target.
@@ -1199,97 +800,47 @@ impl ValueWordExt for u64 {
         None
     }
 
-    /// Extract as bool, returning None if this is not a bool.
     #[inline]
     fn as_bool(&self) -> Option<bool> {
-        if self.is_bool() {
-            Some(get_payload(*self) != 0)
-        } else {
-            None
-        }
+        if self.is_bool() { Some(get_payload(*self) != 0) } else { None }
     }
-
-    /// Extract as function ID, returning None if this is not a function.
     #[inline]
     fn as_function_id(&self) -> Option<u16> {
-        if self.is_function() {
-            Some(get_payload(*self) as u16)
-        } else {
-            None
-        }
+        if self.is_function() { Some(get_payload(*self) as u16) } else { None }
     }
 
-    // ===== Unchecked extractors (for hot paths where the compiler guarantees type) =====
+    // ===== Unchecked extractors (hot paths, caller guarantees type) =====
 
-    /// Extract f64 without type checking.
-    /// Safely handles inline i48 ints via lossless coercion.
-    ///
-    /// # Safety
-    /// Caller must ensure the value is numeric (f64 or i48).
+    /// # Safety: caller must ensure the value is numeric (f64 or i48).
     #[inline(always)]
     unsafe fn as_f64_unchecked(&self) -> f64 {
-        if self.is_f64() {
-            f64::from_bits(*self)
-        } else if is_tagged(*self) && get_tag(*self) == TAG_INT {
-            sign_extend_i48(get_payload(*self)) as f64
-        } else {
-            debug_assert!(false, "as_f64_unchecked on non-numeric ValueWord");
-            0.0
-        }
+        if self.is_f64() { f64::from_bits(*self) }
+        else if is_tagged(*self) && get_tag(*self) == TAG_INT { sign_extend_i48(get_payload(*self)) as f64 }
+        else { debug_assert!(false, "as_f64_unchecked on non-numeric"); 0.0 }
     }
-
-    /// Extract i64 without type checking.
-    /// Safely handles f64 values via truncation.
-    ///
-    /// # Safety
-    /// Caller must ensure the value is numeric (i48 or f64).
+    /// # Safety: caller must ensure the value is numeric (i48 or f64).
     #[inline(always)]
     unsafe fn as_i64_unchecked(&self) -> i64 {
-        if is_tagged(*self) && get_tag(*self) == TAG_INT {
-            sign_extend_i48(get_payload(*self))
-        } else if self.is_f64() {
-            f64::from_bits(*self) as i64
-        } else {
-            debug_assert!(false, "as_i64_unchecked on non-numeric ValueWord");
-            0
-        }
+        if is_tagged(*self) && get_tag(*self) == TAG_INT { sign_extend_i48(get_payload(*self)) }
+        else if self.is_f64() { f64::from_bits(*self) as i64 }
+        else { debug_assert!(false, "as_i64_unchecked on non-numeric"); 0 }
     }
-
-    /// Extract bool without type checking.
-    ///
-    /// # Safety
-    /// Caller must ensure `self.is_bool()` is true.
+    /// # Safety: caller must ensure `self.is_bool()`.
     #[inline(always)]
     unsafe fn as_bool_unchecked(&self) -> bool {
-        debug_assert!(self.is_bool(), "as_bool_unchecked on non-bool ValueWord");
-        get_payload(*self) != 0
+        debug_assert!(self.is_bool()); get_payload(*self) != 0
     }
-
-    /// Extract function ID without type checking.
-    ///
-    /// # Safety
-    /// Caller must ensure `self.is_function()` is true.
+    /// # Safety: caller must ensure `self.is_function()`.
     #[inline(always)]
     unsafe fn as_function_unchecked(&self) -> u16 {
-        debug_assert!(
-            self.is_function(),
-            "as_function_unchecked on non-function ValueWord"
-        );
-        get_payload(*self) as u16
+        debug_assert!(self.is_function()); get_payload(*self) as u16
     }
 
-    // ===== ValueWord inspection API =====
-
-    /// Get a reference to the heap-boxed HeapValue without cloning.
-    /// Returns None if this is not a heap value.
     #[inline]
     fn as_heap_ref(&self) -> Option<&HeapValue> {
         if is_tagged(*self) && get_tag(*self) == TAG_HEAP {
-            let ptr = get_payload(*self) as *const HeapValue;
-            Some(unsafe { &*ptr })
-        } else {
-            None
-        }
+            Some(unsafe { &*(get_payload(*self) as *const HeapValue) })
+        } else { None }
     }
 
     /// Get a mutable reference to the heap-boxed HeapValue, cloning if shared.
@@ -1336,88 +887,42 @@ impl ValueWordExt for u64 {
         nan_tag_is_truthy(tag, get_payload(*self))
     }
 
-    /// Extract as f64 using safe coercion.
-    ///
-    /// This accepts:
-    /// - explicit floating-point values (`number`, `f32`)
-    /// - inline `int` values (`i48`)
-    ///
-    /// It intentionally does not coerce `BigInt`, `i64`, or `u64`
-    /// native scalars into `f64` to avoid lossy conversion.
     #[inline]
     fn as_number_coerce(&self) -> Option<f64> {
-        if let Some(n) = self.as_number_strict() {
-            Some(n)
-        } else if is_tagged(*self) && get_tag(*self) == TAG_INT {
-            Some(sign_extend_i48(get_payload(*self)) as f64)
-        } else {
-            None
-        }
+        self.as_number_strict()
+            .or_else(|| if is_tagged(*self) && get_tag(*self) == TAG_INT { Some(sign_extend_i48(get_payload(*self)) as f64) } else { None })
     }
 
-    /// Check if this ValueWord is a module function tag.
-    #[inline(always)]
-    fn is_module_function(&self) -> bool {
-        is_tagged(*self) && get_tag(*self) == TAG_MODULE_FN
-    }
-
-    /// Extract module function index.
+    #[inline(always)] fn is_module_function(&self) -> bool { is_tagged(*self) && get_tag(*self) == TAG_MODULE_FN }
     #[inline]
     fn as_module_function(&self) -> Option<usize> {
-        if self.is_module_function() {
-            Some(get_payload(*self) as usize)
-        } else {
-            None
-        }
+        if self.is_module_function() { Some(get_payload(*self) as usize) } else { None }
     }
 
-    // ===== HeapValue inspection =====
+    // ===== Macro-generated extractors =====
 
-    /// Get the HeapKind discriminator without cloning.
-    /// Returns None if this is not a heap value.
+    define_heap_ref_extractors!(heap_ref_extractors_impl);
+    define_heap_deref_extractors!(heap_deref_extractors_impl);
+    define_heap_copy_extractors!(heap_copy_extractors_impl);
+    define_heap_mut_extractors!(heap_mut_extractors_impl);
+
+    // ===== Hand-written extractors (non-trivial) =====
+
     #[inline]
     fn heap_kind(&self) -> Option<crate::heap_value::HeapKind> {
-        if let Some(hv) = self.as_heap_ref() {
-            Some(hv.kind())
-        } else {
-            std::option::Option::None
-        }
+        self.as_heap_ref().map(|hv| hv.kind())
     }
 
-    // ===== Phase 2A: Extended inspection API =====
-
-    /// Get a reference to a heap String without cloning.
-    /// Returns None if this is not a heap-boxed String.
     #[inline]
     fn as_str(&self) -> Option<&str> {
-        if let Some(hv) = self.as_heap_ref() {
-            match hv {
-                HeapValue::String(s) => Some(s.as_str()),
-                _ => std::option::Option::None,
-            }
-        } else {
-            std::option::Option::None
-        }
+        match self.as_heap_ref()? { HeapValue::String(s) => Some(s.as_str()), _ => None }
     }
 
-    /// Extract a Decimal from a heap-boxed Decimal value.
-    /// Returns None if this is not a heap-boxed Decimal.
     #[inline]
     fn as_decimal(&self) -> Option<rust_decimal::Decimal> {
-        if let Some(hv) = self.as_heap_ref() {
-            match hv {
-                HeapValue::Decimal(d) => Some(*d),
-                _ => std::option::Option::None,
-            }
-        } else {
-            std::option::Option::None
-        }
+        match self.as_heap_ref()? { HeapValue::Decimal(d) => Some(*d), _ => None }
     }
 
-    /// Extract a Decimal without type checking.
-    ///
-    /// # Safety
-    /// Caller must ensure this is a heap-boxed Decimal value.
     #[inline(always)]
     unsafe fn as_decimal_unchecked(&self) -> rust_decimal::Decimal {
         debug_assert!(matches!(self.as_heap_ref(), Some(HeapValue::Decimal(_))));
@@ -1427,21 +932,11 @@ impl ValueWordExt for u64 {
         }
     }
 
-    /// Get a reference to a heap Array without cloning.
-    /// Returns None if this is not a heap-boxed Array.
     #[inline]
     fn as_array(&self) -> Option<&VMArray> {
-        if let Some(hv) = self.as_heap_ref() {
-            match hv {
-                HeapValue::Array(arr) => Some(arr),
-                _ => std::option::Option::None,
-            }
-        } else {
-            std::option::Option::None
-        }
+        match self.as_heap_ref()? { HeapValue::Array(arr) => Some(arr), _ => None }
     }
 
-    /// Get a unified read-only view over any array variant (Generic, Int, Float, Bool, width-specific).
     #[inline]
     fn as_any_array(&self) -> Option<ArrayView<'_>> {
         match self.as_heap_ref()? {
@@ -1461,7 +956,6 @@ impl ValueWordExt for u64 {
         }
     }
 
-    /// Get a unified mutable view over any array variant. Uses Arc::make_mut for COW.
     #[inline]
     fn as_any_array_mut(&mut self) -> Option<ArrayViewMut<'_>> {
         match self.as_heap_mut()? {
@@ -1473,137 +967,57 @@ impl ValueWordExt for u64 {
         }
     }
 
-    // ===== HeapValue extractors for new variants =====
-
-    /// Extract a reference to a DataTable.
-    #[inline]
-    fn as_datatable(&self) -> Option<&Arc<DataTable>> {
-        match self.as_heap_ref()? {
-            HeapValue::DataTable(dt) => Some(dt),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract TypedTable fields.
     #[inline]
     fn as_typed_table(&self) -> Option<(u64, &Arc<DataTable>)> {
         match self.as_heap_ref()? {
             HeapValue::TypedTable { schema_id, table } => Some((*schema_id, table)),
-            _ => std::option::Option::None,
+            _ => None,
         }
     }
-
-    /// Extract RowView fields.
     #[inline]
     fn as_row_view(&self) -> Option<(u64, &Arc<DataTable>, usize)> {
         match self.as_heap_ref()? {
-            HeapValue::RowView {
-                schema_id,
-                table,
-                row_idx,
-            } => Some((*schema_id, table, *row_idx)),
-            _ => std::option::Option::None,
+            HeapValue::RowView { schema_id, table, row_idx } => Some((*schema_id, table, *row_idx)),
+            _ => None,
         }
     }
-
-    /// Extract ColumnRef fields.
     #[inline]
     fn as_column_ref(&self) -> Option<(u64, &Arc<DataTable>, u32)> {
         match self.as_heap_ref()? {
-            HeapValue::ColumnRef {
-                schema_id,
-                table,
-                col_id,
-            } => Some((*schema_id, table, *col_id)),
-            _ => std::option::Option::None,
+            HeapValue::ColumnRef { schema_id, table, col_id } => Some((*schema_id, table, *col_id)),
+            _ => None,
         }
     }
-
-    /// Extract IndexedTable fields.
     #[inline]
     fn as_indexed_table(&self) -> Option<(u64, &Arc<DataTable>, u32)> {
         match self.as_heap_ref()? {
-            HeapValue::IndexedTable {
-                schema_id,
-                table,
-                index_col,
-            } => Some((*schema_id, table, *index_col)),
-            _ => std::option::Option::None,
+            HeapValue::IndexedTable { schema_id, table, index_col } => Some((*schema_id, table, *index_col)),
+            _ => None,
         }
     }
-
-    /// Extract TypedObject fields (schema_id, slots, heap_mask).
     #[inline]
     fn as_typed_object(&self) -> Option<(u64, &[ValueSlot], u64)> {
         match self.as_heap_ref()? {
-            HeapValue::TypedObject {
-                schema_id,
-                slots,
-                heap_mask,
-            } => Some((*schema_id, slots, *heap_mask)),
-            _ => std::option::Option::None,
+            HeapValue::TypedObject { schema_id, slots, heap_mask } => Some((*schema_id, slots, *heap_mask)),
+            _ => None,
         }
     }
-
-    /// Extract Closure fields (function_id, upvalues).
     #[inline]
     fn as_closure(&self) -> Option<(u16, &[crate::value::Upvalue])> {
         match self.as_heap_ref()? {
-            HeapValue::Closure {
-                function_id,
-                upvalues,
-            } => Some((*function_id, upvalues)),
-            _ => std::option::Option::None,
+            HeapValue::Closure { function_id, upvalues } => Some((*function_id, upvalues)),
+            _ => None,
         }
     }
 
-    /// Extract the inner value from a Some variant.
-    #[inline]
-    fn as_some_inner(&self) -> Option<&ValueWord> {
-        match self.as_heap_ref()? {
-            HeapValue::Some(inner) => Some(inner),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract the inner value from an Ok variant.
-    #[inline]
-    fn as_ok_inner(&self) -> Option<&ValueWord> {
-        match self.as_heap_ref()? {
-            HeapValue::Ok(inner) => Some(inner),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract the inner value from an Err variant.
-    #[inline]
-    fn as_err_inner(&self) -> Option<&ValueWord> {
-        match self.as_heap_ref()? {
-            HeapValue::Err(inner) => Some(inner),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract the original payload from an Err variant, unwrapping AnyError
-    /// normalization if present.
-    ///
-    /// When `Err(x)` is constructed at runtime, `x` is wrapped in an AnyError
-    /// TypedObject (slot layout: [category, payload, cause, trace, message, code]).
-    /// This method detects that wrapper and returns the original payload from
-    /// slot 1 rather than the full AnyError struct.
     fn as_err_payload(&self) -> Option<ValueWord> {
         let inner = match self.as_heap_ref()? {
             HeapValue::Err(inner) => inner.as_ref(),
-            _ => return std::option::Option::None,
+            _ => return None,
         };
-        // Check if inner is an AnyError TypedObject: slot 0 is "AnyError" string
-        if let Some(HeapValue::TypedObject {
-            slots, heap_mask, ..
-        }) = inner.as_heap_ref()
-        {
+        if let Some(HeapValue::TypedObject { slots, heap_mask, .. }) = inner.as_heap_ref() {
             const PAYLOAD_SLOT: usize = 1;
             if slots.len() >= 6 && *heap_mask & 1 != 0 {
-                // Verify slot 0 is the "AnyError" category string
                 let cat = slots[0].as_heap_value();
                 if let HeapValue::String(s) = cat {
                     if s.as_str() == "AnyError" && PAYLOAD_SLOT < slots.len() {
@@ -1613,286 +1027,43 @@ impl ValueWordExt for u64 {
                 }
             }
         }
-        // Not an AnyError wrapper — return inner directly
         Some(inner.clone())
     }
 
-    /// Extract a Future ID.
     #[inline]
     fn as_future(&self) -> Option<u64> {
-        match self.as_heap_ref()? {
-            HeapValue::Future(id) => Some(*id),
-            _ => std::option::Option::None,
-        }
+        match self.as_heap_ref()? { HeapValue::Future(id) => Some(*id), _ => None }
     }
-
-    /// Extract TraitObject fields.
     #[inline]
     fn as_trait_object(&self) -> Option<(&ValueWord, &Arc<VTable>)> {
         match self.as_heap_ref()? {
             HeapValue::TraitObject { value, vtable } => Some((value, vtable)),
-            _ => std::option::Option::None,
+            _ => None,
         }
     }
-
-    /// Extract ExprProxy column name.
-    #[inline]
-    fn as_expr_proxy(&self) -> Option<&Arc<String>> {
-        match self.as_heap_ref()? {
-            HeapValue::ExprProxy(name) => Some(name),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract FilterExpr node.
-    #[inline]
-    fn as_filter_expr(&self) -> Option<&Arc<FilterNode>> {
-        match self.as_heap_ref()? {
-            HeapValue::FilterExpr(node) => Some(node),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a HostClosure reference.
-    #[inline]
-    fn as_host_closure(&self) -> Option<&HostCallable> {
-        match self.as_heap_ref()? {
-            HeapValue::HostClosure(nc) => Some(nc),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a Duration reference.
-    #[inline]
-    fn as_duration(&self) -> Option<&shape_ast::ast::Duration> {
-        match self.as_heap_ref()? {
-            HeapValue::Duration(d) => Some(d),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a Range (start, end, inclusive).
     #[inline]
     fn as_range(&self) -> Option<(Option<&ValueWord>, Option<&ValueWord>, bool)> {
         match self.as_heap_ref()? {
-            HeapValue::Range {
-                start,
-                end,
-                inclusive,
-            } => Some((
+            HeapValue::Range { start, end, inclusive } => Some((
                 start.as_ref().map(|b| b.as_ref()),
                 end.as_ref().map(|b| b.as_ref()),
                 *inclusive,
             )),
-            _ => std::option::Option::None,
+            _ => None,
         }
     }
-
-    /// Extract a TimeSpan (chrono::Duration).
     #[inline]
-    fn as_timespan(&self) -> Option<chrono::Duration> {
-        match self.as_heap_ref()? {
-            HeapValue::TimeSpan(ts) => Some(*ts),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a Timeframe reference.
-    #[inline]
-    fn as_timeframe(&self) -> Option<&Timeframe> {
-        match self.as_heap_ref()? {
-            HeapValue::Timeframe(tf) => Some(tf),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Get the HashMap contents if this is a HashMap.
-    #[inline]
-    fn as_hashmap(
-        &self,
-    ) -> Option<(&Vec<ValueWord>, &Vec<ValueWord>, &HashMap<u64, Vec<usize>>)> {
+    fn as_hashmap(&self) -> Option<(&Vec<ValueWord>, &Vec<ValueWord>, &HashMap<u64, Vec<usize>>)> {
         match self.as_heap_ref()? {
             HeapValue::HashMap(d) => Some((&d.keys, &d.values, &d.index)),
-            _ => std::option::Option::None,
+            _ => None,
         }
     }
-
-    /// Get read-only access to the full HashMapData (includes shape_id).
     #[inline]
     fn as_hashmap_data(&self) -> Option<&HashMapData> {
-        match self.as_heap_ref()? {
-            HeapValue::HashMap(d) => Some(d),
-            _ => std::option::Option::None,
-        }
+        match self.as_heap_ref()? { HeapValue::HashMap(d) => Some(d), _ => None }
     }
 
-    /// Get mutable access to the HashMapData.
-    /// Uses copy-on-write via `as_heap_mut()` (clones if Arc refcount > 1).
-    #[inline]
-    fn as_hashmap_mut(&mut self) -> Option<&mut HashMapData> {
-        match self.as_heap_mut()? {
-            HeapValue::HashMap(d) => Some(d),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Get mutable access to the SetData.
-    #[inline]
-    fn as_set_mut(&mut self) -> Option<&mut SetData> {
-        match self.as_heap_mut()? {
-            HeapValue::Set(d) => Some(d),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Get mutable access to the DequeData.
-    #[inline]
-    fn as_deque_mut(&mut self) -> Option<&mut DequeData> {
-        match self.as_heap_mut()? {
-            HeapValue::Deque(d) => Some(d),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Get mutable access to the PriorityQueueData.
-    #[inline]
-    fn as_priority_queue_mut(&mut self) -> Option<&mut PriorityQueueData> {
-        match self.as_heap_mut()? {
-            HeapValue::PriorityQueue(d) => Some(d),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a ContentNode reference.
-    #[inline]
-    fn as_content(&self) -> Option<&ContentNode> {
-        match self.as_heap_ref()? {
-            HeapValue::Content(node) => Some(node),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a DateTime<FixedOffset>.
-    #[inline]
-    fn as_time(&self) -> Option<DateTime<FixedOffset>> {
-        match self.as_heap_ref()? {
-            HeapValue::Time(t) => Some(*t),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a reference to the Instant.
-    #[inline]
-    fn as_instant(&self) -> Option<&std::time::Instant> {
-        match self.as_heap_ref()? {
-            HeapValue::Instant(t) => Some(t.as_ref()),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a reference to the IoHandleData.
-    #[inline]
-    fn as_io_handle(&self) -> Option<&crate::heap_value::IoHandleData> {
-        match self.as_heap_ref()? {
-            HeapValue::IoHandle(data) => Some(data.as_ref()),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a width-aware native scalar value.
-    #[inline]
-    fn as_native_scalar(&self) -> Option<NativeScalar> {
-        match self.as_heap_ref()? {
-            HeapValue::NativeScalar(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    /// Extract a pointer-backed native view.
-    #[inline]
-    fn as_native_view(&self) -> Option<&NativeViewData> {
-        match self.as_heap_ref()? {
-            HeapValue::NativeView(view) => Some(view.as_ref()),
-            _ => None,
-        }
-    }
-
-    /// Extract a reference to the DateTime<FixedOffset>.
-    #[inline]
-    fn as_datetime(&self) -> Option<&DateTime<FixedOffset>> {
-        match self.as_heap_ref()? {
-            HeapValue::Time(t) => Some(t),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract an Arc<String> from a heap String.
-    #[inline]
-    fn as_arc_string(&self) -> Option<&Arc<String>> {
-        match self.as_heap_ref()? {
-            HeapValue::String(s) => Some(s),
-            _ => std::option::Option::None,
-        }
-    }
-
-    // ===== Typed collection accessors =====
-
-    /// Extract a reference to an IntArray.
-    #[inline]
-    fn as_int_array(&self) -> Option<&Arc<crate::typed_buffer::TypedBuffer<i64>>> {
-        match self.as_heap_ref()? {
-            HeapValue::IntArray(a) => Some(a),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a reference to a FloatArray.
-    #[inline]
-    fn as_float_array(&self) -> Option<&Arc<crate::typed_buffer::AlignedTypedBuffer>> {
-        match self.as_heap_ref()? {
-            HeapValue::FloatArray(a) => Some(a),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a reference to a BoolArray.
-    #[inline]
-    fn as_bool_array(&self) -> Option<&Arc<crate::typed_buffer::TypedBuffer<u8>>> {
-        match self.as_heap_ref()? {
-            HeapValue::BoolArray(a) => Some(a),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a reference to MatrixData.
-    #[inline]
-    fn as_matrix(&self) -> Option<&crate::heap_value::MatrixData> {
-        match self.as_heap_ref()? {
-            HeapValue::Matrix(m) => Some(m.as_ref()),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a reference to IteratorState.
-    #[inline]
-    fn as_iterator(&self) -> Option<&crate::heap_value::IteratorState> {
-        match self.as_heap_ref()? {
-            HeapValue::Iterator(it) => Some(it.as_ref()),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Extract a reference to GeneratorState.
-    #[inline]
-    fn as_generator(&self) -> Option<&crate::heap_value::GeneratorState> {
-        match self.as_heap_ref()? {
-            HeapValue::Generator(g) => Some(g.as_ref()),
-            _ => std::option::Option::None,
-        }
-    }
-
-    /// Get the length of a typed array (IntArray, FloatArray, BoolArray, width-specific).
-    /// Returns None for non-typed-array values.
     #[inline]
     fn typed_array_len(&self) -> Option<usize> {
         match self.as_heap_ref()? {
@@ -1907,51 +1078,36 @@ impl ValueWordExt for u64 {
             HeapValue::U32Array(a) => Some(a.len()),
             HeapValue::U64Array(a) => Some(a.len()),
             HeapValue::F32Array(a) => Some(a.len()),
-            _ => std::option::Option::None,
+            _ => None,
         }
     }
 
-    /// Coerce a typed array to a FloatArray (zero-copy for FloatArray, convert for IntArray).
     fn coerce_to_float_array(&self) -> Option<Arc<crate::typed_buffer::AlignedTypedBuffer>> {
         match self.as_heap_ref()? {
             HeapValue::FloatArray(a) => Some(Arc::clone(a)),
             HeapValue::IntArray(a) => {
                 let mut buf = crate::typed_buffer::AlignedTypedBuffer::with_capacity(a.len());
-                for &v in a.iter() {
-                    buf.push(v as f64);
-                }
+                for &v in a.iter() { buf.push(v as f64); }
                 Some(Arc::new(buf))
             }
-            _ => std::option::Option::None,
+            _ => None,
         }
     }
 
-    /// Convert a typed array to a generic Array of ValueWord values.
     fn to_generic_array(&self) -> Option<crate::value::VMArray> {
-        // Generic Array path: hand back the existing Arc<Vec<ValueWord>>.
         if let Some(HeapValue::Array(arc)) = self.as_heap_ref() {
             return Some(arc.clone());
         }
         match self.as_heap_ref()? {
-            HeapValue::IntArray(a) => Some(Arc::new(
-                a.iter().map(|&v| ValueWord::from_i64(v)).collect(),
-            )),
-            HeapValue::FloatArray(a) => Some(Arc::new(
-                a.iter().map(|&v| ValueWord::from_f64(v)).collect(),
-            )),
-            HeapValue::BoolArray(a) => Some(Arc::new(
-                a.iter().map(|&v| ValueWord::from_bool(v != 0)).collect(),
-            )),
-            _ => std::option::Option::None,
+            HeapValue::IntArray(a) => Some(Arc::new(a.iter().map(|&v| ValueWord::from_i64(v)).collect())),
+            HeapValue::FloatArray(a) => Some(Arc::new(a.iter().map(|&v| ValueWord::from_f64(v)).collect())),
+            HeapValue::BoolArray(a) => Some(Arc::new(a.iter().map(|&v| ValueWord::from_bool(v != 0)).collect())),
+            _ => None,
         }
     }
 
-    /// Backwards-compat shim for tests that previously used `to_array_arc`.
-    /// Forwards to [`to_generic_array`] which now handles all array variants.
     #[inline]
-    fn to_array_arc(&self) -> Option<crate::value::VMArray> {
-        self.to_generic_array()
-    }
+    fn to_array_arc(&self) -> Option<crate::value::VMArray> { self.to_generic_array() }
 
     /// Fast equality comparison without materializing HeapValue.
     /// For inline types (f64, i48, bool, none, unit, function), compares bits directly.
@@ -2005,79 +1161,39 @@ impl ValueWordExt for u64 {
     fn vw_hash(&self) -> u64 {
         use ahash::AHasher;
         use std::hash::{Hash, Hasher};
+        #[inline]
+        fn ahash<H: Hash>(v: &H) -> u64 { let mut h = AHasher::default(); v.hash(&mut h); h.finish() }
 
         let bits = *self;
         if !is_tagged(bits) {
             let f = unsafe { self.as_f64_unchecked() };
-            let fb = if f == 0.0 { 0u64 } else { f.to_bits() };
-            let mut hasher = AHasher::default();
-            fb.hash(&mut hasher);
-            return hasher.finish();
+            return ahash(&if f == 0.0 { 0u64 } else { f.to_bits() });
         }
         let tag = get_tag(bits);
-        if tag == TAG_INT {
-            let i = unsafe { self.as_i64_unchecked() };
-            let mut hasher = AHasher::default();
-            i.hash(&mut hasher);
-            return hasher.finish();
-        }
-        if tag == TAG_BOOL {
-            return if unsafe { self.as_bool_unchecked() } { 1 } else { 0 };
-        }
-        if tag == TAG_NONE {
-            return 0x_DEAD_0000;
-        }
-        if tag == TAG_UNIT {
-            return 0x_DEAD_0001;
-        }
-        if tag == TAG_HEAP {
-                if let Some(hv) = self.as_heap_ref() {
-                    match hv {
-                        HeapValue::String(s) => {
-                            let mut hasher = AHasher::default();
-                            s.hash(&mut hasher);
-                            hasher.finish()
-                        }
-                        HeapValue::BigInt(i) => {
-                            let mut hasher = AHasher::default();
-                            i.hash(&mut hasher);
-                            hasher.finish()
-                        }
-                        HeapValue::Decimal(d) => {
-                            let mut hasher = AHasher::default();
-                            d.mantissa().hash(&mut hasher);
-                            d.scale().hash(&mut hasher);
-                            hasher.finish()
-                        }
-                        HeapValue::NativeScalar(v) => {
-                            let mut hasher = AHasher::default();
-                            v.type_name().hash(&mut hasher);
-                            v.to_string().hash(&mut hasher);
-                            hasher.finish()
-                        }
-                        HeapValue::NativeView(v) => {
-                            let mut hasher = AHasher::default();
-                            v.ptr.hash(&mut hasher);
-                            v.layout.name.hash(&mut hasher);
-                            v.mutable.hash(&mut hasher);
-                            hasher.finish()
-                        }
-                        _ => {
-                            let mut hasher = AHasher::default();
-                            (*self).hash(&mut hasher);
-                            hasher.finish()
-                        }
-                    }
-                } else {
-                    let mut hasher = AHasher::default();
-                    (*self).hash(&mut hasher);
-                    hasher.finish()
+        match tag {
+            TAG_INT => ahash(&unsafe { self.as_i64_unchecked() }),
+            TAG_BOOL => if unsafe { self.as_bool_unchecked() } { 1 } else { 0 },
+            TAG_NONE => 0x_DEAD_0000,
+            TAG_UNIT => 0x_DEAD_0001,
+            TAG_HEAP => match self.as_heap_ref() {
+                Some(HeapValue::String(s)) => ahash(s.as_ref()),
+                Some(HeapValue::BigInt(i)) => ahash(i),
+                Some(HeapValue::Decimal(d)) => {
+                    let mut h = AHasher::default();
+                    d.mantissa().hash(&mut h); d.scale().hash(&mut h); h.finish()
                 }
-            } else {
-                let mut hasher = AHasher::default();
-                (*self).hash(&mut hasher);
-                hasher.finish()
-            }
+                Some(HeapValue::NativeScalar(v)) => {
+                    let mut h = AHasher::default();
+                    v.type_name().hash(&mut h); v.to_string().hash(&mut h); h.finish()
+                }
+                Some(HeapValue::NativeView(v)) => {
+                    let mut h = AHasher::default();
+                    v.ptr.hash(&mut h); v.layout.name.hash(&mut h); v.mutable.hash(&mut h); h.finish()
+                }
+                _ => ahash(&bits),
+            },
+            _ => ahash(&bits),
+        }
     }
 
     // ===== Arithmetic helpers (operate directly on bits, no conversion) =====
@@ -2192,21 +1308,8 @@ impl ValueWordExt for u64 {
         nan_tag_type_name(tag)
     }
 
-    // ===== Convenience aliases for common extraction patterns =====
-
-    /// Extract as f64, coercing i48 to f64 if needed.
-    /// Alias for `as_number_coerce()` — convenience method.
-    #[inline]
-    fn to_number(&self) -> Option<f64> {
-        self.as_number_coerce()
-    }
-
-    /// Extract as bool.
-    /// Alias for `as_bool()` — convenience method.
-    #[inline]
-    fn to_bool(&self) -> Option<bool> {
-        self.as_bool()
-    }
+    #[inline] fn to_number(&self) -> Option<f64> { self.as_number_coerce() }
+    #[inline] fn to_bool(&self) -> Option<bool> { self.as_bool() }
 
     /// Convert Int or Number to usize (for indexing operations).
     fn as_usize(&self) -> Option<usize> {
@@ -2325,79 +1428,44 @@ impl ValueWordExt for u64 {
             Some(HeapValue::PriorityQueue(d)) => {
                 serde_json::Value::Array(d.items.iter().map(|v| v.to_json_value()).collect())
             }
-            Some(HeapValue::NativeScalar(v)) => match v {
-                NativeScalar::I8(n) => serde_json::json!({ "type": "i8", "value": n }),
-                NativeScalar::U8(n) => serde_json::json!({ "type": "u8", "value": n }),
-                NativeScalar::I16(n) => serde_json::json!({ "type": "i16", "value": n }),
-                NativeScalar::U16(n) => serde_json::json!({ "type": "u16", "value": n }),
-                NativeScalar::I32(n) => serde_json::json!({ "type": "i32", "value": n }),
-                NativeScalar::U32(n) => serde_json::json!({ "type": "u32", "value": n }),
-                NativeScalar::I64(n) => {
-                    serde_json::json!({ "type": "i64", "value": n.to_string() })
-                }
-                NativeScalar::U64(n) => {
-                    serde_json::json!({ "type": "u64", "value": n.to_string() })
-                }
-                NativeScalar::Isize(n) => {
-                    serde_json::json!({ "type": "isize", "value": n.to_string() })
-                }
-                NativeScalar::Usize(n) => {
-                    serde_json::json!({ "type": "usize", "value": n.to_string() })
-                }
-                NativeScalar::Ptr(n) => {
-                    serde_json::json!({ "type": "ptr", "value": format!("0x{n:x}") })
-                }
-                NativeScalar::F32(n) => serde_json::json!({ "type": "f32", "value": n }),
-            },
+            Some(HeapValue::NativeScalar(v)) => {
+                let (ty, val): (&str, serde_json::Value) = match v {
+                    NativeScalar::I8(n) => ("i8", serde_json::json!(n)),
+                    NativeScalar::U8(n) => ("u8", serde_json::json!(n)),
+                    NativeScalar::I16(n) => ("i16", serde_json::json!(n)),
+                    NativeScalar::U16(n) => ("u16", serde_json::json!(n)),
+                    NativeScalar::I32(n) => ("i32", serde_json::json!(n)),
+                    NativeScalar::U32(n) => ("u32", serde_json::json!(n)),
+                    NativeScalar::I64(n) => ("i64", serde_json::json!(n.to_string())),
+                    NativeScalar::U64(n) => ("u64", serde_json::json!(n.to_string())),
+                    NativeScalar::Isize(n) => ("isize", serde_json::json!(n.to_string())),
+                    NativeScalar::Usize(n) => ("usize", serde_json::json!(n.to_string())),
+                    NativeScalar::Ptr(n) => ("ptr", serde_json::json!(format!("0x{n:x}"))),
+                    NativeScalar::F32(n) => ("f32", serde_json::json!(n)),
+                };
+                serde_json::json!({ "type": ty, "value": val })
+            }
             Some(HeapValue::NativeView(v)) => serde_json::json!({
                 "type": if v.mutable { "cmut" } else { "cview" },
                 "layout": v.layout.name,
                 "ptr": v.ptr,
             }),
             // Typed arrays — serialize as JSON arrays of their element values
-            Some(HeapValue::IntArray(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::FloatArray(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::BoolArray(buf)) => serde_json::Value::Array(
-                buf.data
-                    .iter()
-                    .map(|&v| serde_json::json!(v != 0))
-                    .collect(),
-            ),
-            Some(HeapValue::I8Array(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::I16Array(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::I32Array(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::U8Array(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::U16Array(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::U32Array(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::U64Array(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
-            Some(HeapValue::F32Array(buf)) => {
-                serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect())
-            }
+            Some(HeapValue::IntArray(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::FloatArray(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::BoolArray(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v != 0)).collect()),
+            Some(HeapValue::I8Array(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::I16Array(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::I32Array(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::U8Array(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::U16Array(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::U32Array(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::U64Array(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
+            Some(HeapValue::F32Array(buf)) => serde_json::Value::Array(buf.data.iter().map(|&v| serde_json::json!(v)).collect()),
             _ => serde_json::json!(format!("<{}>", self.type_name())),
         }
     }
 }
-
-
-
 
 
 
