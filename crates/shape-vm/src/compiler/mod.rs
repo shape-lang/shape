@@ -922,6 +922,21 @@ pub struct BytecodeCompiler {
 
     /// Monotonic counter for monomorphization specialization IDs.
     pub(crate) next_monomorphization_id: u64,
+
+    /// Phase C — running count of closure-aware specializations emitted in
+    /// the current module. When this exceeds
+    /// [`monomorphization::cache::DEFAULT_CLOSURE_SPECIALIZATION_BUDGET`],
+    /// further closure-aware specializations bail back to the generic
+    /// (non-inlined) dispatch path.
+    pub(crate) closure_specialization_count: u32,
+
+    /// Phase C — structural CSE map for closure specializations. Keyed on
+    /// `(capture_signature_mono_key, body_hash)`. The value is the
+    /// `ClosureTypeId` already interned for a structurally identical
+    /// closure, so later call sites with the same capture + body layout
+    /// reuse the same specialization instead of minting a fresh one.
+    pub(crate) closure_specialization_cse:
+        HashMap<(String, u64), shape_value::v2::concrete_type::ClosureTypeId>,
 }
 
 impl Default for BytecodeCompiler {

@@ -1,9 +1,13 @@
 //! Function and method call expression compilation
 
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
+use crate::compiler::monomorphization::cache::ClosureDefPeek;
 use crate::compiler::monomorphization::type_resolution::{
     concrete_type_for_expr, extract_arg_concrete_types, resolve_call_site_type_args,
+    resolve_call_site_type_args_with_closures,
 };
+use shape_runtime::closure::EnvironmentAnalyzer;
+use std::collections::BTreeSet;
 use crate::compiler::string_interpolation::has_interpolation;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{NumericType, VariableKind, VariableTypeInfo};
@@ -2538,16 +2542,42 @@ impl BytecodeCompiler {
         combined_arg_types.push(Some(receiver_ct));
         combined_arg_types.extend(method_arg_cts);
 
-        // 3. Resolve type parameter bindings from the call site.
+        // 3. Combined args expression list (receiver first, then method args)
+        //    for the closure-aware resolver.
+        let mut combined_args: Vec<Expr> = Vec::with_capacity(1 + args.len());
+        combined_args.push(receiver.clone());
+        combined_args.extend(args.iter().cloned());
+
+        // 4. Phase C — if any method arg is a closure literal, route through
+        //    the closure-aware resolver so the mono key incorporates the
+        //    closure's layout + inferred return type. Otherwise fall through
+        //    to the type-only path (byte-for-byte compatible with pre-C).
+        let has_closure_arg = args
+            .iter()
+            .any(|a| matches!(a, Expr::FunctionExpr { .. }));
+
+        if has_closure_arg {
+            if let Some(idx) =
+                self.try_monomorphize_method_call_with_closures(func_name, &combined_args)
+            {
+                return Some(idx);
+            }
+            // Fall-through: either resolution bailed, inlining failed, or the
+            // budget was exhausted. Hand off to the type-only path which
+            // produces a `Call(fn_id)` direct dispatch rather than an
+            // inlined body — still better than `CallValue`.
+        }
+
+        // 5. Type-only resolver — existing behaviour.
         let resolution =
             resolve_call_site_type_args(self, func_name, &combined_arg_types, &type_params)?;
 
-        // 4. All type args must be concrete (no unresolved variables).
+        // 6. All type args must be concrete (no unresolved variables).
         if resolution.type_args.is_empty() {
             return None;
         }
 
-        // 5. Call ensure_monomorphic_function to get/create the specialization.
+        // 7. Call ensure_monomorphic_function to get/create the specialization.
         //    On failure, return None to fall back to the generic version.
         match self.ensure_monomorphic_function(func_name, &resolution.type_args) {
             Ok(specialized_idx) => {
@@ -2563,6 +2593,141 @@ impl BytecodeCompiler {
                 Some(idx)
             }
             Err(_) => None,
+        }
+    }
+
+    /// Phase C — closure-aware specialization path.
+    ///
+    /// Runs the closure-extended resolver on `combined_args` (receiver +
+    /// method args). For each `Expr::FunctionExpr` argument, peeks the
+    /// closure's captures + body so the cache key encodes the closure's
+    /// layout and so the substitution pass can inline the closure body into
+    /// the specialized stdlib template.
+    ///
+    /// Returns `None` on any failure — the caller then falls back to the
+    /// type-only path (still producing a direct `Call(fn_id)` dispatch,
+    /// never `CallValue`).
+    fn try_monomorphize_method_call_with_closures(
+        &mut self,
+        func_name: &str,
+        combined_args: &[Expr],
+    ) -> Option<usize> {
+        let type_params: Vec<String> = {
+            let def = self.function_defs.get(func_name)?;
+            let tps = def.type_params.as_ref()?;
+            if tps.is_empty() {
+                return None;
+            }
+            tps.iter().map(|tp| tp.name.clone()).collect()
+        };
+
+        // Per-arg concrete types (closure args collapse to an opaque
+        // Function/Closure tag, same as the type-only path).
+        let arg_types = extract_arg_concrete_types(self, combined_args);
+
+        let resolution = resolve_call_site_type_args_with_closures(
+            self,
+            func_name,
+            combined_args,
+            &arg_types,
+            &type_params,
+        )?;
+        if resolution.type_args.is_empty() {
+            return None;
+        }
+        if resolution.closure_specs.is_empty() {
+            // No closure arg after all — bounce to the type-only path.
+            return None;
+        }
+
+        // Gather the peeked closure def info (params, body, captures) and
+        // the callee's formal param name for each closure arg. The resolver
+        // processed `combined_args` in order; we walk it in the same order
+        // to keep positional alignment.
+        let closure_defs: Vec<ClosureDefPeek> = combined_args
+            .iter()
+            .filter_map(|a| match a {
+                Expr::FunctionExpr { params, body, .. } => Some((params.clone(), body.clone())),
+                _ => None,
+            })
+            .map(|(params, body)| self.peek_closure_def(&params, &body))
+            .collect();
+
+        // Pull the formal closure-param names from the callee def.
+        let def = self.function_defs.get(func_name)?.clone();
+        let mut callee_closure_param_names: Vec<String> = Vec::new();
+        for (i, a) in combined_args.iter().enumerate() {
+            if matches!(a, Expr::FunctionExpr { .. }) {
+                let param = def.params.get(i)?;
+                let ids = param.get_identifiers();
+                if ids.len() != 1 {
+                    // Destructured closure param — not supported.
+                    return None;
+                }
+                callee_closure_param_names.push(ids[0].clone());
+            }
+        }
+
+        match self.ensure_monomorphic_function_with_closures(
+            func_name,
+            &resolution.type_args,
+            &resolution.closure_specs,
+            &closure_defs,
+            &callee_closure_param_names,
+        ) {
+            Ok(Some(specialized_idx)) => {
+                let idx = specialized_idx as usize;
+                if self.current_function == Some(idx) {
+                    return None;
+                }
+                Some(idx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Phase C — peek a closure literal's params/body/captures without
+    /// lowering. Runs the same `EnvironmentAnalyzer` the compiler uses for
+    /// closure compilation so the capture list matches what the emitter sees
+    /// later.
+    fn peek_closure_def(
+        &self,
+        params: &[shape_ast::ast::FunctionParameter],
+        body: &[shape_ast::ast::Statement],
+    ) -> ClosureDefPeek {
+        let proto_def = shape_ast::ast::FunctionDef {
+            name: "__peek_closure__".to_string(),
+            name_span: Span::DUMMY,
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: params.to_vec(),
+            return_type: None,
+            body: body.to_vec(),
+            annotations: vec![],
+            where_clause: None,
+            is_async: false,
+            is_comptime: false,
+        };
+        let outer_vars = self.collect_outer_scope_vars();
+        let (mut captured_vars, _mutated) =
+            EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
+        captured_vars.sort();
+        let param_names: BTreeSet<String> = params
+            .iter()
+            .flat_map(|p| p.get_identifiers())
+            .collect();
+        captured_vars.retain(|n| !param_names.contains(n));
+
+        let param_name_list: Vec<String> = params
+            .iter()
+            .flat_map(|p| p.get_identifiers())
+            .collect();
+
+        ClosureDefPeek {
+            param_names: param_name_list,
+            body: body.to_vec(),
+            capture_names: captured_vars,
         }
     }
 }

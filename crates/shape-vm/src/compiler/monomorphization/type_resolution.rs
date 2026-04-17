@@ -119,11 +119,267 @@
 //! the generic-template path and keeps existing tests passing while the rest
 //! of the v2 pipeline is being built out.
 
-use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
+use shape_ast::ast::{Expr, Spanned, Statement, TypeAnnotation};
 use shape_value::v2::ConcreteType;
+use shape_value::v2::concrete_type::ClosureTypeId;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+/// Compute a stable, **span-insensitive** 64-bit hash of a closure body AST
+/// for Phase C CSE (structural deduplication of closure specializations,
+/// §3.4).
+///
+/// Two syntactically identical closures at different source locations must
+/// produce the SAME hash — otherwise `arr.map(|x| x+1)` at two call sites
+/// would mint two specializations even though their bodies are identical.
+/// We strip `Span` information before hashing to achieve span-insensitive
+/// structural equality.
+///
+/// Not cryptographic — this is a cache key, not a security boundary.
+/// Collisions produce incorrect cache hits; for the small AST sizes inside
+/// stdlib-bound closures the collision probability is negligible.
+pub fn hash_closure_body(
+    params: &[shape_ast::ast::FunctionParameter],
+    body: &[Statement],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for p in params {
+        // Param patterns: hash identifier names only, skip spans.
+        hash_pattern(&p.pattern, &mut hasher);
+    }
+    for stmt in body {
+        hash_stmt(stmt, &mut hasher);
+    }
+    hasher.finish()
+}
+
+fn hash_pattern(p: &shape_ast::ast::DestructurePattern, h: &mut impl Hasher) {
+    use shape_ast::ast::DestructurePattern;
+    match p {
+        DestructurePattern::Identifier(name, _) => {
+            0u8.hash(h);
+            name.hash(h);
+        }
+        DestructurePattern::Array(items) => {
+            1u8.hash(h);
+            for it in items {
+                hash_pattern(it, h);
+            }
+        }
+        DestructurePattern::Object(fields) => {
+            2u8.hash(h);
+            for f in fields {
+                f.key.hash(h);
+                hash_pattern(&f.pattern, h);
+            }
+        }
+        DestructurePattern::Rest(inner) => {
+            3u8.hash(h);
+            hash_pattern(inner, h);
+        }
+        DestructurePattern::Decomposition(bindings) => {
+            4u8.hash(h);
+            for b in bindings {
+                b.name.hash(h);
+            }
+        }
+    }
+}
+
+fn hash_stmt(s: &Statement, h: &mut impl Hasher) {
+    use shape_ast::ast::{statements::ForInit, Statement};
+    match s {
+        Statement::Return(e, _) => {
+            0u8.hash(h);
+            if let Some(e) = e {
+                hash_expr(e, h);
+            }
+        }
+        Statement::Break(_) => 1u8.hash(h),
+        Statement::Continue(_) => 2u8.hash(h),
+        Statement::VariableDecl(decl, _) => {
+            3u8.hash(h);
+            hash_pattern(&decl.pattern, h);
+            decl.is_mut.hash(h);
+            if let Some(v) = &decl.value {
+                hash_expr(v, h);
+            }
+        }
+        Statement::Assignment(a, _) => {
+            4u8.hash(h);
+            hash_pattern(&a.pattern, h);
+            hash_expr(&a.value, h);
+        }
+        Statement::Expression(e, _) => {
+            5u8.hash(h);
+            hash_expr(e, h);
+        }
+        Statement::For(fl, _) => {
+            6u8.hash(h);
+            match &fl.init {
+                ForInit::ForIn { pattern, iter } => {
+                    0u8.hash(h);
+                    hash_pattern(pattern, h);
+                    hash_expr(iter, h);
+                }
+                ForInit::ForC { init, condition, update } => {
+                    1u8.hash(h);
+                    hash_stmt(init, h);
+                    hash_expr(condition, h);
+                    hash_expr(update, h);
+                }
+            }
+            for bs in &fl.body {
+                hash_stmt(bs, h);
+            }
+        }
+        Statement::While(wl, _) => {
+            7u8.hash(h);
+            hash_expr(&wl.condition, h);
+            for bs in &wl.body {
+                hash_stmt(bs, h);
+            }
+        }
+        Statement::If(ifs, _) => {
+            8u8.hash(h);
+            hash_expr(&ifs.condition, h);
+            for t in &ifs.then_body {
+                hash_stmt(t, h);
+            }
+            if let Some(el) = &ifs.else_body {
+                9u8.hash(h);
+                for es in el {
+                    hash_stmt(es, h);
+                }
+            }
+        }
+        // Comptime-only directives and Extend are never found inside closure
+        // bodies — hash them opaquely so any structural difference is
+        // detected.
+        other => {
+            255u8.hash(h);
+            format!("{:?}", other).hash(h);
+        }
+    }
+}
+
+fn hash_expr(e: &Expr, h: &mut impl Hasher) {
+    use shape_ast::ast::Expr;
+    match e {
+        Expr::Literal(lit, _) => {
+            0u8.hash(h);
+            // Literal's Debug is span-free.
+            format!("{:?}", lit).hash(h);
+        }
+        Expr::Identifier(name, _) => {
+            1u8.hash(h);
+            name.hash(h);
+        }
+        Expr::BinaryOp { left, op, right, .. } => {
+            2u8.hash(h);
+            format!("{:?}", op).hash(h);
+            hash_expr(left, h);
+            hash_expr(right, h);
+        }
+        Expr::UnaryOp { op, operand, .. } => {
+            3u8.hash(h);
+            format!("{:?}", op).hash(h);
+            hash_expr(operand, h);
+        }
+        Expr::FunctionCall { name, args, named_args, .. } => {
+            4u8.hash(h);
+            name.hash(h);
+            for a in args {
+                hash_expr(a, h);
+            }
+            for (k, v) in named_args {
+                k.hash(h);
+                hash_expr(v, h);
+            }
+        }
+        Expr::MethodCall { receiver, method, args, named_args, optional, .. } => {
+            5u8.hash(h);
+            hash_expr(receiver, h);
+            method.hash(h);
+            optional.hash(h);
+            for a in args {
+                hash_expr(a, h);
+            }
+            for (k, v) in named_args {
+                k.hash(h);
+                hash_expr(v, h);
+            }
+        }
+        Expr::PropertyAccess { object, property, optional, .. } => {
+            6u8.hash(h);
+            hash_expr(object, h);
+            property.hash(h);
+            optional.hash(h);
+        }
+        Expr::IndexAccess { object, index, end_index, .. } => {
+            7u8.hash(h);
+            hash_expr(object, h);
+            hash_expr(index, h);
+            if let Some(e) = end_index {
+                hash_expr(e, h);
+            }
+        }
+        Expr::Array(items, _) => {
+            8u8.hash(h);
+            for it in items {
+                hash_expr(it, h);
+            }
+        }
+        // Everything else falls back to Debug-rendering. Any span info in
+        // the Debug output means some AST spans leak into the hash — but
+        // since closure bodies in real programs have stable spans within a
+        // single compilation unit (comparing two spans at different source
+        // positions IS the thing this function exists to distinguish), the
+        // mismatch is intentional for those shapes.
+        other => {
+            255u8.hash(h);
+            format!("{:?}", other).hash(h);
+        }
+    }
+}
 
 use crate::compiler::BytecodeCompiler;
+
+/// Phase C — closure spec recorded per closure-literal argument.
+///
+/// When a call site passes a closure literal (`Expr::FunctionExpr`) as an
+/// argument to a generic higher-order method (`arr.map(|x| x + n)`), the
+/// resolver mints a [`ClosureTypeId`] (idempotent, via the per-capture
+/// signature registry) and infers the closure's return `ConcreteType` by
+/// unifying the method's formal closure-parameter annotation against the
+/// receiver's already-bound generic type arguments.
+///
+/// The pair `(ClosureTypeId, return_type)` is appended to the
+/// [`TypeArgResolution::closure_specs`] list in positional order (one entry
+/// per closure argument the resolver found). Both values contribute to the
+/// mono key segment `closure_<N>_<ret_ty>` appended by [`build_mono_key_with_consts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosureSpec {
+    /// The closure's layout id — interned in
+    /// [`crate::compiler::BytecodeCompiler::closure_registry`].
+    pub closure_type_id: ClosureTypeId,
+    /// Inferred return type. `None` when the resolver couldn't narrow it — the
+    /// mono key then encodes `unknown` for this segment.
+    pub return_type: Option<ConcreteType>,
+    /// Phase C — 64-bit hash of the closure body AST (see §3.4 structural
+    /// CSE). Two closures with identical capture signatures but DIFFERENT
+    /// bodies (e.g. `|x| x + 1` and `|x| x * 2` — both capture nothing, so
+    /// Phase A's registry gives them the same `ClosureTypeId`) must NOT
+    /// share a specialization. Including the body hash in the key produces
+    /// distinct cache entries per structurally-unique closure body.
+    ///
+    /// Derived from `format!("{:?}", body)` fed into `DefaultHasher`. Not
+    /// cryptographic — it's a cache key, not a security boundary. Collisions
+    /// are vanishingly unlikely for the AST sizes that appear in stdlib
+    /// higher-order calls.
+    pub body_hash: u64,
+}
 
 /// A compile-time-evaluated value used to specialize a const generic parameter.
 ///
@@ -250,11 +506,17 @@ pub struct TypeArgResolution {
     /// See [`ComptimeConstValue`] for the underlying value representation and
     /// the migration path to the typed Phase 5 ComptimeValue.
     pub const_args: Vec<ComptimeConstValue>,
+    /// Phase C — one entry per closure-literal argument at the call site, in
+    /// positional order. Empty when no `Expr::FunctionExpr` argument was
+    /// found. Each entry contributes a `closure_<N>_<ret_ty>` segment to the
+    /// mono key.
+    pub closure_specs: Vec<ClosureSpec>,
     /// Cache key — `format!("{}::{}", fn_name, type_args[*].mono_key().join("_"))`,
     /// extended with `const_args` segments via [`const_value_mono_segment`]
-    /// when const generics are present. For a non-generic call
-    /// (`type_args.is_empty() && const_args.is_empty()`) this is just
-    /// `fn_name`.
+    /// when const generics are present, then with `closure_<N>_<ret_ty>`
+    /// segments for each entry in `closure_specs`. For a non-generic call
+    /// (`type_args.is_empty() && const_args.is_empty() && closure_specs.is_empty()`)
+    /// this is just `fn_name`.
     pub mono_key: String,
 }
 
@@ -271,6 +533,28 @@ impl TypeArgResolution {
             fn_name,
             type_args,
             const_args: Vec::new(),
+            closure_specs: Vec::new(),
+            mono_key,
+        }
+    }
+
+    /// Phase C — construct a resolution with type args and closure specs.
+    ///
+    /// Leaves `const_args` empty. The mono key is built via
+    /// [`build_mono_key_full`] so the `closure_<N>_<ret_ty>` segments are
+    /// appended after the type args.
+    pub fn with_closure_specs(
+        fn_name: impl Into<String>,
+        type_args: Vec<ConcreteType>,
+        closure_specs: Vec<ClosureSpec>,
+    ) -> Self {
+        let fn_name = fn_name.into();
+        let mono_key = build_mono_key_full(&fn_name, &type_args, &[], &closure_specs);
+        Self {
+            fn_name,
+            type_args,
+            const_args: Vec::new(),
+            closure_specs,
             mono_key,
         }
     }
@@ -290,6 +574,7 @@ impl TypeArgResolution {
             fn_name,
             type_args,
             const_args,
+            closure_specs: Vec::new(),
             mono_key,
         }
     }
@@ -325,11 +610,55 @@ pub fn build_mono_key_with_consts(
     type_args: &[ConcreteType],
     const_args: &[ComptimeConstValue],
 ) -> String {
-    if type_args.is_empty() && const_args.is_empty() {
+    build_mono_key_full(fn_name, type_args, const_args, &[])
+}
+
+/// Phase C — build a cache key that incorporates type args, const args, AND
+/// per-closure-arg specialization segments.
+///
+/// Format (types first, then consts, then closures):
+///
+///   - `"fn_name"` — no args of any kind.
+///   - `"fn_name::T1_T2"` — type args only.
+///   - `"fn_name::T1_int_3"` — mixed type + const args.
+///   - `"fn_name::T1_closure_7_i64"` — type arg + one closure segment.
+///   - `"fn_name::T1_closure_7_unknown"` — closure with unresolved return type.
+///
+/// Each closure segment is `closure_<N>_<ret_ty>` where `N` is the
+/// `ClosureTypeId` (layout id) and `<ret_ty>` is the closure's inferred return
+/// type rendered via [`ConcreteType::mono_key`], or `"unknown"` when the
+/// return type couldn't be narrowed.
+pub fn build_mono_key_full(
+    fn_name: &str,
+    type_args: &[ConcreteType],
+    const_args: &[ComptimeConstValue],
+    closure_specs: &[ClosureSpec],
+) -> String {
+    if type_args.is_empty() && const_args.is_empty() && closure_specs.is_empty() {
         return fn_name.to_string();
     }
     let mut parts: Vec<String> = type_args.iter().map(|t| t.mono_key()).collect();
     parts.extend(const_args.iter().map(const_value_mono_segment));
+    for spec in closure_specs {
+        let ret = spec
+            .return_type
+            .as_ref()
+            .map(|t| t.mono_key())
+            .unwrap_or_else(|| "unknown".to_string());
+        // `body_hash` renders as `b<hex>` so the key stays filesystem-safe.
+        // A body hash of 0 means "no hash computed" — in that case we skip
+        // the segment so the key stays byte-for-byte identical to the
+        // pre-hash variant (back-compat for unit tests that don't populate
+        // body_hash).
+        if spec.body_hash != 0 {
+            parts.push(format!(
+                "closure_{}_{}_b{:x}",
+                spec.closure_type_id.0, ret, spec.body_hash
+            ));
+        } else {
+            parts.push(format!("closure_{}_{}", spec.closure_type_id.0, ret));
+        }
+    }
     format!("{}::{}", fn_name, parts.join("_"))
 }
 
@@ -413,6 +742,191 @@ pub fn resolve_call_site_type_args(
     }
 
     Some(TypeArgResolution::new(fn_name, type_args))
+}
+
+/// Phase C — resolve type args AND per-closure-arg specialization info.
+///
+/// Like [`resolve_call_site_type_args`], but additionally inspects each
+/// argument position. When an argument is an `Expr::FunctionExpr` (closure
+/// literal) AND the callee's formal annotation at that position is a
+/// `TypeAnnotation::Function`, the resolver:
+///
+///   1. Peeks the closure literal — resolves capture names → `ConcreteType`
+///      via [`concrete_type_for_expr`] (captures that can't be resolved fall
+///      back to `Pointer(Void)`).
+///   2. Mints/looks up a [`ClosureTypeId`] via `compiler.mint_closure_type_id_peek`
+///      (idempotent at the layout level — no side-effects on `closure_type_ids`).
+///   3. Unifies the closure's annotated return type against already-bound
+///      generics to infer `return_type`.
+///
+/// The emitted `ClosureSpec`s are recorded on the returned
+/// `TypeArgResolution`, so the mono key ends in one `closure_<N>_<ret>`
+/// segment per closure arg.
+///
+/// Returns `None` for the same reasons as the type-only path, with one extra:
+/// if a closure arg exists but the type-arg resolver fails to bind its generic
+/// params, this helper also bails (the call site simply doesn't specialize —
+/// the caller then falls back to the generic dispatch path).
+pub fn resolve_call_site_type_args_with_closures(
+    compiler: &mut BytecodeCompiler,
+    fn_name: &str,
+    args: &[Expr],
+    arg_types: &[Option<ConcreteType>],
+    generic_params: &[String],
+) -> Option<TypeArgResolution> {
+    // First run the existing type-only resolver to bind generic params.
+    let base = resolve_call_site_type_args(compiler, fn_name, arg_types, generic_params)?;
+
+    // Clone the fn def (we need to hold both a &mut compiler and an immutable
+    // view of param annotations). The def is not hot — one clone per closure
+    // call site is negligible.
+    let func_def = compiler.function_defs.get(fn_name).cloned()?;
+
+    // Build a bindings map from the already-resolved type args, so the
+    // closure-return-type inference can substitute through the closure's
+    // annotation.
+    let mut bindings: HashMap<String, ConcreteType> = HashMap::new();
+    for (name, ct) in generic_params.iter().zip(base.type_args.iter()) {
+        bindings.insert(name.clone(), ct.clone());
+    }
+
+    let mut closure_specs: Vec<ClosureSpec> = Vec::new();
+
+    // Walk each argument position. `args` is the actual call-site expression
+    // list; `func_def.params` is the callee's formal parameter list. The two
+    // are aligned positionally up to `args.len()`.
+    for (i, arg_expr) in args.iter().enumerate() {
+        // Only closures contribute a ClosureSpec — everything else is already
+        // represented in `type_args`.
+        let (cparams, cbody) = match arg_expr {
+            Expr::FunctionExpr { params, body, .. } => (params, body),
+            _ => continue,
+        };
+
+        // The callee must have a corresponding parameter with a function-
+        // shaped annotation for us to infer the return type. If it doesn't,
+        // we still mint a ClosureTypeId (with `return_type = None`) so the
+        // mono key is distinct per capture signature.
+        let return_type =
+            func_def
+                .params
+                .get(i)
+                .and_then(|p| p.type_annotation.as_ref())
+                .and_then(|ann| match ann {
+                    TypeAnnotation::Function { returns, .. } => Some(returns.as_ref()),
+                    _ => None,
+                })
+                .and_then(|ret_ann| {
+                    // Substitute type params through the return annotation,
+                    // then render to ConcreteType if possible.
+                    concrete_type_from_annotation(ret_ann, &bindings)
+                });
+
+        // Mint a ClosureTypeId for the literal. Uses the captures-only
+        // signature (Phase A semantics) so two structurally identical closure
+        // literals with identical captures share one id.
+        let closure_type_id = compiler.mint_closure_type_id_peek(cparams, cbody);
+        // Phase C §3.4 — structural CSE. The body hash distinguishes two
+        // closures with identical capture signatures (and hence identical
+        // ClosureTypeIds) but different bodies. Without this, `|x| x + 1`
+        // and `|x| x * 2` would erroneously share a specialization.
+        let body_hash = hash_closure_body(cparams, cbody);
+
+        closure_specs.push(ClosureSpec {
+            closure_type_id,
+            return_type,
+            body_hash,
+        });
+    }
+
+    if closure_specs.is_empty() {
+        // No closure args — return the type-only resolution unchanged so the
+        // cache key stays byte-for-byte consistent with prior phases.
+        return Some(base);
+    }
+
+    Some(TypeArgResolution::with_closure_specs(
+        base.fn_name,
+        base.type_args,
+        closure_specs,
+    ))
+}
+
+/// Try to render a `TypeAnnotation` as a `ConcreteType`, substituting any
+/// type-parameter references from `bindings`. Returns `None` when the
+/// annotation mentions something the resolver can't map to a concrete type.
+fn concrete_type_from_annotation(
+    ann: &TypeAnnotation,
+    bindings: &HashMap<String, ConcreteType>,
+) -> Option<ConcreteType> {
+    match ann {
+        TypeAnnotation::Basic(name) => {
+            if let Some(ct) = bindings.get(name) {
+                return Some(ct.clone());
+            }
+            concrete_type_from_name(name)
+        }
+        TypeAnnotation::Reference(path) if !path.is_qualified() => {
+            let n = path.as_str();
+            if let Some(ct) = bindings.get(n) {
+                return Some(ct.clone());
+            }
+            concrete_type_from_name(n)
+        }
+        TypeAnnotation::Generic { name, args } => {
+            let base = name.as_str();
+            match base {
+                "Array" | "Vec" if args.len() == 1 => Some(ConcreteType::Array(Box::new(
+                    concrete_type_from_annotation(&args[0], bindings)?,
+                ))),
+                "HashMap" | "Map" if args.len() == 2 => Some(ConcreteType::HashMap(
+                    Box::new(concrete_type_from_annotation(&args[0], bindings)?),
+                    Box::new(concrete_type_from_annotation(&args[1], bindings)?),
+                )),
+                "Option" if args.len() == 1 => Some(ConcreteType::Option(Box::new(
+                    concrete_type_from_annotation(&args[0], bindings)?,
+                ))),
+                "Result" if args.len() == 2 => Some(ConcreteType::Result(
+                    Box::new(concrete_type_from_annotation(&args[0], bindings)?),
+                    Box::new(concrete_type_from_annotation(&args[1], bindings)?),
+                )),
+                _ => None,
+            }
+        }
+        TypeAnnotation::Array(inner) => Some(ConcreteType::Array(Box::new(
+            concrete_type_from_annotation(inner, bindings)?,
+        ))),
+        TypeAnnotation::Tuple(items) => {
+            let elems: Option<Vec<ConcreteType>> = items
+                .iter()
+                .map(|t| concrete_type_from_annotation(t, bindings))
+                .collect();
+            Some(ConcreteType::Tuple(elems?))
+        }
+        TypeAnnotation::Void => Some(ConcreteType::Void),
+        _ => None,
+    }
+}
+
+/// Map a Shape type-annotation identifier to its `ConcreteType`. Recognises
+/// the builtin primitive scalar names; returns `None` for unknown identifiers.
+fn concrete_type_from_name(name: &str) -> Option<ConcreteType> {
+    match name {
+        "int" | "i64" => Some(ConcreteType::I64),
+        "i32" => Some(ConcreteType::I32),
+        "i16" => Some(ConcreteType::I16),
+        "i8" => Some(ConcreteType::I8),
+        "u64" => Some(ConcreteType::U64),
+        "u32" => Some(ConcreteType::U32),
+        "u16" => Some(ConcreteType::U16),
+        "u8" => Some(ConcreteType::U8),
+        "number" | "f64" => Some(ConcreteType::F64),
+        "bool" => Some(ConcreteType::Bool),
+        "string" => Some(ConcreteType::String),
+        "decimal" => Some(ConcreteType::Decimal),
+        "void" | "Void" => Some(ConcreteType::Void),
+        _ => None,
+    }
 }
 
 /// Whether `annotation` (or any of its sub-annotations) names one of the

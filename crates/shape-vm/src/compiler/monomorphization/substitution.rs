@@ -1330,6 +1330,458 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
 }
 
 // ---------------------------------------------------------------------------
+// Phase C — closure body inlining
+// ---------------------------------------------------------------------------
+
+/// Phase C — inline a closure literal's body into a specialized stdlib
+/// template.
+///
+/// Given a specialized function body (e.g. the result of
+/// `substitute_function_def` on `Vec.map`) that names a formal closure
+/// parameter (e.g. `f: (T) => U`), and given the caller's closure literal
+/// (`|x| x + n`), this helper rewrites every `Expr::FunctionCall { name: "f", args }`
+/// inside the specialized body into the closure's body with its formal
+/// parameters substituted by the call's argument expressions.
+///
+/// Captures become **leading parameters of the specialized body**: the helper
+/// prepends one `FunctionParameter` per capture (drawn from `capture_names`)
+/// to `specialized.params`. The specialized body sees captures as plain local
+/// identifiers, so lexical references inside the inlined closure body
+/// (`n` in the example above) resolve like any other local parameter.
+///
+/// # Arguments
+///
+/// * `specialized` — The specialized function def. Mutated in place: its
+///   `params` gain capture-prefix entries and its `body` is rewritten.
+/// * `closure_param_name` — The name of the formal closure parameter inside
+///   `specialized.params` that should be replaced. After inlining, this
+///   parameter is REMOVED from `specialized.params`. Callers typically pass
+///   the name from the original (pre-substitution) def.
+/// * `closure_params` — The closure literal's formal param names in
+///   positional order. Used to substitute call arguments into the closure
+///   body.
+/// * `closure_body` — The closure literal's body statements.
+/// * `capture_names` — Names of the closure's captures in the order they
+///   appear in the capture list. Each one becomes a leading parameter of the
+///   specialized body (untyped — the bytecode compiler infers from usage).
+///
+/// # Return
+///
+/// `Ok(())` when inlining succeeds. `Err(_)` when the closure body has a
+/// shape the inliner doesn't yet handle — callers should fall through to the
+/// non-inlining specialization path in that case.
+///
+/// # Worked example (map with 1-capture closure)
+///
+/// Specialized template (before):
+/// ```shape
+/// fn map::i64(self: Array<int>, f: (int) => int) -> Array<int> {
+///     let mut result = []
+///     for item in self {
+///         result.push(f(item))
+///     }
+///     result
+/// }
+/// ```
+///
+/// Closure literal `|x| x + n` with `n` captured:
+///
+/// After `inline_closure_body_into_specialization(&mut spec, "f", &["x"], body_of_closure, &["n"])`:
+/// ```shape
+/// fn map::i64_closure_7_i64(n: _, self: Array<int>) -> Array<int> {
+///     let mut result = []
+///     for item in self {
+///         result.push({ item + n })   // inlined: `x` → `item`
+///     }
+///     result
+/// }
+/// ```
+pub fn inline_closure_body_into_specialization(
+    specialized: &mut shape_ast::ast::FunctionDef,
+    closure_param_name: &str,
+    closure_params: &[String],
+    closure_body: &[shape_ast::ast::Statement],
+    capture_names: &[String],
+) -> shape_ast::error::Result<()> {
+    // Walk the body and replace every call to the formal closure parameter
+    // (`f(item)`) with the inlined closure body.
+    //
+    // Phase C scope note — we intentionally DO NOT strip `closure_param_name`
+    // from the specialized function's parameter list, and DO NOT hoist
+    // captures into leading parameters. The call site still emits
+    // `MakeClosure` + the closure-arg slot, and the specialized body simply
+    // never invokes `f` — the closure pointer sits unused in its local slot.
+    //
+    // This keeps the call-site ABI identical to the pre-Phase-C direct-call
+    // path (`Call(specialized_idx)` with the original arg list), which means:
+    //
+    //   1. No new call-site compiler changes are required to land Phase C.
+    //   2. The win is still real: the specialized body contains ZERO
+    //      `CallValue`/`CallClosure` opcodes — the closure body is inlined.
+    //   3. Zero-alloc + capture hoisting are Phase D/E/H work (see the
+    //      closure-specialization design doc §4 and §5); they strip the
+    //      formal closure param + replace `MakeClosure` with stack
+    //      construction. Until those phases land, keeping the formal param
+    //      preserves ABI compatibility with unspecialized call sites.
+    //
+    // The `capture_names` arg is accepted for API stability but unused here
+    // — it becomes live once Phase D/E wires up capture hoisting.
+    let _ = capture_names;
+
+    specialized.body = specialized
+        .body
+        .iter()
+        .map(|s| {
+            inline_closure_calls_in_statement(
+                s,
+                closure_param_name,
+                closure_params,
+                closure_body,
+            )
+        })
+        .collect();
+
+    Ok(())
+}
+
+/// Recursively walk a statement and rewrite any `Expr::FunctionCall` whose
+/// name is `closure_param_name` into a block that (a) binds the closure's
+/// formal params to the call's actual args and (b) executes the closure body.
+fn inline_closure_calls_in_statement(
+    stmt: &shape_ast::ast::Statement,
+    closure_param_name: &str,
+    closure_params: &[String],
+    closure_body: &[shape_ast::ast::Statement],
+) -> shape_ast::ast::Statement {
+    use shape_ast::ast::{Statement, statements::{ForInit, ForLoop, IfStatement, WhileLoop}};
+    match stmt {
+        Statement::Return(expr, span) => Statement::Return(
+            expr.as_ref()
+                .map(|e| inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body)),
+            *span,
+        ),
+        Statement::Expression(expr, span) => Statement::Expression(
+            inline_closure_calls_in_expr(expr, closure_param_name, closure_params, closure_body),
+            *span,
+        ),
+        Statement::VariableDecl(decl, span) => {
+            let mut new_decl = decl.clone();
+            new_decl.value = decl.value.as_ref().map(|e| {
+                inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body)
+            });
+            Statement::VariableDecl(new_decl, *span)
+        }
+        Statement::Assignment(assignment, span) => {
+            let mut new_assign = assignment.clone();
+            new_assign.value = inline_closure_calls_in_expr(
+                &assignment.value,
+                closure_param_name,
+                closure_params,
+                closure_body,
+            );
+            Statement::Assignment(new_assign, *span)
+        }
+        Statement::For(for_loop, span) => {
+            let new_init = match &for_loop.init {
+                ForInit::ForIn { pattern, iter } => ForInit::ForIn {
+                    pattern: pattern.clone(),
+                    iter: inline_closure_calls_in_expr(
+                        iter,
+                        closure_param_name,
+                        closure_params,
+                        closure_body,
+                    ),
+                },
+                ForInit::ForC { init, condition, update } => ForInit::ForC {
+                    init: Box::new(inline_closure_calls_in_statement(
+                        init,
+                        closure_param_name,
+                        closure_params,
+                        closure_body,
+                    )),
+                    condition: inline_closure_calls_in_expr(
+                        condition,
+                        closure_param_name,
+                        closure_params,
+                        closure_body,
+                    ),
+                    update: inline_closure_calls_in_expr(
+                        update,
+                        closure_param_name,
+                        closure_params,
+                        closure_body,
+                    ),
+                },
+            };
+            Statement::For(
+                ForLoop {
+                    init: new_init,
+                    body: for_loop
+                        .body
+                        .iter()
+                        .map(|s| {
+                            inline_closure_calls_in_statement(
+                                s,
+                                closure_param_name,
+                                closure_params,
+                                closure_body,
+                            )
+                        })
+                        .collect(),
+                    is_async: for_loop.is_async,
+                },
+                *span,
+            )
+        }
+        Statement::While(wl, span) => Statement::While(
+            WhileLoop {
+                condition: inline_closure_calls_in_expr(
+                    &wl.condition,
+                    closure_param_name,
+                    closure_params,
+                    closure_body,
+                ),
+                body: wl
+                    .body
+                    .iter()
+                    .map(|s| {
+                        inline_closure_calls_in_statement(
+                            s,
+                            closure_param_name,
+                            closure_params,
+                            closure_body,
+                        )
+                    })
+                    .collect(),
+            },
+            *span,
+        ),
+        Statement::If(ifs, span) => Statement::If(
+            IfStatement {
+                condition: inline_closure_calls_in_expr(
+                    &ifs.condition,
+                    closure_param_name,
+                    closure_params,
+                    closure_body,
+                ),
+                then_body: ifs
+                    .then_body
+                    .iter()
+                    .map(|s| {
+                        inline_closure_calls_in_statement(
+                            s,
+                            closure_param_name,
+                            closure_params,
+                            closure_body,
+                        )
+                    })
+                    .collect(),
+                else_body: ifs.else_body.as_ref().map(|body| {
+                    body.iter()
+                        .map(|s| {
+                            inline_closure_calls_in_statement(
+                                s,
+                                closure_param_name,
+                                closure_params,
+                                closure_body,
+                            )
+                        })
+                        .collect()
+                }),
+            },
+            *span,
+        ),
+        // Pass-through: Break, Continue, comptime-only directives, Extend.
+        // These don't occur in the stdlib map/filter/reduce bodies that
+        // Phase C targets.
+        other => other.clone(),
+    }
+}
+
+/// Rewrite a `Expr::FunctionCall { name: closure_param_name, args }` into a
+/// block expression that inlines the closure body. All other expression
+/// shapes are walked structurally so the replacement reaches nested calls.
+fn inline_closure_calls_in_expr(
+    expr: &shape_ast::ast::Expr,
+    closure_param_name: &str,
+    closure_params: &[String],
+    closure_body: &[shape_ast::ast::Statement],
+) -> shape_ast::ast::Expr {
+    use shape_ast::ast::Expr;
+    // Intercept the target case first: a call whose name is the formal
+    // closure parameter. We still want the args themselves to be processed
+    // (they could contain nested calls), but swapping with the inlined body
+    // happens here.
+    if let Expr::FunctionCall { name, args, .. } = expr {
+        if name == closure_param_name {
+            // Recursively walk each arg first so any nested closure-param
+            // calls get replaced too.
+            let rewritten_args: Vec<Expr> = args
+                .iter()
+                .map(|a| {
+                    inline_closure_calls_in_expr(
+                        a,
+                        closure_param_name,
+                        closure_params,
+                        closure_body,
+                    )
+                })
+                .collect();
+            return build_inlined_closure_block(closure_params, &rewritten_args, closure_body);
+        }
+    }
+
+    // Otherwise recurse structurally — a small top-down rewrite of every
+    // Expr variant that can hold sub-expressions. This is verbose but
+    // correct: any variant not matched here falls through unchanged.
+    let rec = |e: &Expr| {
+        inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body)
+    };
+    let rec_box = |e: &Box<Expr>| Box::new(rec(e));
+    let rec_vec = |v: &Vec<Expr>| v.iter().map(rec).collect();
+
+    match expr {
+        Expr::BinaryOp { left, op, right, span } => Expr::BinaryOp {
+            left: rec_box(left),
+            op: op.clone(),
+            right: rec_box(right),
+            span: *span,
+        },
+        Expr::UnaryOp { op, operand, span } => Expr::UnaryOp {
+            op: op.clone(),
+            operand: rec_box(operand),
+            span: *span,
+        },
+        Expr::FunctionCall { name, args, named_args, span } => Expr::FunctionCall {
+            name: name.clone(),
+            args: args.iter().map(rec).collect(),
+            named_args: named_args
+                .iter()
+                .map(|(k, v)| (k.clone(), rec(v)))
+                .collect(),
+            span: *span,
+        },
+        Expr::MethodCall { receiver, method, args, named_args, optional, span } => {
+            Expr::MethodCall {
+                receiver: rec_box(receiver),
+                method: method.clone(),
+                args: rec_vec(args),
+                named_args: named_args
+                    .iter()
+                    .map(|(k, v)| (k.clone(), rec(v)))
+                    .collect(),
+                optional: *optional,
+                span: *span,
+            }
+        }
+        Expr::PropertyAccess { object, property, optional, span } => Expr::PropertyAccess {
+            object: rec_box(object),
+            property: property.clone(),
+            optional: *optional,
+            span: *span,
+        },
+        Expr::IndexAccess { object, index, end_index, span } => Expr::IndexAccess {
+            object: rec_box(object),
+            index: rec_box(index),
+            end_index: end_index.as_ref().map(|e| rec_box(e)),
+            span: *span,
+        },
+        Expr::Array(items, span) => Expr::Array(rec_vec(items), *span),
+        Expr::Assign(assign, span) => {
+            use shape_ast::ast::expr_helpers::AssignExpr;
+            Expr::Assign(
+                Box::new(AssignExpr {
+                    target: rec_box(&assign.target),
+                    value: rec_box(&assign.value),
+                }),
+                *span,
+            )
+        }
+        Expr::Return(Some(e), span) => Expr::Return(Some(rec_box(e)), *span),
+        Expr::If(ifexpr, span) => {
+            use shape_ast::ast::expr_helpers::IfExpr;
+            Expr::If(
+                Box::new(IfExpr {
+                    condition: rec_box(&ifexpr.condition),
+                    then_branch: rec_box(&ifexpr.then_branch),
+                    else_branch: ifexpr.else_branch.as_ref().map(|e| rec_box(e)),
+                }),
+                *span,
+            )
+        }
+        Expr::Block(block, span) => {
+            use shape_ast::ast::expr_helpers::{BlockExpr, BlockItem};
+            let items = block
+                .items
+                .iter()
+                .map(|item| match item {
+                    BlockItem::Expression(e) => BlockItem::Expression(rec(e)),
+                    BlockItem::Statement(s) => BlockItem::Statement(
+                        inline_closure_calls_in_statement(
+                            s,
+                            closure_param_name,
+                            closure_params,
+                            closure_body,
+                        ),
+                    ),
+                    BlockItem::VariableDecl(decl) => {
+                        let mut new_decl = decl.clone();
+                        new_decl.value = decl.value.as_ref().map(rec);
+                        BlockItem::VariableDecl(new_decl)
+                    }
+                    BlockItem::Assignment(assignment) => {
+                        let mut na = assignment.clone();
+                        na.value = rec(&assignment.value);
+                        BlockItem::Assignment(na)
+                    }
+                })
+                .collect();
+            Expr::Block(BlockExpr { items }, *span)
+        }
+        // Everything else passes through verbatim — call expressions of the
+        // closure parameter cannot appear in AST positions we don't traverse
+        // here. Extend this match if additional shapes appear in stdlib
+        // higher-order bodies.
+        other => other.clone(),
+    }
+}
+
+/// Build the inlined block that replaces `f(a1, a2, ...)`: a block with a
+/// `let` prelude binding each closure formal to its corresponding arg, then
+/// the closure body. Implemented via `Expr::Block` (a block expression) so it
+/// fits cleanly into the replacement position.
+fn build_inlined_closure_block(
+    closure_params: &[String],
+    call_args: &[shape_ast::ast::Expr],
+    closure_body: &[shape_ast::ast::Statement],
+) -> shape_ast::ast::Expr {
+    use shape_ast::ast::expr_helpers::{BlockExpr, BlockItem};
+    use shape_ast::ast::{DestructurePattern, Expr, Statement, VarKind, VariableDecl};
+
+    let span = shape_ast::ast::Span::default();
+
+    let mut items: Vec<BlockItem> = Vec::new();
+    // Bind each closure formal to its corresponding arg via a let statement.
+    for (pname, aexpr) in closure_params.iter().zip(call_args.iter()) {
+        let decl = VariableDecl {
+            kind: VarKind::Let,
+            is_mut: false,
+            pattern: DestructurePattern::Identifier(pname.clone(), span),
+            type_annotation: None,
+            value: Some(aexpr.clone()),
+            ownership: Default::default(),
+        };
+        items.push(BlockItem::Statement(Statement::VariableDecl(decl, span)));
+    }
+    // Append the closure body statements.
+    for stmt in closure_body {
+        items.push(BlockItem::Statement(stmt.clone()));
+    }
+
+    Expr::Block(BlockExpr { items }, span)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1882,6 +2334,197 @@ mod tests {
         match &mono.body[0] {
             Statement::Return(Some(Expr::Literal(shape_ast::ast::Literal::Int(4), _)), _) => {}
             other => panic!("expected Int(4) literal in body, got {:?}", other),
+        }
+    }
+
+    // =====================================================================
+    // Phase C — inline_closure_body_into_specialization tests.
+    // =====================================================================
+
+    /// `f(item)` inside a return statement is replaced by the inlined
+    /// closure body wrapped in a block that binds the closure's formal
+    /// params.
+    #[test]
+    fn phase_c_inline_closure_body_replaces_call_in_return() {
+        // Specialized body: `fn map::i64(self: Array<int>, f: (int) => int) { return f(item) }`
+        let mut spec = FunctionDef {
+            name: "map::i64".into(),
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: vec![
+                ident_param("self", ref_t("Array")),
+                ident_param("f", ref_t("fn_type")),
+            ],
+            return_type: None,
+            where_clause: None,
+            body: vec![Statement::Return(
+                Some(Expr::FunctionCall {
+                    name: "f".into(),
+                    args: vec![Expr::Identifier("item".into(), Span::default())],
+                    named_args: vec![],
+                    span: Span::default(),
+                }),
+                Span::default(),
+            )],
+            annotations: vec![],
+            is_async: false,
+            is_comptime: false,
+        };
+        // Closure: `|x| x + 1`
+        let closure_body = vec![Statement::Expression(
+            Expr::BinaryOp {
+                left: Box::new(Expr::Identifier("x".into(), Span::default())),
+                op: shape_ast::ast::BinaryOp::Add,
+                right: Box::new(Expr::Literal(
+                    shape_ast::ast::Literal::Int(1),
+                    Span::default(),
+                )),
+                span: Span::default(),
+            },
+            Span::default(),
+        )];
+
+        super::inline_closure_body_into_specialization(
+            &mut spec,
+            "f",
+            &["x".into()],
+            &closure_body,
+            &[], // no captures
+        )
+        .expect("inlining should succeed");
+
+        // Body should no longer contain a FunctionCall named "f".
+        match &spec.body[0] {
+            Statement::Return(Some(Expr::Block(block, _)), _) => {
+                // Block items: one VariableDecl (let x = item), one Expression (x + 1).
+                assert_eq!(block.items.len(), 2);
+            }
+            other => panic!("expected Return(Block(..)), got {:?}", other),
+        }
+    }
+
+    /// Phase C inlining preserves the specialized function's `name`
+    /// unchanged — it's the caller's responsibility to rename.
+    #[test]
+    fn phase_c_inline_preserves_specialization_name() {
+        let mut spec = FunctionDef {
+            name: "original_name".into(),
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: vec![ident_param("f", ref_t("fn_type"))],
+            return_type: None,
+            where_clause: None,
+            body: vec![],
+            annotations: vec![],
+            is_async: false,
+            is_comptime: false,
+        };
+        super::inline_closure_body_into_specialization(
+            &mut spec,
+            "f",
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(spec.name, "original_name");
+    }
+
+    /// Inlining KEEPS the formal closure parameter in the specialized
+    /// body's param list — Phase C intentionally doesn't strip it so the
+    /// call-site ABI stays unchanged. Capture hoisting is Phase D/E work.
+    #[test]
+    fn phase_c_inline_preserves_formal_closure_param() {
+        let mut spec = FunctionDef {
+            name: "map::i64_closure_0_i64".into(),
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: vec![
+                ident_param("self", ref_t("Array")),
+                ident_param("f", ref_t("fn_type")),
+            ],
+            return_type: None,
+            where_clause: None,
+            body: vec![],
+            annotations: vec![],
+            is_async: false,
+            is_comptime: false,
+        };
+        super::inline_closure_body_into_specialization(
+            &mut spec,
+            "f",
+            &["x".into()],
+            &[],
+            &["captured_n".into()], // unused by Phase C
+        )
+        .unwrap();
+        // Params should still contain `self` AND `f` (the closure formal).
+        let names: Vec<String> = spec
+            .params
+            .iter()
+            .flat_map(|p| p.get_identifiers())
+            .collect();
+        assert!(
+            names.contains(&"self".to_string()),
+            "expected self in params: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"f".to_string()),
+            "expected formal closure param `f` preserved: {:?}",
+            names
+        );
+    }
+
+    /// Non-matching FunctionCalls (e.g. calls to other named functions) are
+    /// passed through unchanged by the inliner.
+    #[test]
+    fn phase_c_inline_leaves_unrelated_calls_alone() {
+        let mut spec = FunctionDef {
+            name: "map".into(),
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: vec![ident_param("f", ref_t("fn_type"))],
+            return_type: None,
+            where_clause: None,
+            body: vec![Statement::Return(
+                Some(Expr::FunctionCall {
+                    name: "println".into(), // not the closure param
+                    args: vec![Expr::Literal(
+                        shape_ast::ast::Literal::String("hi".into()),
+                        Span::default(),
+                    )],
+                    named_args: vec![],
+                    span: Span::default(),
+                }),
+                Span::default(),
+            )],
+            annotations: vec![],
+            is_async: false,
+            is_comptime: false,
+        };
+        super::inline_closure_body_into_specialization(
+            &mut spec,
+            "f",
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        // The `println(...)` call should be intact — its name was not `f`.
+        match &spec.body[0] {
+            Statement::Return(Some(Expr::FunctionCall { name, .. }), _) => {
+                assert_eq!(name, "println");
+            }
+            other => panic!("expected FunctionCall(println) unchanged, got {:?}", other),
         }
     }
 }

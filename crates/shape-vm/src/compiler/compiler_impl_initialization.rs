@@ -139,6 +139,8 @@ impl BytecodeCompiler {
             current_function_local_concrete_types: HashMap::new(),
             monomorphization_cache: crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             next_monomorphization_id: 0,
+            closure_specialization_count: 0,
+            closure_specialization_cse: HashMap::new(),
         }
     }
 

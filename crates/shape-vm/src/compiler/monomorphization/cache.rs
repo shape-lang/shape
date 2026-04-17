@@ -24,8 +24,17 @@ use std::collections::HashMap;
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::monomorphization::substitution;
 use crate::compiler::monomorphization::type_resolution::{
-    ComptimeConstValue, build_mono_key_with_consts,
+    ClosureSpec, ComptimeConstValue, build_mono_key_full, build_mono_key_with_consts,
 };
+
+/// Phase C — per-module specialization budget.
+///
+/// Once the per-module closure-specialization count exceeds this threshold
+/// the compiler falls back to the existing (non-inlined) generic dispatch
+/// path. Prevents unbounded code-size growth for programs that generate
+/// hundreds of distinct closure types. See §3.4 of
+/// `docs/v2-closure-specialization.md` for the rationale.
+pub const DEFAULT_CLOSURE_SPECIALIZATION_BUDGET: u32 = 64;
 
 /// Cache mapping a monomorphization key to the compiled function index.
 ///
@@ -102,6 +111,18 @@ impl MonomorphizationCache {
 /// byte-for-byte identical for type-only inputs.
 pub fn build_mono_key(base_fn_name: &str, type_args: &[ConcreteType]) -> String {
     build_mono_key_with_consts(base_fn_name, type_args, &[])
+}
+
+/// Phase C — construct a mono key that includes per-closure-arg
+/// specialization segments. Thin re-export of
+/// [`build_mono_key_full`] so external callers can go through the cache
+/// module uniformly.
+pub fn build_mono_key_with_closures(
+    base_fn_name: &str,
+    type_args: &[ConcreteType],
+    closure_specs: &[ClosureSpec],
+) -> String {
+    build_mono_key_full(base_fn_name, type_args, &[], closure_specs)
 }
 
 impl BytecodeCompiler {
@@ -389,6 +410,155 @@ impl BytecodeCompiler {
 
         Ok(specialization_idx)
     }
+
+    /// Phase C — closure-aware specialization entry point.
+    ///
+    /// Like [`Self::ensure_monomorphic_function`] but additionally keys the
+    /// specialization on per-closure-arg [`ClosureSpec`]s and inlines each
+    /// closure literal's body into the specialized stdlib template (replacing
+    /// calls to the formal closure parameter with the closure body).
+    ///
+    /// Flow:
+    ///   1. Build the full mono key (`base::T1_..._closure_N_ret_...`).
+    ///   2. Cache hit → return existing index.
+    ///   3. Budget exhausted → bail out (`Ok(None)`) so the caller falls
+    ///      back to the generic path.
+    ///   4. Substitute type params through the function def (as in the
+    ///      type-only path).
+    ///   5. For each closure spec, call
+    ///      [`super::substitution::inline_closure_body_into_specialization`]
+    ///      to rewrite the specialized body.
+    ///   6. Register + compile the specialized function; record cache entry;
+    ///      bump the closure-specialization count.
+    ///
+    /// The `closure_defs` parallel to `closure_specs` carries the peeked
+    /// closure literals (params, body, captures) that the inliner needs.
+    /// `callee_closure_param_names[i]` is the name of the callee's formal
+    /// parameter that holds the i-th closure; it's the identifier the inliner
+    /// rewrites. When empty or mismatched, specialization bails and returns
+    /// `Ok(None)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ensure_monomorphic_function_with_closures(
+        &mut self,
+        base_fn_name: &str,
+        type_args: &[ConcreteType],
+        closure_specs: &[ClosureSpec],
+        closure_defs: &[ClosureDefPeek],
+        callee_closure_param_names: &[String],
+    ) -> Result<Option<u16>> {
+        let mono_key = build_mono_key_with_closures(base_fn_name, type_args, closure_specs);
+
+        // Cache hit — reuse.
+        if let Some(existing) = self.monomorphization_cache.lookup(&mono_key) {
+            return Ok(Some(existing));
+        }
+
+        // Per-module specialization budget (§3.4). When we've already produced
+        // DEFAULT_CLOSURE_SPECIALIZATION_BUDGET closure-aware specializations,
+        // bail and let the caller emit the generic (non-inlined) path.
+        if self.closure_specialization_count >= DEFAULT_CLOSURE_SPECIALIZATION_BUDGET {
+            return Ok(None);
+        }
+
+        // Closure-spec length sanity check: we must have peek info and a
+        // param name for every recorded spec. If not, the caller messed up.
+        if closure_defs.len() != closure_specs.len()
+            || callee_closure_param_names.len() != closure_specs.len()
+        {
+            return Ok(None);
+        }
+
+        // Look up the base def; fail soft if missing.
+        let original_def = match self.function_defs.get(base_fn_name).cloned() {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        let declared_type_params: Vec<String> = original_def
+            .type_params
+            .as_ref()
+            .map(|tps| tps.iter().map(|tp| tp.name.clone()).collect())
+            .unwrap_or_default();
+
+        // If type args and declared params disagree, bail (falls back to
+        // generic path) rather than raise — the caller may still want to
+        // compile the call with an unspecialized body.
+        if declared_type_params.len() != type_args.len() {
+            return Ok(None);
+        }
+
+        let subs: HashMap<String, ConcreteType> = declared_type_params
+            .iter()
+            .cloned()
+            .zip(type_args.iter().cloned())
+            .collect();
+
+        // Substitute type params first.
+        let mut specialized_def = substitution::substitute_function_def(&original_def, &subs);
+        // Overwrite the name with the full closure-aware key so the cache key
+        // and the registered function name agree.
+        specialized_def.name = mono_key.clone();
+
+        // Inline each closure body in turn.
+        for (i, spec_info) in closure_defs.iter().enumerate() {
+            let closure_param_name = &callee_closure_param_names[i];
+            if substitution::inline_closure_body_into_specialization(
+                &mut specialized_def,
+                closure_param_name,
+                &spec_info.param_names,
+                &spec_info.body,
+                &spec_info.capture_names,
+            )
+            .is_err()
+            {
+                // Inlining bailed — fall back to generic path.
+                return Ok(None);
+            }
+        }
+
+        // Register + compile.
+        if self.register_function(&specialized_def).is_err() {
+            return Ok(None);
+        }
+        let specialization_idx_usize = match self.find_function(&specialized_def.name) {
+            Some(idx) => idx,
+            None => return Ok(None),
+        };
+        let specialization_idx: u16 = match specialization_idx_usize.try_into() {
+            Ok(x) => x,
+            Err(_) => return Ok(None),
+        };
+
+        // Cache BEFORE compile_function so any recursive call inside the
+        // specialized body resolves through the cache.
+        self.monomorphization_cache
+            .insert(mono_key, specialization_idx);
+        self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
+        self.closure_specialization_count =
+            self.closure_specialization_count.saturating_add(1);
+
+        if self.compile_function(&specialized_def).is_err() {
+            // Compilation failed — we already inserted the cache entry; the
+            // caller will fall back to the generic path anyway. Returning
+            // Ok(None) keeps the error surface clean.
+            return Ok(None);
+        }
+
+        Ok(Some(specialization_idx))
+    }
+}
+
+/// Peeked closure-literal info handed to the inliner. The resolver fills
+/// this from the `Expr::FunctionExpr` args before lowering.
+#[derive(Debug, Clone)]
+pub struct ClosureDefPeek {
+    /// Formal parameter names of the closure literal (`x` in `|x| x + n`).
+    pub param_names: Vec<String>,
+    /// The closure literal's body statements.
+    pub body: Vec<shape_ast::ast::Statement>,
+    /// Names of the closure's captures, in order, as leading params for the
+    /// specialized body.
+    pub capture_names: Vec<String>,
 }
 
 #[cfg(test)]
@@ -577,6 +747,130 @@ mod tests {
             "expected unknown-function error, got: {}",
             msg
         );
+    }
+
+    // =====================================================================
+    // Phase C — closure-aware specialization tests.
+    // =====================================================================
+
+    #[test]
+    fn build_mono_key_with_closures_matches_design_doc_format() {
+        // Single closure arg, i64 return: `map::array_i64_closure_7_i64`.
+        let type_args = [ConcreteType::Array(Box::new(ConcreteType::I64))];
+        let closure_specs = [ClosureSpec {
+            closure_type_id: shape_value::v2::concrete_type::ClosureTypeId(7),
+            return_type: Some(ConcreteType::I64),
+            body_hash: 0,
+        }];
+        let key = build_mono_key_with_closures("map", &type_args, &closure_specs);
+        assert_eq!(key, "map::array_i64_closure_7_i64");
+    }
+
+    #[test]
+    fn build_mono_key_filter_with_closure_bool_return() {
+        // `filter(|x| x > 0)` over `Array<number>`:
+        // `"filter::array_f64_closure_N_bool"`.
+        let type_args = [ConcreteType::Array(Box::new(ConcreteType::F64))];
+        let closure_specs = [ClosureSpec {
+            closure_type_id: shape_value::v2::concrete_type::ClosureTypeId(3),
+            return_type: Some(ConcreteType::Bool),
+            body_hash: 0,
+        }];
+        let key = build_mono_key_with_closures("filter", &type_args, &closure_specs);
+        assert_eq!(key, "filter::array_f64_closure_3_bool");
+    }
+
+    #[test]
+    fn build_mono_key_reduce_with_two_closure_args() {
+        // `reduce` with two closures: both peeked, both contribute to the key.
+        let type_args = [ConcreteType::I64];
+        let closure_specs = [
+            ClosureSpec {
+                closure_type_id: shape_value::v2::concrete_type::ClosureTypeId(4),
+                return_type: Some(ConcreteType::I64),
+                body_hash: 0,
+            },
+            ClosureSpec {
+                closure_type_id: shape_value::v2::concrete_type::ClosureTypeId(5),
+                return_type: Some(ConcreteType::Bool),
+                body_hash: 0,
+            },
+        ];
+        let key = build_mono_key_with_closures("reduce", &type_args, &closure_specs);
+        assert_eq!(key, "reduce::i64_closure_4_i64_closure_5_bool");
+    }
+
+    #[test]
+    fn build_mono_key_with_closures_unknown_return_type() {
+        // When the return type is unknown (couldn't be inferred), the key
+        // encodes `unknown` so different captures still produce distinct
+        // keys.
+        let closure_specs = [ClosureSpec {
+            closure_type_id: shape_value::v2::concrete_type::ClosureTypeId(0),
+            return_type: None,
+            body_hash: 0,
+        }];
+        let key = build_mono_key_with_closures("map", &[ConcreteType::I64], &closure_specs);
+        assert_eq!(key, "map::i64_closure_0_unknown");
+    }
+
+    #[test]
+    fn budget_fallback_returns_none_when_exhausted() {
+        // Budget is the per-module cap on closure specializations. When
+        // exhausted, ensure_monomorphic_function_with_closures returns
+        // Ok(None) so the caller falls back to the direct-call path.
+        let mut compiler = BytecodeCompiler::new();
+        compiler.closure_specialization_count = DEFAULT_CLOSURE_SPECIALIZATION_BUDGET;
+
+        // No function registered — even so, the budget check runs first and
+        // returns Ok(None) for budget exhaustion. (If we got past the budget
+        // check, we'd fall into the "function_defs lookup" path and still
+        // return Ok(None), which is what we want.)
+        let result = compiler.ensure_monomorphic_function_with_closures(
+            "map",
+            &[ConcreteType::I64],
+            &[ClosureSpec {
+                closure_type_id: shape_value::v2::concrete_type::ClosureTypeId(0),
+                return_type: Some(ConcreteType::I64),
+                body_hash: 0,
+            }],
+            &[ClosureDefPeek {
+                param_names: vec!["x".into()],
+                body: vec![],
+                capture_names: vec![],
+            }],
+            &["f".into()],
+        );
+        // Budget is at cap → Ok(None) (fallback path).
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn budget_counter_starts_at_zero() {
+        let compiler = BytecodeCompiler::new();
+        assert_eq!(compiler.closure_specialization_count, 0);
+    }
+
+    #[test]
+    fn cache_hit_returns_same_index_on_second_call() {
+        // Two lookups with the same closure-aware mono key must hit the
+        // cache on the second try. Exercises the fast path at the top of
+        // ensure_monomorphic_function_with_closures.
+        let mut cache = MonomorphizationCache::new();
+        let key = build_mono_key_with_closures(
+            "map",
+            &[ConcreteType::I64],
+            &[ClosureSpec {
+                closure_type_id: shape_value::v2::concrete_type::ClosureTypeId(0),
+                return_type: Some(ConcreteType::I64),
+                body_hash: 0,
+            }],
+        );
+        cache.insert(key.clone(), 7);
+        assert_eq!(cache.lookup(&key), Some(7));
+        // Re-lookup — cache still hits.
+        assert_eq!(cache.lookup(&key), Some(7));
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

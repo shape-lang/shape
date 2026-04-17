@@ -340,6 +340,56 @@ impl BytecodeCompiler {
             .collect();
         self.closure_registry.intern(capture_types)
     }
+
+    /// Phase C — peek a closure literal's capture signature and mint (or
+    /// reuse) a [`ClosureTypeId`] WITHOUT lowering the closure to bytecode
+    /// and WITHOUT pushing to `closure_type_ids`.
+    ///
+    /// The resolver calls this during `try_monomorphize_method_call` to key
+    /// the monomorphization cache on the closure's layout. At emission time
+    /// the usual `compile_expr_closure` path runs as normal — because the
+    /// registry's `intern` is idempotent, both calls return the same
+    /// `ClosureTypeId`. The split responsibility (gotcha option **(a)** in
+    /// the Phase C plan) is:
+    ///
+    ///   - Resolver → peek + intern layout id only.
+    ///   - `compile_expr_closure` → intern layout id (no-op second time) AND
+    ///     push `(func_id, type_id)` into `closure_type_ids`.
+    ///
+    /// This keeps `closure_type_ids` free of duplicates while letting the
+    /// resolver see the id early.
+    pub(crate) fn mint_closure_type_id_peek(
+        &mut self,
+        params: &[shape_ast::ast::FunctionParameter],
+        body: &[shape_ast::ast::Statement],
+    ) -> ClosureTypeId {
+        // Run the same capture analysis as `compile_expr_closure`, but only
+        // for the purpose of reading capture names off of the AST.
+        let proto_def = FunctionDef {
+            name: "__peek_closure__".to_string(),
+            name_span: Span::DUMMY,
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: params.to_vec(),
+            return_type: None,
+            body: body.to_vec(),
+            annotations: vec![],
+            where_clause: None,
+            is_async: false,
+            is_comptime: false,
+        };
+
+        let outer_vars = self.collect_outer_scope_vars();
+        let (mut captured_vars, _mutated) =
+            EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
+        captured_vars.sort();
+        let param_names: BTreeSet<String> =
+            params.iter().flat_map(|p| p.get_identifiers()).collect();
+        captured_vars.retain(|name| !param_names.contains(name));
+
+        self.mint_closure_type_id(&captured_vars)
+    }
 }
 
 #[cfg(test)]

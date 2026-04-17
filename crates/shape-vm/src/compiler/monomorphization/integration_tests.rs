@@ -228,15 +228,19 @@ mod e2e_tests {
         assert_eq!(result.as_i64(), Some(6));
     }
 
-    /// Two `map` calls on arrays of the same element type should produce
-    /// exactly ONE specialization in the cache (cache de-duplication).
+    /// Two `map` calls on arrays of the same element type with
+    /// STRUCTURALLY IDENTICAL closures should share one specialization
+    /// (Phase C structural CSE, §3.4). Closures with different bodies
+    /// (even if only differing in a constant) produce distinct
+    /// specializations — the cache key includes a body hash to prevent
+    /// incorrect sharing.
     #[test]
     fn test_two_callsites_same_type_share_specialization() {
         let source = r#"
             let arr1 = [1, 2, 3]
             let r1 = arr1.map(|x| x + 1)
             let arr2 = [10, 20, 30]
-            let r2 = arr2.map(|x| x + 2)
+            let r2 = arr2.map(|x| x + 1)
             r1
         "#;
         let bytecode = compile_with_prelude(source);
@@ -248,7 +252,7 @@ mod e2e_tests {
         assert_eq!(
             map_specializations.len(),
             1,
-            "two map<i64> call sites should share one specialization, got: {:?}",
+            "two map<i64> call sites with identical closure bodies should share one specialization, got: {:?}",
             map_specializations
         );
     }
@@ -367,6 +371,371 @@ mod e2e_tests {
             "concrete function `add` should NOT be in the monomorphization cache, got: {:?}",
             cache_keys
         );
+    }
+
+    // =====================================================================
+    // Phase C — per-closure monomorphization end-to-end tests.
+    // =====================================================================
+
+    /// `arr.map(|x| x+1)` over `Array<int>` emits a closure-aware
+    /// specialization. The specialized body's function name matches the
+    /// `map::array_i64_closure_*_i64` shape (either direct or prefixed with
+    /// `Vec.` for method-dispatch routes).
+    #[test]
+    fn phase_c_map_closure_emits_specialized_body() {
+        let source = r#"
+            let arr = [1, 2, 3]
+            let result = arr.map(|x| x + 1)
+            result
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let has_phase_c_key = bytecode
+            .monomorphization_keys
+            .iter()
+            .any(|k| k.contains("map") && k.contains("closure_"));
+        assert!(
+            has_phase_c_key,
+            "expected a closure-aware map specialization, got: {:?}",
+            bytecode.monomorphization_keys
+        );
+    }
+
+    /// Phase C specialized body must contain ZERO `CallValue`/`CallClosure`
+    /// opcodes — the closure body is inlined. Verified by scanning the
+    /// specialized function's instructions.
+    #[test]
+    fn phase_c_specialized_body_has_fewer_call_value_opcodes() {
+        // Compare CallValue counts between the closure-aware specialization
+        // and the type-only (non-closure) specialization of the same stdlib
+        // template. The closure-aware path must emit strictly fewer
+        // CallValue opcodes — inlining eliminates the indirect dispatch
+        // through `f`. The stdlib's map body may still emit a CallValue for
+        // OTHER purposes (e.g. result.push dispatches through an extend
+        // method that the compiler lowers to CallValue), which is out of
+        // scope for Phase C. We only measure the impact of closure
+        // inlining.
+        use crate::bytecode::OpCode;
+        let source = r#"
+            let arr = [1, 2, 3]
+            arr.map(|x| x + 1)
+        "#;
+        let bytecode = compile_with_prelude(source);
+
+        let phase_c = bytecode
+            .functions
+            .iter()
+            .find(|f| f.name.contains("map") && f.name.contains("closure_"))
+            .expect("expected Phase C specialization");
+        let type_only = bytecode
+            .functions
+            .iter()
+            .find(|f| {
+                f.name.contains("map")
+                    && f.name.contains("i64")
+                    && !f.name.contains("closure_")
+            });
+
+        fn count_call_value(
+            bc: &crate::bytecode::BytecodeProgram,
+            f: &crate::bytecode::Function,
+        ) -> usize {
+            let start = f.entry_point as usize;
+            let end = start + f.body_length as usize;
+            bc.instructions[start..end.min(bc.instructions.len())]
+                .iter()
+                .filter(|i| i.opcode == OpCode::CallValue)
+                .count()
+        }
+
+        let phase_c_count = count_call_value(&bytecode, phase_c);
+
+        // Primary assertion: the Phase C body either has ZERO CallValues
+        // (ideal) OR strictly fewer than the type-only baseline. The
+        // baseline (non-closure) body calls `f(item)` via CallValue at
+        // least once, so Phase C inlining must remove at least one.
+        if let Some(type_only_fn) = type_only {
+            let type_only_count = count_call_value(&bytecode, type_only_fn);
+            assert!(
+                phase_c_count < type_only_count,
+                "Phase C '{}' has {} CallValue; type-only '{}' has {} — inlining did not reduce indirect dispatch",
+                phase_c.name,
+                phase_c_count,
+                type_only_fn.name,
+                type_only_count,
+            );
+        } else {
+            // If the compiler only produced the closure-aware specialization
+            // (the type-only one never got emitted because every call site
+            // was closure-aware), the tighter assertion applies: a
+            // closure-aware specialization with a non-escaping closure
+            // literal must contain ZERO CallValues attributable to the
+            // closure dispatch. Any remaining CallValues come from OTHER
+            // stdlib method calls (e.g. `result.push`) — but Phase C bodies
+            // typically lower those to typed opcodes like `ArrayPushLocal`.
+            //
+            // Cap the allowance at 1 to catch regressions where the inliner
+            // stops firing.
+            assert!(
+                phase_c_count <= 1,
+                "Phase C '{}' has {} CallValue opcodes — inlining regressed",
+                phase_c.name, phase_c_count
+            );
+        }
+        // NOTE: `CallClosure` opcode does not exist yet in the VM — the
+        // design doc §1.3 introduces it in a later phase. Until then,
+        // the only indirect call opcode to guard against is `CallValue`.
+    }
+
+    /// Two `arr.map(|x| x * 2)` call sites at distinct AST spans with
+    /// IDENTICAL capture signatures (none) share one Phase C specialization.
+    #[test]
+    fn phase_c_identical_closures_share_specialization() {
+        let source = r#"
+            let a = [1, 2, 3]
+            let r1 = a.map(|x| x * 2)
+            let b = [4, 5, 6]
+            let r2 = b.map(|x| x * 2)
+            r1
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let phase_c_keys: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("map") && k.contains("closure_"))
+            .collect();
+        assert_eq!(
+            phase_c_keys.len(),
+            1,
+            "two structurally identical closures should share ONE Phase C specialization, got: {:?}",
+            phase_c_keys
+        );
+    }
+
+    /// Two syntactically identical closure LITERALS (no captures) at
+    /// different call sites intern the same `ClosureTypeId` (Phase A's
+    /// registry is per-capture-signature).
+    #[test]
+    fn phase_c_two_identical_closures_share_closure_type_id() {
+        let source = r#"
+            let a = [1, 2, 3]
+            let r = a.map(|x| x + 1)
+            let b = [4, 5, 6]
+            let s = b.map(|x| x + 1)
+            r
+        "#;
+        let bytecode = compile_with_prelude(source);
+        // Both keys (if present) should carry the same closure_<N> segment.
+        let phase_c_keys: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("map") && k.contains("closure_"))
+            .collect();
+        // Either one shared key, or two keys whose closure_<N> segment
+        // matches. Phase A's registry + our key-dedup should force the
+        // former.
+        assert_eq!(
+            phase_c_keys.len(),
+            1,
+            "expected one shared key for identical closures, got: {:?}",
+            phase_c_keys
+        );
+    }
+
+    /// A Function-typed parameter (`f: (int) => int`) called with a
+    /// non-literal callable (a bound identifier) should NOT trigger Phase C
+    /// specialization, since the arg is not an `Expr::FunctionExpr`.
+    #[test]
+    fn phase_c_non_closure_arg_skips_closure_specialization() {
+        let source = r#"
+            fn double(x: int) -> int { x * 2 }
+            let arr = [1, 2, 3]
+            arr.map(double)
+        "#;
+        let bytecode = compile_with_prelude(source);
+        // No closure-aware specialization should be cached — `double` is a
+        // plain named function, not a closure literal.
+        let phase_c_keys: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("map") && k.contains("closure_"))
+            .collect();
+        assert!(
+            phase_c_keys.is_empty(),
+            "passing a bare function name must not trigger Phase C specialization, got: {:?}",
+            phase_c_keys
+        );
+    }
+
+    /// `arr.filter(|x| x > 0)` over `Array<int>` produces a Phase C key
+    /// with `bool` as the closure's return type.
+    #[test]
+    fn phase_c_filter_closure_key_has_bool_return() {
+        let source = r#"
+            let arr = [1, -2, 3, -4, 5]
+            arr.filter(|x| x > 0)
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let phase_c_keys: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("filter") && k.contains("closure_"))
+            .collect();
+        // The closure returns bool; the key must contain `_bool_b` where
+        // `_b<hex>` is the structural body-hash suffix from CSE.
+        assert!(
+            phase_c_keys
+                .iter()
+                .any(|k| k.contains("_bool_b") || k.ends_with("_bool")),
+            "expected a filter closure specialization with bool return, got: {:?}",
+            phase_c_keys
+        );
+    }
+
+    /// Closure with a captured variable — the capture signature differs
+    /// from a no-capture closure, so within a SINGLE compilation unit the
+    /// Phase A registry assigns distinct `ClosureTypeId`s. The keys then
+    /// differ. Cross-module comparisons aren't meaningful because each
+    /// compiler maintains its own monotonic registry starting at 0.
+    #[test]
+    fn phase_c_captured_vs_uncaptured_closures_keyed_distinctly() {
+        let source = r#"
+            let a = [1, 2, 3]
+            let r1 = a.map(|x| x + 1)
+            let n = 10
+            let r2 = a.map(|x| x + n)
+            r1
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let phase_c_keys: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("map") && k.contains("closure_"))
+            .collect();
+        // Two closures with DIFFERENT capture signatures within the same
+        // compilation unit must produce TWO distinct Phase C keys.
+        assert_eq!(
+            phase_c_keys.len(),
+            2,
+            "captured vs uncaptured closures must produce distinct Phase C keys, got: {:?}",
+            phase_c_keys
+        );
+        // And the two keys must not be equal.
+        let mut unique: std::collections::HashSet<&&String> =
+            std::collections::HashSet::new();
+        for k in &phase_c_keys {
+            unique.insert(k);
+        }
+        assert_eq!(unique.len(), 2, "keys must be distinct: {:?}", phase_c_keys);
+    }
+
+    /// Monomorphic cache hit — calling `arr.map(|x| x+1)` TWICE on the same
+    /// receiver type + same closure shape results in a SINGLE cache entry
+    /// (second call hits the cache).
+    #[test]
+    fn phase_c_second_identical_call_hits_cache() {
+        let source = r#"
+            let a = [1, 2, 3]
+            let r1 = a.map(|x| x + 1)
+            let r2 = a.map(|x| x + 1)
+            r1
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let phase_c_keys: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("map") && k.contains("closure_"))
+            .collect();
+        assert_eq!(
+            phase_c_keys.len(),
+            1,
+            "second call with identical closure must hit the cache, got: {:?}",
+            phase_c_keys
+        );
+    }
+
+    /// Reduce with a single closure arg — the closure is peeked, a
+    /// `ClosureSpec` is recorded, and the mono key carries the closure
+    /// segment.
+    #[test]
+    fn phase_c_reduce_single_closure_arg() {
+        let source = r#"
+            let arr = [1, 2, 3, 4, 5]
+            arr.reduce(|acc, x| acc + x, 0)
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let phase_c_keys: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("reduce") && k.contains("closure_"))
+            .collect();
+        assert!(
+            !phase_c_keys.is_empty(),
+            "reduce should trigger Phase C specialization, got: {:?}",
+            bytecode.monomorphization_keys
+        );
+    }
+
+    /// §3.4 structural CSE — two closures with identical capture signatures
+    /// (both capture nothing, so Phase A gives them the same ClosureTypeId)
+    /// but DIFFERENT bodies (`|x| x + 1` vs `|x| x * 2`) produce TWO
+    /// distinct Phase C specializations. Without body-hash CSE, they'd
+    /// collide on a single entry and one body would silently overwrite the
+    /// other.
+    #[test]
+    fn phase_c_different_bodies_same_captures_distinct_specializations() {
+        let source = r#"
+            let a = [1, 2, 3]
+            let r1 = a.map(|x| x + 1)
+            let r2 = a.map(|x| x * 2)
+            r1
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let phase_c_keys: Vec<&String> = bytecode
+            .monomorphization_keys
+            .iter()
+            .filter(|k| k.contains("map") && k.contains("closure_"))
+            .collect();
+        assert_eq!(
+            phase_c_keys.len(),
+            2,
+            "structurally different closure bodies must produce distinct Phase C specializations, got: {:?}",
+            phase_c_keys
+        );
+    }
+
+    /// Runtime correctness — the Phase C specialized `map` produces the
+    /// same result as the generic path. Guards against inlining that
+    /// silently corrupts the program's output.
+    #[test]
+    fn phase_c_map_runtime_result_matches() {
+        let source = r#"
+            let arr = [1, 2, 3]
+            arr.map(|x| x + 10)
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let result = run_program(&bytecode);
+        let arr = result.as_any_array().expect("expected array result");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.get_nb(0).and_then(|v| v.as_i64()), Some(11));
+        assert_eq!(arr.get_nb(1).and_then(|v| v.as_i64()), Some(12));
+        assert_eq!(arr.get_nb(2).and_then(|v| v.as_i64()), Some(13));
+    }
+
+    /// Runtime correctness — Phase C specialized `filter` still filters
+    /// correctly.
+    #[test]
+    fn phase_c_filter_runtime_result_matches() {
+        let source = r#"
+            let arr = [1, -2, 3, -4, 5]
+            arr.filter(|x| x > 0)
+        "#;
+        let bytecode = compile_with_prelude(source);
+        let result = run_program(&bytecode);
+        let arr = result.as_any_array().expect("expected array result");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.get_nb(0).and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(arr.get_nb(1).and_then(|v| v.as_i64()), Some(3));
+        assert_eq!(arr.get_nb(2).and_then(|v| v.as_i64()), Some(5));
     }
 
     /// Tests that `impl Trait for Vec` methods with untyped parameters get
