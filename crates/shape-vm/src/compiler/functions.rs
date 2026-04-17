@@ -275,6 +275,7 @@ impl BytecodeCompiler {
                 closure_captures: &closure_captures,
                 mutable_captures: &mutable_captures,
                 had_fallbacks: mir_lowering.had_fallbacks,
+                callee_summaries: Some(&self.function_borrow_summaries),
             };
 
             let storage_plan = crate::mir::storage_planning::plan_storage(&planner_input);
@@ -372,7 +373,10 @@ impl BytecodeCompiler {
         );
         let has_informative_summary = !borrow_summary.conflict_pairs.is_empty()
             || borrow_summary.return_summary.is_some()
-            || borrow_summary.return_ownership_mode != crate::mir::ReturnOwnershipMode::Unknown;
+            || borrow_summary.return_ownership_mode != crate::mir::ReturnOwnershipMode::Unknown
+            // Any non-escaping closure-param bit is useful for the storage
+            // planner (Closure Spec Phase B).
+            || borrow_summary.closure_param_escapes.iter().any(|escapes| !escapes);
         if has_informative_summary {
             self.function_borrow_summaries
                 .insert(effective_def.name.clone(), borrow_summary);

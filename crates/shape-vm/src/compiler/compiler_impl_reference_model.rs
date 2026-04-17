@@ -1294,6 +1294,7 @@ impl BytecodeCompiler {
                     closure_captures: &StdHashSet::new(),
                     mutable_captures: &StdHashSet::new(),
                     had_fallbacks: true, // conservative: top-level MIR often has fallbacks
+                    callee_summaries: Some(&self.function_borrow_summaries),
                 };
                 let storage_plan = crate::mir::storage_planning::plan_storage(&planner_input);
                 self.program.top_level_mir =

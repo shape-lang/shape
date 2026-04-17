@@ -1371,6 +1371,8 @@ pub fn extract_borrow_summary(
         }
     }
 
+    let closure_param_escapes = compute_closure_param_escapes(mir);
+
     FunctionBorrowSummary {
         param_borrows,
         conflict_pairs,
@@ -1379,6 +1381,136 @@ pub fn extract_borrow_summary(
             mir,
             &HashMap::new(),
         ),
+        closure_param_escapes,
+    }
+}
+
+/// Compute the per-parameter closure-escape bits (Closure Spec Phase B).
+///
+/// For each parameter slot, scan the function body for the §2.1 closure-escape
+/// vectors. A parameter is marked as **escaping** (`true`) if the parameter
+/// slot's value flows into any of:
+///
+///   1. The return slot (`SlotId(0)`)
+///   2. A container store (`ArrayStore`, `ObjectStore`, `EnumStore`, `Aggregate`)
+///   3. A struct-field write (`Assign(Place::Field{..}, Use(..))`)
+///   4. A closure environment (`ClosureCapture.operands`)
+///   5. A task boundary (`TaskBoundary`)
+///   6. A deref write (`Assign(Place::Deref, Use(..))`)
+///   7. A call-site argument (conservative — callee may store it)
+///
+/// If none of the vectors fire, the parameter is marked non-escaping
+/// (`false`). Calls are conservative: we do not recursively inspect the
+/// callee's own summary here — that would require fixed-point iteration over
+/// the call graph, which is deferred to Phase C (monomorphization makes the
+/// question intraprocedural). The intent of Phase B is to let callers treat
+/// `closure_param_escapes[i] == false` as a reliable "this callee body does
+/// not let the argument escape" bit, used by the storage planner to classify
+/// non-escaping closures that are passed directly to known callees.
+fn compute_closure_param_escapes(mir: &MirFunction) -> Vec<bool> {
+    let num_params = mir.param_slots.len();
+    let mut result = vec![true; num_params];
+
+    for (param_idx, &param_slot) in mir.param_slots.iter().enumerate() {
+        result[param_idx] = param_slot_escapes(param_slot, mir);
+    }
+
+    result
+}
+
+/// Scan `mir` for any closure-escape vector fed by `param_slot`.
+///
+/// Flow propagation: starts with `{param_slot}` as the transitive-closure seed
+/// and widens with each `Assign(Place::Local(dest), rvalue)` whose rvalue
+/// reads a tracked slot. The scan is single-pass and monotonic (slots only
+/// enter `tracked`, never leave), matching the §2.4 fixed-point pattern at
+/// param-slot granularity.
+fn param_slot_escapes(param_slot: SlotId, mir: &MirFunction) -> bool {
+    let mut tracked: HashSet<SlotId> = HashSet::new();
+    tracked.insert(param_slot);
+
+    // Iterate until no new slots are added to the tracked set. Each pass also
+    // checks all escape vectors against the current tracked set.
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        for block in mir.iter_blocks() {
+            for stmt in &block.statements {
+                match &stmt.kind {
+                    StatementKind::Assign(place, rvalue) => {
+                        // Direct escape: storing a tracked value into a non-Local
+                        // destination (field / index / deref).
+                        let reads_tracked = rvalue_uses_any(rvalue, &tracked);
+                        match place {
+                            Place::Local(dest) => {
+                                if reads_tracked && tracked.insert(*dest) {
+                                    changed = true;
+                                }
+                                if *dest == SlotId(0) && reads_tracked {
+                                    return true;
+                                }
+                            }
+                            Place::Field(..) | Place::Index(..) | Place::Deref(..) => {
+                                if reads_tracked {
+                                    return true;
+                                }
+                            }
+                        }
+
+                        // Aggregate literal storing a tracked slot.
+                        if let Rvalue::Aggregate(ops) = rvalue {
+                            if ops.iter().any(|op| operand_uses_any(op, &tracked)) {
+                                return true;
+                            }
+                        }
+                    }
+                    StatementKind::ArrayStore { operands, .. }
+                    | StatementKind::ObjectStore { operands, .. }
+                    | StatementKind::EnumStore { operands, .. }
+                    | StatementKind::TaskBoundary(operands, _)
+                    | StatementKind::ClosureCapture { operands, .. } => {
+                        if operands.iter().any(|op| operand_uses_any(op, &tracked)) {
+                            return true;
+                        }
+                    }
+                    StatementKind::Drop(_) | StatementKind::Nop => {}
+                }
+            }
+
+            if let TerminatorKind::Call { args, .. } = &block.terminator.kind {
+                // Conservative: a call may store any ref argument in
+                // caller-invisible state. Phase C will refine this once the
+                // callee's own summary is a reliable intraprocedural property.
+                if args.iter().any(|op| operand_uses_any(op, &tracked)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn rvalue_uses_any(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
+    match rvalue {
+        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
+            operand_uses_any(op, slots)
+        }
+        Rvalue::Borrow(_, place) => slots.contains(&place.root_local()),
+        Rvalue::BinaryOp(_, lhs, rhs) => {
+            operand_uses_any(lhs, slots) || operand_uses_any(rhs, slots)
+        }
+        Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_any(op, slots)),
+    }
+}
+
+fn operand_uses_any(op: &Operand, slots: &HashSet<SlotId>) -> bool {
+    match op {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+            slots.contains(&place.root_local())
+        }
+        Operand::Constant(_) => false,
     }
 }
 
@@ -2785,6 +2917,149 @@ mod tests {
             summary.kind,
             BorrowKind::Exclusive,
             "outer callee dictates the kind"
+        );
+    }
+
+    // ── Closure Spec Phase B: closure_param_escapes extraction ──────────
+
+    /// Build a minimal MIR function with the given parameter count and body.
+    fn make_param_mir(
+        name: &str,
+        num_params: u16,
+        body: Vec<MirStatement>,
+        num_locals: u16,
+    ) -> MirFunction {
+        // Params occupy slots starting at 1 (slot 0 is the return).
+        let param_slots: Vec<SlotId> = (1..=num_params).map(SlotId).collect();
+        MirFunction {
+            name: name.to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: body,
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals,
+            param_slots,
+            param_reference_kinds: vec![None; num_params as usize],
+            local_types: vec![LocalTypeInfo::Unknown; num_locals as usize],
+            span: span(),
+            field_name_table: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_closure_param_escapes_pure_body_marks_non_escaping() {
+        // fn f(p) { let _ = p + 1 }  — p is read but never escapes.
+        // Slots: _0 = return, _1 = p, _2 = tmp
+        let mir = make_param_mir(
+            "pure_param",
+            1,
+            vec![make_stmt(
+                StatementKind::Assign(
+                    Place::Local(SlotId(2)),
+                    Rvalue::BinaryOp(
+                        BinOp::Add,
+                        Operand::Copy(Place::Local(SlotId(1))),
+                        Operand::Constant(MirConstant::Int(1)),
+                    ),
+                ),
+                0,
+            )],
+            3,
+        );
+
+        let summary = extract_borrow_summary(&mir, None);
+        assert_eq!(
+            summary.closure_param_escapes,
+            vec![false],
+            "pure arithmetic body does not escape the param"
+        );
+    }
+
+    #[test]
+    fn test_closure_param_escapes_return_marks_escaping() {
+        // fn f(p) { p } — p flows to the return slot.
+        let mir = make_param_mir(
+            "return_param",
+            1,
+            vec![make_stmt(
+                StatementKind::Assign(
+                    Place::Local(SlotId(0)),
+                    Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                ),
+                0,
+            )],
+            2,
+        );
+
+        let summary = extract_borrow_summary(&mir, None);
+        assert_eq!(
+            summary.closure_param_escapes,
+            vec![true],
+            "param returned from function must be marked as escaping"
+        );
+    }
+
+    #[test]
+    fn test_closure_param_escapes_captured_marks_escaping() {
+        // fn f(p) { || p }  — p captured into a closure.
+        let mir = make_param_mir(
+            "capture_param",
+            1,
+            vec![make_stmt(
+                StatementKind::ClosureCapture {
+                    closure_slot: SlotId(2),
+                    operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                    function_id: None,
+                },
+                0,
+            )],
+            3,
+        );
+
+        let summary = extract_borrow_summary(&mir, None);
+        assert_eq!(
+            summary.closure_param_escapes,
+            vec![true],
+            "param captured into a closure must be marked as escaping"
+        );
+    }
+
+    #[test]
+    fn test_closure_param_escapes_mixed_params() {
+        // fn f(a, b) { let _ = a + 1; return b }
+        //   a is pure, b is returned.
+        let mir = make_param_mir(
+            "mixed_params",
+            2,
+            vec![
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(3)),
+                        Rvalue::BinaryOp(
+                            BinOp::Add,
+                            Operand::Copy(Place::Local(SlotId(1))),
+                            Operand::Constant(MirConstant::Int(1)),
+                        ),
+                    ),
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(0)),
+                        Rvalue::Use(Operand::Copy(Place::Local(SlotId(2)))),
+                    ),
+                    1,
+                ),
+            ],
+            4,
+        );
+
+        let summary = extract_borrow_summary(&mir, None);
+        assert_eq!(
+            summary.closure_param_escapes,
+            vec![false, true],
+            "a non-escaping, b escaping — verifies per-param resolution"
         );
     }
 }

@@ -295,6 +295,24 @@ pub struct FunctionBorrowSummary {
     /// Used by callers to skip unnecessary Arc→Box promotion when the callee
     /// already returns a uniquely-owned value.
     pub return_ownership_mode: ReturnOwnershipMode,
+    /// Per-parameter closure-escape bit (Closure Spec Phase B).
+    ///
+    /// `closure_param_escapes[i] == true` means the parameter at index `i` may
+    /// flow into one of the §2.1 escape vectors inside the function body
+    /// (returned, stored in a container, stored in a struct field, captured by
+    /// another closure, sent across a task boundary, passed through
+    /// `snapshot()`, written through a deref, or promoted to `UniqueHeap` /
+    /// `SharedCow` storage). `false` means the parameter is only used in
+    /// benign ways — read locally, called, or passed to a callee whose own
+    /// summary says the corresponding parameter is non-escaping.
+    ///
+    /// Length equals the number of function parameters. Used by the
+    /// storage-planning pass to decide whether a closure passed as a call-site
+    /// argument needs to be heap-allocated. The conservative default is
+    /// `true` for every parameter — Phase B only relaxes for clear,
+    /// intraprocedural cases; Phase C will tighten further once
+    /// monomorphization finalizes callee identity.
+    pub closure_param_escapes: Vec<bool>,
 }
 
 /// Ownership classification of a function's return value.

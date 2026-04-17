@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::mir::analysis::BorrowAnalysis;
+use crate::mir::analysis::{BorrowAnalysis, FunctionBorrowSummary};
 use crate::mir::types::*;
 use crate::type_tracking::{
     Aliasability, BindingOwnershipClass, BindingSemantics, BindingStorageClass, EscapeStatus,
@@ -58,6 +58,23 @@ pub struct StoragePlan {
     /// codegen passes (inline arrays, scalar replacement of aggregates) can
     /// activate without re-running escape analysis.
     pub inline_array_sizes: HashMap<SlotId, usize>,
+    /// Closure Spec Phase B: slots that hold closure values (defined by a
+    /// `ClosureCapture` statement) and that provably do not escape their
+    /// enclosing function via any of the §2.1 escape vectors
+    /// (return, container store, field/index/deref write, capture by an
+    /// escaping closure, task boundary, call-site argument, or
+    /// `UniqueHeap`/`SharedCow` promotion).
+    ///
+    /// Consumed by Phase C's per-closure specialization decision: when a
+    /// closure slot is in this set, the specialization may stack-allocate the
+    /// closure and inline its body into the receiving specialization instead
+    /// of heap-allocating a `TypedClosure`. Slots NOT in this set are
+    /// considered escaping and must use the heap variant.
+    ///
+    /// Today no consumer acts on the set (Phase C is not landed). It is
+    /// recorded so the specialization pass can activate without re-running
+    /// escape analysis.
+    pub non_escaping_closure_slots: HashSet<SlotId>,
 }
 
 /// Input bundle for the storage planner.
@@ -74,6 +91,13 @@ pub struct StoragePlannerInput<'a> {
     pub mutable_captures: &'a HashSet<SlotId>,
     /// Whether MIR lowering had fallbacks (incomplete analysis).
     pub had_fallbacks: bool,
+    /// Previously-computed callee borrow summaries, keyed by function name.
+    /// Used by the closure-escape analysis (Closure Spec Phase B) to check
+    /// whether a closure passed as a call-site argument may escape into the
+    /// callee. `None` (or missing entries) is treated conservatively — the
+    /// closure is assumed to escape. Populated from
+    /// `Compiler::function_borrow_summaries`.
+    pub callee_summaries: Option<&'a HashMap<String, FunctionBorrowSummary>>,
 }
 
 /// Scan MIR statements and terminators to find slots captured by closures.
@@ -251,6 +275,7 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
             slot_classes,
             slot_semantics,
             inline_array_sizes: HashMap::new(),
+            non_escaping_closure_slots: HashSet::new(),
         };
     }
 
@@ -266,10 +291,18 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
     // authoritative escape/aliasing verdict.
     let inline_array_sizes = detect_inline_array_candidates(input, &slot_semantics);
 
+    // Closure Spec Phase B: classify every closure slot (each slot defined by
+    // a `ClosureCapture` statement) as escaping or non-escaping, using the
+    // full §2.1 escape-vector table plus a fixed-point over transitive
+    // closure captures.
+    let non_escaping_closure_slots =
+        detect_non_escaping_closure_slots(input, &slot_classes);
+
     StoragePlan {
         slot_classes,
         slot_semantics,
         inline_array_sizes,
+        non_escaping_closure_slots,
     }
 }
 
@@ -354,6 +387,314 @@ fn detect_inline_array_candidates(
         hints.insert(slot, size);
     }
     hints
+}
+
+// ── Closure Spec Phase B: non-escape detection for closure slots ────────────
+//
+// The analysis implements the 10-row escape-vector table from
+// `docs/v2-closure-specialization.md` §2.1. Its output is the set of closure
+// slots that are provably non-escaping, recorded on `StoragePlan` for the
+// Phase C specialization pass to consume.
+//
+// Soundness discipline: when an escape vector cannot be decided (missing
+// callee summary, unknown operand shape), the slot is marked as escaping.
+// Any precision lost here is recoverable by Phase C's monomorphization work;
+// the cost of a false "non-escaping" verdict is a stack-pointer outliving a
+// frame, which is unacceptable.
+
+/// Collect every slot that is defined as a closure value (the destination of
+/// a `ClosureCapture` statement). The `closure_slot` field of a
+/// `ClosureCapture` identifies the slot that will hold the closure object
+/// once the follow-up `Assign(..., ClosurePlaceholder)` completes the
+/// definition. Functions with no closure literals produce an empty set.
+fn collect_closure_slots(mir: &MirFunction) -> HashSet<SlotId> {
+    let mut slots = HashSet::new();
+    for block in mir.iter_blocks() {
+        for stmt in &block.statements {
+            if let StatementKind::ClosureCapture { closure_slot, .. } = &stmt.kind {
+                slots.insert(*closure_slot);
+            }
+        }
+    }
+    slots
+}
+
+/// Build the transitive closure-capture graph: if closure A captures closure
+/// B, the map records `A -> {B}`. Used for the §2.4 fixed-point — if A
+/// escapes, B escapes too because it is carried inside A's capture layout.
+fn build_closure_capture_graph(
+    mir: &MirFunction,
+    closure_slots: &HashSet<SlotId>,
+) -> HashMap<SlotId, HashSet<SlotId>> {
+    let mut graph: HashMap<SlotId, HashSet<SlotId>> = HashMap::new();
+    for block in mir.iter_blocks() {
+        for stmt in &block.statements {
+            if let StatementKind::ClosureCapture {
+                closure_slot,
+                operands,
+                ..
+            } = &stmt.kind
+            {
+                for op in operands {
+                    let Some(root) = operand_root_slot(op) else {
+                        continue;
+                    };
+                    if closure_slots.contains(&root) {
+                        graph
+                            .entry(*closure_slot)
+                            .or_default()
+                            .insert(root);
+                    }
+                }
+            }
+        }
+    }
+    graph
+}
+
+/// §2.1 direct-vector escape check for a single closure slot `c`.
+///
+/// Walks the MIR once per call. Returns `true` if any of rows 1-3, 5-7, 9-10
+/// fire; row 4 (transitive capture) and row 8 (call-argument through callee
+/// summary) are handled by `detect_non_escaping_closure_slots` after direct
+/// vectors are classified.
+///
+/// The walk uses a single-pass monotonic scan: starting from the singleton
+/// tracked set `{c}`, each `Assign(Place::Local(dest), Rvalue::Use(Copy/Move
+/// of a tracked slot))` widens the tracked set to include `dest`. This mirrors
+/// the existing `slot_flows_to_return` pattern but generalized to every sink
+/// the table names, without requiring a separate dataflow pass.
+fn closure_slot_escapes_direct(
+    c: SlotId,
+    input: &StoragePlannerInput<'_>,
+) -> bool {
+    let mir = input.mir;
+
+    // Row 10: the semantics planner promoted the slot to heap-aliased
+    // storage. Any such promotion escapes by construction.
+    if let Some(sem) = input.binding_semantics.get(&c.0) {
+        match sem.storage_class {
+            BindingStorageClass::UniqueHeap | BindingStorageClass::SharedCow => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    // Iteratively widen the tracked set as the closure flows through local
+    // aliases. Each pass also evaluates every escape vector against the
+    // current tracked set — reaching any escape sink is a definite "yes".
+    let mut tracked: HashSet<SlotId> = HashSet::new();
+    tracked.insert(c);
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+
+        for block in mir.iter_blocks() {
+            for stmt in &block.statements {
+                match &stmt.kind {
+                    // Row 1 (return), Row 2 (Aggregate), Row 3 (struct
+                    // field), Row 9 (deref), and local-alias propagation.
+                    StatementKind::Assign(place, rvalue) => {
+                        let reads_tracked = rvalue_uses_any_slot(rvalue, &tracked);
+                        match place {
+                            Place::Local(dest) => {
+                                // Row 1: dest is the return slot.
+                                if *dest == SlotId(0) && reads_tracked {
+                                    return true;
+                                }
+                                // Local-alias propagation: widen the tracked
+                                // set so downstream vectors see the alias.
+                                if reads_tracked && tracked.insert(*dest) {
+                                    changed = true;
+                                }
+                            }
+                            // Row 3: struct-field write `foo.f = c`.
+                            Place::Field(..) => {
+                                if reads_tracked {
+                                    return true;
+                                }
+                            }
+                            // Row 2 subcase / Row 9 variant: index/deref
+                            // writes both materialize the value into some
+                            // other container.
+                            Place::Index(..) | Place::Deref(..) => {
+                                if reads_tracked {
+                                    return true;
+                                }
+                            }
+                        }
+
+                        // Row 2: `Rvalue::Aggregate` feeding any slot — the
+                        // aggregate itself is the escaping container.
+                        if let Rvalue::Aggregate(ops) = rvalue {
+                            if ops.iter().any(|op| operand_uses_any_slot(op, &tracked)) {
+                                return true;
+                            }
+                        }
+                    }
+                    // Row 2: store into array / object / enum literal.
+                    StatementKind::ArrayStore { operands, .. }
+                    | StatementKind::ObjectStore { operands, .. }
+                    | StatementKind::EnumStore { operands, .. } => {
+                        if operands.iter().any(|op| operand_uses_any_slot(op, &tracked)) {
+                            return true;
+                        }
+                    }
+                    // Rows 5 + 6: detached or structured task boundary.
+                    // §5.5 allows stack closures across structured boundaries
+                    // in the future, but Phase B takes the conservative
+                    // verdict — any boundary is escape.
+                    StatementKind::TaskBoundary(operands, _) => {
+                        if operands.iter().any(|op| operand_uses_any_slot(op, &tracked)) {
+                            return true;
+                        }
+                    }
+                    // Row 4 direct contribution: if we find a closure
+                    // capturing a tracked slot and that enclosing closure
+                    // later turns out to escape, the tracked slot escapes
+                    // transitively. Handled by the fixed-point in
+                    // `detect_non_escaping_closure_slots`.
+                    StatementKind::ClosureCapture { .. }
+                    | StatementKind::Drop(_)
+                    | StatementKind::Nop => {}
+                }
+            }
+
+            // Row 8: call-site argument. Conservative default — any call
+            // with a tracked slot in its args escapes, unless the callee is a
+            // statically-known function whose `FunctionBorrowSummary` marks
+            // the corresponding param as non-escaping.
+            if let TerminatorKind::Call { func, args, .. } = &block.terminator.kind {
+                // Row 7: `snapshot()` is an opaque FFI in v1 — there is no
+                // dedicated MIR terminator, so any named call to `snapshot`
+                // must be treated as escape. The full treatment lives in §9
+                // open question #7.
+                let callee_name = match func {
+                    Operand::Constant(MirConstant::Function(name)) => Some(name.as_str()),
+                    _ => None,
+                };
+                if callee_name == Some("snapshot") {
+                    if args.iter().any(|op| operand_uses_any_slot(op, &tracked)) {
+                        return true;
+                    }
+                }
+
+                let callee_summary = callee_name
+                    .and_then(|n| input.callee_summaries.and_then(|m| m.get(n)));
+
+                for (arg_idx, arg) in args.iter().enumerate() {
+                    if !operand_uses_any_slot(arg, &tracked) {
+                        continue;
+                    }
+                    // With a summary + a matching param slot, we can trust
+                    // the callee's per-param escape bit. Otherwise: escape.
+                    match callee_summary {
+                        Some(summary) if arg_idx < summary.closure_param_escapes.len() => {
+                            if summary.closure_param_escapes[arg_idx] {
+                                return true;
+                            }
+                            // else: callee is transparent for this arg;
+                            // continue checking other vectors.
+                        }
+                        _ => return true,
+                    }
+                }
+
+                // Indirect call target itself: if the call *target* is the
+                // tracked slot, we treat it as non-escape (the closure is
+                // invoked in-place). Not a separate vector.
+                let _ = func; // explicitly documenting intent
+            }
+        }
+    }
+
+    false
+}
+
+/// §2.4 fixed-point over the closure capture graph: if closure A escapes,
+/// every closure it captures (B in `graph[A]`) also escapes. The worklist
+/// iterates until the escaping set stops growing — monotone, terminates in
+/// at most `|closure_slots|` passes.
+fn propagate_transitive_closure_escape(
+    closure_slots: &HashSet<SlotId>,
+    capture_graph: &HashMap<SlotId, HashSet<SlotId>>,
+    escaping: &mut HashSet<SlotId>,
+) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &a in closure_slots {
+            if !escaping.contains(&a) {
+                continue;
+            }
+            let Some(captured_closures) = capture_graph.get(&a) else {
+                continue;
+            };
+            for &b in captured_closures {
+                if escaping.insert(b) {
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
+/// Populate `StoragePlan.non_escaping_closure_slots` for the function under
+/// analysis. Orchestrates: (1) collect closure slots, (2) classify each via
+/// §2.1 direct vectors, (3) run the §2.4 transitive-capture fixed-point, (4)
+/// invert — any closure slot NOT in the escaping set is non-escaping.
+fn detect_non_escaping_closure_slots(
+    input: &StoragePlannerInput<'_>,
+    _slot_classes: &HashMap<SlotId, BindingStorageClass>,
+) -> HashSet<SlotId> {
+    let closure_slots = collect_closure_slots(input.mir);
+    if closure_slots.is_empty() {
+        return HashSet::new();
+    }
+
+    // Step 1: direct-vector escape verdict per closure slot.
+    let mut escaping: HashSet<SlotId> = HashSet::new();
+    for &c in &closure_slots {
+        if closure_slot_escapes_direct(c, input) {
+            escaping.insert(c);
+        }
+    }
+
+    // Step 2: transitive propagation via the capture graph.
+    let capture_graph = build_closure_capture_graph(input.mir, &closure_slots);
+    propagate_transitive_closure_escape(&closure_slots, &capture_graph, &mut escaping);
+
+    // Step 3: invert — slots not in `escaping` are non-escaping.
+    closure_slots
+        .difference(&escaping)
+        .copied()
+        .collect()
+}
+
+/// Does `rvalue` read from any slot in `slots`? Covers all rvalue shapes.
+fn rvalue_uses_any_slot(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
+    match rvalue {
+        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
+            operand_uses_any_slot(op, slots)
+        }
+        Rvalue::Borrow(_, place) => slots.contains(&place.root_local()),
+        Rvalue::BinaryOp(_, lhs, rhs) => {
+            operand_uses_any_slot(lhs, slots) || operand_uses_any_slot(rhs, slots)
+        }
+        Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_any_slot(op, slots)),
+    }
+}
+
+/// Does `op` reference a slot in `slots`?
+fn operand_uses_any_slot(op: &Operand, slots: &HashSet<SlotId>) -> bool {
+    match op {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+            slots.contains(&place.root_local())
+        }
+        Operand::Constant(_) => false,
+    }
 }
 
 /// Decide the storage class for a single slot, returning both the storage class
@@ -618,6 +959,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -653,6 +995,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: true,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -720,6 +1063,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -791,6 +1135,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -856,6 +1201,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -905,6 +1251,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1017,6 +1364,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1089,6 +1437,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1125,6 +1474,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1196,6 +1546,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1442,6 +1793,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1490,6 +1842,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1544,6 +1897,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1588,6 +1942,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1642,6 +1997,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1698,6 +2054,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1741,6 +2098,7 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: false,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
@@ -1784,12 +2142,885 @@ mod tests {
             closure_captures: &closure_captures,
             mutable_captures: &mutable_captures,
             had_fallbacks: true,
+            callee_summaries: None,
         };
 
         let plan = plan_storage(&input);
         assert!(
             plan.inline_array_sizes.is_empty(),
             "fallback path must not record any hints"
+        );
+    }
+
+    // ── Closure Spec Phase B: non-escape detection for closure slots ────────
+    //
+    // These tests exercise the 10-row escape-vector table from
+    // `docs/v2-closure-specialization.md` §2.1 plus the §2.4 transitive
+    // fixed-point. They operate directly on synthetic MIR so they can target
+    // specific vectors without relying on the higher-level compiler pipeline.
+    //
+    // Convention: closure slot := the `closure_slot` field of a
+    // `StatementKind::ClosureCapture`. A followup
+    // `Assign(_, ClosurePlaceholder)` would complete the definition in real
+    // MIR; the tests omit it because `collect_closure_slots` keys solely on
+    // the `ClosureCapture` statement.
+    //
+    // Helper: build MIR with a single block + terminator.
+    fn single_block_mir(name: &str, statements: Vec<MirStatement>, num_locals: u16) -> MirFunction {
+        make_mir(
+            name,
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements,
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals,
+        )
+    }
+
+    fn run_planner(mir: &MirFunction) -> StoragePlan {
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+        let input = StoragePlannerInput {
+            mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+            callee_summaries: None,
+        };
+        plan_storage(&input)
+    }
+
+    #[test]
+    fn test_phase_b_pure_local_closure_is_non_escaping() {
+        // let f = || 1; f()  — the closure slot is defined via
+        // ClosureCapture (no captures) and then only invoked. No escape
+        // vector fires.
+        // Slots: _0 = return, _1 = closure, _2 = call result
+        let mir = single_block_mir(
+            "phase_b_pure_local",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "pure let f = || 1 should be non-escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_closure_returned_is_escaping() {
+        // fn make() { || 42 } — the closure slot flows into the return slot.
+        // Slots: _0 = return, _1 = closure
+        let mir = single_block_mir(
+            "phase_b_returned",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(0)),
+                        Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                    ),
+                    2,
+                ),
+            ],
+            2,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "returned closure must be escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_closure_in_array_literal_is_escaping() {
+        // let a = [|x| x]  — Rvalue::Aggregate row 2.
+        // Slots: _0 = return, _1 = closure, _2 = array
+        let mir = single_block_mir(
+            "phase_b_in_array_literal",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Aggregate(vec![Operand::Copy(Place::Local(SlotId(1)))]),
+                    ),
+                    2,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure stored in array literal must be escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_closure_pushed_via_array_store_is_escaping() {
+        // let a = []; a.push(|x| x)  — StatementKind::ArrayStore row 2.
+        // Slots: _0 = return, _1 = array, _2 = closure
+        let mir = single_block_mir(
+            "phase_b_array_store",
+            vec![
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Aggregate(vec![]),
+                    ),
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(2),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    2,
+                ),
+                make_stmt(
+                    StatementKind::ArrayStore {
+                        container_slot: SlotId(1),
+                        operands: vec![Operand::Copy(Place::Local(SlotId(2)))],
+                    },
+                    3,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(2)),
+            "closure pushed into array via ArrayStore must be escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_closure_stored_in_object_field_is_escaping() {
+        // foo.f = || 1  — Place::Field write row 3.
+        // Slots: _0 = return, _1 = foo (struct), _2 = closure
+        let mir = single_block_mir(
+            "phase_b_field_store",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(2),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Field(Box::new(Place::Local(SlotId(1))), FieldIdx(0)),
+                        Rvalue::Use(Operand::Copy(Place::Local(SlotId(2)))),
+                    ),
+                    2,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(2)),
+            "closure stored in struct field must be escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_closure_across_detached_task_is_escaping() {
+        // async scope { || 1 } — TaskBoundary(Detached) row 5.
+        let mir = single_block_mir(
+            "phase_b_detached_task",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::TaskBoundary(
+                        vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        TaskBoundaryKind::Detached,
+                    ),
+                    2,
+                ),
+            ],
+            2,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure crossing detached task boundary must be escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_closure_across_structured_task_is_escaping() {
+        // Structured task boundaries conservatively escape in Phase B per
+        // §5.5 — stack allocation through structured boundaries is deferred.
+        let mir = single_block_mir(
+            "phase_b_structured_task",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::TaskBoundary(
+                        vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        TaskBoundaryKind::Structured,
+                    ),
+                    2,
+                ),
+            ],
+            2,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure crossing structured task boundary must be escaping (conservative); got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_closure_written_through_deref_is_escaping() {
+        // *p = |x| x — Place::Deref write row 9.
+        // Slots: _0 = return, _1 = pointer-holding slot, _2 = closure
+        let mir = single_block_mir(
+            "phase_b_deref_write",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(2),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Deref(Box::new(Place::Local(SlotId(1)))),
+                        Rvalue::Use(Operand::Copy(Place::Local(SlotId(2)))),
+                    ),
+                    2,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(2)),
+            "closure written through deref must be escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_closure_promoted_to_shared_cow_is_escaping() {
+        // Row 10: if the semantics planner assigns the closure slot
+        // SharedCow/UniqueHeap storage, the closure value is escaping by
+        // construction.
+        let mir = single_block_mir(
+            "phase_b_shared_cow_promotion",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+            ],
+            2,
+        );
+
+        let analysis = empty_analysis();
+        let mut binding_semantics = HashMap::new();
+        binding_semantics.insert(
+            1u16,
+            BindingSemantics {
+                ownership_class: BindingOwnershipClass::Flexible,
+                storage_class: BindingStorageClass::SharedCow,
+                aliasability: Aliasability::SharedMutable,
+                mutation_capability: MutationCapability::SharedMutable,
+                escape_status: EscapeStatus::Local,
+                return_ownership_hint: None,
+            },
+        );
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+            callee_summaries: None,
+        };
+        let plan = plan_storage(&input);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "SharedCow-promoted closure slot must be escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_transitive_closure_capture_escapes_together() {
+        // let f = |x| x; let g = |y| f(y) + y — g captures f. If g escapes
+        // (returned), f must also be classified as escaping. Row 4 +
+        // transitive fixed-point (§2.4).
+        // Slots: _0 = return, _1 = f, _2 = g
+        let mir = single_block_mir(
+            "phase_b_transitive_escape",
+            vec![
+                // Define f
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                // Define g, capturing f
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(2),
+                        operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        function_id: None,
+                    },
+                    2,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    3,
+                ),
+                // g flows to the return slot — g escapes.
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(0)),
+                        Rvalue::Use(Operand::Copy(Place::Local(SlotId(2)))),
+                    ),
+                    4,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(2)),
+            "escaping g must not be classified non-escaping"
+        );
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "f is captured by escaping g → f must also escape (§2.4); got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_transitive_capture_both_non_escaping() {
+        // Dual of the test above — when g is non-escaping, the closure it
+        // captures (f) should also be non-escaping. Proves the fixed-point
+        // does not over-mark as escaping.
+        // Slots: _0 = return, _1 = f, _2 = g
+        let mir = single_block_mir(
+            "phase_b_transitive_non_escape",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(2),
+                        operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        function_id: None,
+                    },
+                    2,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    3,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "non-escaping g keeps f non-escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+        assert!(
+            plan.non_escaping_closure_slots.contains(&SlotId(2)),
+            "g itself is non-escaping"
+        );
+    }
+
+    #[test]
+    fn test_phase_b_call_arg_conservative_without_summary() {
+        // arr.map(|x| x+1) — without a callee summary, Phase B must
+        // classify the closure as escaping (sub-task 6 conservative
+        // fallback). Phase C will refine this via the mono key.
+        // Slots: _0 = return, _1 = closure, _2 = result, _3 = arr
+        let mir = make_mir(
+            "phase_b_call_arg_conservative",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::ClosureCapture {
+                            closure_slot: SlotId(1),
+                            operands: vec![],
+                            function_id: None,
+                        },
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: Terminator {
+                    kind: TerminatorKind::Call {
+                        func: Operand::Constant(MirConstant::Function("map".to_string())),
+                        args: vec![
+                            Operand::Copy(Place::Local(SlotId(3))),
+                            Operand::Copy(Place::Local(SlotId(1))),
+                        ],
+                        destination: Place::Local(SlotId(2)),
+                        next: BasicBlockId(0),
+                    },
+                    span: span(),
+                },
+            }],
+            4,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure passed as call arg without a callee summary must be conservative = escaping"
+        );
+    }
+
+    #[test]
+    fn test_phase_b_call_arg_with_non_escaping_summary() {
+        // arr.map(|x| x+1) — with a callee summary marking the
+        // corresponding parameter as non-escaping, the closure is allowed to
+        // be classified as non-escaping.
+        use crate::mir::analysis::{FunctionBorrowSummary, ReturnOwnershipMode};
+
+        let mir = make_mir(
+            "phase_b_call_arg_with_summary",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::ClosureCapture {
+                            closure_slot: SlotId(1),
+                            operands: vec![],
+                            function_id: None,
+                        },
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: Terminator {
+                    kind: TerminatorKind::Call {
+                        func: Operand::Constant(MirConstant::Function(
+                            "trusted_non_escaping".to_string(),
+                        )),
+                        args: vec![
+                            Operand::Copy(Place::Local(SlotId(3))),
+                            Operand::Copy(Place::Local(SlotId(1))),
+                        ],
+                        destination: Place::Local(SlotId(2)),
+                        next: BasicBlockId(0),
+                    },
+                    span: span(),
+                },
+            }],
+            4,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+        let mut summaries: HashMap<String, FunctionBorrowSummary> = HashMap::new();
+        summaries.insert(
+            "trusted_non_escaping".to_string(),
+            FunctionBorrowSummary {
+                param_borrows: vec![None, None],
+                conflict_pairs: vec![],
+                return_summary: None,
+                return_ownership_mode: ReturnOwnershipMode::Unknown,
+                // Both params non-escaping.
+                closure_param_escapes: vec![false, false],
+            },
+        );
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+            callee_summaries: Some(&summaries),
+        };
+        let plan = plan_storage(&input);
+        assert!(
+            plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure passed to a callee with a non-escaping param summary is non-escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    #[test]
+    fn test_phase_b_snapshot_call_forces_escape() {
+        // Row 7: `snapshot()` is opaque FFI — any closure flowing into it
+        // must be treated as escaping.
+        let mir = make_mir(
+            "phase_b_snapshot_escape",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::ClosureCapture {
+                            closure_slot: SlotId(1),
+                            operands: vec![],
+                            function_id: None,
+                        },
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: Terminator {
+                    kind: TerminatorKind::Call {
+                        func: Operand::Constant(MirConstant::Function("snapshot".to_string())),
+                        args: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        destination: Place::Local(SlotId(2)),
+                        next: BasicBlockId(0),
+                    },
+                    span: span(),
+                },
+            }],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure fed to snapshot() must be escaping"
+        );
+    }
+
+    #[test]
+    fn test_phase_b_enum_store_is_escaping() {
+        // Rvalue 2 subcase: closure stored into an enum payload.
+        // Slots: _0 = return, _1 = closure, _2 = enum
+        let mir = single_block_mir(
+            "phase_b_enum_store",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::EnumStore {
+                        container_slot: SlotId(2),
+                        operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                    },
+                    2,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure stored in enum payload must be escaping"
+        );
+    }
+
+    #[test]
+    fn test_phase_b_object_store_is_escaping() {
+        // Rvalue 2 subcase: closure stored into an object/struct literal.
+        // Slots: _0 = return, _1 = closure, _2 = object
+        let mir = single_block_mir(
+            "phase_b_object_store",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::ObjectStore {
+                        container_slot: SlotId(2),
+                        operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        field_names: vec!["f".to_string()],
+                    },
+                    2,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure stored in object literal must be escaping"
+        );
+    }
+
+    #[test]
+    fn test_phase_b_two_independent_closures() {
+        // Two independent closures in the same function, one escapes the
+        // other does not — verifies the per-slot classification doesn't
+        // over-report.
+        // Slots: _0 = return, _1 = escaping, _2 = local, _3 = result of local call
+        let mir = single_block_mir(
+            "phase_b_two_independent",
+            vec![
+                // First closure: escapes via return.
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                // Second closure: never used beyond its assignment.
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(2),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    2,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    3,
+                ),
+                // Return the first.
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(0)),
+                        Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                    ),
+                    4,
+                ),
+            ],
+            3,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "first closure escapes via return"
+        );
+        assert!(
+            plan.non_escaping_closure_slots.contains(&SlotId(2)),
+            "second closure is independent and does not escape; got {:?}",
+            plan.non_escaping_closure_slots
         );
     }
 }
