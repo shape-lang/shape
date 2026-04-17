@@ -26,6 +26,8 @@ impl BytecodeCompiler {
             loop_stack: Vec::new(),
             closure_counter: 0,
             closure_function_ids: Vec::new(),
+            closure_registry: shape_value::v2::closure_layout::ClosureRegistry::new(),
+            closure_type_ids: Vec::new(),
             closure_row_schema: None,
             last_expr_type_info: None,
             type_tracker: TypeTracker::with_stdlib(),

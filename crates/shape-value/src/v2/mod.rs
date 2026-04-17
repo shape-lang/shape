@@ -1,3 +1,4 @@
+pub mod closure_layout;
 pub mod concrete_type;
 pub mod heap_header;
 pub mod refcount;

@@ -1,10 +1,12 @@
 //! Closure (function expression) compilation
 
 use crate::bytecode::{Function, Instruction, OpCode, Operand};
+use crate::compiler::monomorphization::type_resolution::concrete_type_for_expr;
 use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 use shape_ast::ast::{Expr, FunctionDef, Span};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
+use shape_value::v2::concrete_type::{ClosureTypeId, ConcreteType};
 use std::collections::BTreeSet;
 
 use super::super::BytecodeCompiler;
@@ -133,6 +135,16 @@ impl BytecodeCompiler {
         self.inferred_param_pass_modes
             .insert(closure_name.clone(), closure_pass_modes);
 
+        // Phase A: mint a ClosureTypeId keyed on the capture signature.
+        //
+        // Resolves each captured name to a `ConcreteType` via the monomorphizer
+        // helpers; unresolved captures fall back to `Pointer(Void)` (opaque
+        // 8-byte slot, conservatively treated as a heap-refcounted pointer by
+        // the layout's `heap_capture_mask`). This records layout metadata in
+        // `closure_registry` that Phase C consumes to extend the monomorphization
+        // cache key. Emission is unchanged.
+        let closure_type_id = self.mint_closure_type_id(&captured_vars);
+
         let func_idx = self.program.functions.len();
         self.program.functions.push(Function {
             name: closure_name.clone(),
@@ -158,6 +170,9 @@ impl BytecodeCompiler {
 
         // Record closure function_id for MIR back-patching (ClosurePlaceholder → Function)
         self.closure_function_ids.push((closure_name.clone(), func_idx as u16));
+        // Phase A: record the closure's ClosureTypeId against its function index.
+        self.closure_type_ids
+            .push((func_idx as u16, closure_type_id));
 
         // Set up mutable_closure_captures so that during body compilation,
         // variable accesses for mutable captures emit LoadClosure/StoreClosure.
@@ -289,6 +304,42 @@ impl BytecodeCompiler {
         self.last_expr_schema = None;
         Ok(())
     }
+
+    /// Read-only access to the compiler's closure registry.
+    /// Populated by each closure literal during lowering (Phase A).
+    pub fn closure_registry(&self) -> &shape_value::v2::closure_layout::ClosureRegistry {
+        &self.closure_registry
+    }
+
+    /// `(function_id, ClosureTypeId)` pairs, one per closure literal lowered
+    /// during compilation. Phase C consumes this to key the monomorphization
+    /// cache by closure layout.
+    pub fn closure_type_ids(&self) -> &[(u16, ClosureTypeId)] {
+        &self.closure_type_ids
+    }
+
+    /// Mint a `ClosureTypeId` for a closure literal by resolving each capture
+    /// name to a `ConcreteType` and interning the resulting signature in
+    /// `closure_registry` (Phase A).
+    ///
+    /// Unresolved captures fall back to `Pointer(Void)` — an opaque 8-byte
+    /// slot that the layout treats as heap-refcounted. This keeps semantics
+    /// conservative (no missed Drop glue) while Phase B/C/D grow the
+    /// resolution coverage.
+    pub(crate) fn mint_closure_type_id(
+        &mut self,
+        captured_vars: &[String],
+    ) -> ClosureTypeId {
+        let capture_types: Vec<ConcreteType> = captured_vars
+            .iter()
+            .map(|name| {
+                let ident = Expr::Identifier(name.clone(), Span::DUMMY);
+                concrete_type_for_expr(self, &ident)
+                    .unwrap_or_else(|| ConcreteType::Pointer(Box::new(ConcreteType::Void)))
+            })
+            .collect();
+        self.closure_registry.intern(capture_types)
+    }
 }
 
 #[cfg(test)]
@@ -385,5 +436,143 @@ mod tests {
                 .map(|semantics| semantics.storage_class),
             Some(BindingStorageClass::UniqueHeap)
         );
+    }
+
+    // ---- Phase A: ClosureTypeId minting & ClosureRegistry population ----
+
+    use shape_value::v2::concrete_type::ClosureTypeId;
+
+    fn compile_closure_literal(source: &str, compiler: &mut BytecodeCompiler) {
+        let program = parse_program(source).expect("parse failed");
+        let var_decl = match &program.items[0] {
+            Item::VariableDecl(var_decl, _) => var_decl,
+            Item::Statement(Statement::VariableDecl(var_decl, _), _) => var_decl,
+            _ => panic!("expected variable declaration"),
+        };
+        let Some(Expr::FunctionExpr { params, body, .. }) = var_decl.value.as_ref() else {
+            panic!("expected closure initializer");
+        };
+        compiler
+            .compile_expr_closure(params, body)
+            .expect("closure should compile");
+    }
+
+    #[test]
+    fn test_no_capture_closure_mints_closure_type_id_zero() {
+        let mut compiler = BytecodeCompiler::new();
+        compile_closure_literal("let f = || 42", &mut compiler);
+
+        // Exactly one closure was lowered.
+        assert_eq!(compiler.closure_type_ids().len(), 1);
+        let (func_id, type_id) = compiler.closure_type_ids()[0];
+        assert_eq!(type_id, ClosureTypeId(0));
+        // func_id refers to a real entry in the program's function table.
+        assert!(
+            (func_id as usize) < compiler.program.functions.len(),
+            "func_id must index the program's function table"
+        );
+
+        let layout = compiler.closure_registry().get(type_id).expect("layout");
+        assert_eq!(layout.capture_count(), 0);
+        assert_eq!(layout.total_heap_size(), 16);
+        assert_eq!(layout.total_stack_size(), 8);
+    }
+
+    #[test]
+    fn test_two_no_capture_closures_share_type_id() {
+        let mut compiler = BytecodeCompiler::new();
+        compile_closure_literal("let f = || 1", &mut compiler);
+        compile_closure_literal("let g = || 2", &mut compiler);
+
+        let ids = compiler.closure_type_ids();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].1, ids[1].1, "identical capture signatures share id");
+        // Distinct function indices — the bodies are separate functions even
+        // though the capture layout is shared.
+        assert_ne!(ids[0].0, ids[1].0);
+
+        // Registry contains exactly one layout (the shared signature).
+        assert_eq!(compiler.closure_registry().len(), 1);
+    }
+
+    #[test]
+    fn test_closure_counter_advances_independently_of_type_id() {
+        let mut compiler = BytecodeCompiler::new();
+        // Two closure literals, no captures → shared ClosureTypeId(0),
+        // but closure_counter should still be 2 (two function names minted).
+        compile_closure_literal("let f = || 1", &mut compiler);
+        compile_closure_literal("let g = || 2", &mut compiler);
+        assert_eq!(compiler.closure_counter, 2);
+        assert_eq!(compiler.closure_registry().len(), 1);
+    }
+
+    #[test]
+    fn test_captures_with_unresolved_types_fallback_to_opaque_pointer() {
+        // When a capture's concrete type is unresolved, the registry records
+        // it as `Pointer(Void)` — an opaque 8-byte heap-refcounted slot. This
+        // conservative fallback ensures Drop glue is safe.
+        use shape_value::v2::struct_layout::FieldKind;
+
+        let mut compiler = BytecodeCompiler::new();
+        // Create a module binding with no type information.
+        compiler.get_or_create_module_binding("x");
+        compile_closure_literal("let f = || x + 1", &mut compiler);
+
+        let ids = compiler.closure_type_ids();
+        assert_eq!(ids.len(), 1);
+        let layout = compiler.closure_registry().get(ids[0].1).expect("layout");
+        assert_eq!(layout.capture_count(), 1);
+        assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
+        assert_eq!(layout.heap_capture_mask, 0b1, "opaque pointer is heap-refcounted");
+    }
+
+    #[test]
+    fn test_three_closures_record_three_entries_in_type_id_map() {
+        let mut compiler = BytecodeCompiler::new();
+        // Three module bindings, one captured per closure.
+        compiler.get_or_create_module_binding("a");
+        compiler.get_or_create_module_binding("b");
+        compiler.get_or_create_module_binding("c");
+
+        compile_closure_literal("let f = || a", &mut compiler);
+        compile_closure_literal("let g = || b", &mut compiler);
+        compile_closure_literal("let h = || c", &mut compiler);
+
+        let ids = compiler.closure_type_ids();
+        assert_eq!(ids.len(), 3, "three closure literals → three map entries");
+
+        // All three have the same capture shape (one opaque-pointer module
+        // binding), so they should share a ClosureTypeId.
+        assert_eq!(ids[0].1, ids[1].1);
+        assert_eq!(ids[1].1, ids[2].1);
+        assert_eq!(compiler.closure_registry().len(), 1);
+
+        // But each has a distinct function id.
+        assert_ne!(ids[0].0, ids[1].0);
+        assert_ne!(ids[1].0, ids[2].0);
+    }
+
+    #[test]
+    fn test_closure_type_ids_reference_distinct_function_indices() {
+        // The (function_id, ClosureTypeId) pairs must point at real,
+        // distinct entries in the compiled program's function table.
+        let mut compiler = BytecodeCompiler::new();
+        compile_closure_literal("let f = || 1", &mut compiler);
+        compile_closure_literal("let g = || 2", &mut compiler);
+        compile_closure_literal("let h = || 3", &mut compiler);
+
+        let ids = compiler.closure_type_ids();
+        assert_eq!(ids.len(), 3);
+        let funcs = &compiler.program.functions;
+        for (fid, _) in ids {
+            let idx = *fid as usize;
+            assert!(idx < funcs.len(), "function id {idx} out of range");
+            assert!(funcs[idx].is_closure);
+        }
+        // Function ids are distinct.
+        let mut seen = std::collections::HashSet::new();
+        for (fid, _) in ids {
+            assert!(seen.insert(*fid), "duplicate function id {fid}");
+        }
     }
 }

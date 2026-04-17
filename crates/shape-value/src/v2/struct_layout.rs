@@ -35,7 +35,7 @@ impl FieldKind {
 }
 
 /// Information about a single field in a struct layout.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FieldInfo {
     pub name: String,
     pub kind: FieldKind,

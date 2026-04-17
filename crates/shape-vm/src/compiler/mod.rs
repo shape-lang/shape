@@ -507,6 +507,18 @@ pub struct BytecodeCompiler {
     /// Used to back-patch MIR ClosurePlaceholder/ClosureCapture after compilation.
     pub(crate) closure_function_ids: Vec<(String, u16)>,
 
+    /// Registry of closure capture layouts (v2 closure specialization Phase A).
+    ///
+    /// Keyed on capture signature (`Vec<ConcreteType>`): two closures with
+    /// identical capture signatures share a `ClosureTypeId`. Phase C will
+    /// consume this to extend the monomorphization cache key.
+    pub(crate) closure_registry: shape_value::v2::closure_layout::ClosureRegistry,
+
+    /// Mapping from closure function index to its `ClosureTypeId`.
+    /// Populated alongside `closure_function_ids` as each closure literal is
+    /// lowered. Phase C reads this to key monomorphization on the closure type.
+    pub(crate) closure_type_ids: Vec<(u16, shape_value::v2::concrete_type::ClosureTypeId)>,
+
     /// When compiling a DataTable closure method (e.g. dt.filter(row => ...)),
     /// this holds the (schema_id, type_name) to tag the closure's row parameter as RowView.
     pub(crate) closure_row_schema: Option<(u32, String)>,
