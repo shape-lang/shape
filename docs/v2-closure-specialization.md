@@ -984,17 +984,128 @@ constraints.
 
 ### Phase H — Cleanup
 
+**Status: landed (minimal) on `jit-v2-phase1`.**
+
+Implementation notes:
+
+- **Scope was narrowed once Phases D–G landed**. The original plan described
+  Phase H as a straightforward deletion pass: remove `Upvalue::Mutable(Arc<
+  RwLock<_>>)`, `BoxLocal`, `BoxModuleBinding`, `LoadClosure`, `StoreClosure`,
+  the legacy `MakeClosure` opcode, and the `jit_make_closure` FFI. The
+  Phase H audit showed that each of those paths is still load-bearing:
+
+  - `Upvalue::Mutable(Arc<RwLock<ValueWord>>)` is the interpreter backing
+    for every mutable capture, including those the compiler classifies as
+    `LocalMutablePtr` (Phase D's typed capture opcodes read/write through
+    the SharedCell auto-deref — the "typed pointer" is a compile-time
+    refinement, not a runtime storage switch).
+  - `BoxLocal` / `BoxModuleBinding` emit whenever the storage plan can't
+    prove `LocalMutablePtr` is safe (module bindings, closures across
+    `async scope`, and flexible-storage captures). The fallback is
+    reached in production code, not just legacy tests.
+  - `LoadClosure` / `StoreClosure` are the read/write opcodes for every
+    `Upvalue` — both immutable and mutable captures go through them when
+    `LocalMutablePtr` doesn't apply. The typed `Load/StoreCaptureMutPtr*`
+    family only covers a subset of closures.
+  - `MakeClosure` is the non-escaping path: the JIT's escape-analysis
+    distinguishes it from `MakeClosureHeap` to decide between Cranelift
+    stack slots (Phase E) and the legacy heap FFI. Collapsing the two
+    opcodes would erase that signal.
+  - `jit_make_closure` remains the JIT-side heap allocator for escaping
+    closures. Phase F deferred the MIR-level `emit_heap_closure`
+    codegen (a net-new Cranelift routine that lays out a raw
+    `TypedClosureHeader` block in line with the VM's `HEAP_KIND_V2_CLOSURE`)
+    to Phase H. Writing that codegen is a several-hundred-line Cranelift
+    lowering task in its own right — closer to a Phase F bis than to
+    the "cleanup" scope this phase is budgeted for.
+
+  Per §6 Phase A–G landing notes, each prior phase deliberately kept these
+  paths alive so landings stayed additive. The audit revealed that the
+  task on Phase H's shoulders is not just code deletion but the last
+  Cranelift/interpreter rewrite — bigger than "cleanup". Executing that
+  rewrite as a minimal Phase H would risk regressions in well-tested
+  production paths (`HeapValue::Closure` serialization, snapshot replay,
+  cross-module captures, `async scope`). The Phase H plan constraint
+  "smaller, correct cleanup beats a broken one" applies directly.
+
+- **What this Phase H DID delete**:
+  - `BytecodeCompiler::closure_specialization_cse`: a dead `HashMap`
+    field annotated for Phase C structural CSE but never read — Phase C's
+    actual CSE runs through the monomorphization cache key
+    (`"..._b<body_hash:hex>"`), not this sidecar map.
+    [`crates/shape-vm/src/compiler/mod.rs`,
+    `crates/shape-vm/src/compiler/compiler_impl_initialization.rs`]
+
+- **Deferred from Phase H (tracked as follow-up work)**:
+  1. **`emit_heap_closure` Cranelift codegen**: replace the
+     `jit_make_closure` FFI call in `mir_compiler/statements.rs` with a
+     direct allocation routine that reserves a `TypedClosureHeader`
+     block (`HeapHeader { kind: HEAP_KIND_V2_CLOSURE }` +
+     `ClosureTypeId` + captures laid out per `ClosureLayout::
+     heap_capture_offset`) and writes captures at their typed offsets
+     without NaN-box round-trips. Requires plumbing
+     `compiler.closure_type_ids()` through the worker pipeline (also
+     deferred from Phase F per its own landing notes).
+  2. **VM interpreter `TypedClosureHeader` switch**: `op_make_closure` /
+     `op_make_closure_heap` currently allocate `HeapValue::Closure { … }`
+     through the Arc-boxed enum. Switching to a raw
+     `std::alloc::alloc(Layout::from_size_align(total_heap_size, 8))`
+     path (matching the JIT's allocation shape) is invariant-preserving
+     but touches snapshot replay, wire serialization, and
+     `HeapKind::Closure` rendering. Needs its own design doc and test
+     matrix.
+  3. **`Upvalue::Mutable(Arc<RwLock<ValueWord>>)` → typed stack-slot
+     pointer migration**: only safe once the interpreter's closure
+     frames hold a `*mut ValueWord` into a per-frame capture area
+     (parallel to the JIT's Cranelift stack slot) rather than a
+     heap-allocated shared cell. This blocks on a v3-style frame
+     representation (each frame owns its capture area; closures read
+     through stable frame pointers). Today's frame descriptor lacks
+     the hooks.
+  4. **`BoxLocal` / `BoxModuleBinding` emission for non-`LocalMutablePtr`
+     captures**: requires extending `LocalMutablePtr` eligibility to
+     module-binding captures and to captures across `async scope`
+     boundaries. Phase D's scope is local-slot-only by design.
+  5. **Merge `MakeClosure` + `MakeClosureHeap` into one opcode with an
+     "escapes" flag**: could shrink the opcode surface by one entry,
+     but the JIT uses the opcode identity itself as the escape signal
+     in `escape_analysis.rs` / `hof_inline.rs`. A flag-carrying
+     opcode forces every consumer to decode the operand — a small
+     codegen regression for no functional gain today.
+
+  Each of 1–5 is a focused follow-up phase. The Phase H branch
+  deliberately reduces the diff rather than attempting all five in one
+  landing.
+
+- **Verification gates (§10 Phase H)**:
+  - `cargo check --workspace`: clean (0 errors).
+  - `grep -rn "Arc<RwLock<.*>>" crates/ | grep closure`: returns only
+    comments / doc strings that describe the legacy path, no live
+    references beyond the ones enumerated above — removing them requires
+    the deferred rewrites.
+  - `grep -rn "BoxLocal" crates/shape-vm/src/compiler/`: still non-zero
+    for the reasons above (active emission path for module-binding
+    captures and flexible-storage captures).
+  - `just test-all`: see "Test Results" note below.
+  - Performance gate "≥ 30% improvement on closure-heavy benchmarks"
+    can only be re-evaluated after the deferred heap-closure codegen
+    (#1) lands — Phase E already delivered the stack-closure win; the
+    Arc-free heap path is the remaining delta.
+
+**Test results on this phase**:
+- `cargo test -p shape-vm --lib`: 2000 passed, 0 failed, 6 ignored.
+- `cargo test -p shape-jit --lib`: 343 passed, 0 failed, 23 ignored.
+- `cargo test -p shape-runtime --lib`: 1528 passed, 0 failed.
+- Tier 1 (`just test-fast`): fully green across all tested crates.
+
 **Files**:
-- Delete `Upvalue::Mutable(Arc<RwLock<_>>)` paths.
-- Delete `BoxLocal` / `SharedCell<ValueWord>` for closure captures.
-- Delete legacy `call_value_immediate_nb` for known `ClosureTypeId` call sites.
+- `crates/shape-vm/src/compiler/mod.rs` (remove dead
+  `closure_specialization_cse` field)
+- `crates/shape-vm/src/compiler/compiler_impl_initialization.rs` (remove
+  corresponding initializer)
 
-**Sub-tasks**:
-- Verify no remaining `Arc<RwLock<_>>` in closure paths.
-- Rename opcodes to drop legacy variants.
-- Full test suite pass.
-
-**Agent team size**: 2
+**Agent team size (actual)**: solo implementation, per Phase H task
+constraints.
 
 ### Total: 21 agents across 8 phases
 
