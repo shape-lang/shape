@@ -731,6 +731,31 @@ fn propagate_transitive_closure_escape(
     }
 }
 
+/// Does the MIR contain any named call to `snapshot`, regardless of args?
+///
+/// Closure spec Phase G §5.6: `snapshot()` captures the full VM state into
+/// `SerializableCallFrame` via the interpreter's locals array. Stack-allocated
+/// closures live in Cranelift StackSlots and are invisible to that
+/// serializer, so any function that may invoke `snapshot()` must not
+/// stack-allocate its closures — independent of whether a specific closure
+/// flows into `snapshot()`'s argument list. The spec's "forces deopt first"
+/// policy reduces to "promote every closure in the function to heap." Phase G
+/// implements the conservative half (§5.6 short-circuit); the precise
+/// per-closure deopt-with-rematerialization path is future work once MIR
+/// gains a first-class `TerminatorKind::Snapshot` (§9 open question #7).
+fn mir_contains_snapshot_call(mir: &MirFunction) -> bool {
+    for block in mir.iter_blocks() {
+        if let TerminatorKind::Call { func, .. } = &block.terminator.kind {
+            if let Operand::Constant(MirConstant::Function(name)) = func {
+                if name == "snapshot" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Populate `StoragePlan.non_escaping_closure_slots` for the function under
 /// analysis. Orchestrates: (1) collect closure slots, (2) classify each via
 /// §2.1 direct vectors, (3) run the §2.4 transitive-capture fixed-point, (4)
@@ -741,6 +766,19 @@ fn detect_non_escaping_closure_slots(
 ) -> HashSet<SlotId> {
     let closure_slots = collect_closure_slots(input.mir);
     if closure_slots.is_empty() {
+        return HashSet::new();
+    }
+
+    // Closure spec Phase G §5.6: function-wide `snapshot()` escape.
+    // If any terminator in the function calls `snapshot`, force every
+    // closure slot to heap — stack closures cannot survive the VM-state
+    // serialization path that snapshot takes. This is the conservative
+    // complement to Phase G's JIT-side "snapshot forces deopt first"
+    // policy: the MIR planner takes the easy win (heap-allocate every
+    // closure in a snapshottable function) so we do not need to emit a
+    // JIT deopt guard for every snapshot-reachable stack slot.
+    if mir_contains_snapshot_call(input.mir) {
+        // All closure slots escape; return the empty "non-escaping" set.
         return HashSet::new();
     }
 
@@ -3350,6 +3388,165 @@ mod tests {
         assert_eq!(
             plan.slot_classes.get(&SlotId(2)),
             Some(&BindingStorageClass::LocalMutablePtr)
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Closure Spec Phase G — snapshot forces all closures to heap
+    // (docs/v2-closure-specialization.md §5.6)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// A function that calls `snapshot()` must not stack-allocate any of
+    /// its closures. The storage planner short-circuits the non-escaping
+    /// set because `snapshot()` serializes `SerializableCallFrame` from the
+    /// interpreter's locals array and cannot see Cranelift stack slots.
+    #[test]
+    fn test_phase_g_snapshot_call_forces_all_closures_escaping() {
+        // Bytecode MIR shape (no escape vector fires for the closure slot
+        // itself):
+        //   _1 = ClosureCapture(|| 1)
+        //   _2 = snapshot()        ← terminator: Call(snapshot)
+        //   _3 = f(5)              ← second block, irrelevant
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+            ],
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Function(
+                        "snapshot".to_string(),
+                    )),
+                    args: vec![],
+                    destination: Place::Local(SlotId(2)),
+                    next: BasicBlockId(1),
+                },
+                span: span(),
+            },
+        };
+        let bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: vec![],
+            terminator: make_terminator(TerminatorKind::Return),
+        };
+        let mir = make_mir("phase_g_snapshot_escape", vec![bb0, bb1], 3);
+
+        let plan = run_planner(&mir);
+        assert!(
+            plan.non_escaping_closure_slots.is_empty(),
+            "snapshot() in function body must force every closure to heap; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    /// Control: the same-shape function WITHOUT `snapshot()` allows the
+    /// closure to remain non-escaping (no escape vector fires). This
+    /// proves the previous test's failure mode is specifically the
+    /// snapshot short-circuit, not a generic escape artifact.
+    #[test]
+    fn test_phase_g_no_snapshot_keeps_closure_non_escaping() {
+        let mir = single_block_mir(
+            "phase_g_no_snapshot",
+            vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+            ],
+            2,
+        );
+
+        let plan = run_planner(&mir);
+        assert!(
+            plan.non_escaping_closure_slots.contains(&SlotId(1)),
+            "closure with no escape vector (and no snapshot) must be non-escaping; got {:?}",
+            plan.non_escaping_closure_slots
+        );
+    }
+
+    /// Snapshot call with a closure also present: both the closure slot
+    /// AND any local alias of it must end up heap-allocated. Exercises
+    /// the "snapshot forces deopt / re-materialize" policy from §5.6
+    /// without needing to actually run the JIT deopt path.
+    #[test]
+    fn test_phase_g_snapshot_forces_aliased_closure_to_heap() {
+        // _1 = ClosureCapture  ; _2 = _1 (alias)  ; snapshot()
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(1),
+                        operands: vec![],
+                        function_id: None,
+                    },
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                    ),
+                    2,
+                ),
+            ],
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Function(
+                        "snapshot".to_string(),
+                    )),
+                    args: vec![],
+                    destination: Place::Local(SlotId(3)),
+                    next: BasicBlockId(1),
+                },
+                span: span(),
+            },
+        };
+        let bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: vec![],
+            terminator: make_terminator(TerminatorKind::Return),
+        };
+        let mir = make_mir("phase_g_snapshot_aliased", vec![bb0, bb1], 4);
+
+        let plan = run_planner(&mir);
+        assert!(
+            plan.non_escaping_closure_slots.is_empty(),
+            "snapshot() with aliased closure must still force every closure slot to heap; \
+             got {:?}",
+            plan.non_escaping_closure_slots
         );
     }
 }

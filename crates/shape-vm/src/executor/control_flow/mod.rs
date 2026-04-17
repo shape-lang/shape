@@ -409,6 +409,14 @@ impl VirtualMachine {
     /// The arity comes from the opcode operand rather than the stack, so
     /// this helper does not pop a Count sentinel before peeking the
     /// callee. Otherwise the dispatch tree mirrors `op_call_value`.
+    ///
+    /// Closure spec Phase G §5.4: records the resolved target `function_id`
+    /// into the current function's feedback vector so the JIT Tier 2 can
+    /// emit speculative direct-call guards when the site has gone
+    /// monomorphic. The feedback recording happens on the indirect path
+    /// (closure / function-ref callees). Host closures and module
+    /// functions are not recorded (no stable `function_id` / different
+    /// call ABI).
     fn dispatch_call_closure_like(&mut self, arg_count: usize) -> Result<(), VMError> {
         // Stack layout: [callee, arg0, arg1, ..., argN-1]
         let callee_idx = self
@@ -423,6 +431,12 @@ impl VirtualMachine {
                 "Cannot call non-function value".to_string(),
             ));
         }
+        // `self.ip` points one past the call opcode by this time (the
+        // dispatch loop bumps `ip` before handing off to the handler);
+        // the call opcode's IP is therefore `ip - 1`. Feedback is keyed
+        // on the call opcode's IP to match what the JIT observes in
+        // its MIR view of the bytecode.
+        let call_ip = self.ip.saturating_sub(1);
         match shape_value::tags::get_tag(_bits) {
             TAG_FUNCTION => {
                 let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
@@ -433,6 +447,10 @@ impl VirtualMachine {
                     self.stack[i + 1] = Self::NONE_BITS;
                 }
                 self.sp -= 1;
+                // Closure spec Phase G §5.4: record monomorphic target.
+                if let Some(fv) = self.current_feedback_vector() {
+                    fv.record_call(call_ip, func_id);
+                }
                 self.call_function_from_stack(func_id, arg_count)
             }
             TAG_MODULE_FN => {
@@ -471,6 +489,16 @@ impl VirtualMachine {
                     drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
                     self.stack[callee_idx] = Self::NONE_BITS;
                     self.sp = callee_idx;
+                    // Closure spec Phase G §5.4: record monomorphic target.
+                    // The closure's underlying `function_id` is the guard
+                    // key the Tier 2 JIT compares against. A single
+                    // observed id -> `ICState::Monomorphic`; multiple
+                    // observations promote to Polymorphic/Megamorphic
+                    // via the existing state machine in
+                    // `feedback::FeedbackVector::record_call`.
+                    if let Some(fv) = self.current_feedback_vector() {
+                        fv.record_call(call_ip, function_id);
+                    }
                     self.call_closure_with_nb_args(function_id, upvalues, &args_nb)
                 } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) =
                     callee_nb.as_heap_ref()

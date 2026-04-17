@@ -188,6 +188,22 @@ impl BytecodeCompiler {
         self.check_task_boundary_safety(&async_let.expr, async_let.span)?;
         self.plan_flexible_binding_escape_from_expr(&async_let.expr);
 
+        // Closure spec Phase G §5.5: a closure literal crossing a
+        // detached task boundary (`async let c = || ...`) must use the
+        // heap-ABI opcode — the Cranelift stack slot a non-escaping
+        // closure would live in cannot outlive the spawning frame. Mark
+        // the next `MakeClosure` emission to use `MakeClosureHeap` so
+        // the MIR storage planner + JIT codegen see the escape signal.
+        // Phase B's escape analysis flags `TaskBoundary` operands as
+        // escaping (storage_planning.rs rows 5-6) so non-literal
+        // closure operands already fall back to the heap ABI; this
+        // hook covers the literal case where MIR never sees a
+        // `TaskBoundary` for the closure slot (the literal is inlined
+        // into the spawn expression).
+        if matches!(&*async_let.expr, Expr::FunctionExpr { .. }) {
+            self.emit_make_closure_heap_next = true;
+        }
+
         // Compile the RHS expression
         self.compile_expr(&async_let.expr)?;
 
@@ -234,6 +250,16 @@ impl BytecodeCompiler {
         // Enter structured concurrency scope
         self.emit(Instruction::simple(OpCode::AsyncScopeEnter));
 
+        // Closure spec Phase G §5.5: conservative v1 for structured
+        // boundaries — if the scope's result expression is a closure
+        // literal (possibly wrapped in a single-item block), force
+        // heap allocation. Future work per §9.6 is to prove that the
+        // child future's lifetime is bounded by the parent frame and
+        // allow stack closures across structured boundaries.
+        if Self::scope_result_is_closure_literal(inner) {
+            self.emit_make_closure_heap_next = true;
+        }
+
         // Compile the body — any `async let` inside will spawn tasks tracked by this scope
         self.compile_expr(inner)?;
 
@@ -241,6 +267,29 @@ impl BytecodeCompiler {
         self.emit(Instruction::simple(OpCode::AsyncScopeExit));
 
         Ok(())
+    }
+
+    /// Determine whether the final value produced by an `async scope`
+    /// body is a closure literal. Handles the common shapes:
+    ///   - `async scope { || 1 }` → `Expr::Block` wrapping one
+    ///     `Expr::FunctionExpr`
+    ///   - `async scope(|| 1)` → bare `Expr::FunctionExpr`
+    fn scope_result_is_closure_literal(expr: &Expr) -> bool {
+        match expr {
+            Expr::FunctionExpr { .. } => true,
+            Expr::Block(block, _) => {
+                // The scope's value is the last block item (if it is an
+                // expression). A trailing statement produces unit, so no
+                // closure can flow out.
+                block.items.last().is_some_and(|item| match item {
+                    shape_ast::ast::BlockItem::Expression(e) => {
+                        Self::scope_result_is_closure_literal(e)
+                    }
+                    _ => false,
+                })
+            }
+            _ => false,
+        }
     }
 
     /// Check that an expression being spawned as a concurrent task doesn't

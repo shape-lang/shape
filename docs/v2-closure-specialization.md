@@ -890,17 +890,97 @@ constraints.
 
 ### Phase G — Snapshot + Task-Boundary Promotion
 
-**Files**:
-- `crates/shape-runtime/src/snapshot.rs`
-- `crates/shape-jit/src/osr_compiler.rs` (deopt path)
-- `crates/shape-vm/src/compiler/expressions/task_boundary.rs`
+**Status: landed on `jit-v2-phase1`.**
 
-**Sub-tasks**:
-- Snapshot forces JIT → interpreter deopt; stack closures re-materialized during deopt.
-- Task-boundary pass detects closure operands and forces heap variant.
-- Tests: `snapshot()` during hot JIT path with stack closure works; detached-task closure correctly heap-promoted.
+Implementation notes:
 
-**Agent team size**: 2
+- **Snapshot escape short-circuit (§5.6)**: rather than emit a dedicated
+  JIT deopt at the `snapshot()` callsite, Phase G takes the
+  conservative MIR-side win: `detect_non_escaping_closure_slots` walks
+  the function's block terminators and, if ANY of them is a
+  `Call(snapshot, ...)` terminator, short-circuits the entire function's
+  non-escaping set to empty. Every closure in a snapshottable
+  function therefore goes through the heap ABI, so snapshot
+  serialization via `SerializableCallFrame` sees every closure on the
+  interpreter's locals array. This sidesteps the need for a precise
+  deopt-and-rematerialize path; the dedicated path remains future
+  work (§9 open question #7).
+- **Task-boundary compiler hook (§5.5)**: `compile_async_let` and
+  `compile_async_scope` set `emit_make_closure_heap_next = true`
+  before lowering a closure-literal operand, reusing the same hook
+  Phase F used for return-of-closure / array-of-closure patterns. The
+  detached-boundary case (`async let c = || ...`) forces heap
+  unconditionally. The structured-boundary case
+  (`async scope { || ... }`) is conservative v1 per §5.5 — it also
+  forces heap. A `scope_result_is_closure_literal` helper traverses
+  the final block expression to catch the `async scope { || ... }`
+  shape where the closure is wrapped in a single-item block.
+  Phase B's escape-detection table already flagged closure operands
+  in `StatementKind::TaskBoundary` as escaping (rows 5-6), so
+  non-literal closure operands already fell back to heap; the new
+  compiler hook covers the literal case that never reaches MIR with
+  a `TaskBoundary` statement (the literal is inlined into the spawn
+  expression).
+- **Feedback-guided Tier 2 specialization (§5.4)**: `CallClosure` /
+  `CallFunctionIndirect` dispatch now records the resolved target
+  `function_id` into the current function's feedback vector via
+  `FeedbackVector::record_call`. A new helper
+  `executor::ic_fast_paths::closure_call_ic_check` returns a
+  `ClosureCallIcHit { function_id, total_calls }` when the site has
+  transitioned to `ICState::Monomorphic`. The helper is the Tier 2
+  JIT's consumption point: a guard `if observed_fn_id ==
+  expected_fn_id then direct_call else fall_through_to_indirect` is
+  emitted from the guard key in `ClosureCallIcHit`. No new feedback
+  vector type was added — Phase G reuses `FeedbackSlot::Call` per the
+  task spec ("do not add a new feedback vector type — extend the
+  closure-call feedback entry"). The IC helper is wired and
+  tested; threading it through the MIR-compiled JIT's indirect call
+  path at `mir_compiler/terminators.rs` requires plumbing a
+  callsite-IP lookup through `TerminatorKind::Call` (MIR does not
+  currently carry bytecode IPs) and is tracked as a separate Tier 2
+  work item — Phase G's verification (below) exercises the VM-level
+  recording + IC helper; the JIT IR-level guard codegen is the
+  remaining step.
+- **Deopt re-materialization glue**: the existing OSR compiler rejects
+  any loop body containing closure-related opcodes via
+  `is_osr_supported_opcode`, so stack closures never reach an OSR
+  frame today. The whole-function MIR-compiled JIT handles closures
+  directly (Phase E stack-closure + Phase F heap-closure paths); its
+  deopt surface is `TerminatorKind::Call`'s `is_error` guard, which
+  already returns control to the interpreter with all VM-visible
+  locals written back. Because Phase G's snapshot short-circuit
+  forces every closure in a snapshottable function to heap, no
+  rematerialization on the deopt path is required for Phase G's
+  correctness guarantee; the precise per-closure rematerialization
+  path remains Phase H cleanup work.
+
+**Files** (all landed):
+- `crates/shape-vm/src/mir/storage_planning.rs`
+  (new `mir_contains_snapshot_call` + short-circuit in
+  `detect_non_escaping_closure_slots`, 3 MIR-level Phase G tests)
+- `crates/shape-vm/src/compiler/expressions/advanced.rs`
+  (`compile_async_let` + `compile_async_scope` heap-promotion hooks,
+  `scope_result_is_closure_literal` helper)
+- `crates/shape-vm/src/executor/control_flow/mod.rs`
+  (`dispatch_call_closure_like` records call feedback for
+  `CallClosure` / `CallFunctionIndirect`)
+- `crates/shape-vm/src/executor/ic_fast_paths.rs`
+  (new `ClosureCallIcHit` + `closure_call_ic_check` helpers)
+- `crates/shape-vm/src/compiler/expressions/closures.rs`
+  (7 Phase G tests: detached-boundary / structured-boundary
+  heap-promotion, non-task-boundary control, runtime evaluation,
+  heap-capture across a boundary, feedback monomorphic /
+  polymorphic roundtrips)
+
+**Deferred to Phase H**:
+- JIT-IR-level guard emission for `closure_call_ic_check` results.
+- First-class `TerminatorKind::Snapshot` in MIR + dedicated
+  per-closure deopt-and-rematerialize path (§9 open question #7).
+- Lifting the structured-boundary conservative rejection once
+  parent/child future-lifetime analysis lands (§9 open question #6).
+
+**Agent team size (actual)**: solo implementation, per Phase G task
+constraints.
 
 ### Phase H — Cleanup
 

@@ -259,6 +259,61 @@ pub(crate) fn dyn_method_ic_record(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Closure / indirect-call IC fast path (Closure spec Phase G §5.4)
+// ---------------------------------------------------------------------------
+
+/// Result of a monomorphic closure/indirect-call IC check.
+///
+/// Returned when a `CallClosure` / `CallFunctionIndirect` callsite has seen
+/// exactly one target `function_id`. The Tier 2 JIT uses this to emit a
+/// speculative direct-call guard: `if observed_function_id == expected_id
+/// then direct_call else fall_through_to_indirect`. The interpreter itself
+/// does not currently need this hint — it unconditionally takes the
+/// typed-dispatch path because `call_function_from_stack` / `call_closure_*`
+/// are already direct. The hint exists so the JIT can reuse the existing
+/// feedback infrastructure (no new vector type, per §5.4 "Reuse existing
+/// IC infrastructure. Do not add a new feedback vector type — extend the
+/// closure-call feedback entry.").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosureCallIcHit {
+    /// The single `function_id` observed at this callsite.
+    pub function_id: u16,
+    /// Total observed calls, used for JIT heuristics (threshold-based
+    /// specialization; ≤ few calls = skip, ≥ N calls = worth specializing).
+    pub total_calls: u64,
+}
+
+/// Check the `CallClosure` / `CallFunctionIndirect` IC for a monomorphic
+/// hit.
+///
+/// Returns `Some(ClosureCallIcHit)` when the feedback slot at `ip` has
+/// exactly one recorded target and is in state `Monomorphic`. Returns
+/// `None` for Uninitialized / Polymorphic / Megamorphic sites — the Tier 2
+/// JIT then emits a plain indirect call without a guard.
+///
+/// Closure spec Phase G §5.4: shared between `CallClosure` and
+/// `CallFunctionIndirect`; the underlying feedback representation is
+/// the existing `FeedbackSlot::Call(CallFeedback)`.
+pub fn closure_call_ic_check(
+    vm: &VirtualMachine,
+    ip: usize,
+) -> Option<ClosureCallIcHit> {
+    let func_id = vm.call_stack.last()?.function_id? as usize;
+    let fv = vm.feedback_vectors.get(func_id)?.as_ref()?;
+    let slot = fv.get_slot(ip)?;
+    match slot {
+        FeedbackSlot::Call(fb) if fb.state == ICState::Monomorphic => {
+            let target = fb.targets.first()?;
+            Some(ClosureCallIcHit {
+                function_id: target.function_id,
+                total_calls: fb.total_calls,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
