@@ -49,7 +49,7 @@ mod v2_array_tests;
 
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ffi_refs::FFIFuncRefs;
 use shape_value::v2::ConcreteType;
@@ -115,6 +115,22 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) ref_stack_slots: HashMap<SlotId, StackSlot>,
     /// Mapping from field name to byte offset within a TypedObject.
     pub(crate) field_byte_offsets: HashMap<String, u16>,
+
+    // ── Closure Spec Phase E: stack-allocated closures ──────────────
+    /// Slots that hold a non-escaping closure value, per the MIR
+    /// storage plan's `non_escaping_closure_slots`. When a
+    /// `StatementKind::ClosureCapture` targets a slot in this set,
+    /// codegen allocates a Cranelift `StackSlot` shaped like
+    /// `StackClosure { function_id: u32, type_id: u32, captures... }`
+    /// instead of calling `jit_make_closure`. Cranelift's SROA then
+    /// eliminates the slot when Phase C has inlined the closure body
+    /// and the env pointer is dead.
+    pub(crate) non_escaping_closure_slots: HashSet<SlotId>,
+    /// MIR SlotId → Cranelift `StackSlot` backing a non-escaping
+    /// closure. Populated on `ClosureCapture`. Used by drop/release
+    /// paths to skip `arc_release` on stack-resident closure handles
+    /// and by other consumers that need to know the slot is stack-resident.
+    pub(crate) stack_closure_slots: HashMap<SlotId, StackSlot>,
 }
 
 /// Result of MIR preflight check.
@@ -244,6 +260,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // Enrich slot_kinds with MIR-level type inference when the bytecode
         // compiler didn't provide them.
         let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &slot_kinds);
+        // Phase E: pull the set of non-escaping closure slots out of the MIR
+        // storage plan so `ClosureCapture` lowering can pick the stack-slot
+        // fast path. Slots absent from this set fall back to the legacy
+        // `jit_make_closure` FFI path (Phase H will delete that).
+        let non_escaping_closure_slots =
+            mir_data.storage_plan.non_escaping_closure_slots.clone();
         Self {
             builder,
             ctx_ptr,
@@ -263,6 +285,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             user_func_arities,
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
+            non_escaping_closure_slots,
+            stack_closure_slots: HashMap::new(),
         }
     }
 

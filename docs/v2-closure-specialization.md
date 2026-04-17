@@ -647,18 +647,114 @@ Implementation notes:
 
 ### Phase E — JIT Codegen
 
-**Files**:
-- `crates/shape-jit/src/compiler/program.rs`
-- `crates/shape-jit/src/mir_compiler/statements.rs`
-- `crates/shape-jit/src/mir_compiler/rvalues.rs`
-- `crates/shape-jit/src/loop_analysis.rs`
+**Status: landed on `jit-v2-phase1`.**
 
-**Sub-tasks**:
-- Cranelift `StackSlot` allocation for non-escaping closures.
-- Direct `Call(FuncId)` with typed ABI for specialized closures.
-- Ensure capture loads use typed Cranelift types (F64, I64, I32, I8, ptr).
-- Add closure opcodes to `opcode_is_non_allocating` whitelist where applicable.
-- Performance tests: closure-heavy benchmark shows expected reduction in atomic ops.
+Implementation notes:
+
+- **`MirToIR` wired to the storage plan**: the constructor clones the
+  MIR's `StoragePlan.non_escaping_closure_slots` into a `MirToIR` field
+  so `ClosureCapture` lowering can branch on a per-slot basis without
+  re-running escape analysis. A parallel `stack_closure_slots:
+  HashMap<SlotId, StackSlot>` tracks which slots received a Cranelift
+  stack slot so drop/release paths can skip `arc_release`.
+- **Stack-slot layout** (inside `emit_stack_closure`): for each
+  non-escaping `ClosureCapture`, `FunctionBuilder::create_sized_stack_slot`
+  allocates an ExplicitSlot shaped like `StackClosure { function_id:
+  u32 @ 0, type_id: u32 @ 4, captures... }`. Capture offsets are
+  computed from the per-capture Cranelift type (F64/I64/I32/I16/I8/ptr)
+  with natural alignment, mirroring
+  `shape_value::v2::closure_layout::ClosureLayout::stack_capture_offset`.
+  The layout helper (`phase_e_layout`) has a dedicated unit-test
+  module that cross-checks offsets against the runtime `ClosureLayout`
+  for the common F64 signature.
+- **Typed capture stores**: captures are written at their native
+  Cranelift type (no NaN-box round-trip) so Phase C's inlined body
+  can consume them directly via typed `load`. A
+  `coerce_for_capture_store` helper handles width mismatches
+  (`sextend`/`ireduce`) and falls back to NaN-boxing for unknown
+  dynamic slots.
+- **`type_id` is currently 0**: Phase E writes a placeholder into the
+  `type_id` field. Phase F will thread the real `ClosureTypeId`
+  through when `Function<A,R>` dispatch lands — the `type_id` is a
+  signature-lookup key for the ABI switch, not a correctness signal
+  for Phase E's direct/inlined paths.
+- **Ownership plumbing**: `release_old_value_if_heap`, `emit_drop`,
+  and the `Copy` operand retain path all early-out when the place's
+  slot id is in `stack_closure_slots`. The raw stack-slot address
+  is not NaN-boxed and has no refcount, so the legacy `arc_retain`/
+  `arc_release` FFI would interpret it as a malformed heap handle.
+  Cranelift's stack slots are freed automatically at function return.
+- **Direct `Call(FuncId)` ABI**: the existing terminator lowering in
+  `mir_compiler/terminators.rs` already emits `call func_ref` with
+  ctx_ptr + captures + args when `Operand::Constant(MirConstant::
+  Function(name))` resolves to a registered `user_func_refs` entry.
+  Phase C emits this pattern post-inline for budget-overflow
+  specializations, so no Phase E changes were needed in
+  `terminators.rs` or `rvalues.rs`; stack-closure creation is
+  purely a statement-level concern.
+- **Closure body inlining is Phase C's job, not the JIT's**: per §5.2,
+  Phase C inlines the closure body at bytecode-compile time. After
+  inlining, the `ClosureCapture` stack slot is dead — the env pointer
+  is never read because the captures are already bound to locals via
+  the inlined block. Cranelift's scalar-replacement-of-alloca
+  eliminates the slot automatically. The JIT does not need a dedicated
+  inlining step.
+- **`opcode_is_non_allocating` extended**: the 10 Phase D typed
+  capture opcodes (`LoadCaptureMutPtr{F64,I64,I32,Bool,Ptr}` +
+  `StoreCaptureMutPtr*`) were added to the loop-allocation whitelist.
+  These ops never allocate, so loops that only use them no longer
+  emit a GC safepoint poll at the loop header.
+- **Escape fallback preserved**: closures absent from
+  `non_escaping_closure_slots` still go through the legacy
+  `jit_make_closure` FFI path. Phase H deletes that path once Phase F
+  lands `MakeClosureHeap` + the per-`ClosureTypeId` heap-allocation
+  ABI.
+
+**Deferred / Phase G / Phase H**:
+
+- **Snapshot deopt**: §5.6 mandates that `snapshot()` forces a JIT
+  deopt before any stack closure is serialized. Phase E does not
+  emit the deopt — conservative behavior is that stack closures
+  simply cannot survive a snapshot today. The JIT's existing
+  deopt-on-error path in the direct-call ABI (`is_error` check in
+  `mir_compiler/terminators.rs`) preserves correctness for the
+  non-snapshot case: if any later opcode traps, the interpreter
+  re-materializes the closure from a refcounted heap rebuild. Phase G
+  will add a dedicated `TerminatorKind::Snapshot` to MIR and wire
+  re-materialization through `osr_compiler.rs`.
+- **Task-boundary promotion**: §5.5 — Phase B's escape analysis
+  already flags closures captured across a `TaskBoundary(Detached, _)`
+  as escaping, so Phase E correctly falls back to heap for those.
+  `Structured` task boundaries are still heap-promoted (conservative).
+  Phase G can relax this once parent/child lifetime analysis lands.
+- **`type_id` propagation**: stored as 0 today. Phase F writes the
+  real `ClosureTypeId` when `Function<A,R>` polymorphic dispatch
+  needs it for signature lookup.
+- **`JITClosure` FFI layout**: preserved as the Phase H cleanup
+  target. Phase E's stack slot layout mirrors
+  `shape_value::v2::closure_layout::StackClosure` (8-byte header +
+  captures) so Phase H can switch `jit_make_closure` to the new
+  layout without touching the stack-closure codegen.
+
+**Files**:
+- `crates/shape-jit/src/mir_compiler/mod.rs`
+  (add `non_escaping_closure_slots` + `stack_closure_slots` fields)
+- `crates/shape-jit/src/mir_compiler/statements.rs`
+  (add `emit_stack_closure` + layout helper + unit tests)
+- `crates/shape-jit/src/mir_compiler/ownership.rs`
+  (skip arc_retain/arc_release on stack-closure slots)
+- `crates/shape-jit/src/loop_analysis.rs`
+  (Phase D opcodes admitted to safepoint-free whitelist)
+- `crates/shape-jit/src/mir_compiler/integration_tests.rs`
+  (8 new Phase E tests — gated behind `jit_v2_unstable_tests`
+  cfg along with the existing closure integration suite)
+
+**Legacy JIT paths still in place (Phase H cleanup)**:
+- `jit_make_closure` FFI + `JITClosure` struct in `context.rs` —
+  used by the escape-fallback code path.
+- `MakeClosureHeap` opcode — not yet emitted; Phase F adds it.
+- `CallValue` indirect dispatch for heap closures — needed until
+  Phase F's per-`ClosureTypeId` signature-dispatch lands.
 
 **Agent team size**: 2
 

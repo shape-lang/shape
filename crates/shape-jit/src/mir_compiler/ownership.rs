@@ -26,9 +26,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let val = self.read_place(place)?;
                 {
                     let slot = place.root_local();
+                    // Phase E: stack closures carry a raw Cranelift stack-slot
+                    // address. No refcount → skip arc_retain.
+                    let is_stack_closure = matches!(place, Place::Local(s) if self.stack_closure_slots.contains_key(s));
                     let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
                     // Native primitive types (Float64, Int32, Bool) never need refcounting.
-                    if !super::types::is_native_slot(slot_kind) {
+                    if !is_stack_closure && !super::types::is_native_slot(slot_kind) {
                         let type_info = self
                             .local_types
                             .get(slot.0 as usize)
@@ -138,6 +141,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             return Ok(());
         }
 
+        // Phase E: stack-allocated closures own no refcounted data; the
+        // Cranelift stack slot is freed implicitly at function return.
+        // Skip arc_release to avoid accidentally treating the raw
+        // stack-slot address as a NaN-boxed heap handle.
+        if let Place::Local(slot_id) = place {
+            if self.stack_closure_slots.contains_key(slot_id) {
+                self.null_place(place)?;
+                return Ok(());
+            }
+        }
+
         let slot = place.root_local();
         let slot_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
 
@@ -174,6 +188,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             && self.v2_typed_array_elem_kind(place).is_some()
         {
             return Ok(());
+        }
+
+        // Phase E: stack-resident closure handles are raw stack-slot
+        // addresses, not refcounted heap pointers. Skip arc_release.
+        if let Place::Local(slot_id) = place {
+            if self.stack_closure_slots.contains_key(slot_id) {
+                return Ok(());
+            }
         }
 
         let slot = place.root_local();

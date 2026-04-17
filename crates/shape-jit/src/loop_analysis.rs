@@ -490,6 +490,24 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::StoreModuleBindingTyped
             | OpCode::LoadClosure
             | OpCode::StoreClosure
+            // Phase D/E typed capture ops (non-allocating — typed
+            // load/store through a stack pointer into the enclosing
+            // frame's captures area). These skip tag dispatch, never
+            // allocate heap memory, and never enter the GC safepoint
+            // poll path. Safe to admit into the safepoint-free loop
+            // whitelist. Only the opcodes themselves are whitelisted;
+            // the surrounding function body may still allocate, which
+            // is handled by the per-opcode scan in the body.
+            | OpCode::LoadCaptureMutPtrF64
+            | OpCode::LoadCaptureMutPtrI64
+            | OpCode::LoadCaptureMutPtrI32
+            | OpCode::LoadCaptureMutPtrBool
+            | OpCode::LoadCaptureMutPtrPtr
+            | OpCode::StoreCaptureMutPtrF64
+            | OpCode::StoreCaptureMutPtrI64
+            | OpCode::StoreCaptureMutPtrI32
+            | OpCode::StoreCaptureMutPtrBool
+            | OpCode::StoreCaptureMutPtrPtr
             // Type casting (inline, no allocation)
             | OpCode::CastWidth
             // Control flow (inline jumps/branches)
@@ -714,6 +732,51 @@ mod tests {
         assert!(
             info.body_can_allocate,
             "Loop with Call should need GC safepoint"
+        );
+    }
+
+    #[test]
+    fn test_capture_mut_ptr_opcodes_are_non_allocating() {
+        // Phase D/E: typed capture pointer opcodes do not allocate and
+        // should be admitted to the safepoint-free loop whitelist.
+        assert!(opcode_is_non_allocating(OpCode::LoadCaptureMutPtrF64));
+        assert!(opcode_is_non_allocating(OpCode::LoadCaptureMutPtrI64));
+        assert!(opcode_is_non_allocating(OpCode::LoadCaptureMutPtrI32));
+        assert!(opcode_is_non_allocating(OpCode::LoadCaptureMutPtrBool));
+        assert!(opcode_is_non_allocating(OpCode::LoadCaptureMutPtrPtr));
+        assert!(opcode_is_non_allocating(OpCode::StoreCaptureMutPtrF64));
+        assert!(opcode_is_non_allocating(OpCode::StoreCaptureMutPtrI64));
+        assert!(opcode_is_non_allocating(OpCode::StoreCaptureMutPtrI32));
+        assert!(opcode_is_non_allocating(OpCode::StoreCaptureMutPtrBool));
+        assert!(opcode_is_non_allocating(OpCode::StoreCaptureMutPtrPtr));
+    }
+
+    #[test]
+    fn test_capture_mut_ptr_loop_is_non_allocating() {
+        // A loop body that only reads/writes captures via the Phase D/E
+        // typed pointer opcodes must not trigger a safepoint poll.
+        let instrs = vec![
+            make_instr(OpCode::LoopStart, None),
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),
+            make_instr(OpCode::LtInt, None),
+            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(9))),
+            // Typed capture read + arithmetic + typed capture write.
+            make_instr(OpCode::LoadCaptureMutPtrI64, Some(Operand::Local(0))),
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),
+            make_instr(OpCode::AddInt, None),
+            make_instr(OpCode::StoreCaptureMutPtrI64, Some(Operand::Local(0))),
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),
+            make_instr(OpCode::AddInt, None),
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),
+            make_instr(OpCode::LoopEnd, None),
+        ];
+        let loops = analyze_loops(&make_program(instrs, vec![Constant::Int(1)]));
+        let info = loops.get(&0).unwrap();
+        assert!(
+            !info.body_can_allocate,
+            "Phase D capture-ptr loop must not need GC safepoint"
         );
     }
 

@@ -1560,3 +1560,140 @@ result
         16.0,
     );
 }
+
+// ===========================================================================
+// Closure Specialization Phase E — JIT stack-closure codegen
+// ===========================================================================
+//
+// These tests exercise the non-escaping-closure fast path added in
+// Phase E. The correctness bar is the same as any other closure test:
+// the result must match the interpreter. The *absence* of atomic
+// refcount ops inside the hot loop is verified via Cranelift IR
+// inspection — see the `phase_e_tests` module in `statements.rs`
+// and the `opcode_is_non_allocating` whitelist in `loop_analysis.rs`.
+
+#[test]
+fn phase_e_captured_int_add() {
+    // Non-escaping closure with a single int capture.
+    jit_expect_int(
+        r#"
+let n = 10
+let f = |x| x + n
+f(5)
+"#,
+        15,
+    );
+}
+
+#[test]
+fn phase_e_multiple_int_captures() {
+    // Multiple captures — validates stack-slot size scales per layout.
+    jit_expect_int(
+        r#"
+let a = 1
+let b = 2
+let c = 3
+let f = |x| x + a + b + c
+f(10)
+"#,
+        16,
+    );
+}
+
+#[test]
+fn phase_e_mixed_float_int_capture() {
+    // Mixed float + int captures — validates typed Cranelift loads
+    // are emitted per-capture at the correct byte offset.
+    jit_expect_number(
+        r#"
+let n = 1.5
+let m = 2
+let f = |x| x + n - (m as number)
+f(0.0)
+"#,
+        -0.5,
+    );
+}
+
+#[test]
+fn phase_e_nested_closures_stack_allocated() {
+    // Nested non-escaping closure: both `f` and `g` should be
+    // stack-allocated. The inner call returns a value composed from
+    // the outer capture.
+    jit_expect_int(
+        r#"
+let f = |x| {
+    let g = |y| y + x
+    g(5)
+}
+f(10)
+"#,
+        15,
+    );
+}
+
+#[test]
+fn phase_e_escaping_closure_still_correct() {
+    // Closure returned from a function escapes and must use the heap
+    // fallback path. This is the negative case: the result must still
+    // be correct, just via the legacy jit_make_closure FFI.
+    jit_expect_int(
+        r#"
+fn make_adder() {
+    let n = 10
+    return |x| x + n
+}
+let f = make_adder()
+f(5)
+"#,
+        15,
+    );
+}
+
+#[test]
+fn phase_e_captured_closure_in_loop() {
+    // Sum of 0..10 using a stack-allocated mutable accumulator capture.
+    // Exercises Phase D's LocalMutablePtr path + Phase E's stack slot.
+    jit_expect_int(
+        r#"
+let mut s = 0
+let f = |x| { s = s + x }
+for x in 0..10 {
+    f(x)
+}
+s
+"#,
+        45,
+    );
+}
+
+#[test]
+fn phase_e_higher_order_map_pipeline() {
+    // Closure-heavy pipeline: map followed by reduce. Phase C inlines
+    // the closure body into the specialized map/reduce; Phase E makes
+    // sure the intermediate closure env is stack-allocated. Result
+    // correctness is what we assert here; performance verification
+    // (no atomic ops) is implicit via the loop_analysis tests and
+    // Cranelift SROA eliminating the dead stack slot.
+    jit_expect_number(
+        r#"
+let n = 10
+let arr = [1, 2, 3, 4]
+arr.map(|x| x + n).reduce(0, |a, b| a + b)
+"#,
+        50.0, // 11 + 12 + 13 + 14
+    );
+}
+
+#[test]
+fn phase_e_closure_zero_captures() {
+    // Zero captures — StackClosure header is 8 bytes with no
+    // capture area. Validates the empty-captures code path.
+    jit_expect_int(
+        r#"
+let f = || 42
+f()
+"#,
+        42,
+    );
+}
