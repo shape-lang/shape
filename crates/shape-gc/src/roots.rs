@@ -35,7 +35,9 @@ pub fn trace_nanboxed_bits(bits: u64, visitor: &mut dyn FnMut(*mut u8)) {
     if is_tagged {
         let tag = (bits & TAG_MASK) >> TAG_SHIFT;
         if tag == TAG_HEAP {
-            let ptr = (bits & PAYLOAD_MASK) as *mut u8;
+            // Mask off bit 0 (ownership flag) — owned Box-backed values set it.
+            const HEAP_PTR_MASK: u64 = !1;
+            let ptr = (bits & PAYLOAD_MASK & HEAP_PTR_MASK) as *mut u8;
             if !ptr.is_null() {
                 visitor(ptr);
             }

@@ -129,7 +129,7 @@ pub extern "C" fn jit_v2_struct_get_f64_nanboxed(ptr_bits: u64, offset: i32) -> 
         return f64::NAN;
     }
     unsafe {
-        let alloc_ptr = (ptr_bits & PAYLOAD_MASK) as *const u8;
+        let alloc_ptr = (ptr_bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *const u8;
         // JitAlloc header is 8 bytes, then data pointer at offset 8
         let data_ptr = *(alloc_ptr.add(JIT_ALLOC_DATA_OFFSET) as *const *const u8);
         // TypedObject header is 8 bytes, then field data
@@ -159,7 +159,7 @@ pub extern "C" fn jit_v2_struct_set_f64_nanboxed(ptr_bits: u64, offset: i32, val
         return;
     }
     unsafe {
-        let alloc_ptr = (ptr_bits & PAYLOAD_MASK) as *const u8;
+        let alloc_ptr = (ptr_bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *const u8;
         let data_ptr = *(alloc_ptr.add(JIT_ALLOC_DATA_OFFSET) as *const *mut u8);
         let field_addr = data_ptr.add(8 + offset as usize);
         let boxed = box_number(val);

@@ -69,13 +69,18 @@ pub fn fixup_nanboxed_bits(bits: &mut u64, forwarding: &ForwardingTable) {
         return;
     }
 
-    let old_ptr = (*bits & PAYLOAD_MASK) as *mut u8;
+    // Mask off bit 0 (ownership flag): owned Box-backed values have bit 0 set,
+    // but the actual pointer is aligned. Preserve the bit when writing the new
+    // pointer back so ownership metadata is retained across GC compaction.
+    const HEAP_PTR_MASK: u64 = !1;
+    let owned_bit = *bits & 1;
+    let old_ptr = (*bits & PAYLOAD_MASK & HEAP_PTR_MASK) as *mut u8;
     if old_ptr.is_null() {
         return;
     }
 
     if let Some(new_ptr) = forwarding.lookup(old_ptr) {
-        let new_payload = (new_ptr as u64) & PAYLOAD_MASK;
+        let new_payload = ((new_ptr as u64) & PAYLOAD_MASK) | owned_bit;
         *bits = (*bits & !PAYLOAD_MASK) | new_payload;
     }
 }

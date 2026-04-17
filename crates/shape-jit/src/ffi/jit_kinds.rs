@@ -163,7 +163,7 @@ pub fn jit_box<T>(kind: u16, data: T) -> u64 {
 /// points to a `JitAlloc`-prefixed allocation (kind at offset 0).
 #[inline]
 pub unsafe fn read_heap_kind(bits: u64) -> u16 {
-    let ptr = (bits & PAYLOAD_MASK) as *const u16;
+    let ptr = (bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *const u16;
     unsafe { *ptr }
 }
 
@@ -185,7 +185,7 @@ pub unsafe fn read_heap_kind(bits: u64) -> u16 {
 /// - The pointee must have been allocated as `JitAlloc<T>` (correct type).
 #[inline]
 pub unsafe fn jit_unbox<T>(bits: u64) -> &'static T {
-    let ptr = (bits & PAYLOAD_MASK) as *const JitAlloc<T>;
+    let ptr = (bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *const JitAlloc<T>;
     debug_assert!(!ptr.is_null(), "jit_unbox called with null payload pointer");
     unsafe { &(*ptr).data }
 }
@@ -202,7 +202,7 @@ pub unsafe fn jit_unbox<T>(bits: u64) -> &'static T {
 ///   the allocation.
 #[inline]
 pub unsafe fn jit_unbox_mut<T>(bits: u64) -> &'static mut T {
-    let ptr = (bits & PAYLOAD_MASK) as *mut JitAlloc<T>;
+    let ptr = (bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *mut JitAlloc<T>;
     debug_assert!(
         !ptr.is_null(),
         "jit_unbox_mut called with null payload pointer"
@@ -217,6 +217,6 @@ pub unsafe fn jit_unbox_mut<T>(bits: u64) -> &'static mut T {
 /// pointing to `JitAlloc<T>`.
 #[inline]
 pub unsafe fn jit_drop<T>(bits: u64) {
-    let ptr = (bits & PAYLOAD_MASK) as *mut JitAlloc<T>;
+    let ptr = (bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *mut JitAlloc<T>;
     unsafe { drop(Box::from_raw(ptr)) };
 }

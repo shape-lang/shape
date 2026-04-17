@@ -290,7 +290,9 @@ pub fn is_heap_kind(bits: u64, expected_kind: u16) -> bool {
 /// Extract the raw pointer from a TAG_HEAP value (points to JitAlloc header).
 #[inline]
 pub fn unbox_heap_pointer(bits: u64) -> *const u8 {
-    (bits & PAYLOAD_MASK) as *const u8
+    // Mask off the ownership bit (bit 0): owned Box-backed values have bit 0
+    // set, which would offset the pointer by 1 byte.
+    (bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *const u8
 }
 
 // ============================================================================
