@@ -3982,6 +3982,16 @@ impl BytecodeCompiler {
             Statement::Return(expr_opt, _span) => {
                 if let Some(expr) = expr_opt {
                     self.plan_flexible_binding_escape_from_expr(expr);
+                    // Phase F: when the returned expression is a closure
+                    // literal, the closure escapes by definition (it is
+                    // about to cross the return boundary). Flag the next
+                    // closure emission to use the heap ABI opcode so the
+                    // JIT and future Phase H cleanup can rely on a stable
+                    // signal. Matches the escape vector in
+                    // `docs/v2-closure-specialization.md` §2.1 row 1.
+                    if matches!(expr, Expr::FunctionExpr { .. }) {
+                        self.emit_make_closure_heap_next = true;
+                    }
                     if self.current_function_return_reference_summary.is_some() {
                         self.compile_expr_preserving_refs(expr)?;
                     } else {

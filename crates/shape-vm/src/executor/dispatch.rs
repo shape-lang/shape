@@ -134,7 +134,12 @@ impl VirtualMachine {
                 let current_ip = self.ip.saturating_sub(1);
                 let is_call_or_return = matches!(
                     instruction.opcode,
-                    OpCode::Call | OpCode::CallValue | OpCode::Return | OpCode::ReturnValue
+                    OpCode::Call
+                        | OpCode::CallValue
+                        | OpCode::CallClosure
+                        | OpCode::CallFunctionIndirect
+                        | OpCode::Return
+                        | OpCode::ReturnValue
                 );
                 if tt.should_capture(current_ip, self.instruction_count as u64, is_call_or_return) {
                     if let Ok(store) = tt.snapshot_store() {
@@ -248,7 +253,12 @@ impl VirtualMachine {
             if let Some(ref mut tt) = self.time_travel {
                 let is_call_or_return = matches!(
                     instruction.opcode,
-                    OpCode::Call | OpCode::CallValue | OpCode::Return | OpCode::ReturnValue
+                    OpCode::Call
+                        | OpCode::CallValue
+                        | OpCode::CallClosure
+                        | OpCode::CallFunctionIndirect
+                        | OpCode::Return
+                        | OpCode::ReturnValue
                 );
                 if tt.should_capture(ip, self.instruction_count as u64, is_call_or_return) {
                     if let Ok(store) = tt.snapshot_store() {
@@ -461,7 +471,7 @@ impl VirtualMachine {
 
             // Control flow
             Jump | JumpIfFalse | JumpIfTrue | JumpIfFalseTrusted | Call | CallValue
-            | CallForeign | Return | ReturnValue => {
+            | CallClosure | CallFunctionIndirect | CallForeign | Return | ReturnValue => {
                 return self.exec_control_flow(instruction);
             }
 
@@ -513,6 +523,7 @@ impl VirtualMachine {
             | ArrayPushLocal
             | ArrayPop
             | MakeClosure
+            | MakeClosureHeap
             | MergeObject
             | NewTypedObject
             | NewTypedArray

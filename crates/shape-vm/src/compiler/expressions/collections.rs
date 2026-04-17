@@ -214,6 +214,13 @@ impl BytecodeCompiler {
         } else {
             for elem in elements {
                 self.plan_flexible_binding_escape_from_expr(elem);
+                // Phase F: closure literals stored into an array escape
+                // per `docs/v2-closure-specialization.md` §2.1 row 2.
+                // Force heap-ABI emission so the JIT (and Phase H cleanup)
+                // can rely on the signal.
+                if matches!(elem, Expr::FunctionExpr { .. }) {
+                    self.emit_make_closure_heap_next = true;
+                }
                 self.compile_expr_as_value_or_placeholder(elem)?;
             }
             // Emit NewTypedArray for homogeneous int/number/bool literals

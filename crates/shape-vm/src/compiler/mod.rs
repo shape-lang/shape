@@ -519,6 +519,29 @@ pub struct BytecodeCompiler {
     /// lowered. Phase C reads this to key monomorphization on the closure type.
     pub(crate) closure_type_ids: Vec<(u16, shape_value::v2::concrete_type::ClosureTypeId)>,
 
+    /// Registry of `Function<A, R>` signatures (v2 closure specialization
+    /// Phase F). `FunctionTypeId`s assigned here are written into
+    /// `TypedClosureHeader.type_id` in the JIT path and consumed by
+    /// `CallFunctionIndirect` to pick a Cranelift `call_indirect` signature.
+    pub(crate) function_type_registry:
+        shape_value::v2::function_type_registry::FunctionTypeRegistry,
+
+    /// Mapping from closure function index to the `FunctionTypeId` of its
+    /// callable signature (params + return). Populated alongside
+    /// `closure_type_ids` when a closure literal is lowered. The JIT reads
+    /// this to emit the per-`ClosureTypeId` direct-call signature and the
+    /// polymorphic `CallFunctionIndirect` signature.
+    pub(crate) function_type_ids:
+        Vec<(u16, shape_value::v2::concrete_type::FunctionTypeId)>,
+
+    /// Phase F one-shot: if set, the next closure-literal emission uses
+    /// `MakeClosureHeap` instead of the legacy `MakeClosure`. The flag is
+    /// consumed (reset to false) as soon as `compile_expr_closure`
+    /// finishes emitting the opcode. Callers that want to force the heap
+    /// ABI (e.g. the return-statement compiler when the returned value is
+    /// a closure literal) set this right before lowering the closure.
+    pub(crate) emit_make_closure_heap_next: bool,
+
     /// When compiling a DataTable closure method (e.g. dt.filter(row => ...)),
     /// this holds the (schema_id, type_name) to tag the closure's row parameter as RowView.
     pub(crate) closure_row_schema: Option<(u32, String)>,

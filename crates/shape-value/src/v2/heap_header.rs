@@ -22,6 +22,12 @@ pub const HEAP_KIND_V2_TYPED_ARRAY: u16 = 80;
 pub const HEAP_KIND_V2_STRING: u16 = 81;
 pub const HEAP_KIND_V2_TYPED_MAP: u16 = 82;
 pub const HEAP_KIND_V2_STRUCT: u16 = 83;
+/// Closure-spec Phase F: escape-fallback `TypedClosureHeader` allocation kind.
+/// A `MakeClosureHeap` opcode allocates a `TypedClosureHeader`-shaped block
+/// with this kind; Drop glue walks the closure's `heap_capture_mask` and
+/// releases each pointer capture. See `docs/v2-closure-specialization.md` §1.3
+/// and §5.3 for the full ABI.
+pub const HEAP_KIND_V2_CLOSURE: u16 = 84;
 
 // Flag bits
 pub const FLAG_MARKED: u8 = 0x01;
@@ -217,6 +223,7 @@ mod tests {
             HEAP_KIND_V2_STRING,
             HEAP_KIND_V2_TYPED_MAP,
             HEAP_KIND_V2_STRUCT,
+            HEAP_KIND_V2_CLOSURE,
         ];
         for i in 0..kinds.len() {
             for j in (i + 1)..kinds.len() {

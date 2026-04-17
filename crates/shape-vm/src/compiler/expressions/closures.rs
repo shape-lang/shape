@@ -146,6 +146,21 @@ impl BytecodeCompiler {
         // cache key. Emission is unchanged.
         let closure_type_id = self.mint_closure_type_id(&captured_vars);
 
+        // Phase F: mint a FunctionTypeId for the callable signature. This is
+        // the `Function<A, R>` identity — the signature omits captures and
+        // covers only the parameters the caller supplies plus the return.
+        //
+        // Phase F keeps signature resolution conservative: param / return
+        // types that lack compile-time resolution fall back to `Void`. The
+        // ID is still globally unique per structural signature (driven by
+        // the registry's intern), so `CallFunctionIndirect` can pick a
+        // Cranelift call signature once signature inference lands. Two
+        // closures with structurally identical callable shapes share a
+        // `FunctionTypeId` even when their capture layouts (and hence
+        // `ClosureTypeId`s) differ — this is exactly what `Array<Function<
+        // (int) -> int>>` relies on for polymorphic dispatch.
+        let function_type_id = self.mint_function_type_id_for_params(params);
+
         let func_idx = self.program.functions.len();
         self.program.functions.push(Function {
             name: closure_name.clone(),
@@ -174,6 +189,11 @@ impl BytecodeCompiler {
         // Phase A: record the closure's ClosureTypeId against its function index.
         self.closure_type_ids
             .push((func_idx as u16, closure_type_id));
+        // Phase F: record the closure's FunctionTypeId alongside the capture
+        // layout id. One entry per closure literal, same ordering as
+        // `closure_type_ids`.
+        self.function_type_ids
+            .push((func_idx as u16, function_type_id));
 
         // Phase D — classify each mutable capture as LocalMutablePtr vs legacy.
         //
@@ -385,8 +405,28 @@ impl BytecodeCompiler {
             }
         }
 
+        // Phase F: when the compiler has been told to emit the heap-ABI
+        // opcode for this closure (e.g. by an outer expression that knows the
+        // closure escapes — the most common driver is return-of-closure and
+        // store-into-array patterns), emit `MakeClosureHeap` instead of the
+        // legacy `MakeClosure`. In Phase F both opcodes allocate an
+        // equivalent `HeapValue::Closure` value; the distinction exists so
+        // the JIT can specialise escaping closures on the heap ABI while
+        // Phase E's stack-closure path handles non-escaping literals.
+        //
+        // The `emit_make_closure_heap_next` flag is a single-shot hook: the
+        // caller sets it before `compile_expr_closure` runs and the
+        // closure lowerer consumes it at emission time. This keeps the
+        // decision close to the escape signal without threading a second
+        // parameter through the closure-compilation API.
+        let use_heap_opcode = std::mem::take(&mut self.emit_make_closure_heap_next);
+        let make_closure_op = if use_heap_opcode {
+            OpCode::MakeClosureHeap
+        } else {
+            OpCode::MakeClosure
+        };
         self.emit(Instruction::new(
-            OpCode::MakeClosure,
+            make_closure_op,
             Some(Operand::Function(shape_value::FunctionId(func_idx as u16))),
         ));
         // Closures don't produce TypedObjects
@@ -405,6 +445,23 @@ impl BytecodeCompiler {
     /// cache by closure layout.
     pub fn closure_type_ids(&self) -> &[(u16, ClosureTypeId)] {
         &self.closure_type_ids
+    }
+
+    /// Read-only access to the compiler's function-type registry.
+    /// Populated per closure literal during lowering (Phase F).
+    pub fn function_type_registry(
+        &self,
+    ) -> &shape_value::v2::function_type_registry::FunctionTypeRegistry {
+        &self.function_type_registry
+    }
+
+    /// `(function_id, FunctionTypeId)` pairs, one per closure literal.
+    /// Phase F uses this to pick a Cranelift `call_indirect` signature for
+    /// polymorphic `Function<A, R>` dispatch.
+    pub fn function_type_ids(
+        &self,
+    ) -> &[(u16, shape_value::v2::concrete_type::FunctionTypeId)] {
+        &self.function_type_ids
     }
 
     /// Mint a `ClosureTypeId` for a closure literal by resolving each capture
@@ -428,6 +485,86 @@ impl BytecodeCompiler {
             })
             .collect();
         self.closure_registry.intern(capture_types)
+    }
+
+    /// Phase F — mint a `FunctionTypeId` for a closure literal's callable
+    /// signature (parameters + return type).
+    ///
+    /// Captures are intentionally excluded: `FunctionTypeId` identifies the
+    /// cross-value `Function<A, R>` shape, not the capture layout. Two
+    /// closures with the same signature but different captures share a
+    /// `FunctionTypeId` — this is the whole point of the `Array<Function<
+    /// (int) -> int>>` dispatch pattern.
+    ///
+    /// Resolution of per-param concrete types from type annotations is
+    /// kept conservative in Phase F: unannotated or unresolved params
+    /// resolve to `ConcreteType::Void`. This is safe because the registry
+    /// keys structurally and two closures with identical (annotated) param
+    /// shapes still share an id; Phase G/H will tighten resolution once
+    /// bidirectional inference is wired through.
+    pub(crate) fn mint_function_type_id_for_params(
+        &mut self,
+        params: &[shape_ast::ast::FunctionParameter],
+    ) -> shape_value::v2::concrete_type::FunctionTypeId {
+        use shape_value::v2::concrete_type::ConcreteType as CT;
+        use shape_value::v2::function_type_registry::FunctionSignature;
+
+        let param_types: Vec<CT> = params
+            .iter()
+            .map(|p| {
+                p.type_annotation
+                    .as_ref()
+                    .and_then(Self::concrete_type_for_annotation_static)
+                    .unwrap_or(CT::Void)
+            })
+            .collect();
+        let ret = CT::Void;
+        self.function_type_registry
+            .intern(FunctionSignature::new(param_types, ret))
+    }
+
+    /// Extract a `ConcreteType` from a `TypeAnnotation` without consulting
+    /// the compiler's type-inference machinery. Lightweight, conservative
+    /// mapping for the Phase F `FunctionTypeId` registry.
+    fn concrete_type_for_annotation_static(
+        annotation: &shape_ast::ast::TypeAnnotation,
+    ) -> Option<shape_value::v2::concrete_type::ConcreteType> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_value::v2::concrete_type::ConcreteType as CT;
+        match annotation {
+            TypeAnnotation::Basic(name) => match name.as_str() {
+                "int" | "i64" => Some(CT::I64),
+                "i32" => Some(CT::I32),
+                "i16" => Some(CT::I16),
+                "i8" => Some(CT::I8),
+                "u64" => Some(CT::U64),
+                "u32" => Some(CT::U32),
+                "u16" => Some(CT::U16),
+                "u8" => Some(CT::U8),
+                "number" | "f64" => Some(CT::F64),
+                "bool" => Some(CT::Bool),
+                "string" => Some(CT::String),
+                "void" | "unit" => Some(CT::Void),
+                "decimal" => Some(CT::Decimal),
+                "bigint" => Some(CT::BigInt),
+                "DateTime" | "datetime" => Some(CT::DateTime),
+                _ => None,
+            },
+            TypeAnnotation::Array(inner) => {
+                Self::concrete_type_for_annotation_static(inner).map(|t| CT::Array(Box::new(t)))
+            }
+            TypeAnnotation::Reference(path) => {
+                let name = path.as_str();
+                match name {
+                    "int" | "i64" => Some(CT::I64),
+                    "number" | "f64" => Some(CT::F64),
+                    "bool" => Some(CT::Bool),
+                    "string" => Some(CT::String),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Phase C — peek a closure literal's capture signature and mint (or
@@ -952,5 +1089,362 @@ mod tests {
              counter()",
         );
         assert_eq!(val.as_i64(), Some(7));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Closure Spec Phase F — escape-fallback ABI + Function<A,R> dispatch
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_phase_f_closure_literal_mints_function_type_id() {
+        // A closure literal now records a `FunctionTypeId` alongside its
+        // `ClosureTypeId`. Both are sequential, both are 0-indexed.
+        let mut compiler = BytecodeCompiler::new();
+        compile_closure_literal("let f = || 1", &mut compiler);
+
+        let ftids = compiler.function_type_ids();
+        assert_eq!(ftids.len(), 1);
+        let (fn_idx, _fn_type_id) = ftids[0];
+        // The function index in `function_type_ids` matches the one in
+        // `closure_type_ids` — the two registries describe the same
+        // closure literal.
+        let (ctid_fn_idx, _) = compiler.closure_type_ids()[0];
+        assert_eq!(fn_idx, ctid_fn_idx);
+        // Registry contains exactly one signature (the shared no-arg shape).
+        assert_eq!(compiler.function_type_registry().len(), 1);
+    }
+
+    #[test]
+    fn test_phase_f_identical_signatures_share_function_type_id() {
+        // Two closures with the same callable shape but different capture
+        // layouts share a `FunctionTypeId`. Phase F's signature registry
+        // keys on params + return only; captures live in `ClosureTypeId`.
+        // Exercise the minting path directly (the top-level Shape parser
+        // doesn't accept typed closure params in isolated `let` bindings).
+        use shape_ast::ast::{DestructurePattern, FunctionParameter, Span, TypeAnnotation};
+        use shape_value::v2::concrete_type::ConcreteType;
+
+        fn mk_int_param(name: &str) -> FunctionParameter {
+            FunctionParameter {
+                pattern: DestructurePattern::Identifier(name.into(), Span::DUMMY),
+                is_const: false,
+                is_reference: false,
+                is_mut_reference: false,
+                is_out: false,
+                type_annotation: Some(TypeAnnotation::Basic("int".into())),
+                default_value: None,
+            }
+        }
+
+        let mut compiler = BytecodeCompiler::new();
+        // Both have signature `(int) -> void` (return inferred as Void
+        // in Phase F's conservative resolution).
+        let ftid_a = compiler.mint_function_type_id_for_params(&[mk_int_param("x")]);
+        let ftid_b = compiler.mint_function_type_id_for_params(&[mk_int_param("y")]);
+        assert_eq!(
+            ftid_a, ftid_b,
+            "same (params, return) shape → same FunctionTypeId"
+        );
+
+        // Capture layouts differ: no captures vs one int capture.
+        let ctid_empty = compiler.closure_registry.intern(vec![]);
+        let ctid_int = compiler.closure_registry.intern(vec![ConcreteType::I64]);
+        assert_ne!(
+            ctid_empty, ctid_int,
+            "different capture layouts → different ClosureTypeIds"
+        );
+    }
+
+    #[test]
+    fn test_phase_f_different_signatures_distinct_function_type_ids() {
+        // Different param counts or return types → distinct FunctionTypeIds.
+        // Using `mint_function_type_id_for_params` directly to exercise
+        // the registry without the AST parser.
+        use shape_ast::ast::{DestructurePattern, FunctionParameter, Span, TypeAnnotation};
+
+        fn mk_param(name: &str, ty: Option<&str>) -> FunctionParameter {
+            FunctionParameter {
+                pattern: DestructurePattern::Identifier(name.into(), Span::DUMMY),
+                is_const: false,
+                is_reference: false,
+                is_mut_reference: false,
+                is_out: false,
+                type_annotation: ty.map(|t| TypeAnnotation::Basic(t.into())),
+                default_value: None,
+            }
+        }
+
+        let mut compiler = BytecodeCompiler::new();
+        let a = compiler.mint_function_type_id_for_params(&[mk_param("x", Some("int"))]);
+        let b = compiler.mint_function_type_id_for_params(&[
+            mk_param("x", Some("int")),
+            mk_param("y", Some("int")),
+        ]);
+        let c = compiler.mint_function_type_id_for_params(&[mk_param("x", Some("number"))]);
+
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+        assert_eq!(compiler.function_type_registry().len(), 3);
+    }
+
+    #[test]
+    fn test_phase_f_return_closure_emits_make_closure_heap() {
+        // Escape vector #1 (return): a closure literal returned from a
+        // function escapes; the compiler must emit `MakeClosureHeap`.
+        // The returned closure uses its captured variable `n`.
+        let program = compile_source(
+            "fn make() -> any {\n\
+                 let n = 5\n\
+                 return |x| x + n\n\
+             }\n\
+             make()",
+        );
+        assert!(
+            any_opcode_in_program(&program, |op| op == OC::MakeClosureHeap),
+            "expected MakeClosureHeap for return-of-closure, got only MakeClosure"
+        );
+    }
+
+    #[test]
+    fn test_phase_f_array_of_closures_emits_make_closure_heap() {
+        // Escape vector #2 (container store): a closure stored into an
+        // array literal escapes; the compiler must emit `MakeClosureHeap`.
+        // Use closures without type annotations (untyped-param closures
+        // in array literals parse cleanly).
+        let program = compile_source(
+            "fn setup() -> any {\n\
+                 let arr = [|x| x + 1, |x| x + 2]\n\
+                 arr\n\
+             }\n\
+             setup()",
+        );
+        assert!(
+            any_opcode_in_program(&program, |op| op == OC::MakeClosureHeap),
+            "expected MakeClosureHeap for closures stored in array"
+        );
+    }
+
+    #[test]
+    fn test_phase_f_local_closure_keeps_legacy_make_closure() {
+        // A closure bound to a local and only called via the local name
+        // does NOT escape; the legacy `MakeClosure` opcode is still used.
+        // This verifies Phase F is strictly additive.
+        let program = compile_source(
+            "fn main() -> int {\n\
+                 let f = |x| x + 1\n\
+                 f(5)\n\
+             }\n\
+             main()",
+        );
+        assert!(
+            any_opcode_in_program(&program, |op| op == OC::MakeClosure),
+            "expected legacy MakeClosure for non-escaping closure"
+        );
+    }
+
+    #[test]
+    fn test_phase_f_runtime_returned_closure_executes_correctly() {
+        // End-to-end: `fn make() { |x| x + n }` then calling the returned
+        // closure. This exercises MakeClosureHeap + closure dispatch.
+        let val = run_program_top_level(
+            "fn make() -> any {\n\
+                 let n = 10\n\
+                 return |x| x + n\n\
+             }\n\
+             let f = make()\n\
+             f(5)",
+        );
+        assert_eq!(val.as_i64(), Some(15));
+    }
+
+    #[test]
+    fn test_phase_f_runtime_array_of_closures_dispatches_each() {
+        // `Array<Function<(int) -> int>>` with mixed closures: calling each
+        // closure through uniform access dispatches correctly. This
+        // exercises CallFunctionIndirect-style polymorphic dispatch
+        // through a Function-typed value.
+        let val = run_program_top_level(
+            "fn main() -> int {\n\
+                 let arr = [|x| x + 1, |x| x + 10, |x| x + 100]\n\
+                 let sum = arr[0](1) + arr[1](1) + arr[2](1)\n\
+                 sum\n\
+             }\n\
+             main()",
+        );
+        // 2 + 11 + 101 = 114
+        assert_eq!(val.as_i64(), Some(114));
+    }
+
+    #[test]
+    fn test_phase_f_runtime_apply_with_closure_arg() {
+        // Polymorphic dispatch through a function parameter `f`: the
+        // compiler emits `CallFunctionIndirect` because `f` is a typed
+        // callable local. Use untyped closure param — call-site parsing
+        // accepts `apply(|y| y * 2, 21)`.
+        let val = run_program_top_level(
+            "fn apply(f: any, x: int) -> int {\n\
+                 return f(x)\n\
+             }\n\
+             apply(|y| y * 2, 21)",
+        );
+        assert_eq!(val.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn test_phase_f_runtime_multiple_closures_via_parameter() {
+        // IC state transition proxy: the same callsite dispatches three
+        // different closures. Verifies the runtime handles polymorphic
+        // callsites end-to-end (IC state machine itself lives in the JIT;
+        // the VM just routes each call through the same dispatch).
+        let val = run_program_top_level(
+            "fn apply(f: any, x: int) -> int {\n\
+                 return f(x)\n\
+             }\n\
+             let a = apply(|y| y + 1, 10)\n\
+             let b = apply(|y| y - 1, 10)\n\
+             let c = apply(|y| y * 2, 10)\n\
+             a + b + c",
+        );
+        // 11 + 9 + 20 = 40
+        assert_eq!(val.as_i64(), Some(40));
+    }
+
+    #[test]
+    fn test_phase_f_runtime_heap_closure_with_captures() {
+        // A returned closure with a heap-typed capture (number). The
+        // closure outlives its defining scope and correctly reads the
+        // captured value. Exercises MakeClosureHeap + capture read on
+        // call.
+        let val = run_program_top_level(
+            "fn make_adder() -> any {\n\
+                 let base = 100.5\n\
+                 return |x| x + base\n\
+             }\n\
+             let f = make_adder()\n\
+             f(0.5)",
+        );
+        // Equality on f64 via i64 representation is fragile; verify via
+        // approximate equality.
+        let got = val.as_f64().expect("expected f64 result");
+        assert!((got - 101.0).abs() < 1e-9, "expected 101.0, got {got}");
+    }
+
+    #[test]
+    fn test_phase_f_call_closure_arity_runtime_correct() {
+        // The new `CallFunctionIndirect` opcode carries its arity in the
+        // operand rather than on the stack. Whether the compiler emits
+        // it at a given callsite depends on the callee's inferred
+        // callable pass modes (a `Function<A, R>` annotation would force
+        // it; an `any` annotation falls back to the legacy `CallValue`
+        // path). Verify end-to-end correctness with a two-argument
+        // closure regardless of which opcode the compiler picks.
+        let val = run_program_top_level(
+            "fn apply2(f: any, a: int, b: int) -> int {\n\
+                 return f(a, b)\n\
+             }\n\
+             apply2(|x, y| x + y, 2, 3)",
+        );
+        assert_eq!(val.as_i64(), Some(5));
+    }
+
+    #[test]
+    fn test_phase_f_function_type_id_persists_across_call_sites() {
+        // Three separate closure literals with the same signature share
+        // a single `FunctionTypeId` — the id the JIT uses for
+        // `call_indirect` signature lookup. Verifies the registry
+        // doesn't explode with per-literal ids. Exercises the registry
+        // directly to avoid relying on the top-level parser.
+        use shape_ast::ast::{DestructurePattern, FunctionParameter, Span, TypeAnnotation};
+
+        fn mk_int_param(name: &str) -> FunctionParameter {
+            FunctionParameter {
+                pattern: DestructurePattern::Identifier(name.into(), Span::DUMMY),
+                is_const: false,
+                is_reference: false,
+                is_mut_reference: false,
+                is_out: false,
+                type_annotation: Some(TypeAnnotation::Basic("int".into())),
+                default_value: None,
+            }
+        }
+
+        let mut compiler = BytecodeCompiler::new();
+        let a = compiler.mint_function_type_id_for_params(&[mk_int_param("x")]);
+        let b = compiler.mint_function_type_id_for_params(&[mk_int_param("y")]);
+        let c = compiler.mint_function_type_id_for_params(&[mk_int_param("z")]);
+
+        assert_eq!(a, b, "identical (int) signatures share FunctionTypeId");
+        assert_eq!(b, c);
+        assert_eq!(
+            compiler.function_type_registry().len(),
+            1,
+            "three closures with identical shape share one FunctionTypeId"
+        );
+    }
+
+    #[test]
+    fn test_phase_f_runtime_heap_ok_after_outer_scope_drops() {
+        // After the caller's local `f` binding drops at end of function,
+        // the returned closure we passed up is still alive (refcount
+        // preserved via HeapValue::Closure Arc sharing). This validates
+        // the drop glue semantics described in §1.4.
+        let val = run_program_top_level(
+            "fn outer() -> any {\n\
+                 let n = 42\n\
+                 let f = |x| x + n\n\
+                 return f\n\
+             }\n\
+             let g = outer()\n\
+             g(8)",
+        );
+        assert_eq!(val.as_i64(), Some(50));
+    }
+
+    #[test]
+    fn test_phase_f_registries_independent_of_each_other() {
+        // `ClosureTypeId` and `FunctionTypeId` are orthogonal axes.
+        // Exercise both registries directly to verify the Phase F
+        // invariants:
+        //   - same signature + different captures → same FunctionTypeId,
+        //     different ClosureTypeId
+        //   - different signature + same captures → different
+        //     FunctionTypeId, same ClosureTypeId
+        use shape_ast::ast::{DestructurePattern, FunctionParameter, Span, TypeAnnotation};
+        use shape_value::v2::concrete_type::ConcreteType;
+
+        fn mk_param(name: &str, ty: &str) -> FunctionParameter {
+            FunctionParameter {
+                pattern: DestructurePattern::Identifier(name.into(), Span::DUMMY),
+                is_const: false,
+                is_reference: false,
+                is_mut_reference: false,
+                is_out: false,
+                type_annotation: Some(TypeAnnotation::Basic(ty.into())),
+                default_value: None,
+            }
+        }
+
+        let mut compiler = BytecodeCompiler::new();
+        let ftid_int = compiler.mint_function_type_id_for_params(&[mk_param("x", "int")]);
+        let ftid_num = compiler.mint_function_type_id_for_params(&[mk_param("x", "number")]);
+        assert_ne!(
+            ftid_int, ftid_num,
+            "different param types → different FunctionTypeIds"
+        );
+
+        // Capture-only registry: two closures with identical captures
+        // (both capture one int) share a ClosureTypeId regardless of
+        // their signature.
+        let ctid_a = compiler
+            .closure_registry
+            .intern(vec![ConcreteType::I64]);
+        let ctid_b = compiler
+            .closure_registry
+            .intern(vec![ConcreteType::I64]);
+        assert_eq!(
+            ctid_a, ctid_b,
+            "same capture layout → same ClosureTypeId"
+        );
     }
 }

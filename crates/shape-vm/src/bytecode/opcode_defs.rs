@@ -757,6 +757,47 @@ define_opcodes! {
     /// Store heap pointer through a mutable capture pointer. Operand: Local(idx).
     StoreCaptureMutPtrPtr = 0x121, Variable, pops: 1, pushes: 0;
 
+    // ===== Closure Spec Phase F: escape-fallback heap allocation + dispatch =====
+    //
+    // These opcodes implement the v2 escape-fallback ABI (see
+    // `docs/v2-closure-specialization.md` §1.3, §5.3, §5.4). They are ADDITIVE
+    // to the legacy `MakeClosure` / `CallValue` path; Phase H deletes the
+    // legacy path after the JIT fully honours the new ABI.
+    //
+    // - `MakeClosureHeap(fn_id)`: allocate a `TypedClosureHeader`-shaped heap
+    //   block with a known `ClosureTypeId` and capture layout. Captures are
+    //   popped from the stack (same ordering as `MakeClosure`) and written
+    //   into the typed capture area; each heap-typed capture is retained per
+    //   the layout's `heap_capture_mask`. The produced value is a ValueWord
+    //   carrying a `HeapValue::Closure` in Phase F (with `type_id` recorded on
+    //   the side); later phases switch the interpreter to read the raw
+    //   `TypedClosureHeader` directly.
+    //
+    // - `CallClosure(arity)`: direct dispatch on a closure value whose
+    //   `ClosureTypeId` is known at the call site. Pops the closure pointer
+    //   and `arity` args, binds captures + args to the callee's leading
+    //   locals, and jumps to the callee's entry point.
+    //
+    // - `CallFunctionIndirect(arity)`: polymorphic dispatch through a
+    //   `Function<A, R>` value. The operand carries the number of args; the
+    //   `FunctionTypeId` is implicit from type inference (the JIT uses it to
+    //   pick a `call_indirect` signature; the VM treats it as a sanity tag).
+    //   Falls back to the same runtime path as `CallClosure` when the callee
+    //   is a closure or `CallValue` when it's a bare function id.
+    /// Allocate a heap-resident `TypedClosureHeader` with captures. Operand:
+    /// Function(func_id). Captures are already on the stack (same order as
+    /// `MakeClosure`). Pushes the closure value.
+    MakeClosureHeap = 0x122, Variable, pops: 0, pushes: 1;
+    /// Direct dispatch on a closure value whose `ClosureTypeId` is statically
+    /// known at the call site. Operand: Count(arity).
+    ///
+    /// Stack layout before: `[closure, arg0, arg1, ..., argN-1]`.
+    /// Stack layout after: `[result]`.
+    CallClosure = 0x123, Control, pops: 0, pushes: 0;
+    /// Polymorphic dispatch through a `Function<A, R>` value. Operand:
+    /// Count(arity). Same stack layout as `CallClosure`.
+    CallFunctionIndirect = 0x124, Control, pops: 0, pushes: 0;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;

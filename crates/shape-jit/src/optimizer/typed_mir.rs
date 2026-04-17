@@ -176,7 +176,10 @@ pub fn build_typed_mir(program: &BytecodeProgram) -> TypedMirFunction {
             }
             (OpCode::LoopStart, _) => MirOp::LoopStart,
             (OpCode::LoopEnd, _) => MirOp::LoopEnd,
-            (OpCode::Call, _) | (OpCode::CallValue, _) => {
+            (OpCode::Call, _)
+            | (OpCode::CallValue, _)
+            | (OpCode::CallClosure, _)
+            | (OpCode::CallFunctionIndirect, _) => {
                 stack.clear();
                 MirOp::Call
             }

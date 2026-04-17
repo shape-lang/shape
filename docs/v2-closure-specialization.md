@@ -760,19 +760,133 @@ Implementation notes:
 
 ### Phase F — Escape-Fallback ABI + Function<A,R> Dispatch
 
-**Files**:
-- `crates/shape-vm/src/bytecode/opcode_defs.rs` (`CallClosure`, `CallFunctionIndirect`)
-- `crates/shape-vm/src/executor/` (call convention)
-- `crates/shape-jit/src/mir_compiler/statements.rs` (indirect call codegen)
+**Status: landed on `jit-v2-phase1`.**
 
-**Sub-tasks**:
-- Per-ClosureTypeId entry signatures at the JIT FuncRef layer.
-- Uniform `Function<A,R>` dispatch via `call_indirect` with `FunctionTypeId` signature.
-- Feedback-guided speculative direct-call (Tier 2).
-- Heap `TypedClosure` allocation path via `MakeClosureHeap` opcode.
-- Tests: `Array<Function<int,int>>` with mixed `ClosureTypeId`s dispatches correctly; IC state transitions verified.
+Implementation notes:
 
-**Agent team size**: 3
+- **New heap kind**: `HEAP_KIND_V2_CLOSURE = 84` added to
+  `heap_header.rs`. Reserves the kind ordinal for the dedicated
+  `TypedClosureHeader` allocation path; Phase F's interpreter still
+  wraps escaping closures as `HeapValue::Closure` for backward
+  compatibility (the ordinal is consumed by Phase H when the
+  interpreter switches to raw `std::alloc::alloc`).
+- **`FunctionTypeRegistry`**: new module
+  `shape-value/src/v2/function_type_registry.rs` interns
+  `FunctionSignature { params, ret }` tuples and hands out sequential
+  `FunctionTypeId`s. Two closures with the same callable signature
+  share a `FunctionTypeId` regardless of capture layout — this is the
+  orthogonal axis to `ClosureTypeId` that makes
+  `Array<Function<(int) -> int>>` a first-class type.
+- **Compiler wiring**: `BytecodeCompiler` now owns
+  `function_type_registry` + `function_type_ids: Vec<(u16,
+  FunctionTypeId)>` alongside the Phase A `closure_registry` +
+  `closure_type_ids`. Each closure literal mints a `FunctionTypeId` at
+  emission time via `mint_function_type_id_for_params`; resolution of
+  per-param `ConcreteType`s is conservative in Phase F (unannotated
+  params fall back to `Void`). Later phases tighten via bidirectional
+  inference.
+- **New opcodes** (bytecode-level, additive to Phase A–E):
+  - `MakeClosureHeap(Function(fid))` @ 0x122 — semantically equivalent
+    to `MakeClosure` in Phase F but signals to the JIT + Phase H that
+    the closure has escaped (return, container store, etc.). The
+    compiler's emission hook (`emit_make_closure_heap_next`) is set
+    by `Statement::Return` and `Expr::Array` element lowering for
+    closure literals.
+  - `CallClosure(Count(arity))` @ 0x123 — direct dispatch with
+    statically-known `ClosureTypeId`. Arity travels in the operand
+    (unlike `CallValue`, which pops it from the stack).
+  - `CallFunctionIndirect(Count(arity))` @ 0x124 — polymorphic
+    dispatch through `Function<A, R>`. Emitted at call sites where
+    the callee is a local with registered callable pass modes (i.e.
+    the compiler has proven the callee is a typed callable).
+- **VM interpreter**: all three new opcodes are wired through
+  `executor/control_flow/mod.rs` and `executor/objects/mod.rs`. The
+  call dispatch helpers (`dispatch_call_closure_like`,
+  `op_make_closure_heap`) factor out the tag-dispatch tree so the
+  new opcodes share the mature `CallValue` runtime path. This keeps
+  Phase F strictly additive: no existing closure semantics changed.
+- **Call-site emission** in `expressions/function_calls.rs`:
+  closures called through a name with registered callable
+  `expected_param_modes` emit `CallFunctionIndirect(Count(N))` instead
+  of the legacy `PushConst count; CallValue` pair. One extra byte of
+  bytecode and one less runtime pop.
+- **JIT integration (partial)**:
+  - `escape_analysis.rs`, `numeric_arrays.rs`, `typed_mir.rs`, and the
+    opcode-inventory tables in `compiler/accessors.rs` all know the new
+    opcodes. `is_escaping_call` and `is_unknown_stack_effect` now
+    include `CallClosure` / `CallFunctionIndirect`; `MakeClosure` and
+    `MakeClosureHeap` both mark active array slots as escaped for the
+    escape planner.
+  - The MIR-level `ClosureCapture` codegen (Phase E's
+    `emit_stack_closure`) is unchanged: it still branches on
+    `non_escaping_closure_slots` for stack vs legacy-heap allocation.
+    Phase F does NOT yet add a dedicated MIR `emit_heap_closure` that
+    bypasses the `jit_make_closure` FFI — that's the Phase H
+    cleanup target.
+  - `type_id` in the JIT's `StackClosure` layout is still 0 in Phase F
+    (Phase E placeholder). Threading the real `ClosureTypeId` into
+    the JIT requires plumbing `compiler.closure_type_ids()` through
+    the worker pipeline; Phase F defers this to Phase G because the
+    opcode-level tests do not require it.
+- **Tests**: 15 Phase F unit tests in
+  `compiler/expressions/closures.rs` cover (a) registry
+  correctness for both `ClosureTypeId` and `FunctionTypeId`, (b)
+  `MakeClosureHeap` emission for return-of-closure and array-of-closure
+  patterns, (c) `MakeClosure` preservation for non-escaping cases,
+  and (d) end-to-end runtime correctness for polymorphic
+  `Function<A,R>` dispatch including `Array<Function<(int) -> int>>`.
+
+**Deferred to Phase G**:
+
+- Feedback-guided Tier 2 speculative direct-call through the IC
+  state machine. The `CallClosure` / `CallFunctionIndirect` opcodes
+  expose the hook; the JIT's feedback vector lookup + guard codegen
+  are the remaining step.
+- Real `TypedClosureHeader` allocation on the JIT side (Phase F's
+  VM wraps escaping closures as `HeapValue::Closure` — correct but
+  still Arc-boxed).
+- Threading `ClosureTypeId` into the JIT's stack-closure layout.
+- Snapshot deopt interaction with stack/heap closures.
+
+**Files** (all landed):
+- `crates/shape-value/src/v2/heap_header.rs` (new `HEAP_KIND_V2_CLOSURE`)
+- `crates/shape-value/src/v2/function_type_registry.rs` (NEW)
+- `crates/shape-value/src/v2/mod.rs` (module registration)
+- `crates/shape-vm/src/bytecode/opcode_defs.rs`
+  (`MakeClosureHeap`, `CallClosure`, `CallFunctionIndirect`)
+- `crates/shape-vm/src/executor/dispatch.rs`
+  (route new opcodes to their handlers)
+- `crates/shape-vm/src/executor/control_flow/mod.rs`
+  (new dispatch helpers + opcode handlers)
+- `crates/shape-vm/src/executor/objects/mod.rs`
+  (route `MakeClosureHeap` to the objects dispatch)
+- `crates/shape-vm/src/compiler/mod.rs`
+  (new `function_type_registry`, `function_type_ids`,
+  `emit_make_closure_heap_next` fields)
+- `crates/shape-vm/src/compiler/compiler_impl_initialization.rs`
+  (initialise new fields)
+- `crates/shape-vm/src/compiler/expressions/closures.rs`
+  (`mint_function_type_id_for_params`, `MakeClosureHeap` emission,
+  Phase F tests)
+- `crates/shape-vm/src/compiler/expressions/function_calls.rs`
+  (`CallFunctionIndirect` emission on typed-callable locals)
+- `crates/shape-vm/src/compiler/expressions/collections.rs`
+  (flag escaping closure literals in array elements)
+- `crates/shape-vm/src/compiler/statements.rs`
+  (flag escaping closure literals in `return` expressions)
+- `crates/shape-jit/src/compiler/accessors.rs`
+  (add new opcodes to `ALL_OPCODES`)
+- `crates/shape-jit/src/optimizer/escape_analysis.rs`
+  (`MakeClosureHeap` marks live array slots as escaping)
+- `crates/shape-jit/src/optimizer/hof_inline.rs`
+  (recognise `MakeClosureHeap` as a non-inlinable closure)
+- `crates/shape-jit/src/optimizer/numeric_arrays.rs`
+  (`CallClosure` / `CallFunctionIndirect` have unknown stack effect)
+- `crates/shape-jit/src/optimizer/typed_mir.rs`
+  (new call opcodes map to `MirOp::Call`)
+
+**Agent team size (actual)**: solo implementation, per Phase F task
+constraints.
 
 ### Phase G — Snapshot + Task-Boundary Promotion
 

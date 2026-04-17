@@ -645,14 +645,32 @@ impl BytecodeCompiler {
             self.compile_expr_identifier(name, span)?;
 
             let writebacks = self.compile_call_args(args, expected_param_modes.as_deref())?;
-            let arg_count = self
-                .program
-                .add_constant(Constant::Number(args.len() as f64));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(arg_count)),
-            ));
-            self.emit(Instruction::simple(OpCode::CallValue));
+
+            // Phase F: emit `CallFunctionIndirect` when the callee is a
+            // typed callable (`Function<A, R>` parameter or local binding
+            // with known callable pass modes) and fits `u16`. The arity
+            // travels in the operand so the runtime skips the extra
+            // `PushConst` round-trip, and the JIT can pick a
+            // `call_indirect` signature from the inferred
+            // `FunctionTypeId`. Fallback is the legacy `CallValue` path
+            // which reads arity from the stack.
+            let prefers_indirect =
+                expected_param_modes.is_some() && args.len() <= u16::MAX as usize;
+            if prefers_indirect {
+                self.emit(Instruction::new(
+                    OpCode::CallFunctionIndirect,
+                    Some(Operand::Count(args.len() as u16)),
+                ));
+            } else {
+                let arg_count = self
+                    .program
+                    .add_constant(Constant::Number(args.len() as f64));
+                self.emit(Instruction::new(
+                    OpCode::PushConst,
+                    Some(Operand::Const(arg_count)),
+                ));
+                self.emit(Instruction::simple(OpCode::CallValue));
+            }
             if !writebacks.is_empty() {
                 let result_local = self.declare_temp_local("__call_value_result_")?;
                 self.emit(Instruction::new(

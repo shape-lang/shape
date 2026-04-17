@@ -28,6 +28,8 @@ impl VirtualMachine {
             JumpIfTrue => self.op_jump_if_true(instruction)?,
             Call => self.op_call(instruction)?,
             CallValue => self.op_call_value()?,
+            CallClosure => self.op_call_closure(instruction)?,
+            CallFunctionIndirect => self.op_call_function_indirect(instruction)?,
             CallForeign => self.op_call_foreign(instruction)?,
             Return => self.op_return()?,
             ReturnValue => self.op_return_value()?,
@@ -356,6 +358,144 @@ impl VirtualMachine {
         Ok(())
     }
 
+    /// Closure spec Phase F — direct dispatch on a statically-typed closure.
+    ///
+    /// `CallClosure(Count(arity))` is emitted at call sites where the
+    /// compiler has proven the callee's `ClosureTypeId` (typically because a
+    /// closure literal was bound to a `let` and then called through that
+    /// binding, or after Phase C-style specialization narrowed the closure
+    /// type). The VM behaviourally equals `CallValue` with `arg_count` read
+    /// from the operand instead of popped from the stack. The JIT uses the
+    /// statically-known type id to emit a direct `call` with typed capture
+    /// loads — see `docs/v2-closure-specialization.md` §1.3.
+    ///
+    /// Stack layout (both before and after mirrors `CallValue`):
+    /// - Before: `[..., callee, arg0, arg1, ..., arg_{N-1}]`
+    /// - After:  `[..., result]`
+    pub(in crate::executor) fn op_call_closure(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let arity = match instruction.operand {
+            Some(Operand::Count(n)) => n as usize,
+            _ => return Err(VMError::InvalidOperand),
+        };
+        self.dispatch_call_closure_like(arity)
+    }
+
+    /// Closure spec Phase F — polymorphic dispatch through `Function<A, R>`.
+    ///
+    /// `CallFunctionIndirect(Count(arity))` is emitted at call sites where
+    /// the callee's concrete `ClosureTypeId` is not known but the signature
+    /// is (i.e. the callee is typed as `Function<A, R>`). The JIT lowers
+    /// this to a `call_indirect` with the `FunctionTypeId`'s Cranelift
+    /// signature; the VM dispatches through the same runtime path as
+    /// `CallValue`. The opcode distinction exists so the JIT can avoid the
+    /// full tag-dispatch cost when it knows the callee is a callable value
+    /// (not an arbitrary ValueWord).
+    pub(in crate::executor) fn op_call_function_indirect(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let arity = match instruction.operand {
+            Some(Operand::Count(n)) => n as usize,
+            _ => return Err(VMError::InvalidOperand),
+        };
+        self.dispatch_call_closure_like(arity)
+    }
+
+    /// Shared VM dispatch helper for `CallClosure` / `CallFunctionIndirect`.
+    ///
+    /// The arity comes from the opcode operand rather than the stack, so
+    /// this helper does not pop a Count sentinel before peeking the
+    /// callee. Otherwise the dispatch tree mirrors `op_call_value`.
+    fn dispatch_call_closure_like(&mut self, arg_count: usize) -> Result<(), VMError> {
+        // Stack layout: [callee, arg0, arg1, ..., argN-1]
+        let callee_idx = self
+            .sp
+            .checked_sub(arg_count + 1)
+            .ok_or(VMError::StackUnderflow)?;
+        let callee_nb = self.stack_read_raw(callee_idx);
+
+        let _bits = callee_nb.raw_bits();
+        if !shape_value::tags::is_tagged(_bits) {
+            return Err(VMError::RuntimeError(
+                "Cannot call non-function value".to_string(),
+            ));
+        }
+        match shape_value::tags::get_tag(_bits) {
+            TAG_FUNCTION => {
+                let func_id = callee_nb.as_function_id().ok_or(VMError::InvalidCall)?;
+                drop(callee_nb);
+                drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                for i in callee_idx..callee_idx + arg_count {
+                    self.stack[i] = self.stack[i + 1];
+                    self.stack[i + 1] = Self::NONE_BITS;
+                }
+                self.sp -= 1;
+                self.call_function_from_stack(func_id, arg_count)
+            }
+            TAG_MODULE_FN => {
+                let func_id = callee_nb.as_module_function().ok_or(VMError::InvalidCall)?;
+                drop(callee_nb);
+                let args_base = callee_idx + 1;
+                let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
+                for i in 0..arg_count {
+                    args_nb.push(self.stack_take_raw(args_base + i));
+                }
+                drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                self.stack[callee_idx] = Self::NONE_BITS;
+                self.sp = callee_idx;
+                let module_fn = self.module_fn_table.get(func_id).cloned().ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "Module function ID {} not found in registry",
+                        func_id
+                    ))
+                })?;
+                let result_nb = self.invoke_module_fn(&module_fn, &args_nb)?;
+                self.push_raw_u64(result_nb)?;
+                Ok(())
+            }
+            TAG_HEAP => {
+                if let Some((function_id, upvalues_slice)) =
+                    raw_helpers::extract_closure_info(callee_nb.raw_bits())
+                {
+                    let function_id = function_id;
+                    let upvalues = upvalues_slice.to_vec();
+                    drop(callee_nb);
+                    let args_base = callee_idx + 1;
+                    let mut args_nb = Vec::with_capacity(arg_count);
+                    for i in 0..arg_count {
+                        args_nb.push(self.stack_take_raw(args_base + i));
+                    }
+                    drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                    self.stack[callee_idx] = Self::NONE_BITS;
+                    self.sp = callee_idx;
+                    self.call_closure_with_nb_args(function_id, upvalues, &args_nb)
+                } else if let Some(shape_value::heap_value::HeapValue::HostClosure(callable)) =
+                    callee_nb.as_heap_ref()
+                {
+                    let callable = callable.clone();
+                    drop(callee_nb);
+                    let args_base = callee_idx + 1;
+                    let mut args_nb: Vec<ValueWord> = Vec::with_capacity(arg_count);
+                    for i in 0..arg_count {
+                        args_nb.push(self.stack_take_raw(args_base + i));
+                    }
+                    drop(ValueWord::from_raw_bits(self.stack[callee_idx]));
+                    self.stack[callee_idx] = Self::NONE_BITS;
+                    self.sp = callee_idx;
+                    let result_nb = callable.call(&args_nb).map_err(VMError::RuntimeError)?;
+                    self.push_raw_u64(result_nb)?;
+                    Ok(())
+                } else {
+                    Err(VMError::InvalidCall)
+                }
+            }
+            _ => Err(VMError::InvalidCall),
+        }
+    }
+
     pub(in crate::executor) fn op_call_value(&mut self) -> Result<(), VMError> {
         let arg_count = self
             .pop_raw_u64()?
@@ -505,6 +645,49 @@ impl VirtualMachine {
         } else {
             Err(VMError::InvalidOperand)
         }
+    }
+
+    /// Closure spec Phase F — escape-fallback heap allocation.
+    ///
+    /// `MakeClosureHeap(Function(fid))` is the opcode emitted for closures
+    /// whose storage plan classifies them as ESCAPING. Semantically this
+    /// builds a `TypedClosureHeader`-shaped value with the closure's
+    /// `function_id` and the compiler-minted `ClosureTypeId`; captures are
+    /// popped from the stack and written into the typed capture area; each
+    /// heap-typed capture is retained per the layout's `heap_capture_mask`.
+    ///
+    /// In Phase F the interpreter backing is still `HeapValue::Closure` (the
+    /// legacy representation). The opcode encodes the intent, and Phase H
+    /// will migrate the interpreter to read a real raw `TypedClosureHeader`
+    /// allocation with a proper `HeapHeader` (refcount lives with the
+    /// standard v2 atomic retain/release machinery — the Closure HeapValue
+    /// shares the exact lifetime semantics via `Arc<HeapValue>`, so drop
+    /// semantics are preserved end-to-end).
+    ///
+    /// # Invariants (documented for Phase H migration)
+    /// - `function_id` must index a closure-compiled `Function` in
+    ///   `program.functions`.
+    /// - `captures_count` captures are consumed from the top of the stack;
+    ///   if the actual stack is shorter, `StackUnderflow` is raised.
+    /// - Ownership: each heap-typed capture's refcount is preserved — the
+    ///   pop + re-wrap into the `Upvalue` preserves Arc clones via
+    ///   `Upvalue::new` (no atomic ops on scalar captures, standard Arc
+    ///   clone on heap captures).
+    pub(in crate::executor) fn op_make_closure_heap(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        // Behaviourally identical to `op_make_closure` in Phase F — the new
+        // opcode exists to let the JIT distinguish escaping closures
+        // (always heap-allocated) from the legacy `MakeClosure` path, which
+        // is retained for unresolved-escape-status closures until Phase H.
+        //
+        // Once Phase H lands, this handler will switch to allocating a raw
+        // `TypedClosureHeader` block via `std::alloc::alloc` with
+        // `HEAP_KIND_V2_CLOSURE` in the header and each capture written at
+        // its typed offset inside the layout — matching the JIT's memory
+        // layout exactly.
+        self.op_make_closure(instruction)
     }
 
     // Foreign function call

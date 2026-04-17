@@ -28,6 +28,10 @@ impl BytecodeCompiler {
             closure_function_ids: Vec::new(),
             closure_registry: shape_value::v2::closure_layout::ClosureRegistry::new(),
             closure_type_ids: Vec::new(),
+            function_type_registry:
+                shape_value::v2::function_type_registry::FunctionTypeRegistry::new(),
+            function_type_ids: Vec::new(),
+            emit_make_closure_heap_next: false,
             closure_row_schema: None,
             last_expr_type_info: None,
             type_tracker: TypeTracker::with_stdlib(),

@@ -94,6 +94,8 @@ fn is_escaping_call(op: OpCode) -> bool {
         op,
         OpCode::Call
             | OpCode::CallValue
+            | OpCode::CallClosure
+            | OpCode::CallFunctionIndirect
             | OpCode::CallMethod
             | OpCode::BuiltinCall
             | OpCode::DynMethodCall
@@ -415,7 +417,7 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
                     candidates[cand_idx].escaped = true;
                 }
             }
-            (OpCode::MakeClosure, _) => {
+            (OpCode::MakeClosure, _) | (OpCode::MakeClosureHeap, _) => {
                 for &slot in &active_slots {
                     if let Some(&cand_idx) = slot_to_candidate.get(&slot) {
                         candidates[cand_idx].escaped = true;
