@@ -114,6 +114,7 @@ impl BytecodeCompiler {
             drop_type_info: HashMap::new(),
             drop_module_bindings: Vec::new(),
             mutable_closure_captures: HashMap::new(),
+            local_mutable_ptr_captures: HashMap::new(),
             boxed_locals: HashSet::new(),
             permission_set: None,
             current_blob_builder: None,

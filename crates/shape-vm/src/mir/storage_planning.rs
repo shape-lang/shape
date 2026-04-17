@@ -298,11 +298,101 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
     let non_escaping_closure_slots =
         detect_non_escaping_closure_slots(input, &slot_classes);
 
+    // Closure Spec Phase D: promote the storage class of outer slots whose
+    // ONLY heap-indirection driver is a mutable capture by a non-escaping
+    // closure to `LocalMutablePtr`. The previous pass assigned `UniqueHeap`
+    // to such slots (Rule 2 in `decide_slot_storage`) — that was the v1-style
+    // "box into SharedCell on capture" decision. In v2 the closure env holds
+    // a typed stack pointer instead; the binding can stay on the frame.
+    //
+    // Preconditions (all must hold):
+    //   1. The slot is the root of a mutably-captured operand in a
+    //      `ClosureCapture` statement.
+    //   2. The closure slot that captures it is in
+    //      `non_escaping_closure_slots`.
+    //   3. The slot is not itself a first-class reference or promoted to a
+    //      heap-aliased class for some other reason (e.g. also stored into
+    //      a collection).
+    //
+    // Escape fallback (§4.3): for `let mut` + escaping closure with a mutable
+    // capture, `compile_expr_closure` emits `B0003`. For `var` + escaping
+    // closure, the SharedCow path is unchanged.
+    promote_local_mutable_ptr_slots(
+        input,
+        &non_escaping_closure_slots,
+        &mut slot_classes,
+        &mut slot_semantics,
+    );
+
     StoragePlan {
         slot_classes,
         slot_semantics,
         inline_array_sizes,
         non_escaping_closure_slots,
+    }
+}
+
+/// Phase D — promote outer-slot storage class to `LocalMutablePtr` when the
+/// slot is captured by a non-escaping closure.
+///
+/// This runs AFTER the main storage-class decision pass and AFTER the
+/// `non_escaping_closure_slots` computation. It walks every `ClosureCapture`
+/// in the MIR; for each operand whose root slot currently has a conservative
+/// class (`Direct` / `Deferred` / `UniqueHeap`) it promotes to
+/// `LocalMutablePtr`. The MIR statement does not distinguish
+/// mutable-vs-immutable operands — the closure-compiler side inspects the
+/// closure body via `EnvironmentAnalyzer::analyze_function_with_mutability`
+/// and only emits `LoadCaptureMutPtr<T>` / `StoreCaptureMutPtr<T>` for
+/// captures that the body actually mutates. Unused promotions are harmless:
+/// `LocalMutablePtr` carries the same "slot stays on the frame" meaning as
+/// `Direct` and reads through the existing non-closure code paths unchanged.
+///
+/// Conservative: if the outer slot has any other escape vector (it is also
+/// returned, stored in a container, or captured by a different escaping
+/// closure), `decide_slot_storage` already put it in a non-promotable class
+/// (e.g. `SharedCow`) and we leave it alone.
+fn promote_local_mutable_ptr_slots(
+    input: &StoragePlannerInput<'_>,
+    non_escaping_closure_slots: &HashSet<SlotId>,
+    slot_classes: &mut HashMap<SlotId, BindingStorageClass>,
+    slot_semantics: &mut HashMap<SlotId, BindingSemantics>,
+) {
+    for block in input.mir.iter_blocks() {
+        for stmt in &block.statements {
+            let StatementKind::ClosureCapture {
+                closure_slot,
+                operands,
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+
+            if !non_escaping_closure_slots.contains(closure_slot) {
+                continue;
+            }
+
+            for op in operands {
+                let Some(root) = operand_root_slot(op) else {
+                    continue;
+                };
+                let Some(current) = slot_classes.get(&root).copied() else {
+                    continue;
+                };
+                match current {
+                    BindingStorageClass::UniqueHeap
+                    | BindingStorageClass::Direct
+                    | BindingStorageClass::Deferred => {
+                        slot_classes.insert(root, BindingStorageClass::LocalMutablePtr);
+                        if let Some(sem) = slot_semantics.get_mut(&root) {
+                            sem.storage_class = BindingStorageClass::LocalMutablePtr;
+                        }
+                    }
+                    // SharedCow / Reference / LocalMutablePtr: leave alone.
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -1009,10 +1099,16 @@ mod tests {
         );
     }
 
-    // ── Test: UniqueHeap for mutably captured slot ────────────────────────
+    // ── Test: Mutable capture → LocalMutablePtr (Phase D) or UniqueHeap ───
+    //
+    // Before Phase D this scenario produced `UniqueHeap` unconditionally
+    // (Rule 2 in `decide_slot_storage`). Phase D adds a post-processing pass:
+    // when the closure itself is non-escaping, the outer slot is demoted to
+    // `LocalMutablePtr` so the slot can stay on the stack and the closure env
+    // holds a typed pointer instead of an `Arc<RwLock<ValueWord>>` cell.
 
     #[test]
-    fn test_mutable_capture_gets_unique_heap() {
+    fn test_mutable_capture_gets_local_mutable_ptr() {
         // bb0: _0 = 0; ClosureCapture(copy _0); _0 = 1; return
         let mir = make_mir(
             "test_unique_heap",
@@ -1067,9 +1163,13 @@ mod tests {
         };
 
         let plan = plan_storage(&input);
+        // Phase D: when the closure is non-escaping, mutable-capture slots
+        // drop from `UniqueHeap` to `LocalMutablePtr`. The test MIR has the
+        // closure_slot at SlotId(0) and no escape vectors, so the closure is
+        // non-escaping and the demotion fires.
         assert_eq!(
             plan.slot_classes.get(&SlotId(0)),
-            Some(&BindingStorageClass::UniqueHeap)
+            Some(&BindingStorageClass::LocalMutablePtr)
         );
     }
 
@@ -1368,10 +1468,21 @@ mod tests {
         };
 
         let plan = plan_storage(&input);
-        assert_eq!(
-            plan.slot_classes.get(&SlotId(0)),
-            Some(&BindingStorageClass::Direct),
-            "immutable capture stays Direct"
+        // Phase D: when a non-escaping closure captures the slot, the planner
+        // promotes `Direct` → `LocalMutablePtr` unconditionally (the compiler
+        // side decides whether to actually emit the typed-pointer opcodes
+        // based on the closure body's mutation analysis). `LocalMutablePtr`
+        // is semantically equivalent to `Direct` for immutable captures:
+        // the slot stays on the frame and no heap indirection is introduced.
+        let class = plan.slot_classes.get(&SlotId(0)).copied();
+        assert!(
+            matches!(
+                class,
+                Some(BindingStorageClass::Direct)
+                    | Some(BindingStorageClass::LocalMutablePtr)
+            ),
+            "immutable capture stays on stack (Direct or LocalMutablePtr), got {:?}",
+            class
         );
     }
 
@@ -1550,10 +1661,13 @@ mod tests {
         };
 
         let plan = plan_storage(&input);
+        // Phase D: when the closure is non-escaping, a mutably-captured `var`
+        // slot that would previously have been `UniqueHeap` is demoted to
+        // `LocalMutablePtr`. Escaping closures stay on the legacy path.
         assert_eq!(
             plan.slot_classes.get(&SlotId(0)),
-            Some(&BindingStorageClass::UniqueHeap),
-            "mutable capture → UniqueHeap overrides SharedCow"
+            Some(&BindingStorageClass::LocalMutablePtr),
+            "non-escaping mutable capture → LocalMutablePtr (Phase D)"
         );
     }
 
@@ -3021,6 +3135,221 @@ mod tests {
             plan.non_escaping_closure_slots.contains(&SlotId(2)),
             "second closure is independent and does not escape; got {:?}",
             plan.non_escaping_closure_slots
+        );
+    }
+
+    // ── Closure Spec Phase D: LocalMutablePtr promotion ──────────────────
+
+    /// Build a minimal MIR: outer mutable slot `_1`, closure slot `_2`
+    /// captures `_1`, closure is invoked. Phase B classifies `_2` as
+    /// non-escaping; Phase D demotes `_1` from `UniqueHeap` → `LocalMutablePtr`.
+    fn phase_d_basic_mir() -> MirFunction {
+        single_block_mir(
+            "phase_d_local_ptr",
+            vec![
+                // _1 = 0
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+                    ),
+                    0,
+                ),
+                // ClosureCapture { closure_slot: _2, operands: [copy _1] }
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(2),
+                        operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        function_id: None,
+                    },
+                    1,
+                ),
+                // _2 = <closure placeholder>
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    2,
+                ),
+                // Reassign outer (proves slot is mutably captured).
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::Int(5))),
+                    ),
+                    3,
+                ),
+            ],
+            3,
+        )
+    }
+
+    #[test]
+    fn test_phase_d_non_escaping_closure_promotes_outer_slot_to_local_mutable_ptr() {
+        let mir = phase_d_basic_mir();
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let mut closure_captures = HashSet::new();
+        closure_captures.insert(SlotId(1));
+        let mut mutable_captures = HashSet::new();
+        mutable_captures.insert(SlotId(1));
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+            callee_summaries: None,
+        };
+        let plan = plan_storage(&input);
+
+        assert_eq!(
+            plan.slot_classes.get(&SlotId(1)),
+            Some(&BindingStorageClass::LocalMutablePtr),
+            "non-escaping mutable capture → LocalMutablePtr"
+        );
+        assert!(
+            plan.non_escaping_closure_slots.contains(&SlotId(2)),
+            "closure in _2 is non-escaping"
+        );
+    }
+
+    #[test]
+    fn test_phase_d_escaping_closure_leaves_outer_slot_as_unique_heap() {
+        // The closure escapes via return, so its mutable capture must stay
+        // on the heap — Phase D's demotion is gated on `non_escaping`.
+        let mut mir = phase_d_basic_mir();
+        // Replace the trailing statement with `_0 = copy _2` so the closure
+        // flows into the return slot.
+        let last_block_idx = mir.blocks.len() - 1;
+        let stmts = &mut mir.blocks[last_block_idx].statements;
+        // Drop the reassignment (index 3) and add a return-flow statement.
+        stmts.pop();
+        stmts.push(make_stmt(
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Copy(Place::Local(SlotId(2)))),
+            ),
+            3,
+        ));
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let mut closure_captures = HashSet::new();
+        closure_captures.insert(SlotId(1));
+        let mut mutable_captures = HashSet::new();
+        mutable_captures.insert(SlotId(1));
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+            callee_summaries: None,
+        };
+        let plan = plan_storage(&input);
+
+        assert!(
+            !plan.non_escaping_closure_slots.contains(&SlotId(2)),
+            "closure is escaping via return"
+        );
+        assert_eq!(
+            plan.slot_classes.get(&SlotId(1)),
+            Some(&BindingStorageClass::UniqueHeap),
+            "escaping closure → outer slot stays UniqueHeap"
+        );
+    }
+
+    #[test]
+    fn test_phase_d_multiple_disjoint_captures_all_local_mutable_ptr() {
+        // fn f() { let mut a = 0; let mut b = 0; let c = |x| { a = a + 1; b = b + 2 }; c(); }
+        // Two disjoint mutably-captured slots by the same non-escaping closure.
+        // Both should be `LocalMutablePtr`.
+        let mir = single_block_mir(
+            "phase_d_disjoint",
+            vec![
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+                    ),
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::ClosureCapture {
+                        closure_slot: SlotId(3),
+                        operands: vec![
+                            Operand::Copy(Place::Local(SlotId(1))),
+                            Operand::Copy(Place::Local(SlotId(2))),
+                        ],
+                        function_id: None,
+                    },
+                    2,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(3)),
+                        Rvalue::Use(Operand::Constant(MirConstant::ClosurePlaceholder)),
+                    ),
+                    3,
+                ),
+                // Reassignments to force `mutable_captures` membership.
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::Int(1))),
+                    ),
+                    4,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Use(Operand::Constant(MirConstant::Int(2))),
+                    ),
+                    5,
+                ),
+            ],
+            4,
+        );
+
+        let analysis = empty_analysis();
+        let binding_semantics = HashMap::new();
+        let mut closure_captures = HashSet::new();
+        closure_captures.insert(SlotId(1));
+        closure_captures.insert(SlotId(2));
+        let mut mutable_captures = HashSet::new();
+        mutable_captures.insert(SlotId(1));
+        mutable_captures.insert(SlotId(2));
+
+        let input = StoragePlannerInput {
+            mir: &mir,
+            analysis: &analysis,
+            binding_semantics: &binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+            callee_summaries: None,
+        };
+        let plan = plan_storage(&input);
+        assert_eq!(
+            plan.slot_classes.get(&SlotId(1)),
+            Some(&BindingStorageClass::LocalMutablePtr)
+        );
+        assert_eq!(
+            plan.slot_classes.get(&SlotId(2)),
+            Some(&BindingStorageClass::LocalMutablePtr)
         );
     }
 }

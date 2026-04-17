@@ -133,9 +133,20 @@ impl BytecodeCompiler {
 
     /// Query the MIR storage plan for a specific local slot's storage class.
     /// Returns `None` if no plan exists or the slot is not in the plan.
+    ///
+    /// The compiler's local indexing is 0-based (first bytecode local =
+    /// index 0), but MIR reserves `SlotId(0)` for the return slot and starts
+    /// user locals at `SlotId(1)`. Add 1 when indexing into the plan so
+    /// callers can pass bytecode-local indices directly.
     pub(super) fn mir_storage_class_for_slot(&self, slot: u16) -> Option<BindingStorageClass> {
-        self.current_storage_plan()
-            .and_then(|plan| plan.slot_classes.get(&crate::mir::SlotId(slot)).copied())
+        let plan = self.current_storage_plan()?;
+        // Prefer the +1-offset lookup (current MIR convention). Fall back to
+        // the direct lookup so the helper stays robust if a future MIR ABI
+        // change stops reserving SlotId(0).
+        plan.slot_classes
+            .get(&crate::mir::SlotId(slot.saturating_add(1)))
+            .copied()
+            .or_else(|| plan.slot_classes.get(&crate::mir::SlotId(slot)).copied())
     }
 
     /// MIR analysis is authoritative for both function bodies and top-level code.
@@ -433,6 +444,14 @@ impl BytecodeCompiler {
             },
             Direct => match current {
                 Deferred => Direct,
+                _ => current,
+            },
+            // Phase D: `LocalMutablePtr` upgrades `Deferred` / `Direct` but
+            // never overrides an already-shared binding (SharedCow / Reference
+            // / UniqueHeap). `LocalMutablePtr` is strictly for non-escaping
+            // bindings whose outer slot stays on the stack.
+            LocalMutablePtr => match current {
+                Deferred | Direct => LocalMutablePtr,
                 _ => current,
             },
             Deferred | Reference => current,

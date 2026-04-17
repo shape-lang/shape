@@ -486,7 +486,17 @@ impl VirtualMachine {
             | DerefStore
             | SetIndexRef
             | BoxLocal
-            | BoxModuleBinding => {
+            | BoxModuleBinding
+            | LoadCaptureMutPtrF64
+            | LoadCaptureMutPtrI64
+            | LoadCaptureMutPtrI32
+            | LoadCaptureMutPtrBool
+            | LoadCaptureMutPtrPtr
+            | StoreCaptureMutPtrF64
+            | StoreCaptureMutPtrI64
+            | StoreCaptureMutPtrI32
+            | StoreCaptureMutPtrBool
+            | StoreCaptureMutPtrPtr => {
                 return self.exec_variables(instruction);
             }
 

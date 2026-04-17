@@ -183,8 +183,24 @@ impl BytecodeCompiler {
                 self.pending_variable_name = saved_pending_variable_name;
                 let ref_borrow = compile_result?;
                 self.emit(Instruction::simple(OpCode::Dup));
-                // Mutable closure captures: emit StoreClosure
+                // Mutable closure captures: emit StoreClosure (or, Phase D, a
+                // typed StoreCaptureMutPtr<T> when the storage plan classified
+                // the outer binding as LocalMutablePtr).
                 if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name.as_str()) {
+                    if let Some(&(ptr_idx, kind)) =
+                        self.local_mutable_ptr_captures.get(name.as_str())
+                    {
+                        use shape_value::v2::struct_layout::FieldKind;
+                        let op = match kind {
+                            FieldKind::F64 => OpCode::StoreCaptureMutPtrF64,
+                            FieldKind::I64 => OpCode::StoreCaptureMutPtrI64,
+                            FieldKind::I32 => OpCode::StoreCaptureMutPtrI32,
+                            FieldKind::Bool => OpCode::StoreCaptureMutPtrBool,
+                            _ => OpCode::StoreCaptureMutPtrPtr,
+                        };
+                        self.emit(Instruction::new(op, Some(Operand::Local(ptr_idx))));
+                        return Ok(());
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreClosure,
                         Some(Operand::Local(upvalue_idx)),

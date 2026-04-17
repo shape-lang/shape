@@ -1148,6 +1148,14 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
             LoanSinkKind::ReturnSlot => continue,
             LoanSinkKind::ClosureEnv if sink_is_local => continue,
             LoanSinkKind::ClosureEnv => BorrowErrorKind::ReferenceEscapeIntoClosure,
+            // Phase D: exclusive loan registered via `ClosureCapture` for a
+            // non-escaping closure slot whose mutable capture root is marked
+            // `LocalMutablePtr`. The loan is issued purely for solver
+            // bookkeeping so outer reads/writes during the closure's lifetime
+            // are caught by the standard exclusive-loan rules; the sink itself
+            // is local by construction (non-escaping closure) and should never
+            // synthesize a diagnostic.
+            LoanSinkKind::ClosureEnvMut => continue,
             LoanSinkKind::ArrayStore | LoanSinkKind::ArrayAssignment if sink_is_local => continue,
             LoanSinkKind::ArrayStore | LoanSinkKind::ArrayAssignment => {
                 BorrowErrorKind::ReferenceStoredInArray

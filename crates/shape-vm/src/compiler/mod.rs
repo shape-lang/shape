@@ -823,6 +823,18 @@ pub struct BytecodeCompiler {
     /// Only populated while compiling a closure body that has mutable captures.
     pub(crate) mutable_closure_captures: HashMap<String, u16>,
 
+    /// Closure Spec Phase D — subset of `mutable_closure_captures` that the
+    /// enclosing function's MIR storage plan classified as
+    /// `BindingStorageClass::LocalMutablePtr`. Maps captured variable name →
+    /// (upvalue_idx, FieldKind of the pointee type). When an identifier lookup
+    /// during closure-body compilation finds the name in this map, it emits
+    /// `LoadCaptureMutPtr<T>` / `StoreCaptureMutPtr<T>` instead of the legacy
+    /// `LoadClosure` / `StoreClosure`. When absent from this map (but present
+    /// in `mutable_closure_captures`), the legacy BoxLocal path is used —
+    /// Phase H will remove that path.
+    pub(crate) local_mutable_ptr_captures:
+        HashMap<String, (u16, shape_value::v2::struct_layout::FieldKind)>,
+
     /// Variables in the current scope that have been boxed into SharedCells
     /// by a mutable closure capture. When a subsequent closure captures one
     /// of these variables (even immutably), it must use the SharedCell path

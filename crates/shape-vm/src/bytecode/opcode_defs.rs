@@ -721,6 +721,42 @@ define_opcodes! {
     /// epilogue, not by this opcode itself.
     ReturnOwned = 0x117, Stack, pops: 0, pushes: 0;
 
+    // ===== Closure Spec Phase D: Typed mutable-capture access =====
+    //
+    // These opcodes implement the `LocalMutablePtr` capture ABI for
+    // non-escaping closures (see `docs/v2-closure-specialization.md` §4.1).
+    // Each opcode takes a `Local(capture_idx)` operand naming the capture
+    // index in the current frame's upvalue table and performs a typed read or
+    // write. The element type is encoded in the opcode name — no tag checks,
+    // no ValueWord round-trip on the hot path (Phase E will specialize the
+    // executor to raw typed loads/stores against a Cranelift `StackSlot`).
+    //
+    // In Phase D the interpreter backing storage is still a SharedCell
+    // (Upvalue::Mutable), so correctness relies on the SharedCell auto-deref
+    // already performed by the call-frame upvalue machinery. The typed
+    // variants skip the tag-dispatch step on read: the compiler has proven
+    // the ValueWord carries the declared encoding.
+    /// Load f64 through a mutable capture pointer. Operand: Local(idx).
+    LoadCaptureMutPtrF64 = 0x118, Variable, pops: 0, pushes: 1;
+    /// Load i64 through a mutable capture pointer. Operand: Local(idx).
+    LoadCaptureMutPtrI64 = 0x119, Variable, pops: 0, pushes: 1;
+    /// Load i32 through a mutable capture pointer. Operand: Local(idx).
+    LoadCaptureMutPtrI32 = 0x11A, Variable, pops: 0, pushes: 1;
+    /// Load bool through a mutable capture pointer. Operand: Local(idx).
+    LoadCaptureMutPtrBool = 0x11B, Variable, pops: 0, pushes: 1;
+    /// Load heap pointer through a mutable capture pointer. Operand: Local(idx).
+    LoadCaptureMutPtrPtr = 0x11C, Variable, pops: 0, pushes: 1;
+    /// Store f64 through a mutable capture pointer. Operand: Local(idx).
+    StoreCaptureMutPtrF64 = 0x11D, Variable, pops: 1, pushes: 0;
+    /// Store i64 through a mutable capture pointer. Operand: Local(idx).
+    StoreCaptureMutPtrI64 = 0x11E, Variable, pops: 1, pushes: 0;
+    /// Store i32 through a mutable capture pointer. Operand: Local(idx).
+    StoreCaptureMutPtrI32 = 0x11F, Variable, pops: 1, pushes: 0;
+    /// Store bool through a mutable capture pointer. Operand: Local(idx).
+    StoreCaptureMutPtrBool = 0x120, Variable, pops: 1, pushes: 0;
+    /// Store heap pointer through a mutable capture pointer. Operand: Local(idx).
+    StoreCaptureMutPtrPtr = 0x121, Variable, pops: 1, pushes: 0;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;

@@ -564,14 +564,78 @@ Implementation notes:
 
 ### Phase D — Mutable Stack-Pointer Captures
 
+**Status: landed on `jit-v2-phase1`.**
+
+Implementation notes:
+
+- **`BindingStorageClass::LocalMutablePtr`** is added in `type_tracking.rs`
+  and `LoanSinkKind::ClosureEnvMut` in `mir/analysis.rs`. The new sink kind
+  is registered at solve time (treated like `ClosureEnv` but never
+  synthesizes a diagnostic — the loan is bookkeeping for the exclusive-loan
+  solver rules).
+- **Storage-planner promotion**: after `non_escaping_closure_slots` is
+  computed, `promote_local_mutable_ptr_slots` walks every `ClosureCapture`
+  and demotes each operand root slot from `UniqueHeap` / `Direct` /
+  `Deferred` to `LocalMutablePtr` when the owning closure is non-escaping.
+  The promotion is unconditional on the operand side (MIR's
+  `ClosureCapture` doesn't flag per-operand mutability); the compiler side
+  inspects the closure body via `EnvironmentAnalyzer::analyze_function_with_mutability`
+  and only emits the typed pointer opcodes for actually-mutated captures.
+  Unused promotions are harmless — `LocalMutablePtr` is semantically a
+  refinement of `Direct` for the stack-resident case.
+- **New opcodes**: `LoadCaptureMutPtr{F64,I64,I32,Bool,Ptr}` and
+  `StoreCaptureMutPtr{F64,I64,I32,Bool,Ptr}`. Operand is `Local(idx)` —
+  the capture index in the current frame's upvalue table.
+- **Interpreter backing (Phase D transitional)**: the new opcodes still
+  use the existing `Upvalue::Mutable(Arc<RwLock<ValueWord>>)` shared-cell
+  mechanism. `BoxLocal` is emitted at closure creation as before (keeping
+  the legacy path alive per §6 Phase H). The typed-ness shows up in
+  `op_load_capture_mut_ptr_*` / `op_store_capture_mut_ptr_*` — they skip
+  the tag-dispatch step on read/write. Phase E replaces the SharedCell
+  backing with a real `*mut T` into a Cranelift `StackSlot`; the opcode
+  ABI stays identical.
+- **`let mut` + escaping closure**: `compile_expr_closure` inspects the
+  enclosing function's MIR storage plan for each mutable capture. If the
+  capture's outer slot has ownership `OwnedMutable` and the plan placed
+  the slot in any class other than `LocalMutablePtr` / `Reference` /
+  `Direct` / `Deferred`, the compiler returns `[B0003] mutable binding
+  '<name>' cannot be captured by an escaping closure; promote the source
+  to \`var\` or restructure to keep the closure local`.
+- **Timing gotcha resolution**: the spec flagged a worry that
+  `mint_closure_type_id_peek` (Phase C) runs at resolver time, before the
+  enclosing function's storage plan exists. For Phase D the check runs in
+  `compile_expr_closure`, which executes during the enclosing function's
+  body compilation AFTER MIR + storage planning for that function are done.
+  Verified working on the Phase D test suite; no deferred pass needed.
+- **MIR-to-compiler slot offset**: MIR reserves `SlotId(0)` for the return
+  slot and starts user locals at `SlotId(1)`, while bytecode-local indices
+  are 0-based. `mir_storage_class_for_slot` now applies the `+1` offset
+  with a fall-through to the un-offset lookup, so callers can pass
+  bytecode-local indices directly and the helper stays robust if the MIR
+  ABI changes.
+- **Legacy path preserved**: `BoxLocal` / `LoadClosure` / `StoreClosure`
+  all remain in place. `local_mutable_ptr_captures: HashMap<String, (u16,
+  FieldKind)>` on the compiler is the sidecar that tells identifier /
+  assignment lowering to use the typed opcode family instead. Phase H
+  deletes the legacy mechanism.
+
 **Files**:
 - `crates/shape-vm/src/type_tracking.rs` (add `LocalMutablePtr` variant)
+- `crates/shape-vm/src/mir/analysis.rs` (add `LoanSinkKind::ClosureEnvMut`)
+- `crates/shape-vm/src/mir/solver.rs`
 - `crates/shape-vm/src/mir/storage_planning.rs`
-- `crates/shape-vm/src/mir/solver.rs` (add `LoanSinkKind::ClosureEnvMut`)
-- `crates/shape-vm/src/compiler/expressions/closures.rs`
 - `crates/shape-vm/src/bytecode/opcode_defs.rs` (add `LoadCaptureMutPtr*` / `StoreCaptureMutPtr*`)
+- `crates/shape-vm/src/executor/variables/mod.rs`
+- `crates/shape-vm/src/executor/dispatch.rs`
+- `crates/shape-vm/src/compiler/expressions/closures.rs`
+- `crates/shape-vm/src/compiler/expressions/assignment.rs`
+- `crates/shape-vm/src/compiler/expressions/identifiers.rs`
+- `crates/shape-vm/src/compiler/helpers.rs`
+- `crates/shape-vm/src/compiler/helpers_binding.rs`
+- `crates/shape-vm/src/compiler/mod.rs`
+- `crates/shape-vm/src/compiler/compiler_impl_initialization.rs`
 
-**Sub-tasks**:
+**Sub-tasks** (all done):
 - New `BindingStorageClass::LocalMutablePtr`.
 - Lowering: mutable captures of non-escaping closures become `Rvalue::Borrow(Exclusive, _)` with closure-lifetime region.
 - New capture opcodes; executor handlers do `load/store T [ptr]`.

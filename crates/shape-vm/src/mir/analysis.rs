@@ -38,6 +38,13 @@ pub enum ReferenceOriginRoot {
 pub enum LoanSinkKind {
     ReturnSlot,
     ClosureEnv,
+    /// Phase D: exclusive loan installed because a mutable capture targets a
+    /// non-escaping closure env whose storage plan is `LocalMutablePtr`. The
+    /// solver treats this exactly like any other exclusive loan — existing
+    /// `ConflictExclusiveExclusive` / `ReadWhileExclusivelyBorrowed` /
+    /// `WriteWhileBorrowed` rules catch races. Distinguished from `ClosureEnv`
+    /// so diagnostics and later phases can reason about it separately.
+    ClosureEnvMut,
     ArrayStore,
     ObjectStore,
     EnumStore,

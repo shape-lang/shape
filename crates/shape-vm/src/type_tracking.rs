@@ -501,6 +501,16 @@ pub enum EscapeStatus {
 ///
 /// `Deferred` is the initial state for ordinary bindings until a later planner
 /// decides whether the slot can stay direct or must be upgraded.
+///
+/// `LocalMutablePtr` (Closure Spec Phase D) marks a slot that lives on the
+/// stack AND has had a typed `*mut T` handed to a non-escaping closure env.
+/// The borrow checker has verified that no outer code races the closure over
+/// that slot's lifetime (the `ClosureCapture` was lowered as an exclusive
+/// borrow with `LoanSinkKind::ClosureEnvMut`). The binding is still direct in
+/// the sense that the slot stays on the caller stack — no `Arc<RwLock<>>`,
+/// no boxing. This is orthogonal to `Direct`/`UniqueHeap`: `Direct` means
+/// "no indirection and no closure-env sharing", `LocalMutablePtr` means "no
+/// indirection but a closure env holds a typed pointer into this slot".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BindingStorageClass {
     Deferred,
@@ -508,6 +518,9 @@ pub enum BindingStorageClass {
     UniqueHeap,
     SharedCow,
     Reference,
+    /// Phase D: stack-resident slot with a typed `*mut T` capture handed to a
+    /// non-escaping closure. See the doc comment on `BindingStorageClass`.
+    LocalMutablePtr,
 }
 
 /// Ownership/storage metadata for a binding slot.

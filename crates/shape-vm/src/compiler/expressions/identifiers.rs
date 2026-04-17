@@ -121,8 +121,27 @@ impl BytecodeCompiler {
                 location: Some(self.span_to_source_location(span)),
             });
         }
-        // Mutable closure captures: emit LoadClosure to read from the shared upvalue
+        // Mutable closure captures: emit LoadClosure (or, Phase D, the typed
+        // LoadCaptureMutPtr<T>) to read from the shared upvalue / stack pointer.
         if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name) {
+            // Phase D: if the capture was classified as LocalMutablePtr by the
+            // enclosing function's storage plan, emit a typed load that skips
+            // tag dispatch on the hot path.
+            if let Some(&(ptr_idx, kind)) = self.local_mutable_ptr_captures.get(name) {
+                use shape_value::v2::struct_layout::FieldKind;
+                let op = match kind {
+                    FieldKind::F64 => OpCode::LoadCaptureMutPtrF64,
+                    FieldKind::I64 => OpCode::LoadCaptureMutPtrI64,
+                    FieldKind::I32 => OpCode::LoadCaptureMutPtrI32,
+                    FieldKind::Bool => OpCode::LoadCaptureMutPtrBool,
+                    _ => OpCode::LoadCaptureMutPtrPtr,
+                };
+                self.emit(Instruction::new(op, Some(Operand::Local(ptr_idx))));
+                self.last_expr_schema = None;
+                self.last_expr_type_info = None;
+                self.last_expr_numeric_type = None;
+                return Ok(());
+            }
             self.emit(Instruction::new(
                 OpCode::LoadClosure,
                 Some(Operand::Local(upvalue_idx)),

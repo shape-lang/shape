@@ -364,6 +364,16 @@ impl VirtualMachine {
             SetIndexRef => self.op_set_index_ref(instruction)?,
             BoxLocal => self.op_box_local(instruction)?,
             BoxModuleBinding => self.op_box_module_binding(instruction)?,
+            LoadCaptureMutPtrF64 => self.op_load_capture_mut_ptr_f64(instruction)?,
+            LoadCaptureMutPtrI64 => self.op_load_capture_mut_ptr_i64(instruction)?,
+            LoadCaptureMutPtrI32 => self.op_load_capture_mut_ptr_i32(instruction)?,
+            LoadCaptureMutPtrBool => self.op_load_capture_mut_ptr_bool(instruction)?,
+            LoadCaptureMutPtrPtr => self.op_load_capture_mut_ptr_ptr(instruction)?,
+            StoreCaptureMutPtrF64 => self.op_store_capture_mut_ptr_f64(instruction)?,
+            StoreCaptureMutPtrI64 => self.op_store_capture_mut_ptr_i64(instruction)?,
+            StoreCaptureMutPtrI32 => self.op_store_capture_mut_ptr_i32(instruction)?,
+            StoreCaptureMutPtrBool => self.op_store_capture_mut_ptr_bool(instruction)?,
+            StoreCaptureMutPtrPtr => self.op_store_capture_mut_ptr_ptr(instruction)?,
             _ => unreachable!(
                 "exec_variables called with non-variable opcode: {:?}",
                 instruction.opcode
@@ -426,6 +436,232 @@ impl VirtualMachine {
         // With Arc<RwLock<ValueWord>> upvalues, closing is automatic
         // The value is already on the heap and shared
         Ok(())
+    }
+
+    // ── Closure Spec Phase D: typed mutable-capture pointer access ───────
+    //
+    // The interpreter backing for `LoadCaptureMutPtrT` / `StoreCaptureMutPtrT`
+    // is the existing `Upvalue::Mutable(Arc<RwLock<ValueWord>>)` shared cell.
+    // Phase D's invariant is that the compiler has proven (a) the closure is
+    // non-escaping, (b) the outer slot has `BindingStorageClass::LocalMutablePtr`,
+    // (c) the MIR solver registered an exclusive loan on the outer slot for
+    // the closure's lifetime, and (d) the ValueWord stored in the shared cell
+    // carries the declared encoding (F64/I64/I32/Bool/Ptr). The typed opcodes
+    // skip the tag dispatch on read.
+    //
+    // Phase E replaces this path with a real raw `*mut T` into a Cranelift
+    // `StackSlot`. The opcode-level ABI stays identical — only the executor
+    // implementation changes.
+
+    /// Read the raw ValueWord stored behind the mutable capture pointer at
+    /// `upvalue_idx`. Auto-dereferences `SharedCell`-wrapped upvalues, which
+    /// is how the interpreter simulates a typed `*mut T` in Phase D.
+    ///
+    /// # Safety
+    ///
+    /// The caller must have verified (via the compiler storage plan) that
+    /// the capture at `upvalue_idx` is `LocalMutablePtr` and the ValueWord
+    /// encoding matches the opcode's declared type. The MIR solver has
+    /// registered an exclusive loan on the outer slot spanning the closure's
+    /// lifetime, so no outer read/write can race the access.
+    #[inline]
+    fn read_capture_mut_cell(&self, upvalue_idx: u16) -> Result<ValueWord, VMError> {
+        let frame = self.call_stack.last().ok_or_else(|| {
+            VMError::RuntimeError("closure capture read outside a call frame".to_string())
+        })?;
+        let upvalues = frame.upvalues.as_ref().ok_or_else(|| {
+            VMError::RuntimeError(
+                "closure capture read in a frame without upvalues".to_string(),
+            )
+        })?;
+        let upvalue = upvalues.get(upvalue_idx as usize).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "capture index {} not found in closure",
+                upvalue_idx
+            ))
+        })?;
+        // `Upvalue::get()` returns the stored ValueWord. For Phase D the
+        // cell is always Mutable (BoxLocal wrapped the outer slot); the
+        // returned value IS the underlying scalar, not the SharedCell
+        // wrapper — `Upvalue::Mutable::get` reads through the Arc.
+        Ok(upvalue.get())
+    }
+
+    /// Write a ValueWord back through the mutable capture pointer at
+    /// `upvalue_idx`. See `read_capture_mut_cell` for the safety preconditions.
+    #[inline]
+    fn write_capture_mut_cell(
+        &mut self,
+        upvalue_idx: u16,
+        value: ValueWord,
+    ) -> Result<(), VMError> {
+        let frame = self.call_stack.last_mut().ok_or_else(|| {
+            VMError::RuntimeError("closure capture write outside a call frame".to_string())
+        })?;
+        let upvalues = frame.upvalues.as_mut().ok_or_else(|| {
+            VMError::RuntimeError(
+                "closure capture write in a frame without upvalues".to_string(),
+            )
+        })?;
+        let upvalue = upvalues.get_mut(upvalue_idx as usize).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "capture index {} not found in closure",
+                upvalue_idx
+            ))
+        })?;
+        record_heap_write();
+        write_barrier_vw(&upvalue.get(), &value);
+        upvalue.set(value);
+        Ok(())
+    }
+
+    /// `LoadCaptureMutPtrF64 { idx }`: read the f64 stored behind capture `idx`.
+    fn op_load_capture_mut_ptr_f64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.read_capture_mut_cell(idx)?;
+        // SAFETY: compiler-proved f64 encoding in the capture cell. Fall back
+        // via ValueWord bits to remain correct if the cell is slightly more
+        // general (e.g. the SharedCell-based Phase D backing may hold a
+        // non-canonical encoding; `as_f64` handles both). Phase E will read
+        // raw f64 bits from the typed stack slot directly.
+        let f = value
+            .as_f64()
+            .or_else(|| value.as_i64().map(|i| i as f64))
+            .ok_or_else(|| {
+                VMError::RuntimeError(
+                    "LoadCaptureMutPtrF64: capture does not encode f64".to_string(),
+                )
+            })?;
+        self.push_raw_f64(f)
+    }
+
+    /// `LoadCaptureMutPtrI64 { idx }`: read the i64 stored behind capture `idx`.
+    fn op_load_capture_mut_ptr_i64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.read_capture_mut_cell(idx)?;
+        // SAFETY: compiler-proved i64 encoding. Push raw u64 bits preserving
+        // the i48-tagged NaN-boxed integer so downstream pop_raw_i64 decodes.
+        self.push_raw_u64(value.raw_bits())
+    }
+
+    /// `LoadCaptureMutPtrI32 { idx }`: read an i32 stored behind capture `idx`.
+    fn op_load_capture_mut_ptr_i32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.read_capture_mut_cell(idx)?;
+        // i32 is stored in the same i48 NaN-boxed integer encoding as i64
+        // for Phase D. Preserve the bit pattern.
+        self.push_raw_u64(value.raw_bits())
+    }
+
+    /// `LoadCaptureMutPtrBool { idx }`: read the bool stored behind capture `idx`.
+    fn op_load_capture_mut_ptr_bool(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.read_capture_mut_cell(idx)?;
+        // SAFETY: compiler-proved bool encoding. push_raw_u64 preserves the
+        // TAG_BOOL pattern so downstream pop_raw_bool can decode.
+        self.push_raw_u64(value.raw_bits())
+    }
+
+    /// `LoadCaptureMutPtrPtr { idx }`: read a heap pointer (e.g. TypedArray,
+    /// String, Struct) stored behind capture `idx`.
+    fn op_load_capture_mut_ptr_ptr(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let value = self.read_capture_mut_cell(idx)?;
+        // Heap pointer. `Upvalue::get` already bumped the Arc via clone, so
+        // the caller owns the returned ValueWord. Push as raw bits.
+        self.push_raw_u64(value.raw_bits())
+    }
+
+    /// `StoreCaptureMutPtrF64 { idx }`: pop f64 and write through capture `idx`.
+    fn op_store_capture_mut_ptr_f64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let f = self.pop_raw_f64()?;
+        let value = ValueWord::from_f64(f);
+        self.write_capture_mut_cell(idx, value)
+    }
+
+    /// `StoreCaptureMutPtrI64 { idx }`: pop i64 and write through capture `idx`.
+    fn op_store_capture_mut_ptr_i64(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let raw = self.pop_raw_u64()?;
+        // The raw bits already encode i64 via the i48 NaN-box. Reconstruct
+        // a ValueWord without decoding to preserve the tag.
+        let value = ValueWord::from_raw_bits(raw);
+        self.write_capture_mut_cell(idx, value)
+    }
+
+    /// `StoreCaptureMutPtrI32 { idx }`: pop i32 and write through capture `idx`.
+    fn op_store_capture_mut_ptr_i32(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let raw = self.pop_raw_u64()?;
+        let value = ValueWord::from_raw_bits(raw);
+        self.write_capture_mut_cell(idx, value)
+    }
+
+    /// `StoreCaptureMutPtrBool { idx }`: pop bool and write through capture `idx`.
+    fn op_store_capture_mut_ptr_bool(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let raw = self.pop_raw_u64()?;
+        let value = ValueWord::from_raw_bits(raw);
+        self.write_capture_mut_cell(idx, value)
+    }
+
+    /// `StoreCaptureMutPtrPtr { idx }`: pop heap pointer and write through capture `idx`.
+    fn op_store_capture_mut_ptr_ptr(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let raw = self.pop_raw_u64()?;
+        let value = ValueWord::from_raw_bits(raw);
+        self.write_capture_mut_cell(idx, value)
     }
 
     /// Load value from a local variable slot (register window on the unified stack).
