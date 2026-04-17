@@ -3606,3 +3606,69 @@ fn test_phase5a_route_between_params_is_unknown() {
     );
 }
 
+// =====================================================================
+// Phase 5.B: Return-ownership hint flows through call-initialized let
+// =====================================================================
+//
+// Phase 5.B populates `BindingSemantics::return_ownership_hint` when a
+// `let` initializer is a call to a known function. Phase 5.C will consume
+// that hint to skip redundant Arc→Box promotion. These tests verify the
+// end-to-end behavior (result correctness) rather than inspecting private
+// compiler state — Phase 5.C adds the observable bytecode-level tests.
+
+#[test]
+fn test_phase5b_call_initialized_let_roundtrip_stays_correct() {
+    // let arr = make(); arr.reduce(|a,b| a+b)
+    // If the hint plumbing is wrong, either the call or the reduce will
+    // misbehave. We pin the correct numeric result here as a regression
+    // guard for the cross-function ownership flow.
+    let code = r#"
+        fn make() -> Array<int> { [1, 2, 3, 4, 5] }
+        fn run() -> int {
+            let arr = make()
+            arr.reduce(0, |a, b| a + b)
+        }
+        run()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(15));
+}
+
+#[test]
+fn test_phase5b_call_through_pipeline_stays_correct() {
+    // Three-stage pipeline a → b → c. Each returns an allocated array.
+    // The final sum must still be correct once Phase 5.B tracks hints
+    // across every let.
+    let code = r#"
+        fn a() -> Array<int> { [1, 2, 3] }
+        fn b() -> Array<int> {
+            let x = a()
+            x
+        }
+        fn c() -> int {
+            let y = b()
+            y.reduce(0, |acc, n| acc + n)
+        }
+        c()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(6));
+}
+
+#[test]
+fn test_phase5b_hint_tolerates_parameter_return() {
+    // `wrap(x) -> Array<int> { x }` returns its parameter (BorrowedFromParam).
+    // A `let y = wrap(arr)` binding should compile and run without special
+    // casing — the hint is `BorrowedFromParam`, which Phase 5.C leaves alone.
+    let code = r#"
+        fn wrap(x: Array<int>) -> Array<int> { x }
+        fn run() -> int {
+            let y = wrap([10, 20, 30])
+            y.reduce(0, |acc, n| acc + n)
+        }
+        run()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(60));
+}
+

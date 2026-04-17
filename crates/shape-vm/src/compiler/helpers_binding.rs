@@ -48,6 +48,7 @@ impl BytecodeCompiler {
                 BindingOwnershipClass::Flexible => MutationCapability::SharedMutable,
             },
             escape_status: EscapeStatus::Local,
+            return_ownership_hint: None,
         }
     }
 
@@ -226,6 +227,80 @@ impl BytecodeCompiler {
                 if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
                     self.type_tracker
                         .set_binding_semantics(binding_idx, semantics);
+                }
+            }
+        }
+    }
+
+    /// Phase 5.B: If the initializer is a simple (non-qualified) call to a
+    /// function whose return-ownership mode has been inferred, return that
+    /// mode. Callers use it to populate `BindingSemantics::return_ownership_hint`.
+    ///
+    /// Intentionally conservative: returns `None` for method calls, qualified
+    /// calls, indirect/callable-value calls, and calls into module-bound or
+    /// closure-captured names (which may shadow or override the global
+    /// summary). That matches the call-resolution precedence in
+    /// `build_callee_summaries`.
+    pub(super) fn return_ownership_hint_for_initializer(
+        &self,
+        expr: &Expr,
+    ) -> Option<crate::mir::ReturnOwnershipMode> {
+        let Expr::FunctionCall { name, .. } = expr else {
+            return None;
+        };
+        // Shadowing rules: if the name resolves to a local, a captured name,
+        // or a module binding, the call target may not be the module-level
+        // function whose summary we stored. In any of those cases, skip.
+        if self.resolve_local(name).is_some() {
+            return None;
+        }
+        if self.mutable_closure_captures.contains_key(name.as_str()) {
+            return None;
+        }
+        if self.resolve_scoped_module_binding_name(name).is_some() {
+            return None;
+        }
+        let summary = self.function_borrow_summaries.get(name)?;
+        match summary.return_ownership_mode {
+            crate::mir::ReturnOwnershipMode::Unknown => None,
+            mode => Some(mode),
+        }
+    }
+
+    /// Apply a return-ownership hint to every pattern binding's semantics
+    /// *without* overwriting the other fields. Must be called after
+    /// `apply_binding_semantics_to_pattern_bindings`.
+    pub(super) fn apply_return_ownership_hint_to_pattern_bindings(
+        &mut self,
+        pattern: &DestructurePattern,
+        is_local: bool,
+        hint: crate::mir::ReturnOwnershipMode,
+    ) {
+        for (name, _) in pattern.get_bindings() {
+            if is_local {
+                if let Some(local_idx) = self.resolve_local(&name) {
+                    if let Some(mut sem) = self
+                        .type_tracker
+                        .get_local_binding_semantics(local_idx)
+                        .copied()
+                    {
+                        sem.return_ownership_hint = Some(hint);
+                        self.type_tracker
+                            .set_local_binding_semantics(local_idx, sem);
+                    }
+                }
+            } else {
+                let scoped_name = self
+                    .resolve_scoped_module_binding_name(&name)
+                    .unwrap_or(name);
+                if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                    if let Some(mut sem) =
+                        self.type_tracker.get_binding_semantics(binding_idx).copied()
+                    {
+                        sem.return_ownership_hint = Some(hint);
+                        self.type_tracker
+                            .set_binding_semantics(binding_idx, sem);
+                    }
                 }
             }
         }

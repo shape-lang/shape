@@ -243,6 +243,7 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
                     aliasability: Aliasability::Unique,
                     mutation_capability: MutationCapability::Immutable,
                     escape_status: EscapeStatus::Local,
+                    return_ownership_hint: None,
                 },
             );
         }
@@ -450,12 +451,21 @@ fn decide_slot_storage(
 
     let escape_status = detect_escape_status(slot, input.mir, input.closure_captures);
 
+    // Preserve the Phase 5.B return-ownership hint through storage planning:
+    // it was populated on the incoming binding semantics by the compiler's
+    // let-statement path and is consumed at codegen time.
+    let return_ownership_hint = input
+        .binding_semantics
+        .get(&slot.0)
+        .and_then(|s| s.return_ownership_hint);
+
     let enriched = BindingSemantics {
         ownership_class: ownership.unwrap_or(BindingOwnershipClass::OwnedImmutable),
         storage_class: storage_class,
         aliasability,
         mutation_capability,
         escape_status,
+        return_ownership_hint,
     };
 
     (storage_class, enriched)
@@ -881,6 +891,7 @@ mod tests {
                 aliasability: Aliasability::Unique,
                 mutation_capability: MutationCapability::Immutable,
                 escape_status: EscapeStatus::Local,
+                return_ownership_hint: None,
             },
         );
 

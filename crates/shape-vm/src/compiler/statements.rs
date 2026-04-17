@@ -4418,6 +4418,19 @@ impl BytecodeCompiler {
                         true,
                         Self::binding_semantics_for_var_decl(var_decl),
                     );
+                    // Phase 5.B: If the initializer is a call to a function whose
+                    // return-ownership mode is known, record the hint on each
+                    // pattern binding so Phase 5.C codegen can skip the Arc→Box
+                    // PromoteToOwned round-trip.
+                    if let Some(init) = var_decl.value.as_ref() {
+                        if let Some(hint) = self.return_ownership_hint_for_initializer(init) {
+                            self.apply_return_ownership_hint_to_pattern_bindings(
+                                &var_decl.pattern,
+                                true,
+                                hint,
+                            );
+                        }
+                    }
                     self.plan_flexible_binding_storage_for_pattern_initializer(
                         &var_decl.pattern,
                         true,

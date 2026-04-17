@@ -305,7 +305,16 @@ pub struct FunctionBorrowSummary {
 ///
 /// `Unknown` is the conservative fallback — it preserves current Arc-everywhere
 /// behavior, so any inference uncertainty stays semantics-preserving.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ReturnOwnershipMode {
     /// Returns a newly-allocated owned value. Caller can take ownership directly
     /// (as Box) without an Arc round-trip.

@@ -518,6 +518,11 @@ pub struct BindingSemantics {
     pub aliasability: Aliasability,
     pub mutation_capability: MutationCapability,
     pub escape_status: EscapeStatus,
+    /// Phase 5.B: If this binding was initialized from a call to a function
+    /// with a known return-ownership mode, record that mode here. Phase 5.C
+    /// consumes the hint to skip the Arc→Box `PromoteToOwned` at the callsite
+    /// when the callee has already returned a uniquely-owned value.
+    pub return_ownership_hint: Option<crate::mir::ReturnOwnershipMode>,
 }
 
 impl BindingSemantics {
@@ -532,6 +537,7 @@ impl BindingSemantics {
                 BindingOwnershipClass::Flexible => MutationCapability::SharedMutable,
             },
             escape_status: EscapeStatus::Local,
+            return_ownership_hint: None,
         }
     }
 }
