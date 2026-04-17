@@ -84,7 +84,16 @@ impl JITCompiler {
                     .enumerate()
                     .map(|(i, f)| (f.name.clone(), i as u16))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_concrete_types(
+                let closure_function_layouts: HashMap<
+                    u16,
+                    std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>,
+                > = program
+                    .closure_function_layouts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, opt)| opt.as_ref().map(|l| (i as u16, l.clone())))
+                    .collect();
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_closure_layouts(
                     &mut builder,
                     ctx_ptr,
                     ffi,
@@ -96,6 +105,7 @@ impl JITCompiler {
                     &function_indices,
                     HashMap::new(),
                     HashMap::new(),
+                    closure_function_layouts,
                 );
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
@@ -189,7 +199,16 @@ impl JITCompiler {
                     .enumerate()
                     .map(|(i, f)| (f.name.clone(), i as u16))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_concrete_types(
+                let closure_function_layouts: HashMap<
+                    u16,
+                    std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>,
+                > = program
+                    .closure_function_layouts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, opt)| opt.as_ref().map(|l| (i as u16, l.clone())))
+                    .collect();
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_closure_layouts(
                     &mut builder,
                     ctx_ptr,
                     ffi,
@@ -201,6 +220,7 @@ impl JITCompiler {
                     &function_indices,
                     user_func_refs.clone(),
                     user_func_arities.clone(),
+                    closure_function_layouts,
                 );
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();

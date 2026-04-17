@@ -50,8 +50,10 @@ mod v2_array_tests;
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::ffi_refs::FFIFuncRefs;
+use shape_value::v2::closure_layout::ClosureLayout;
 use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
@@ -131,6 +133,16 @@ pub struct MirToIR<'a, 'b> {
     /// paths to skip `arc_release` on stack-resident closure handles
     /// and by other consumers that need to know the slot is stack-resident.
     pub(crate) stack_closure_slots: HashMap<SlotId, StackSlot>,
+
+    // ── Closure Spec Phase H1: heap-allocated closure codegen ──────
+    /// Map from closure body `function_id` to its `ClosureLayout`.
+    /// When present, `emit_heap_closure` uses the layout to emit inline
+    /// Cranelift code that allocates a `TypedClosureHeader`-shaped block
+    /// and writes captures at their natural-width offsets, replacing the
+    /// legacy `jit_make_closure` FFI call. Absent entries fall back to
+    /// the FFI path (e.g. when loading a cached program from disk, which
+    /// doesn't carry layout metadata).
+    pub(crate) closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
 }
 
 /// Result of MIR preflight check.
@@ -256,6 +268,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         user_func_refs: HashMap<u16, FuncRef>,
         user_func_arities: HashMap<u16, u16>,
     ) -> Self {
+        Self::new_with_closure_layouts(
+            builder,
+            ctx_ptr,
+            ffi,
+            mir_data,
+            slot_kinds,
+            concrete_types,
+            strings,
+            entry_block,
+            function_indices,
+            user_func_refs,
+            user_func_arities,
+            HashMap::new(),
+        )
+    }
+
+    /// Closure-spec Phase H1 constructor: also accepts a
+    /// `function_id → ClosureLayout` map so `emit_heap_closure` can lay out
+    /// captures for escaping closures without going through the
+    /// `jit_make_closure` FFI. Passing an empty map degrades gracefully to
+    /// the legacy FFI path (same behaviour as `new_with_concrete_types`).
+    pub fn new_with_closure_layouts(
+        builder: &'a mut FunctionBuilder<'b>,
+        ctx_ptr: Value,
+        ffi: FFIFuncRefs,
+        mir_data: &'a MirFunctionData,
+        slot_kinds: Vec<SlotKind>,
+        concrete_types: Vec<ConcreteType>,
+        strings: &'a [String],
+        entry_block: Block,
+        function_indices: &'a HashMap<String, u16>,
+        user_func_refs: HashMap<u16, FuncRef>,
+        user_func_arities: HashMap<u16, u16>,
+        closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
+    ) -> Self {
         let local_types = mir_data.mir.local_types.clone();
         // Enrich slot_kinds with MIR-level type inference when the bytecode
         // compiler didn't provide them.
@@ -287,6 +334,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             field_byte_offsets: HashMap::new(),
             non_escaping_closure_slots,
             stack_closure_slots: HashMap::new(),
+            closure_function_layouts,
         }
     }
 

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use super::super::ffi::conversion::{
     jit_print, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
+#[allow(deprecated)]
 use super::super::ffi::object::{
     jit_format, jit_get_prop, jit_hashmap_shape_id, jit_hashmap_value_at, jit_length,
     jit_make_closure, jit_new_object, jit_object_rest, jit_set_prop,
@@ -22,6 +23,7 @@ use super::super::ffi::typed_object::jit_typed_object_set_field;
 use super::helpers::jit_format_error;
 
 /// Register object FFI symbols with the JIT builder
+#[allow(deprecated)]
 pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_new_object", jit_new_object as *const u8);
     builder.symbol("jit_get_prop", jit_get_prop as *const u8);

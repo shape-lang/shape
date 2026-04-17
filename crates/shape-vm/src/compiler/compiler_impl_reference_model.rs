@@ -1309,6 +1309,25 @@ impl BytecodeCompiler {
         // Finalize the __main__ blob and build the content-addressed program.
         self.build_content_addressed_program();
 
+        // Closure-spec Phase H1: build a `function_id → ClosureLayout` side
+        // table for the JIT worker. `emit_heap_closure` consumes this to lay
+        // out captures at their natural-width offsets without going through
+        // the `jit_make_closure` FFI.
+        {
+            let total_fns = self.program.functions.len();
+            let mut layouts: Vec<Option<std::sync::Arc<
+                shape_value::v2::closure_layout::ClosureLayout,
+            >>> = vec![None; total_fns];
+            for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
+                if let Some(layout) = self.closure_registry.get(type_id) {
+                    if (fn_idx as usize) < total_fns {
+                        layouts[fn_idx as usize] = Some(std::sync::Arc::new(layout.clone()));
+                    }
+                }
+            }
+            self.program.closure_function_layouts = layouts;
+        }
+
         // Transfer content-addressed program to the bytecode output.
         self.program.content_addressed = self.content_addressed_program.take();
         if self.program.functions.is_empty() {

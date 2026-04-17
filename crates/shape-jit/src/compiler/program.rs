@@ -322,6 +322,7 @@ impl JITCompiler {
                 content_addressed: None,
                 function_blob_hashes: Vec::new(),
                 monomorphization_keys: Vec::new(),
+                closure_function_layouts: program.closure_function_layouts.clone(),
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
@@ -360,7 +361,20 @@ impl JITCompiler {
                     .enumerate()
                     .map(|(i, f)| (f.name.clone(), i as u16))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_concrete_types(
+                // Closure-spec Phase H1: thread the per-function
+                // ClosureLayout map into MirToIR so `emit_heap_closure`
+                // can lay out captures at natural-width offsets without
+                // going through the legacy `jit_make_closure` FFI.
+                let closure_function_layouts: std::collections::HashMap<
+                    u16,
+                    std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>,
+                > = program
+                    .closure_function_layouts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, opt)| opt.as_ref().map(|l| (i as u16, l.clone())))
+                    .collect();
+                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_closure_layouts(
                     &mut builder,
                     ctx_ptr,
                     ffi,
@@ -372,6 +386,7 @@ impl JITCompiler {
                     &function_indices,
                     user_func_refs.clone(),
                     user_func_arities.clone(),
+                    closure_function_layouts,
                 );
                 // Set up blocks and locals, then store function parameters.
                 mir_compiler.create_blocks();

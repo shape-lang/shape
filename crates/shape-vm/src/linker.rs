@@ -616,6 +616,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
             })
             .collect(),
         monomorphization_keys: Vec::new(),
+        closure_function_layouts: Vec::new(),
     }
 }
 

@@ -20,6 +20,24 @@ use crate::ffi::value_ffi::*;
 /// Create a closure with captured values from the stack.
 ///
 /// Supports unlimited captures via heap-allocated capture array.
+///
+/// # Deprecation (Closure-spec Phase H1)
+///
+/// Phase H1 introduces `MirToIR::emit_heap_closure` which inlines the
+/// allocation + `TypedClosureHeader` init directly in Cranelift IR. The
+/// FFI path below remains as the default for now because the VM-side
+/// `jit_call_value` dispatch only understands the legacy `HK_CLOSURE`
+/// layout. Phase H2 migrates the VM to `TypedClosureHeader`, at which
+/// point this function is unreachable from `MakeClosureHeap` lowering
+/// and can be deleted (Phase H5 consolidates `MakeClosure` +
+/// `MakeClosureHeap` into one opcode). See
+/// `docs/v2-closure-specialization.md` §13 H1–H5.
+#[deprecated(
+    note = "Closure-spec Phase H1: prefer `MirToIR::emit_heap_closure` for \
+            `MakeClosureHeap` lowering. This FFI remains as the legacy fallback \
+            for `MakeClosure` until Phase H2+H5 migrate the VM dispatch and \
+            collapse the opcodes."
+)]
 #[inline(always)]
 pub extern "C" fn jit_make_closure(
     ctx: *mut JITContext,

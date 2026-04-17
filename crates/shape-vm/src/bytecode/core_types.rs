@@ -351,6 +351,17 @@ pub struct BytecodeProgram {
     /// generic function that was specialized during this compilation session.
     #[serde(skip, default)]
     pub monomorphization_keys: Vec<String>,
+
+    /// Closure-spec Phase H1: per-function `ClosureLayout` for every closure
+    /// function index. The JIT worker reads this to drive `emit_heap_closure`
+    /// Cranelift codegen for escaping closures (replacing the legacy
+    /// `jit_make_closure` FFI path). `None` entries indicate the function is
+    /// not a closure body, or the layout wasn't computed. Populated at the
+    /// end of compilation from the compiler's `ClosureRegistry`. Not
+    /// serialized — programs loaded from disk fall back to the FFI path.
+    #[serde(skip, default)]
+    pub closure_function_layouts:
+        Vec<Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
 }
 
 /// Constants in the constant pool
