@@ -7,10 +7,11 @@
 #[cfg(test)]
 mod tests {
     use crate::frontmatter::{
-use shape_value::ValueWordExt;
         FrontmatterDiagnosticSeverity, parse_frontmatter, parse_frontmatter_validated,
     };
     use crate::project::*;
+    #[allow(unused_imports)]
+    use shape_value::ValueWordExt;
     #[allow(unused_imports)]
     use std::collections::HashMap;
     use std::io::Write;

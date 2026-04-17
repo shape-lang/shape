@@ -11,6 +11,8 @@
 use super::*;
 use shape_value::{ValueWord, ValueWordExt};
 use shape_value::heap_value::IteratorState;
+use shape_value::value::VMArrayBuf;
+use smallvec::smallvec;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,13 +22,14 @@ fn nb_str(s: &str) -> ValueWord {
 
 /// Build a test array [1, 2, 3, 4, 5]
 fn test_array() -> ValueWord {
-    ValueWord::from_array(Arc::new(vec![
+    let buf: VMArrayBuf = smallvec![
         ValueWord::from_i64(1),
         ValueWord::from_i64(2),
         ValueWord::from_i64(3),
         ValueWord::from_i64(4),
         ValueWord::from_i64(5),
-    ]))
+    ];
+    ValueWord::from_array(Arc::new(buf))
 }
 
 /// Build an Iterator from an array [1, 2, 3, 4, 5]
@@ -315,11 +318,12 @@ fn test_array_iter_collect() {
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 0 args
         Instruction::simple(OpCode::CallMethod),
     ];
-    let arr = ValueWord::from_array(Arc::new(vec![
+    let arr_buf: VMArrayBuf = smallvec![
         ValueWord::from_i64(1),
         ValueWord::from_i64(2),
         ValueWord::from_i64(3),
-    ]));
+    ];
+    let arr = ValueWord::from_array(Arc::new(arr_buf));
     let constants = vec![
         Constant::Value(arr),
         Constant::String("iter".to_string()),
@@ -492,7 +496,7 @@ fn test_iterator_is_truthy_when_not_done() {
 #[test]
 fn test_iterator_done_is_falsy() {
     let iter = ValueWord::from_iterator(Box::new(IteratorState {
-        source: ValueWord::from_array(Arc::new(vec![])),
+        source: ValueWord::from_array(Arc::new(VMArrayBuf::new())),
         position: 0,
         transforms: vec![],
         done: true,
@@ -525,7 +529,7 @@ fn test_nanboxed_from_iterator_roundtrip() {
 #[test]
 fn test_empty_iterator_collect() {
     let empty_iter = ValueWord::from_iterator(Box::new(IteratorState {
-        source: ValueWord::from_array(Arc::new(vec![])),
+        source: ValueWord::from_array(Arc::new(VMArrayBuf::new())),
         position: 0,
         transforms: vec![],
         done: false,
@@ -549,7 +553,7 @@ fn test_empty_iterator_collect() {
 #[test]
 fn test_empty_iterator_count() {
     let empty_iter = ValueWord::from_iterator(Box::new(IteratorState {
-        source: ValueWord::from_array(Arc::new(vec![])),
+        source: ValueWord::from_array(Arc::new(VMArrayBuf::new())),
         position: 0,
         transforms: vec![],
         done: false,
