@@ -343,6 +343,142 @@ unsafe fn simd_sum_f64(data: *const f64, len: usize, threshold: usize) -> f64 {
     s
 }
 
+/// Scan a f64 buffer for any NaN. Used to short-circuit min/max where
+/// hardware `min_pd`/`max_pd` don't reliably propagate NaN.
+///
+/// # Safety
+/// `data` must point to at least `len` valid `f64` values.
+#[inline]
+unsafe fn contains_nan_f64(data: *const f64, len: usize) -> bool {
+    for i in 0..len {
+        if unsafe { *data.add(i) }.is_nan() {
+            return true;
+        }
+    }
+    false
+}
+
+/// SIMD-accelerated f64 minimum using `wide::f64x4::fast_min`. Falls back to
+/// a scalar loop below the threshold. Requires `len > 0`.
+///
+/// Hardware `min_pd` returns the non-NaN operand rather than propagating
+/// NaN, so we scan for NaN up front to match scalar `f64::min` semantics.
+///
+/// # Safety
+/// `data` must point to at least `len` valid, contiguous `f64` values and
+/// `len` must be at least 1.
+#[inline]
+unsafe fn simd_min_f64(data: *const f64, len: usize, threshold: usize) -> f64 {
+    use wide::f64x4;
+    debug_assert!(len > 0);
+    if unsafe { contains_nan_f64(data, len) } {
+        return f64::NAN;
+    }
+    if len < threshold {
+        let mut m = unsafe { *data };
+        for i in 1..len {
+            let v = unsafe { *data.add(i) };
+            if v < m {
+                m = v;
+            }
+        }
+        return m;
+    }
+    let chunks = len / 4;
+    let mut acc = unsafe {
+        f64x4::from([
+            *data,
+            *data.add(1),
+            *data.add(2),
+            *data.add(3),
+        ])
+    };
+    for i in 1..chunks {
+        let base = i * 4;
+        let v = unsafe {
+            f64x4::from([
+                *data.add(base),
+                *data.add(base + 1),
+                *data.add(base + 2),
+                *data.add(base + 3),
+            ])
+        };
+        acc = acc.fast_min(v);
+    }
+    let parts = acc.to_array();
+    let mut m = parts[0];
+    for &p in &parts[1..] {
+        if p < m {
+            m = p;
+        }
+    }
+    for i in (chunks * 4)..len {
+        let v = unsafe { *data.add(i) };
+        if v < m {
+            m = v;
+        }
+    }
+    m
+}
+
+/// SIMD-accelerated f64 maximum. Mirrors [`simd_min_f64`].
+///
+/// # Safety
+/// See [`simd_min_f64`].
+#[inline]
+unsafe fn simd_max_f64(data: *const f64, len: usize, threshold: usize) -> f64 {
+    use wide::f64x4;
+    debug_assert!(len > 0);
+    if unsafe { contains_nan_f64(data, len) } {
+        return f64::NAN;
+    }
+    if len < threshold {
+        let mut m = unsafe { *data };
+        for i in 1..len {
+            let v = unsafe { *data.add(i) };
+            if v > m {
+                m = v;
+            }
+        }
+        return m;
+    }
+    let chunks = len / 4;
+    let mut acc = unsafe {
+        f64x4::from([
+            *data,
+            *data.add(1),
+            *data.add(2),
+            *data.add(3),
+        ])
+    };
+    for i in 1..chunks {
+        let base = i * 4;
+        let v = unsafe {
+            f64x4::from([
+                *data.add(base),
+                *data.add(base + 1),
+                *data.add(base + 2),
+                *data.add(base + 3),
+            ])
+        };
+        acc = acc.fast_max(v);
+    }
+    let parts = acc.to_array();
+    let mut m = parts[0];
+    for &p in &parts[1..] {
+        if p > m {
+            m = p;
+        }
+    }
+    for i in (chunks * 4)..len {
+        let v = unsafe { *data.add(i) };
+        if v > m {
+            m = v;
+        }
+    }
+    m
+}
+
 /// SIMD-accelerated i64 sum using `wide::i64x4` lanes.
 ///
 /// Uses `wrapping_add` semantics at the lane level (Shape's int sum on Vec<int>
@@ -402,13 +538,13 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
     }
     match view.elem_type {
         V2ElemType::F64 => {
-            let mut s = 0.0_f64;
-            for i in 0..view.len {
-                s += unsafe {
-                    let arr = view.ptr as *const TypedArray<f64>;
-                    TypedArray::<f64>::get_unchecked(arr, i)
-                };
-            }
+            // Reuse the SIMD sum path; below threshold it runs the scalar
+            // fallback internally so small arrays still see the simple loop.
+            let data = unsafe {
+                let arr = view.ptr as *const TypedArray<f64>;
+                (*arr).data as *const f64
+            };
+            let s = unsafe { simd_sum_f64(data, view.len as usize, 16) };
             Some(ValueWord::from_f64(s / view.len as f64))
         }
         V2ElemType::I64 => {
@@ -446,16 +582,11 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
     }
     match view.elem_type {
         V2ElemType::F64 => {
-            let mut min = f64::INFINITY;
-            for i in 0..view.len {
-                let v = unsafe {
-                    let arr = view.ptr as *const TypedArray<f64>;
-                    TypedArray::<f64>::get_unchecked(arr, i)
-                };
-                if v < min {
-                    min = v;
-                }
-            }
+            let data = unsafe {
+                let arr = view.ptr as *const TypedArray<f64>;
+                (*arr).data as *const f64
+            };
+            let min = unsafe { simd_min_f64(data, view.len as usize, 16) };
             Some(ValueWord::from_f64(min))
         }
         V2ElemType::I64 => {
@@ -499,16 +630,11 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<ValueWord> {
     }
     match view.elem_type {
         V2ElemType::F64 => {
-            let mut max = f64::NEG_INFINITY;
-            for i in 0..view.len {
-                let v = unsafe {
-                    let arr = view.ptr as *const TypedArray<f64>;
-                    TypedArray::<f64>::get_unchecked(arr, i)
-                };
-                if v > max {
-                    max = v;
-                }
-            }
+            let data = unsafe {
+                let arr = view.ptr as *const TypedArray<f64>;
+                (*arr).data as *const f64
+            };
+            let max = unsafe { simd_max_f64(data, view.len as usize, 16) };
             Some(ValueWord::from_f64(max))
         }
         V2ElemType::I64 => {

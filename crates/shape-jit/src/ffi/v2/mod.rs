@@ -4,6 +4,13 @@
 //! NaN-boxed u64 values. They are called from JIT-compiled v2 code via direct
 //! extern "C" calls.
 
+pub mod typed_map;
+
+pub use typed_map::{
+    jit_v2_map_get_str_f64, jit_v2_map_get_str_i64, jit_v2_map_has_str, jit_v2_map_len,
+    jit_v2_map_set_str_i64,
+};
+
 use shape_value::v2::heap_header::HeapHeader;
 use shape_value::v2::typed_array::TypedArray;
 
@@ -89,6 +96,206 @@ pub extern "C" fn jit_v2_array_sum_i64(arr: *const TypedArray<i64>) -> i64 {
 /// SIMD reduction threshold — below this, setup cost dominates.
 const SIMD_SUM_THRESHOLD: usize = 16;
 
+// ── Min / Max / Mean / Sum-of-squares over Array<number> ─────────────────
+
+/// SIMD-accelerated minimum over a `TypedArray<f64>`. Returns `NaN` for null
+/// or empty arrays (matches `Vec<number>.min()` semantics on empty input).
+/// NaN propagates naturally — `fast_min(NaN, v)` yields `NaN` on all
+/// compliant backends.
+///
+/// # Safety
+/// `arr` must be a valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_min_f64(arr: *const TypedArray<f64>) -> f64 {
+    if arr.is_null() {
+        return f64::NAN;
+    }
+    let (data, len) = unsafe { ((*arr).data as *const f64, (*arr).len as usize) };
+    if len == 0 || data.is_null() {
+        return f64::NAN;
+    }
+    unsafe { simd_min_f64_inner(data, len) }
+}
+
+/// SIMD-accelerated maximum over a `TypedArray<f64>`. Returns `NaN` for null
+/// or empty arrays. NaN propagates.
+///
+/// # Safety
+/// `arr` must be a valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_max_f64(arr: *const TypedArray<f64>) -> f64 {
+    if arr.is_null() {
+        return f64::NAN;
+    }
+    let (data, len) = unsafe { ((*arr).data as *const f64, (*arr).len as usize) };
+    if len == 0 || data.is_null() {
+        return f64::NAN;
+    }
+    unsafe { simd_max_f64_inner(data, len) }
+}
+
+/// SIMD-accelerated mean (arithmetic average) over a `TypedArray<f64>`.
+/// Returns `NaN` for null or empty arrays.
+///
+/// # Safety
+/// `arr` must be a valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_mean_f64(arr: *const TypedArray<f64>) -> f64 {
+    if arr.is_null() {
+        return f64::NAN;
+    }
+    let (data, len) = unsafe { ((*arr).data as *const f64, (*arr).len as usize) };
+    if len == 0 || data.is_null() {
+        return f64::NAN;
+    }
+    let sum = unsafe { simd_sum_f64_inner(data, len) };
+    sum / (len as f64)
+}
+
+/// SIMD-accelerated sum-of-squares over a `TypedArray<f64>` — `Σ x²`.
+/// Single-pass: load, multiply, accumulate. Useful as a building block for
+/// variance/std and for `arr.map(|x| x*x).sum()` patterns. Returns `0.0`
+/// for null or empty arrays.
+///
+/// # Safety
+/// `arr` must be a valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_sum_squares_f64(arr: *const TypedArray<f64>) -> f64 {
+    if arr.is_null() {
+        return 0.0;
+    }
+    let (data, len) = unsafe { ((*arr).data as *const f64, (*arr).len as usize) };
+    if len == 0 || data.is_null() {
+        return 0.0;
+    }
+    unsafe { simd_sum_squares_f64_inner(data, len) }
+}
+
+// ── Element-wise scalar ops returning a new Array<number> ────────────────
+
+/// Allocate a new `TypedArray<f64>` with length equal to `arr.len`, populated
+/// by multiplying each element by `factor`. Returns a null pointer when the
+/// receiver is null.
+///
+/// # Safety
+/// `arr` must be a valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_scale_f64(
+    arr: *const TypedArray<f64>,
+    factor: f64,
+) -> *mut TypedArray<f64> {
+    if arr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let (data, len) = unsafe { ((*arr).data as *const f64, (*arr).len as usize) };
+    let out = TypedArray::<f64>::with_capacity(len as u32);
+    if len == 0 || data.is_null() {
+        return out;
+    }
+    unsafe {
+        let out_data = (*out).data as *mut f64;
+        simd_scale_f64_inner(data, out_data, len, factor);
+        (*out).len = len as u32;
+    }
+    out
+}
+
+/// Allocate a new `TypedArray<f64>` with length equal to `arr.len`, populated
+/// by adding `offset` to each element. Returns a null pointer when the
+/// receiver is null.
+///
+/// # Safety
+/// `arr` must be a valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_add_scalar_f64(
+    arr: *const TypedArray<f64>,
+    offset: f64,
+) -> *mut TypedArray<f64> {
+    if arr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let (data, len) = unsafe { ((*arr).data as *const f64, (*arr).len as usize) };
+    let out = TypedArray::<f64>::with_capacity(len as u32);
+    if len == 0 || data.is_null() {
+        return out;
+    }
+    unsafe {
+        let out_data = (*out).data as *mut f64;
+        simd_add_scalar_f64_inner(data, out_data, len, offset);
+        (*out).len = len as u32;
+    }
+    out
+}
+
+// ── Element-wise binary ops (two arrays) ─────────────────────────────────
+
+/// Allocate a new `TypedArray<f64>` holding the element-wise sum of `a` and
+/// `b`. Requires matching lengths — panics on mismatch to mirror Shape's
+/// `dot()`/runtime length-mismatch semantics. Returns null for null inputs.
+///
+/// # Safety
+/// `a` and `b` must be valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_add_f64(
+    a: *const TypedArray<f64>,
+    b: *const TypedArray<f64>,
+) -> *mut TypedArray<f64> {
+    if a.is_null() || b.is_null() {
+        return std::ptr::null_mut();
+    }
+    let (a_data, a_len) = unsafe { ((*a).data as *const f64, (*a).len as usize) };
+    let (b_data, b_len) = unsafe { ((*b).data as *const f64, (*b).len as usize) };
+    if a_len != b_len {
+        panic!(
+            "v2 array_add_f64: length mismatch ({} vs {})",
+            a_len, b_len
+        );
+    }
+    let out = TypedArray::<f64>::with_capacity(a_len as u32);
+    if a_len == 0 {
+        return out;
+    }
+    unsafe {
+        let out_data = (*out).data as *mut f64;
+        simd_binary_add_f64_inner(a_data, b_data, out_data, a_len);
+        (*out).len = a_len as u32;
+    }
+    out
+}
+
+/// Allocate a new `TypedArray<f64>` holding the element-wise product of `a`
+/// and `b`. Requires matching lengths.
+///
+/// # Safety
+/// `a` and `b` must be valid `TypedArray<f64>*` (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_mul_f64(
+    a: *const TypedArray<f64>,
+    b: *const TypedArray<f64>,
+) -> *mut TypedArray<f64> {
+    if a.is_null() || b.is_null() {
+        return std::ptr::null_mut();
+    }
+    let (a_data, a_len) = unsafe { ((*a).data as *const f64, (*a).len as usize) };
+    let (b_data, b_len) = unsafe { ((*b).data as *const f64, (*b).len as usize) };
+    if a_len != b_len {
+        panic!(
+            "v2 array_mul_f64: length mismatch ({} vs {})",
+            a_len, b_len
+        );
+    }
+    let out = TypedArray::<f64>::with_capacity(a_len as u32);
+    if a_len == 0 {
+        return out;
+    }
+    unsafe {
+        let out_data = (*out).data as *mut f64;
+        simd_binary_mul_f64_inner(a_data, b_data, out_data, a_len);
+        (*out).len = a_len as u32;
+    }
+    out
+}
+
 #[inline]
 unsafe fn simd_sum_f64_inner(data: *const f64, len: usize) -> f64 {
     use wide::f64x4;
@@ -155,6 +362,280 @@ unsafe fn simd_sum_i64_inner(data: *const i64, len: usize) -> i64 {
         s = s.wrapping_add(unsafe { *data.add(i) });
     }
     s
+}
+
+/// Load four f64 values starting at `data[base]` into an `f64x4` lane.
+///
+/// # Safety
+/// `data` must point to at least `base + 4` valid `f64` values.
+#[inline]
+unsafe fn load_f64x4(data: *const f64, base: usize) -> wide::f64x4 {
+    unsafe {
+        wide::f64x4::from([
+            *data.add(base),
+            *data.add(base + 1),
+            *data.add(base + 2),
+            *data.add(base + 3),
+        ])
+    }
+}
+
+/// Detect a NaN anywhere in a f64 buffer. Uses SIMD lanes via a
+/// bitwise-equal comparison-against-self (NaN is the only value that is
+/// not equal to itself under IEEE 754).
+///
+/// # Safety
+/// `data` must point to at least `len` valid `f64` values.
+#[inline]
+unsafe fn contains_nan_f64(data: *const f64, len: usize) -> bool {
+    use wide::f64x4;
+    if len < SIMD_SUM_THRESHOLD {
+        for i in 0..len {
+            if unsafe { *data.add(i) }.is_nan() {
+                return true;
+            }
+        }
+        return false;
+    }
+    let chunks = len / 4;
+    for i in 0..chunks {
+        let v = unsafe { load_f64x4(data, i * 4) };
+        // NaN != NaN — a SIMD self-compare leaves NaN lanes as 0x0, other
+        // lanes as all-ones. `wide` doesn't expose a portable movemask, so
+        // we materialize the 4 lanes and scalar-check.
+        let arr = v.to_array();
+        if arr[0].is_nan() || arr[1].is_nan() || arr[2].is_nan() || arr[3].is_nan() {
+            return true;
+        }
+    }
+    for i in (chunks * 4)..len {
+        if unsafe { *data.add(i) }.is_nan() {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline]
+unsafe fn simd_min_f64_inner(data: *const f64, len: usize) -> f64 {
+    use wide::f64x4;
+    // Hardware `min_pd` does NOT reliably propagate NaN (it returns the
+    // non-NaN operand in whichever slot based on the comparison order).
+    // Do a cheap SIMD NaN scan first — if present, short-circuit to NaN
+    // to match scalar `f64::min` semantics that our consumers expect.
+    if unsafe { contains_nan_f64(data, len) } {
+        return f64::NAN;
+    }
+    if len < SIMD_SUM_THRESHOLD {
+        let mut m = unsafe { *data };
+        for i in 1..len {
+            let v = unsafe { *data.add(i) };
+            if v < m {
+                m = v;
+            }
+        }
+        return m;
+    }
+    let chunks = len / 4;
+    let mut acc = unsafe { load_f64x4(data, 0) };
+    for i in 1..chunks {
+        let v = unsafe { load_f64x4(data, i * 4) };
+        acc = acc.fast_min(v);
+    }
+    let parts = acc.to_array();
+    let mut m = parts[0];
+    for &p in &parts[1..] {
+        if p < m {
+            m = p;
+        }
+    }
+    for i in (chunks * 4)..len {
+        let v = unsafe { *data.add(i) };
+        if v < m {
+            m = v;
+        }
+    }
+    m
+}
+
+#[inline]
+unsafe fn simd_max_f64_inner(data: *const f64, len: usize) -> f64 {
+    use wide::f64x4;
+    if unsafe { contains_nan_f64(data, len) } {
+        return f64::NAN;
+    }
+    if len < SIMD_SUM_THRESHOLD {
+        let mut m = unsafe { *data };
+        for i in 1..len {
+            let v = unsafe { *data.add(i) };
+            if v > m {
+                m = v;
+            }
+        }
+        return m;
+    }
+    let chunks = len / 4;
+    let mut acc = unsafe { load_f64x4(data, 0) };
+    for i in 1..chunks {
+        let v = unsafe { load_f64x4(data, i * 4) };
+        acc = acc.fast_max(v);
+    }
+    let parts = acc.to_array();
+    let mut m = parts[0];
+    for &p in &parts[1..] {
+        if p > m {
+            m = p;
+        }
+    }
+    for i in (chunks * 4)..len {
+        let v = unsafe { *data.add(i) };
+        if v > m {
+            m = v;
+        }
+    }
+    m
+}
+
+#[inline]
+unsafe fn simd_sum_squares_f64_inner(data: *const f64, len: usize) -> f64 {
+    use wide::f64x4;
+    if len < SIMD_SUM_THRESHOLD {
+        let mut s = 0.0_f64;
+        for i in 0..len {
+            let v = unsafe { *data.add(i) };
+            s += v * v;
+        }
+        return s;
+    }
+    let chunks = len / 4;
+    let mut acc = f64x4::splat(0.0);
+    for i in 0..chunks {
+        let v = unsafe { load_f64x4(data, i * 4) };
+        acc += v * v;
+    }
+    let parts = acc.to_array();
+    let mut s = parts[0] + parts[1] + parts[2] + parts[3];
+    for i in (chunks * 4)..len {
+        let v = unsafe { *data.add(i) };
+        s += v * v;
+    }
+    s
+}
+
+#[inline]
+unsafe fn simd_scale_f64_inner(src: *const f64, dst: *mut f64, len: usize, factor: f64) {
+    use wide::f64x4;
+    if len < SIMD_SUM_THRESHOLD {
+        for i in 0..len {
+            unsafe { *dst.add(i) = *src.add(i) * factor };
+        }
+        return;
+    }
+    let chunks = len / 4;
+    let splat = f64x4::splat(factor);
+    for i in 0..chunks {
+        let base = i * 4;
+        let v = unsafe { load_f64x4(src, base) };
+        let r = (v * splat).to_array();
+        unsafe {
+            *dst.add(base) = r[0];
+            *dst.add(base + 1) = r[1];
+            *dst.add(base + 2) = r[2];
+            *dst.add(base + 3) = r[3];
+        }
+    }
+    for i in (chunks * 4)..len {
+        unsafe { *dst.add(i) = *src.add(i) * factor };
+    }
+}
+
+#[inline]
+unsafe fn simd_add_scalar_f64_inner(src: *const f64, dst: *mut f64, len: usize, offset: f64) {
+    use wide::f64x4;
+    if len < SIMD_SUM_THRESHOLD {
+        for i in 0..len {
+            unsafe { *dst.add(i) = *src.add(i) + offset };
+        }
+        return;
+    }
+    let chunks = len / 4;
+    let splat = f64x4::splat(offset);
+    for i in 0..chunks {
+        let base = i * 4;
+        let v = unsafe { load_f64x4(src, base) };
+        let r = (v + splat).to_array();
+        unsafe {
+            *dst.add(base) = r[0];
+            *dst.add(base + 1) = r[1];
+            *dst.add(base + 2) = r[2];
+            *dst.add(base + 3) = r[3];
+        }
+    }
+    for i in (chunks * 4)..len {
+        unsafe { *dst.add(i) = *src.add(i) + offset };
+    }
+}
+
+#[inline]
+unsafe fn simd_binary_add_f64_inner(
+    a: *const f64,
+    b: *const f64,
+    dst: *mut f64,
+    len: usize,
+) {
+    if len < SIMD_SUM_THRESHOLD {
+        for i in 0..len {
+            unsafe { *dst.add(i) = *a.add(i) + *b.add(i) };
+        }
+        return;
+    }
+    let chunks = len / 4;
+    for i in 0..chunks {
+        let base = i * 4;
+        let va = unsafe { load_f64x4(a, base) };
+        let vb = unsafe { load_f64x4(b, base) };
+        let r = (va + vb).to_array();
+        unsafe {
+            *dst.add(base) = r[0];
+            *dst.add(base + 1) = r[1];
+            *dst.add(base + 2) = r[2];
+            *dst.add(base + 3) = r[3];
+        }
+    }
+    for i in (chunks * 4)..len {
+        unsafe { *dst.add(i) = *a.add(i) + *b.add(i) };
+    }
+}
+
+#[inline]
+unsafe fn simd_binary_mul_f64_inner(
+    a: *const f64,
+    b: *const f64,
+    dst: *mut f64,
+    len: usize,
+) {
+    if len < SIMD_SUM_THRESHOLD {
+        for i in 0..len {
+            unsafe { *dst.add(i) = *a.add(i) * *b.add(i) };
+        }
+        return;
+    }
+    let chunks = len / 4;
+    for i in 0..chunks {
+        let base = i * 4;
+        let va = unsafe { load_f64x4(a, base) };
+        let vb = unsafe { load_f64x4(b, base) };
+        let r = (va * vb).to_array();
+        unsafe {
+            *dst.add(base) = r[0];
+            *dst.add(base + 1) = r[1];
+            *dst.add(base + 2) = r[2];
+            *dst.add(base + 3) = r[3];
+        }
+    }
+    for i in (chunks * 4)..len {
+        unsafe { *dst.add(i) = *a.add(i) * *b.add(i) };
+    }
 }
 
 // ============================================================================
@@ -601,6 +1082,340 @@ mod tests {
             assert_eq!(header.get_refcount(), 1);
             std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(24, 8).unwrap());
         }
+    }
+
+    // ── SIMD min/max/mean/sum-of-squares tests ────────────────────────────
+
+    fn fill_f64(arr: *mut TypedArray<f64>, vals: &[f64]) {
+        for &v in vals {
+            jit_v2_array_push_f64(arr, v);
+        }
+    }
+
+    #[test]
+    fn test_simd_min_f64_small_scalar_path() {
+        let arr = jit_v2_array_new_f64(8);
+        fill_f64(arr, &[3.0, 1.5, 4.0, -2.0, 0.5, 7.0, -9.0, 2.0]);
+        let m = jit_v2_array_min_f64(arr);
+        assert_eq!(m, -9.0);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_min_f64_large_vector_path() {
+        let arr = jit_v2_array_new_f64(64);
+        let mut expected = f64::INFINITY;
+        for i in 0..33 {
+            // non-multiple of 4 for remainder coverage
+            let v = (17 - i) as f64 * 0.25;
+            jit_v2_array_push_f64(arr, v);
+            if v < expected {
+                expected = v;
+            }
+        }
+        let m = jit_v2_array_min_f64(arr);
+        assert!((m - expected).abs() < 1e-12);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_min_f64_empty_and_null() {
+        let arr = jit_v2_array_new_f64(0);
+        assert!(jit_v2_array_min_f64(arr).is_nan());
+        unsafe { TypedArray::drop_array(arr) };
+        assert!(jit_v2_array_min_f64(std::ptr::null()).is_nan());
+    }
+
+    #[test]
+    fn test_simd_min_f64_single_element() {
+        let arr = jit_v2_array_new_f64(1);
+        jit_v2_array_push_f64(arr, 42.5);
+        assert_eq!(jit_v2_array_min_f64(arr), 42.5);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_min_f64_nan_propagates() {
+        // Scalar path
+        let arr = jit_v2_array_new_f64(4);
+        fill_f64(arr, &[1.0, 2.0, f64::NAN, 4.0]);
+        assert!(jit_v2_array_min_f64(arr).is_nan());
+        unsafe { TypedArray::drop_array(arr) };
+        // SIMD path (>= 16 elements)
+        let arr = jit_v2_array_new_f64(20);
+        let mut v = vec![1.0_f64; 20];
+        v[7] = f64::NAN;
+        fill_f64(arr, &v);
+        assert!(jit_v2_array_min_f64(arr).is_nan());
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_max_f64_small_scalar_path() {
+        let arr = jit_v2_array_new_f64(8);
+        fill_f64(arr, &[3.0, 1.5, 4.0, -2.0, 0.5, 7.0, -9.0, 2.0]);
+        let m = jit_v2_array_max_f64(arr);
+        assert_eq!(m, 7.0);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_max_f64_large_vector_path() {
+        let arr = jit_v2_array_new_f64(64);
+        let mut expected = f64::NEG_INFINITY;
+        for i in 0..37 {
+            let v = (i as f64 * 1.3) - 5.0;
+            jit_v2_array_push_f64(arr, v);
+            if v > expected {
+                expected = v;
+            }
+        }
+        let m = jit_v2_array_max_f64(arr);
+        assert!((m - expected).abs() < 1e-12);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_max_f64_nan_propagates() {
+        let arr = jit_v2_array_new_f64(20);
+        let mut v = vec![1.0_f64; 20];
+        v[3] = f64::NAN;
+        fill_f64(arr, &v);
+        assert!(jit_v2_array_max_f64(arr).is_nan());
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_mean_f64_small() {
+        let arr = jit_v2_array_new_f64(4);
+        fill_f64(arr, &[1.0, 2.0, 3.0, 4.0]);
+        let m = jit_v2_array_mean_f64(arr);
+        assert!((m - 2.5).abs() < 1e-12);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_mean_f64_large() {
+        let arr = jit_v2_array_new_f64(64);
+        let mut total = 0.0_f64;
+        for i in 0..50 {
+            let v = i as f64 + 0.5;
+            jit_v2_array_push_f64(arr, v);
+            total += v;
+        }
+        let expected = total / 50.0;
+        let m = jit_v2_array_mean_f64(arr);
+        assert!((m - expected).abs() < 1e-9, "mean={} expected={}", m, expected);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_mean_f64_empty_is_nan() {
+        let arr = jit_v2_array_new_f64(0);
+        assert!(jit_v2_array_mean_f64(arr).is_nan());
+        unsafe { TypedArray::drop_array(arr) };
+        assert!(jit_v2_array_mean_f64(std::ptr::null()).is_nan());
+    }
+
+    #[test]
+    fn test_simd_sum_squares_f64_small() {
+        let arr = jit_v2_array_new_f64(4);
+        fill_f64(arr, &[1.0, 2.0, 3.0, 4.0]);
+        // 1 + 4 + 9 + 16 = 30
+        let s = jit_v2_array_sum_squares_f64(arr);
+        assert!((s - 30.0).abs() < 1e-12);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_sum_squares_f64_large() {
+        let arr = jit_v2_array_new_f64(64);
+        let mut expected = 0.0_f64;
+        for i in 0..50 {
+            let v = (i as f64 - 25.0) * 0.5;
+            jit_v2_array_push_f64(arr, v);
+            expected += v * v;
+        }
+        let s = jit_v2_array_sum_squares_f64(arr);
+        assert!((s - expected).abs() < 1e-8);
+        unsafe { TypedArray::drop_array(arr) };
+    }
+
+    #[test]
+    fn test_simd_sum_squares_f64_empty() {
+        let arr = jit_v2_array_new_f64(0);
+        assert_eq!(jit_v2_array_sum_squares_f64(arr), 0.0);
+        unsafe { TypedArray::drop_array(arr) };
+        assert_eq!(jit_v2_array_sum_squares_f64(std::ptr::null()), 0.0);
+    }
+
+    // ── SIMD allocating transforms ────────────────────────────────────────
+
+    fn collect_f64(arr: *const TypedArray<f64>) -> Vec<f64> {
+        let len = unsafe { (*arr).len } as usize;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            out.push(unsafe { TypedArray::<f64>::get_unchecked(arr, i as u32) });
+        }
+        out
+    }
+
+    #[test]
+    fn test_simd_scale_f64_small() {
+        let a = jit_v2_array_new_f64(4);
+        fill_f64(a, &[1.0, 2.0, 3.0, 4.0]);
+        let out = jit_v2_array_scale_f64(a, 2.5);
+        assert_eq!(collect_f64(out), vec![2.5, 5.0, 7.5, 10.0]);
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_scale_f64_large() {
+        let a = jit_v2_array_new_f64(32);
+        for i in 0..20 {
+            jit_v2_array_push_f64(a, i as f64);
+        }
+        let out = jit_v2_array_scale_f64(a, -0.5);
+        let got = collect_f64(out);
+        for i in 0..20 {
+            assert!((got[i] - (i as f64 * -0.5)).abs() < 1e-12);
+        }
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_scale_f64_empty() {
+        let a = jit_v2_array_new_f64(0);
+        let out = jit_v2_array_scale_f64(a, 3.0);
+        assert_eq!(unsafe { (*out).len }, 0);
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_add_scalar_f64_small() {
+        let a = jit_v2_array_new_f64(3);
+        fill_f64(a, &[1.0, 2.0, 3.0]);
+        let out = jit_v2_array_add_scalar_f64(a, 10.0);
+        assert_eq!(collect_f64(out), vec![11.0, 12.0, 13.0]);
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_add_scalar_f64_large() {
+        let a = jit_v2_array_new_f64(32);
+        for i in 0..25 {
+            jit_v2_array_push_f64(a, i as f64);
+        }
+        let out = jit_v2_array_add_scalar_f64(a, 100.0);
+        let got = collect_f64(out);
+        for i in 0..25 {
+            assert!((got[i] - (i as f64 + 100.0)).abs() < 1e-12);
+        }
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_add_f64_small() {
+        let a = jit_v2_array_new_f64(4);
+        let b = jit_v2_array_new_f64(4);
+        fill_f64(a, &[1.0, 2.0, 3.0, 4.0]);
+        fill_f64(b, &[10.0, 20.0, 30.0, 40.0]);
+        let out = jit_v2_array_add_f64(a, b);
+        assert_eq!(collect_f64(out), vec![11.0, 22.0, 33.0, 44.0]);
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(b);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_add_f64_large() {
+        let a = jit_v2_array_new_f64(32);
+        let b = jit_v2_array_new_f64(32);
+        for i in 0..23 {
+            jit_v2_array_push_f64(a, i as f64);
+            jit_v2_array_push_f64(b, (i * 2) as f64);
+        }
+        let out = jit_v2_array_add_f64(a, b);
+        let got = collect_f64(out);
+        for i in 0..23 {
+            assert!((got[i] - (i as f64 + (i * 2) as f64)).abs() < 1e-12);
+        }
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(b);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_mul_f64_small() {
+        let a = jit_v2_array_new_f64(4);
+        let b = jit_v2_array_new_f64(4);
+        fill_f64(a, &[1.0, 2.0, 3.0, 4.0]);
+        fill_f64(b, &[10.0, 20.0, 30.0, 40.0]);
+        let out = jit_v2_array_mul_f64(a, b);
+        assert_eq!(collect_f64(out), vec![10.0, 40.0, 90.0, 160.0]);
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(b);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_mul_f64_large() {
+        let a = jit_v2_array_new_f64(32);
+        let b = jit_v2_array_new_f64(32);
+        for i in 0..20 {
+            jit_v2_array_push_f64(a, (i as f64 + 1.0) * 0.5);
+            jit_v2_array_push_f64(b, (i as f64 + 1.0) * 2.0);
+        }
+        let out = jit_v2_array_mul_f64(a, b);
+        let got = collect_f64(out);
+        for i in 0..20 {
+            let expected = ((i as f64 + 1.0) * 0.5) * ((i as f64 + 1.0) * 2.0);
+            assert!((got[i] - expected).abs() < 1e-12);
+        }
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(b);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_add_f64_empty() {
+        let a = jit_v2_array_new_f64(0);
+        let b = jit_v2_array_new_f64(0);
+        let out = jit_v2_array_add_f64(a, b);
+        assert_eq!(unsafe { (*out).len }, 0);
+        unsafe {
+            TypedArray::drop_array(a);
+            TypedArray::drop_array(b);
+            TypedArray::drop_array(out);
+        }
+    }
+
+    #[test]
+    fn test_simd_add_f64_null_inputs() {
+        assert!(jit_v2_array_add_f64(std::ptr::null(), std::ptr::null()).is_null());
     }
 
     #[test]

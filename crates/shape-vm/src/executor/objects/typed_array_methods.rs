@@ -57,6 +57,117 @@ fn float_array_sum(arr: &Arc<AlignedTypedBuffer>) -> f64 {
     sum
 }
 
+/// SIMD-accelerated minimum of a float array. Caller must ensure the array
+/// is non-empty.
+///
+/// Hardware `min_pd` doesn't reliably propagate NaN (it returns the non-NaN
+/// operand in whichever slot), so we scan for NaN up front and short-circuit.
+fn float_array_min(arr: &Arc<AlignedTypedBuffer>) -> f64 {
+    let len = arr.len();
+    debug_assert!(len > 0);
+    if arr.iter().any(|v| v.is_nan()) {
+        return f64::NAN;
+    }
+    if len < SIMD_THRESHOLD {
+        let mut m = arr[0];
+        for i in 1..len {
+            let v = arr[i];
+            if v < m {
+                m = v;
+            }
+        }
+        return m;
+    }
+    let chunks = len / 4;
+    let mut acc = f64x4::from(&arr[0..4]);
+    for i in 1..chunks {
+        let idx = i * 4;
+        let v = f64x4::from(&arr[idx..idx + 4]);
+        acc = acc.fast_min(v);
+    }
+    let parts = acc.to_array();
+    let mut m = parts[0];
+    for &p in &parts[1..] {
+        if p < m {
+            m = p;
+        }
+    }
+    for i in (chunks * 4)..len {
+        let v = arr[i];
+        if v < m {
+            m = v;
+        }
+    }
+    m
+}
+
+/// SIMD-accelerated maximum of a float array. Caller must ensure non-empty.
+/// NaN handling mirrors [`float_array_min`] — scan and short-circuit.
+fn float_array_max(arr: &Arc<AlignedTypedBuffer>) -> f64 {
+    let len = arr.len();
+    debug_assert!(len > 0);
+    if arr.iter().any(|v| v.is_nan()) {
+        return f64::NAN;
+    }
+    if len < SIMD_THRESHOLD {
+        let mut m = arr[0];
+        for i in 1..len {
+            let v = arr[i];
+            if v > m {
+                m = v;
+            }
+        }
+        return m;
+    }
+    let chunks = len / 4;
+    let mut acc = f64x4::from(&arr[0..4]);
+    for i in 1..chunks {
+        let idx = i * 4;
+        let v = f64x4::from(&arr[idx..idx + 4]);
+        acc = acc.fast_max(v);
+    }
+    let parts = acc.to_array();
+    let mut m = parts[0];
+    for &p in &parts[1..] {
+        if p > m {
+            m = p;
+        }
+    }
+    for i in (chunks * 4)..len {
+        let v = arr[i];
+        if v > m {
+            m = v;
+        }
+    }
+    m
+}
+
+/// SIMD-accelerated Σ x² of a float array.
+#[allow(dead_code)]
+fn float_array_sum_squares(arr: &Arc<AlignedTypedBuffer>) -> f64 {
+    let len = arr.len();
+    if len < SIMD_THRESHOLD {
+        let mut s = 0.0_f64;
+        for &v in arr.iter() {
+            s += v * v;
+        }
+        return s;
+    }
+    let chunks = len / 4;
+    let mut acc = f64x4::splat(0.0);
+    for i in 0..chunks {
+        let idx = i * 4;
+        let v = f64x4::from(&arr[idx..idx + 4]);
+        acc += v * v;
+    }
+    let parts = acc.to_array();
+    let mut s = parts[0] + parts[1] + parts[2] + parts[3];
+    for i in (chunks * 4)..len {
+        s += arr[i] * arr[i];
+    }
+    s
+}
+
 pub fn handle_float_sum(
     _vm: &mut VirtualMachine,
     args: Vec<ValueWord>,
@@ -117,13 +228,7 @@ pub fn handle_float_min(
     if arr.is_empty() {
         return Ok(ValueWord::from_f64(f64::NAN));
     }
-    let mut min = f64::INFINITY;
-    for &v in arr.iter() {
-        if v < min {
-            min = v;
-        }
-    }
-    Ok(ValueWord::from_f64(min))
+    Ok(ValueWord::from_f64(float_array_min(arr)))
 }
 
 pub fn handle_int_min(
@@ -148,13 +253,7 @@ pub fn handle_float_max(
     if arr.is_empty() {
         return Ok(ValueWord::from_f64(f64::NAN));
     }
-    let mut max = f64::NEG_INFINITY;
-    for &v in arr.iter() {
-        if v > max {
-            max = v;
-        }
-    }
-    Ok(ValueWord::from_f64(max))
+    Ok(ValueWord::from_f64(float_array_max(arr)))
 }
 
 pub fn handle_int_max(
@@ -481,13 +580,7 @@ pub fn v2_float_min(
     if arr.is_empty() {
         return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
     }
-    let mut min = f64::INFINITY;
-    for &v in arr.iter() {
-        if v < min {
-            min = v;
-        }
-    }
-    Ok(ValueWord::from_f64(min).raw_bits())
+    Ok(ValueWord::from_f64(float_array_min(arr)).raw_bits())
 }
 
 /// v2 min for int arrays.
@@ -532,13 +625,7 @@ pub fn v2_float_max(
     if arr.is_empty() {
         return Ok(ValueWord::from_f64(f64::NAN).raw_bits());
     }
-    let mut max = f64::NEG_INFINITY;
-    for &v in arr.iter() {
-        if v > max {
-            max = v;
-        }
-    }
-    Ok(ValueWord::from_f64(max).raw_bits())
+    Ok(ValueWord::from_f64(float_array_max(arr)).raw_bits())
 }
 
 /// v2 max for int arrays.

@@ -264,4 +264,21 @@ pub struct FFIFuncRefs {
     // v2 SIMD reductions (Phase C.3)
     pub(crate) v2_array_sum_f64: FuncRef,
     pub(crate) v2_array_sum_i64: FuncRef,
+    // v2 SIMD extended reductions (min/max/mean/sum-of-squares, f64)
+    pub(crate) v2_array_min_f64: FuncRef,
+    pub(crate) v2_array_max_f64: FuncRef,
+    pub(crate) v2_array_mean_f64: FuncRef,
+    pub(crate) v2_array_sum_squares_f64: FuncRef,
+    // v2 SIMD element-wise scalar ops (allocating, f64)
+    pub(crate) v2_array_scale_f64: FuncRef,
+    pub(crate) v2_array_add_scalar_f64: FuncRef,
+    // v2 SIMD element-wise binary ops (allocating, f64)
+    pub(crate) v2_array_add_f64: FuncRef,
+    pub(crate) v2_array_mul_f64: FuncRef,
+    // v2 typed HashMap<string, ...> access
+    pub(crate) v2_map_get_str_i64: FuncRef,
+    pub(crate) v2_map_get_str_f64: FuncRef,
+    pub(crate) v2_map_has_str: FuncRef,
+    pub(crate) v2_map_set_str_i64: FuncRef,
+    pub(crate) v2_map_len: FuncRef,
 }

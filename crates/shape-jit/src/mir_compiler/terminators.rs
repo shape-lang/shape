@@ -134,6 +134,39 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
+                // ── v2 TYPED HASHMAP<string, V> METHOD FAST PATH ─────────
+                // Intercept `m.get(k)` / `m.set(k, v)` / `m.has(k)` /
+                // `m.length()` when the receiver is a `HashMap<string, I64|F64>`
+                // slot. Bypasses the generic method-dispatch trampoline.
+                if let Operand::Constant(MirConstant::Method(method_name)) = func {
+                    if let Some(receiver_arg) = args.first() {
+                        if let Some(receiver_place) = match receiver_arg {
+                            Operand::Copy(p)
+                            | Operand::Move(p)
+                            | Operand::MoveExplicit(p) => Some(p.clone()),
+                            _ => None,
+                        } {
+                            if let Some(kinds) =
+                                self.v2_typed_str_map_kinds(&receiver_place)
+                            {
+                                if let Some(()) = self.try_emit_v2_typed_map_method(
+                                    method_name,
+                                    &receiver_place,
+                                    &args[1..],
+                                    destination,
+                                    kinds,
+                                )? {
+                                    let next_block = self.block_map.get(next).ok_or_else(
+                                        || format!("MirToIR: unknown call continuation block {}", next),
+                                    )?;
+                                    self.builder.ins().jump(*next_block, &[]);
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── METHOD CALL PATH ─────────────────────────────────────
                 // Method calls use MirConstant::Method(name). The MIR args
                 // are [receiver, arg0, arg1, ...]. We need to push them to

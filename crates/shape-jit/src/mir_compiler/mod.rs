@@ -31,6 +31,7 @@ pub(crate) mod v2_field;
 pub(crate) mod v2_int;
 pub(crate) mod v2_refcount;
 pub(crate) mod v2_string;
+pub(crate) mod v2_typed_map;
 
 // integration_tests and v2_array_tests are gated behind a non-default cfg
 // because they currently exercise JIT executor paths that have heap-corruption

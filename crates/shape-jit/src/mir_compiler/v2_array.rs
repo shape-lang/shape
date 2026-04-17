@@ -307,6 +307,84 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 self.write_place(destination, result)?;
                 Ok(Some(()))
             }
+            // f64-only SIMD reductions. Dispatched only for Array<number>.
+            "min" | "max" | "mean" | "avg" | "sumSquares" | "sum_squares" => {
+                if !rest_args.is_empty() {
+                    return Ok(None);
+                }
+                if !matches!(elem, SlotKind::Float64) {
+                    return Ok(None);
+                }
+                let func = match method_name {
+                    "min" => self.ffi.v2_array_min_f64,
+                    "max" => self.ffi.v2_array_max_f64,
+                    "mean" | "avg" => self.ffi.v2_array_mean_f64,
+                    "sumSquares" | "sum_squares" => self.ffi.v2_array_sum_squares_f64,
+                    _ => unreachable!(),
+                };
+                let arr_ptr = self.read_place(receiver)?;
+                let inst = self.builder.ins().call(func, &[arr_ptr]);
+                let result = self.builder.inst_results(inst)[0];
+                self.release_old_value_if_heap(destination)?;
+                self.write_place(destination, result)?;
+                Ok(Some(()))
+            }
+            // f64 scalar broadcast — returns a new Array<number>.
+            "scale" | "addScalar" | "add_scalar" => {
+                if rest_args.len() != 1 {
+                    return Ok(None);
+                }
+                if !matches!(elem, SlotKind::Float64) {
+                    return Ok(None);
+                }
+                let func = match method_name {
+                    "scale" => self.ffi.v2_array_scale_f64,
+                    "addScalar" | "add_scalar" => self.ffi.v2_array_add_scalar_f64,
+                    _ => unreachable!(),
+                };
+                let arr_ptr = self.read_place(receiver)?;
+                let raw = self.compile_operand_raw(&rest_args[0])?;
+                let scalar = self.coerce_to_v2_elem(raw, SlotKind::Float64);
+                let inst = self.builder.ins().call(func, &[arr_ptr, scalar]);
+                let new_arr = self.builder.inst_results(inst)[0];
+                self.release_old_value_if_heap(destination)?;
+                self.write_place(destination, new_arr)?;
+                Ok(Some(()))
+            }
+            // f64 element-wise binary ops — both operands are Array<number>,
+            // returns a new Array<number>.
+            "addArray" | "add_array" | "mulArray" | "mul_array" => {
+                if rest_args.len() != 1 {
+                    return Ok(None);
+                }
+                if !matches!(elem, SlotKind::Float64) {
+                    return Ok(None);
+                }
+                let func = match method_name {
+                    "addArray" | "add_array" => self.ffi.v2_array_add_f64,
+                    "mulArray" | "mul_array" => self.ffi.v2_array_mul_f64,
+                    _ => unreachable!(),
+                };
+                let arr_ptr = self.read_place(receiver)?;
+                let other = self.compile_operand_raw(&rest_args[0])?;
+                // The other argument is an Array<number> (pointer); no coercion
+                // needed, but make sure the value type is i64 before handoff.
+                let other_i64 = {
+                    let ty = self.builder.func.dfg.value_type(other);
+                    if ty == types::I64 {
+                        other
+                    } else {
+                        // Fall back to generic dispatch if we couldn't resolve
+                        // the other operand to a plain pointer-sized value.
+                        return Ok(None);
+                    }
+                };
+                let inst = self.builder.ins().call(func, &[arr_ptr, other_i64]);
+                let new_arr = self.builder.inst_results(inst)[0];
+                self.release_old_value_if_heap(destination)?;
+                self.write_place(destination, new_arr)?;
+                Ok(Some(()))
+            }
             _ => Ok(None),
         }
     }

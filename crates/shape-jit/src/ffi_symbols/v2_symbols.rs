@@ -61,6 +61,45 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     // SIMD reductions (Phase C.3)
     builder.symbol("jit_v2_array_sum_f64", v2::jit_v2_array_sum_f64 as *const u8);
     builder.symbol("jit_v2_array_sum_i64", v2::jit_v2_array_sum_i64 as *const u8);
+
+    // SIMD reductions — min / max / mean / sum-of-squares (f64)
+    builder.symbol("jit_v2_array_min_f64", v2::jit_v2_array_min_f64 as *const u8);
+    builder.symbol("jit_v2_array_max_f64", v2::jit_v2_array_max_f64 as *const u8);
+    builder.symbol("jit_v2_array_mean_f64", v2::jit_v2_array_mean_f64 as *const u8);
+    builder.symbol(
+        "jit_v2_array_sum_squares_f64",
+        v2::jit_v2_array_sum_squares_f64 as *const u8,
+    );
+
+    // SIMD element-wise scalar ops (allocating, f64)
+    builder.symbol(
+        "jit_v2_array_scale_f64",
+        v2::jit_v2_array_scale_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_add_scalar_f64",
+        v2::jit_v2_array_add_scalar_f64 as *const u8,
+    );
+
+    // SIMD element-wise binary ops (allocating, f64)
+    builder.symbol("jit_v2_array_add_f64", v2::jit_v2_array_add_f64 as *const u8);
+    builder.symbol("jit_v2_array_mul_f64", v2::jit_v2_array_mul_f64 as *const u8);
+
+    // Typed HashMap<string, ...> access
+    builder.symbol(
+        "jit_v2_map_get_str_i64",
+        v2::jit_v2_map_get_str_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_map_get_str_f64",
+        v2::jit_v2_map_get_str_f64 as *const u8,
+    );
+    builder.symbol("jit_v2_map_has_str", v2::jit_v2_map_has_str as *const u8);
+    builder.symbol(
+        "jit_v2_map_set_str_i64",
+        v2::jit_v2_map_set_str_i64 as *const u8,
+    );
+    builder.symbol("jit_v2_map_len", v2::jit_v2_map_len as *const u8);
 }
 
 /// Helper: declare a function and insert into the map.
@@ -387,5 +426,139 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         sig.params.push(AbiParam::new(types::I64)); // arr ptr
         sig.returns.push(AbiParam::new(types::I64));
         declare(module, ffi_funcs, "jit_v2_array_sum_i64", &sig);
+    }
+
+    // ========================================================================
+    // SIMD reductions — min / max / mean / sum-of-squares (f64)
+    // ========================================================================
+
+    // jit_v2_array_min_f64(arr: ptr) -> f64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::F64));
+        declare(module, ffi_funcs, "jit_v2_array_min_f64", &sig);
+    }
+
+    // jit_v2_array_max_f64(arr: ptr) -> f64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::F64));
+        declare(module, ffi_funcs, "jit_v2_array_max_f64", &sig);
+    }
+
+    // jit_v2_array_mean_f64(arr: ptr) -> f64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::F64));
+        declare(module, ffi_funcs, "jit_v2_array_mean_f64", &sig);
+    }
+
+    // jit_v2_array_sum_squares_f64(arr: ptr) -> f64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::F64));
+        declare(module, ffi_funcs, "jit_v2_array_sum_squares_f64", &sig);
+    }
+
+    // ========================================================================
+    // SIMD element-wise scalar ops (allocating, f64)
+    // ========================================================================
+
+    // jit_v2_array_scale_f64(arr: ptr, factor: f64) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_array_scale_f64", &sig);
+    }
+
+    // jit_v2_array_add_scalar_f64(arr: ptr, offset: f64) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_array_add_scalar_f64", &sig);
+    }
+
+    // ========================================================================
+    // SIMD element-wise binary ops (allocating, f64)
+    // ========================================================================
+
+    // jit_v2_array_add_f64(a: ptr, b: ptr) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_array_add_f64", &sig);
+    }
+
+    // jit_v2_array_mul_f64(a: ptr, b: ptr) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_array_mul_f64", &sig);
+    }
+
+    // ========================================================================
+    // Typed HashMap<string, ...> access
+    // ========================================================================
+    //
+    // These helpers operate on `ValueWord`-encoded `u64` bits whose heap
+    // variant is `HeapValue::HashMap`. The JIT emits direct calls when the
+    // receiver's ConcreteType is `HashMap<String, V>` with a proven value
+    // type — eliminating the generic method-dispatch trampoline.
+
+    // jit_v2_map_get_str_i64(map_bits: u64, key_bits: u64) -> u64 (ValueWord)
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // map bits
+        sig.params.push(AbiParam::new(types::I64)); // key bits
+        sig.returns.push(AbiParam::new(types::I64)); // ValueWord result
+        declare(module, ffi_funcs, "jit_v2_map_get_str_i64", &sig);
+    }
+
+    // jit_v2_map_get_str_f64(map_bits: u64, key_bits: u64) -> f64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::F64)); // NATIVE F64
+        declare(module, ffi_funcs, "jit_v2_map_get_str_f64", &sig);
+    }
+
+    // jit_v2_map_has_str(map_bits: u64, key_bits: u64) -> u64 (0/1)
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_map_has_str", &sig);
+    }
+
+    // jit_v2_map_set_str_i64(map_bits: u64, key_bits: u64, value_bits: u64) -> u64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64)); // updated map bits
+        declare(module, ffi_funcs, "jit_v2_map_set_str_i64", &sig);
+    }
+
+    // jit_v2_map_len(map_bits: u64) -> i64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_map_len", &sig);
     }
 }
