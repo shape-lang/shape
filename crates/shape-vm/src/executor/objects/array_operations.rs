@@ -229,7 +229,10 @@ impl VirtualMachine {
         }
 
         if is_tagged && tag == 0 {
-            let ptr = (bits & PAYLOAD_MASK) as *mut HeapValue;
+            // Mask off the ownership bit (bit 0) before casting to pointer.
+            // Owned values (Box-backed) have bit 0 set; using the raw payload
+            // as a pointer causes misaligned dereference (UB).
+            let ptr = (bits & PAYLOAD_MASK & shape_value::tags::HEAP_PTR_MASK) as *mut HeapValue;
             if !ptr.is_null() {
                 let heap_val = unsafe { &mut *ptr };
                 match heap_val {
