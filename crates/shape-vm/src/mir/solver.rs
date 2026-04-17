@@ -1375,7 +1375,24 @@ pub fn extract_borrow_summary(
         param_borrows,
         conflict_pairs,
         return_summary,
+        return_ownership_mode: super::return_ownership::infer_return_ownership_mode(
+            mir,
+            &HashMap::new(),
+        ),
     }
+}
+
+/// Variant of `extract_borrow_summary` that threads a callee-summaries map so
+/// return-mode inference can look up `Call`-returned values.
+pub fn extract_borrow_summary_with_callees(
+    mir: &MirFunction,
+    return_summary: Option<ReturnReferenceSummary>,
+    callee_modes: &HashMap<String, ReturnOwnershipMode>,
+) -> FunctionBorrowSummary {
+    let mut summary = extract_borrow_summary(mir, return_summary);
+    summary.return_ownership_mode =
+        super::return_ownership::infer_return_ownership_mode(mir, callee_modes);
+    summary
 }
 
 fn rvalue_uses_param(rvalue: &Rvalue, param_slot: SlotId) -> bool {

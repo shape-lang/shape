@@ -14,11 +14,14 @@ pub mod field_analysis;
 pub mod liveness;
 pub mod lowering;
 pub mod repair;
+pub mod return_ownership;
 pub mod solver;
 pub mod storage_planning;
 pub mod types;
 
-pub use analysis::{BorrowAnalysis, BorrowErrorCode, BorrowErrorKind, FunctionBorrowSummary};
+pub use analysis::{
+    BorrowAnalysis, BorrowErrorCode, BorrowErrorKind, FunctionBorrowSummary, ReturnOwnershipMode,
+};
 pub use cfg::ControlFlowGraph;
 pub use field_analysis::FieldAnalysis;
 pub use liveness::LivenessResult;

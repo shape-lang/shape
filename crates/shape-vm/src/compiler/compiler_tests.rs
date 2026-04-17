@@ -3427,3 +3427,182 @@ fn test_phase4_var_reassign_preserves_value() {
     assert_eq!(result.as_i64(), Some(30));
 }
 
+// =====================================================================
+// Phase 5.A: Return ownership mode inference
+// =====================================================================
+//
+// These tests pin the `ReturnOwnershipMode` stored on each function's
+// `FunctionBorrowSummary` after compilation. Phase 5.A wires the summary
+// through to the compiler's `function_borrow_summaries` map — behavior at
+// runtime does not change in this phase.
+
+/// Helper: parse, lower each module-level `fn` into MIR, then run the
+/// return-ownership inference pass with previous functions' modes threaded
+/// in as `callee_modes`. Mirrors how `BytecodeCompiler` populates
+/// `function_borrow_summaries` during real compilation.
+fn infer_module_return_modes(
+    code: &str,
+) -> std::collections::HashMap<String, crate::mir::ReturnOwnershipMode> {
+    use shape_ast::ast::Item;
+
+    let program = parse_program(code).unwrap();
+    let mut modes: std::collections::HashMap<String, crate::mir::ReturnOwnershipMode> =
+        std::collections::HashMap::new();
+
+    for item in &program.items {
+        if let Item::Function(def, _) = item {
+            let lowering = crate::mir::lowering::lower_function_detailed(
+                &def.name,
+                &def.params,
+                &def.body,
+                def.name_span,
+            );
+            let mode = crate::mir::return_ownership::infer_return_ownership_mode(
+                &lowering.mir,
+                &modes,
+            );
+            modes.insert(def.name.clone(), mode);
+        }
+    }
+
+    modes
+}
+
+fn mode_of(
+    modes: &std::collections::HashMap<String, crate::mir::ReturnOwnershipMode>,
+    name: &str,
+) -> crate::mir::ReturnOwnershipMode {
+    modes
+        .get(name)
+        .copied()
+        .unwrap_or(crate::mir::ReturnOwnershipMode::Unknown)
+}
+
+#[test]
+fn test_phase5a_newly_allocated_array_return_is_newly_owned() {
+    let code = r#"
+        fn make() -> Array<int> { [1, 2, 3] }
+    "#;
+    let modes = infer_module_return_modes(code);
+    assert_eq!(
+        mode_of(&modes, "make"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+}
+
+#[test]
+fn test_phase5a_constant_int_return_is_newly_owned() {
+    let code = r#"
+        fn answer() -> int { 42 }
+    "#;
+    let modes = infer_module_return_modes(code);
+    assert_eq!(
+        mode_of(&modes, "answer"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+}
+
+#[test]
+fn test_phase5a_binary_op_return_is_newly_owned() {
+    let code = r#"
+        fn add(a: int, b: int) -> int { a + b }
+    "#;
+    let modes = infer_module_return_modes(code);
+    assert_eq!(
+        mode_of(&modes, "add"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+}
+
+#[test]
+fn test_phase5a_two_allocating_branches_both_newly_owned() {
+    let code = r#"
+        fn choose(cond: bool) -> Array<int> {
+            if cond { [1] } else { [2] }
+        }
+    "#;
+    let modes = infer_module_return_modes(code);
+    assert_eq!(
+        mode_of(&modes, "choose"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+}
+
+#[test]
+fn test_phase5a_call_through_inherits_callee_mode() {
+    // fn wrap() -> Array<int> { make() } should pick up `make`'s NewlyOwned
+    // mode via the callee map threaded through inference.
+    let code = r#"
+        fn make() -> Array<int> { [1, 2, 3] }
+        fn wrap() -> Array<int> { make() }
+    "#;
+    let modes = infer_module_return_modes(code);
+    assert_eq!(
+        mode_of(&modes, "make"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+    assert_eq!(
+        mode_of(&modes, "wrap"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+}
+
+#[test]
+fn test_phase5a_pipeline_three_stages_all_newly_owned() {
+    // fn a() -> Array<int> { [1,2,3] }
+    // fn b() -> Array<int> { a() }
+    // fn c() -> Array<int> { b() }
+    // All three should end up NewlyOwned, laying the groundwork for Phase 5.B/C
+    // to produce a zero-Arc pipeline.
+    let code = r#"
+        fn a() -> Array<int> { [1, 2, 3] }
+        fn b() -> Array<int> { a() }
+        fn c() -> Array<int> { b() }
+    "#;
+    let modes = infer_module_return_modes(code);
+    assert_eq!(
+        mode_of(&modes, "a"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+    assert_eq!(
+        mode_of(&modes, "b"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+    assert_eq!(
+        mode_of(&modes, "c"),
+        crate::mir::ReturnOwnershipMode::NewlyOwned
+    );
+}
+
+#[test]
+fn test_phase5a_identity_returns_borrowed_from_param() {
+    // Returning a parameter directly is classified as borrowed-from-param —
+    // the caller's source is the real owner, so the callee has nothing new
+    // to give back.
+    let code = r#"
+        fn pass(x: Array<int>) -> Array<int> { x }
+    "#;
+    let modes = infer_module_return_modes(code);
+    assert_eq!(
+        mode_of(&modes, "pass"),
+        crate::mir::ReturnOwnershipMode::BorrowedFromParam(0)
+    );
+}
+
+#[test]
+fn test_phase5a_route_between_params_is_unknown() {
+    // `if c { a } else { b }` returns different params on each branch — the
+    // modes don't meet cleanly, so we fall back to Unknown (the safe
+    // Arc-everywhere default).
+    let code = r#"
+        fn route(cond: bool, a: Array<int>, b: Array<int>) -> Array<int> {
+            if cond { a } else { b }
+        }
+    "#;
+    let modes = infer_module_return_modes(code);
+    assert_eq!(
+        mode_of(&modes, "route"),
+        crate::mir::ReturnOwnershipMode::Unknown
+    );
+}
+

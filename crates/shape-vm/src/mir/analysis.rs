@@ -291,6 +291,54 @@ pub struct FunctionBorrowSummary {
     /// If the function returns a reference derived from a parameter, records which
     /// parameter and borrow kind. Used for interprocedural composition.
     pub return_summary: Option<ReturnReferenceSummary>,
+    /// Ownership classification of the function's return value (Phase 5.A).
+    /// Used by callers to skip unnecessary Arc→Box promotion when the callee
+    /// already returns a uniquely-owned value.
+    pub return_ownership_mode: ReturnOwnershipMode,
+}
+
+/// Ownership classification of a function's return value.
+///
+/// Used for interprocedural ownership inference (Phase 5.A). Each function's
+/// return is classified into one of these modes so that callers can propagate
+/// the right storage decisions without emitting redundant Arc→Box promotions.
+///
+/// `Unknown` is the conservative fallback — it preserves current Arc-everywhere
+/// behavior, so any inference uncertainty stays semantics-preserving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReturnOwnershipMode {
+    /// Returns a newly-allocated owned value. Caller can take ownership directly
+    /// (as Box) without an Arc round-trip.
+    /// Example: `fn make() -> Array<int> { [1,2,3] }`
+    NewlyOwned,
+    /// Returns a reference/alias derived from the given parameter. Caller keeps
+    /// ownership of the source.
+    /// Example: `fn first(arr: &Array<int>) -> &int { &arr[0] }`
+    BorrowedFromParam(usize),
+    /// Returns a shared (Arc) value — reference-counted across callers.
+    Shared,
+    /// Returns a value proven to escape into global / static storage.
+    Static,
+    /// Could not infer — fall back to current Arc behavior.
+    Unknown,
+}
+
+impl ReturnOwnershipMode {
+    /// Combine two return modes observed on different return paths.
+    /// "Weakest" wins — any mismatch degrades to `Unknown` so the conservative
+    /// Arc fallback is always safe.
+    pub fn meet(self, other: Self) -> Self {
+        if self == other {
+            return self;
+        }
+        ReturnOwnershipMode::Unknown
+    }
+}
+
+impl Default for ReturnOwnershipMode {
+    fn default() -> Self {
+        ReturnOwnershipMode::Unknown
+    }
 }
 
 /// Error for writing to an immutable binding.

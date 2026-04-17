@@ -361,11 +361,19 @@ impl BytecodeCompiler {
         }
 
         // Extract and store borrow summary for interprocedural alias checking.
-        let borrow_summary = crate::mir::solver::extract_borrow_summary(
+        // Thread previously-computed return-ownership modes into the inference
+        // pass so call-through functions (fn wrap() { make() }) can inherit
+        // their callee's mode instead of falling back to Unknown.
+        let callee_return_modes = self.build_callee_return_modes(Some(&effective_def.name));
+        let borrow_summary = crate::mir::solver::extract_borrow_summary_with_callees(
             &mir_lowering.mir,
             mir_analysis.return_reference_summary.clone(),
+            &callee_return_modes,
         );
-        if !borrow_summary.conflict_pairs.is_empty() || borrow_summary.return_summary.is_some() {
+        let has_informative_summary = !borrow_summary.conflict_pairs.is_empty()
+            || borrow_summary.return_summary.is_some()
+            || borrow_summary.return_ownership_mode != crate::mir::ReturnOwnershipMode::Unknown;
+        if has_informative_summary {
             self.function_borrow_summaries
                 .insert(effective_def.name.clone(), borrow_summary);
         } else {
@@ -676,6 +684,28 @@ impl BytecodeCompiler {
                     .return_summary
                     .as_ref()
                     .map(|s| (name.clone(), s.clone()))
+            })
+            .collect()
+    }
+
+    /// Gather previously-computed return-ownership modes for all module-level
+    /// functions, for use by the return-ownership inference pass on the
+    /// function currently being compiled (Phase 5.A). Excludes the function
+    /// under compilation so we don't consume a stale self-summary.
+    pub(crate) fn build_callee_return_modes(
+        &self,
+        exclude_name: Option<&str>,
+    ) -> std::collections::HashMap<String, crate::mir::ReturnOwnershipMode> {
+        self.function_borrow_summaries
+            .iter()
+            .filter_map(|(name, summary)| {
+                if exclude_name == Some(name.as_str()) {
+                    return None;
+                }
+                if summary.return_ownership_mode == crate::mir::ReturnOwnershipMode::Unknown {
+                    return None;
+                }
+                Some((name.clone(), summary.return_ownership_mode))
             })
             .collect()
     }
