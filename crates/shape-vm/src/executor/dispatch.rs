@@ -410,7 +410,7 @@ impl VirtualMachine {
 
         match instruction.opcode {
             // Stack operations
-            PushConst | PushNull | Pop | Dup | Swap | PromoteToOwned => {
+            PushConst | PushNull | Pop | Dup | Swap | PromoteToOwned | ReturnOwned => {
                 return self.exec_stack_ops(instruction);
             }
 

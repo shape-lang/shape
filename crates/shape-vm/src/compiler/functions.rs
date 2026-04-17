@@ -1202,7 +1202,7 @@ impl BytecodeCompiler {
                         if total_scopes > 0 {
                             self.emit_drops_for_early_exit(total_scopes)?;
                         }
-                        self.emit(Instruction::simple(OpCode::ReturnValue));
+                        self.emit_return_value_with_ownership();
                         // Skip the fallback return below since we've already returned
                         // Update function locals count
                         self.program.functions[func_idx].locals_count = self.next_local;

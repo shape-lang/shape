@@ -3995,7 +3995,7 @@ impl BytecodeCompiler {
                 if total_scopes > 0 {
                     self.emit_drops_for_early_exit(total_scopes)?;
                 }
-                self.emit(Instruction::simple(OpCode::ReturnValue));
+                self.emit_return_value_with_ownership();
             }
 
             Statement::Break(_) => {
@@ -4372,6 +4372,14 @@ impl BytecodeCompiler {
                     //   - `let mut` (owned mutable) with Direct storage
                     //   - `const` with Direct storage
                     // Does NOT apply to `var` bindings, which stay Arc for shared mutability.
+                    //
+                    // Phase 5.C: When the initializer was a call to a function whose
+                    // return-ownership mode is `NewlyOwned`, the callee already emitted
+                    // `ReturnOwned` and handed us a Box-backed value on the stack. In
+                    // that case we skip the caller-side `PromoteToOwned` — inserting it
+                    // would be a harmless no-op (the owned bit is already set), but
+                    // emitting one extra opcode per binding across an entire pipeline
+                    // is measurable, and the hint is free to consult.
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         let is_owned_binding = var_decl.kind == VarKind::Let
                             || var_decl.kind == VarKind::Const;
@@ -4385,7 +4393,23 @@ impl BytecodeCompiler {
                                             crate::type_tracking::BindingStorageClass::Direct
                                         )
                                     });
-                                if should_promote {
+                                // Compute the Phase 5.B hint directly from the
+                                // initializer AST — the binding semantics aren't
+                                // populated yet at this point in the let-statement
+                                // pipeline (that happens a few lines below via
+                                // `apply_binding_semantics_to_pattern_bindings`),
+                                // so we can't read `return_ownership_hint` off the
+                                // slot's semantics here.
+                                let callee_already_owned = var_decl
+                                    .value
+                                    .as_ref()
+                                    .and_then(|init| {
+                                        self.return_ownership_hint_for_initializer(init)
+                                    })
+                                    .map_or(false, |hint| {
+                                        hint == crate::mir::ReturnOwnershipMode::NewlyOwned
+                                    });
+                                if should_promote && !callee_already_owned {
                                     // The last instruction should be StoreLocal(local_idx).
                                     // Insert PromoteToOwned just before it.
                                     let instr_count = self.program.instructions.len();

@@ -38,6 +38,12 @@ impl VirtualMachine {
                 self.push_raw_u64(a)?;
             }
             PromoteToOwned => self.op_promote_to_owned()?,
+            // Phase 5.C: `ReturnOwned` has identical runtime semantics to
+            // `PromoteToOwned` — it converts a freshly-allocated Arc on the
+            // return value to a Box. Emitted by callees whose
+            // `ReturnOwnershipMode` is `NewlyOwned` so callers can skip their
+            // own promotion after the call returns.
+            ReturnOwned => self.op_promote_to_owned()?,
             _ => unreachable!(
                 "exec_stack_ops called with non-stack opcode: {:?}",
                 instruction.opcode

@@ -707,6 +707,20 @@ define_opcodes! {
     /// Concatenate two strings. Both on stack.
     StringConcatTyped = 0x116, Object, pops: 2, pushes: 1;
 
+    /// Phase 5.C: Return with owned semantics. Pops the top-of-stack return
+    /// value, promotes Arc→Box when refcount is exactly 1 (as `PromoteToOwned`
+    /// does), then falls through to the normal return path. Emitted by the
+    /// compiler in place of the implicit return-slot store for functions
+    /// whose inferred `ReturnOwnershipMode` is `NewlyOwned`, so the callee
+    /// already hands a uniquely-owned value to the caller and the caller
+    /// can skip its own `PromoteToOwned`.
+    ///
+    /// Stack effect is identical to `PromoteToOwned` — it operates on the
+    /// value already on the stack and leaves it in place; the control flow
+    /// is handled by the subsequent `Return` instruction or by the function
+    /// epilogue, not by this opcode itself.
+    ReturnOwned = 0x117, Stack, pops: 0, pushes: 0;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;

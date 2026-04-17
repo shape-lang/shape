@@ -232,6 +232,38 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Phase 5.C: Look up the current function's inferred return ownership
+    /// mode, if any. Returns `None` when there is no MIR context (top-level
+    /// code), when no summary was stored, or when the mode is `Unknown`.
+    pub(super) fn current_function_return_ownership_mode(
+        &self,
+    ) -> Option<crate::mir::ReturnOwnershipMode> {
+        let ctx = self.current_mir_context_name()?;
+        let summary = self.function_borrow_summaries.get(ctx)?;
+        match summary.return_ownership_mode {
+            crate::mir::ReturnOwnershipMode::Unknown => None,
+            mode => Some(mode),
+        }
+    }
+
+    /// Phase 5.C: Emit the function return sequence. If the enclosing
+    /// function's inferred return mode is `NewlyOwned`, emits a `ReturnOwned`
+    /// immediately before the `ReturnValue` so the caller receives a
+    /// Box-backed (unique) value and can skip its own `PromoteToOwned`.
+    ///
+    /// For any other mode (including `Unknown`, `BorrowedFromParam`,
+    /// `Shared`, `Static`), emits the plain `ReturnValue` — today's behavior.
+    pub(super) fn emit_return_value_with_ownership(&mut self) {
+        use crate::bytecode::{Instruction, OpCode};
+        if matches!(
+            self.current_function_return_ownership_mode(),
+            Some(crate::mir::ReturnOwnershipMode::NewlyOwned)
+        ) {
+            self.emit(Instruction::simple(OpCode::ReturnOwned));
+        }
+        self.emit(Instruction::simple(OpCode::ReturnValue));
+    }
+
     /// Phase 5.B: If the initializer is a simple (non-qualified) call to a
     /// function whose return-ownership mode has been inferred, return that
     /// mode. Callers use it to populate `BindingSemantics::return_ownership_hint`.

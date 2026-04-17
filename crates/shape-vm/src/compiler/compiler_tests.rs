@@ -3626,7 +3626,7 @@ fn test_phase5b_call_initialized_let_roundtrip_stays_correct() {
         fn make() -> Array<int> { [1, 2, 3, 4, 5] }
         fn run() -> int {
             let arr = make()
-            arr.reduce(0, |a, b| a + b)
+            arr.reduce(|a, b| a + b, 0)
         }
         run()
     "#;
@@ -3647,7 +3647,7 @@ fn test_phase5b_call_through_pipeline_stays_correct() {
         }
         fn c() -> int {
             let y = b()
-            y.reduce(0, |acc, n| acc + n)
+            y.reduce(|acc, n| acc + n, 0)
         }
         c()
     "#;
@@ -3664,11 +3664,148 @@ fn test_phase5b_hint_tolerates_parameter_return() {
         fn wrap(x: Array<int>) -> Array<int> { x }
         fn run() -> int {
             let y = wrap([10, 20, 30])
-            y.reduce(0, |acc, n| acc + n)
+            y.reduce(|acc, n| acc + n, 0)
         }
         run()
     "#;
     let result = compile_and_run(code);
     assert_eq!(result.as_i64(), Some(60));
+}
+
+// =====================================================================
+// Phase 5.C: ReturnOwned opcode + skip PromoteToOwned at callsites
+// =====================================================================
+//
+// These tests verify the bytecode-level effect of Phase 5.C: the callee
+// emits `ReturnOwned` before its `ReturnValue`, and the caller skips the
+// `PromoteToOwned` it would otherwise have emitted on a `let` binding.
+
+/// Helper: compile a program and return the raw instruction stream of the
+/// given function.
+fn function_bytecode(code: &str, fn_name: &str) -> Vec<OpCode> {
+    let program = parse_program(code).unwrap();
+    let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+    let func = bytecode
+        .functions
+        .iter()
+        .find(|f| f.name == fn_name)
+        .unwrap_or_else(|| panic!("function {:?} not found", fn_name));
+    let start = func.entry_point;
+    let len = func.body_length;
+    bytecode.instructions[start..start + len]
+        .iter()
+        .map(|i| i.opcode)
+        .collect()
+}
+
+#[test]
+fn test_phase5c_newly_owned_callee_emits_return_owned() {
+    // fn make() -> Array<int> { [1, 2, 3] }
+    // Should contain ReturnOwned immediately before its ReturnValue.
+    let code = r#"
+        fn make() -> Array<int> { [1, 2, 3] }
+        fn main() -> int { make().reduce(|a, b| a + b, 0) }
+        main()
+    "#;
+    let ops = function_bytecode(code, "make");
+    assert!(
+        ops.contains(&OpCode::ReturnOwned),
+        "NewlyOwned function should emit ReturnOwned, got ops: {:?}",
+        ops
+    );
+}
+
+#[test]
+fn test_phase5c_newly_owned_caller_skips_promote_to_owned() {
+    // In the caller `let arr = make()`, we'd normally emit PromoteToOwned
+    // before StoreLocal. With Phase 5.C it should be skipped because the
+    // callee returned a Box already.
+    let code = r#"
+        fn make() -> Array<int> { [1, 2, 3] }
+        fn use_it() -> int {
+            let arr = make()
+            arr.reduce(|a, b| a + b, 0)
+        }
+        use_it()
+    "#;
+    let ops = function_bytecode(code, "use_it");
+    assert!(
+        !ops.contains(&OpCode::PromoteToOwned),
+        "caller should skip PromoteToOwned for NewlyOwned call, got ops: {:?}",
+        ops
+    );
+}
+
+#[test]
+fn test_phase5c_borrowed_from_param_does_not_emit_return_owned() {
+    // fn pass(x) -> ... { x } returns BorrowedFromParam — the callee
+    // doesn't own the value so emitting ReturnOwned would be wrong.
+    let code = r#"
+        fn pass(x: Array<int>) -> Array<int> { x }
+        pass([1, 2, 3])
+    "#;
+    let ops = function_bytecode(code, "pass");
+    assert!(
+        !ops.contains(&OpCode::ReturnOwned),
+        "BorrowedFromParam function should NOT emit ReturnOwned, got ops: {:?}",
+        ops
+    );
+}
+
+#[test]
+fn test_phase5c_pipeline_runs_correctly_with_return_owned() {
+    // End-to-end pipeline: every stage is NewlyOwned, every `let` skips
+    // PromoteToOwned, every callee emits ReturnOwned. The numeric result
+    // must still be correct.
+    let code = r#"
+        fn a() -> Array<int> { [1, 2, 3, 4, 5] }
+        fn b() -> Array<int> {
+            let x = a()
+            x
+        }
+        fn c() -> int {
+            let y = b()
+            y.reduce(|acc, n| acc + n, 0)
+        }
+        c()
+    "#;
+    let result = compile_and_run(code);
+    assert_eq!(result.as_i64(), Some(15));
+}
+
+#[test]
+fn test_phase5c_pipeline_callee_all_emit_return_owned() {
+    let code = r#"
+        fn a() -> Array<int> { [1, 2, 3] }
+        fn b() -> Array<int> { a() }
+        fn c() -> Array<int> { b() }
+        c()
+    "#;
+    for name in ["a", "b", "c"] {
+        let ops = function_bytecode(code, name);
+        assert!(
+            ops.contains(&OpCode::ReturnOwned),
+            "pipeline stage {:?} should emit ReturnOwned, got ops: {:?}",
+            name,
+            ops
+        );
+    }
+}
+
+#[test]
+fn test_phase5c_explicit_return_statement_also_emits_return_owned() {
+    // Explicit `return` path should go through the same helper.
+    let code = r#"
+        fn make() -> Array<int> {
+            return [1, 2, 3]
+        }
+        make()
+    "#;
+    let ops = function_bytecode(code, "make");
+    assert!(
+        ops.contains(&OpCode::ReturnOwned),
+        "explicit return in NewlyOwned function should emit ReturnOwned, got ops: {:?}",
+        ops
+    );
 }
 
