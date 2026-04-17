@@ -3,6 +3,7 @@
 //! Extracted from `value_word.rs` to reduce file size.
 
 use crate::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+use crate::value::VMArrayBuf;
 use crate::value_word::{ValueWord, ValueWordExt};
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use std::sync::Arc;
 /// / `get_nb()` for cold paths that need ValueWord values.
 #[derive(Debug)]
 pub enum ArrayView<'a> {
-    Generic(&'a Arc<Vec<ValueWord>>),
+    Generic(&'a Arc<VMArrayBuf>),
     Int(&'a Arc<TypedBuffer<i64>>),
     Float(&'a Arc<AlignedTypedBuffer>),
     Bool(&'a Arc<TypedBuffer<u8>>),
@@ -93,7 +94,7 @@ impl<'a> ArrayView<'a> {
     }
 
     /// Materialize into a generic ValueWord array. Cheap Arc clone for Generic variant.
-    pub fn to_generic(&self) -> Arc<Vec<ValueWord>> {
+    pub fn to_generic(&self) -> Arc<VMArrayBuf> {
         match self {
             ArrayView::Generic(a) => (*a).clone(),
             ArrayView::Int(a) => Arc::new(a.iter().map(|&i| ValueWord::from_i64(i)).collect()),
@@ -169,7 +170,7 @@ impl<'a> ArrayView<'a> {
     }
 
     #[inline]
-    pub fn as_generic(&self) -> Option<&Arc<Vec<ValueWord>>> {
+    pub fn as_generic(&self) -> Option<&Arc<VMArrayBuf>> {
         if let ArrayView::Generic(a) = self {
             Some(a)
         } else {
@@ -198,7 +199,7 @@ impl<'a> ArrayView<'a> {
 
 /// Mutable view over all array variants. Uses Arc::make_mut for COW semantics.
 pub enum ArrayViewMut<'a> {
-    Generic(&'a mut Arc<Vec<ValueWord>>),
+    Generic(&'a mut Arc<VMArrayBuf>),
     Int(&'a mut Arc<TypedBuffer<i64>>),
     Float(&'a mut Arc<AlignedTypedBuffer>),
     Bool(&'a mut Arc<TypedBuffer<u8>>),

@@ -39,7 +39,7 @@ fn parallel_map(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, St
         let result = invoke(callback, &[item.clone()])?;
         results.push(result);
     }
-    Ok(ValueWord::from_array(Arc::new(results)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)))
 }
 
 /// parallel.filter(array, fn) -> Array
@@ -65,7 +65,7 @@ fn parallel_filter(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord,
             results.push(item.clone());
         }
     }
-    Ok(ValueWord::from_array(Arc::new(results)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)))
 }
 
 /// parallel.for_each(array, fn) -> null
@@ -112,9 +112,9 @@ fn parallel_chunks(args: &[ValueWord], _ctx: &ModuleContext) -> Result<ValueWord
     let items = arr.to_generic();
     let chunks: Vec<ValueWord> = items
         .chunks(size)
-        .map(|chunk| ValueWord::from_array(Arc::new(chunk.to_vec())))
+        .map(|chunk| ValueWord::from_array(shape_value::vmarray_from_vec(chunk.to_vec())))
         .collect();
-    Ok(ValueWord::from_array(Arc::new(chunks)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(chunks)))
 }
 
 /// parallel.reduce(array, fn, initial) -> any
@@ -162,7 +162,7 @@ fn parallel_sort(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, S
         .ok_or_else(|| "parallel.sort() requires an array as first argument".to_string())?;
 
     let items = arr.to_generic();
-    let mut sorted: Vec<ValueWord> = (*items).clone();
+    let mut sorted: Vec<ValueWord> = items.to_vec();
 
     if let Some(callback) = args.get(1) {
         // Custom comparator: callback(a, b) -> number (negative, zero, positive)
@@ -206,7 +206,7 @@ fn parallel_sort(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, S
             sorted.sort_by(|a, b| compare_values_natural(a, b));
         }
     }
-    Ok(ValueWord::from_array(Arc::new(sorted)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted)))
 }
 
 /// Natural ordering comparator for ValueWord.
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn test_parallel_chunks_basic() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn test_parallel_chunks_exact_division() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn test_parallel_chunks_size_larger_than_array() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
         ]));
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn test_parallel_chunks_invalid_size() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(1)]));
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_i64(1)]));
         let result = parallel_chunks(&[arr, ValueWord::from_i64(0)], &ctx);
         assert!(result.is_err());
     }
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn test_parallel_chunks_empty_array() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![]));
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![]));
         let result = parallel_chunks(&[arr, ValueWord::from_i64(3)], &ctx).unwrap();
         let chunks = result.as_any_array().unwrap().to_generic();
         assert_eq!(chunks.len(), 0);
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn test_parallel_sort_natural() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(3),
             ValueWord::from_i64(1),
             ValueWord::from_i64(4),
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn test_parallel_sort_strings() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_string(Arc::new("banana".to_string())),
             ValueWord::from_string(Arc::new("apple".to_string())),
             ValueWord::from_string(Arc::new("cherry".to_string())),
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn test_parallel_map_requires_callback() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(1)]));
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_i64(1)]));
         let result = parallel_map(&[arr], &ctx);
         assert!(result.is_err());
     }
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn test_parallel_map_requires_invoke_callable() {
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(1)]));
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_i64(1)]));
         let cb = ValueWord::none(); // dummy
         let result = parallel_map(&[arr, cb], &ctx);
         assert!(result.is_err());

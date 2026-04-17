@@ -119,7 +119,8 @@ pub use slot::ValueSlot;
 pub use typed_buffer::{AlignedTypedBuffer, TypedBuffer};
 pub use value::{
     FilterLiteral, FilterNode, FilterOp, HostCallable, PrintResult, PrintSpan, Upvalue, VMArray,
-    VTable, VTableEntry, vmarray_from_nanboxed, vmarray_from_value_words,
+    VMArrayBuf, VMARRAY_INLINE_CAP, VTable, VTableEntry, vmarray_from_nanboxed,
+    vmarray_from_value_words, vmarray_from_vec,
 };
 
 // v2 runtime re-exports

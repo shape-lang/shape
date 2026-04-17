@@ -196,7 +196,7 @@ mod tests {
     fn test_intrinsic_stencil() {
         let mut ctx = ExecutionContext::new_empty();
 
-        let series = ValueWord::from_array(Arc::new(vec![
+        let series = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
             ValueWord::from_f64(3.0),
@@ -204,7 +204,7 @@ mod tests {
             ValueWord::from_f64(5.0),
         ]));
 
-        let kernel = ValueWord::from_array(Arc::new(vec![
+        let kernel = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(0.25),
             ValueWord::from_f64(0.5),
             ValueWord::from_f64(0.25),

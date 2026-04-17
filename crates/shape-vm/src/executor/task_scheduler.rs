@@ -222,7 +222,7 @@ impl TaskScheduler {
                     let val = self.resolve_task(id, &mut executor_fn)?;
                     results.push(val);
                 }
-                Ok(ValueWord::from_array(std::sync::Arc::new(results)))
+                Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)))
             }
             // Race: return first result (all run, but we return first)
             1 => {
@@ -258,7 +258,7 @@ impl TaskScheduler {
                         ))),
                     }
                 }
-                Ok(ValueWord::from_array(std::sync::Arc::new(results)))
+                Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)))
             }
             _ => Err(VMError::RuntimeError(format!(
                 "Unknown join kind: {}",

@@ -761,7 +761,7 @@ pub fn wire_to_nb(wire: &WireValue) -> ValueWord {
 
         WireValue::Array(arr) => {
             let elements: Vec<ValueWord> = arr.iter().map(wire_to_nb).collect();
-            ValueWord::from_array(Arc::new(elements))
+            ValueWord::from_array(shape_value::vmarray_from_vec(elements))
         }
 
         WireValue::Object(obj) => {
@@ -1019,7 +1019,7 @@ mod tests {
     #[test]
     fn test_array_conversion() {
         let ctx = get_dummy_context();
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
             ValueWord::from_f64(3.0),
@@ -1333,7 +1333,7 @@ mod tests {
     #[test]
     fn test_nb_to_wire_array() {
         let ctx = get_dummy_context();
-        let nb = ValueWord::from_array(Arc::new(vec![
+        let nb = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_i64(2),
             ValueWord::from_bool(true),
@@ -1399,7 +1399,7 @@ mod tests {
             ValueWord::none(),
             ValueWord::unit(),
             ValueWord::from_string(Arc::new("test".to_string())),
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_f64(1.0),
                 ValueWord::from_i64(2),
             ])),
@@ -1516,7 +1516,7 @@ mod tests {
     #[test]
     fn test_nb_roundtrip_array() {
         let ctx = get_dummy_context();
-        let original = ValueWord::from_array(Arc::new(vec![
+        let original = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(10),
             ValueWord::from_f64(20.5),
             ValueWord::from_string(Arc::new("x".to_string())),

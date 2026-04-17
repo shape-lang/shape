@@ -393,7 +393,7 @@ fn apply_mutable_writebacks(
                     elem_type,
                     &format!("native call arg#{arg_index} writeback"),
                 )?;
-                stack[*target_slot] = ValueWord::from_array(Arc::new(decoded));
+                stack[*target_slot] = ValueWord::from_array(shape_value::vmarray_from_vec(decoded));
             }
         }
     }
@@ -519,7 +519,7 @@ pub fn invoke_linked_function(
         CType::CSlice(elem) | CType::CMutSlice(elem) => {
             let out = unsafe { linked.cif.call::<CSliceAbi>(linked.code_ptr, &ffi_args) };
             let values = decode_slice_elements(out, elem, "native call return")?;
-            ValueWord::from_array(Arc::new(values))
+            ValueWord::from_array(shape_value::vmarray_from_vec(values))
         }
         CType::CView(layout_name) => {
             let out = unsafe { linked.cif.call::<usize>(linked.code_ptr, &ffi_args) };
@@ -974,7 +974,7 @@ unsafe fn decode_callback_arg(
         CType::CSlice(elem) | CType::CMutSlice(elem) => {
             let slice = unsafe { *(arg_ptr as *const CSliceAbi) };
             let values = decode_slice_elements(slice, elem, &format!("callback arg#{idx}"))?;
-            Ok(ValueWord::from_array(Arc::new(values)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(values)))
         }
         CType::Usize | CType::Ptr | CType::Callback(_) | CType::CView(_) | CType::CMut(_) => {
             let raw = unsafe { *(arg_ptr as *const usize) };
@@ -2135,7 +2135,7 @@ mod tests {
         let mut owned_cstrings = Vec::new();
         let mut owned_callbacks = Vec::new();
         let layouts = HashMap::new();
-        let values = ValueWord::from_array(Arc::new(vec![
+        let values = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_native_u8(1),
             ValueWord::from_native_u8(2),
             ValueWord::from_native_u8(3),
@@ -2161,7 +2161,7 @@ mod tests {
         let mut owned_cstrings = Vec::new();
         let mut owned_callbacks = Vec::new();
         let layouts = HashMap::new();
-        let values = ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(256)]));
+        let values = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_i64(256)]));
         let err = encode_arg(
             &values,
             &CType::CSlice(Box::new(CType::U8)),
@@ -2225,7 +2225,7 @@ mod tests {
 
         let mut stack = vec![
             ValueWord::none(),
-            ValueWord::from_array(Arc::new(vec![ValueWord::from_native_u8(1)])),
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_native_u8(1)])),
         ];
         apply_mutable_writebacks(&mut stack, &prepared_args, &plans)
             .expect("writeback should succeed");
@@ -2274,7 +2274,7 @@ mod tests {
             elem_type: CType::NullableCString,
         }];
 
-        let mut stack = vec![ValueWord::from_array(Arc::new(vec![]))];
+        let mut stack = vec![ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))];
         apply_mutable_writebacks(&mut stack, &prepared_args, &plans)
             .expect("nullable cstring writeback should succeed");
 

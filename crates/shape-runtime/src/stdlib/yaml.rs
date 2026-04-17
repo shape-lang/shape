@@ -22,7 +22,7 @@ fn yaml_value_to_nanboxed(value: serde_yaml::Value) -> ValueWord {
         serde_yaml::Value::String(s) => ValueWord::from_string(Arc::new(s)),
         serde_yaml::Value::Sequence(arr) => {
             let items: Vec<ValueWord> = arr.into_iter().map(yaml_value_to_nanboxed).collect();
-            ValueWord::from_array(Arc::new(items))
+            ValueWord::from_array(shape_value::vmarray_from_vec(items))
         }
         serde_yaml::Value::Mapping(map) => {
             let mut keys = Vec::with_capacity(map.len());
@@ -95,7 +95,7 @@ pub fn create_yaml_module() -> ModuleExports {
                 documents.push(yaml_value_to_nanboxed(value));
             }
 
-            Ok(ValueWord::from_ok(ValueWord::from_array(Arc::new(
+            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(
                 documents,
             ))))
         },

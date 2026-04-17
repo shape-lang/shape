@@ -140,7 +140,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                     .map(|l| ValueWord::from_string(Arc::new(l.to_string())))
                     .collect();
 
-                Ok(ValueWord::from_ok(ValueWord::from_array(Arc::new(lines))))
+                Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(lines))))
             },
             ModuleFunction {
                 description: "Read a file and return its lines as an array of strings".to_string(),
@@ -233,7 +233,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
                     .map(|&b| ValueWord::from_f64(b as f64))
                     .collect();
 
-                Ok(ValueWord::from_ok(ValueWord::from_array(Arc::new(arr))))
+                Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr))))
             },
             ModuleFunction {
                 description: "Read the entire contents of a file as an array of byte values"
@@ -472,7 +472,7 @@ mod tests {
         let path = dir.path().join("bytes.bin");
         let path_str = path.to_str().unwrap();
 
-        let data = ValueWord::from_array(Arc::new(vec![
+        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(0.0),
             ValueWord::from_f64(127.0),
             ValueWord::from_f64(255.0),
@@ -508,7 +508,7 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         // 256 is out of range
-        let data = ValueWord::from_array(Arc::new(vec![ValueWord::from_f64(256.0)]));
+        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_f64(256.0)]));
         let result = write_fn(
             &[ValueWord::from_string(Arc::new(path_str.to_string())), data],
             &ctx,
@@ -516,7 +516,7 @@ mod tests {
         assert!(result.is_err());
 
         // Negative is out of range
-        let data = ValueWord::from_array(Arc::new(vec![ValueWord::from_f64(-1.0)]));
+        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_f64(-1.0)]));
         let result = write_fn(
             &[ValueWord::from_string(Arc::new(path_str.to_string())), data],
             &ctx,

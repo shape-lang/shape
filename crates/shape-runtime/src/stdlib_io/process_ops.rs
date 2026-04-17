@@ -486,7 +486,7 @@ mod tests {
         let result = io_exec(
             &[
                 ValueWord::from_string(Arc::new("echo".to_string())),
-                ValueWord::from_array(Arc::new(vec![ValueWord::from_string(Arc::new(
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_string(Arc::new(
                     "hello world".to_string(),
                 ))])),
             ],
@@ -525,7 +525,7 @@ mod tests {
         let handle = io_spawn(
             &[
                 ValueWord::from_string(Arc::new("echo".to_string())),
-                ValueWord::from_array(Arc::new(vec![ValueWord::from_string(Arc::new(
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_string(Arc::new(
                     "test".to_string(),
                 ))])),
             ],
@@ -544,7 +544,7 @@ mod tests {
         let handle = io_spawn(
             &[
                 ValueWord::from_string(Arc::new("echo".to_string())),
-                ValueWord::from_array(Arc::new(vec![ValueWord::from_string(Arc::new(
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_string(Arc::new(
                     "hello from process".to_string(),
                 ))])),
             ],
@@ -606,7 +606,7 @@ mod tests {
         let handle = io_spawn(
             &[
                 ValueWord::from_string(Arc::new("sleep".to_string())),
-                ValueWord::from_array(Arc::new(vec![ValueWord::from_string(Arc::new(
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_string(Arc::new(
                     "60".to_string(),
                 ))])),
             ],
@@ -634,7 +634,7 @@ mod tests {
         let handle = io_spawn(
             &[
                 ValueWord::from_string(Arc::new("sh".to_string())),
-                ValueWord::from_array(Arc::new(vec![
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                     ValueWord::from_string(Arc::new("-c".to_string())),
                     ValueWord::from_string(Arc::new("echo error_msg >&2".to_string())),
                 ])),
@@ -681,7 +681,7 @@ mod tests {
         let handle = io_spawn(
             &[
                 ValueWord::from_string(Arc::new("echo".to_string())),
-                ValueWord::from_array(Arc::new(vec![ValueWord::from_string(Arc::new(
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_string(Arc::new(
                     "line output".to_string(),
                 ))])),
             ],

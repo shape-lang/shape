@@ -2291,7 +2291,7 @@ mod tests {
 
     #[test]
     fn test_heap_array_roundtrip() {
-        let arr = Arc::new(vec![
+        let arr = crate::value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),

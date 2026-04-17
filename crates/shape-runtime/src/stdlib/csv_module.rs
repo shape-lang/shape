@@ -32,10 +32,10 @@ pub fn create_csv_module() -> ModuleExports {
                     .iter()
                     .map(|field| ValueWord::from_string(Arc::new(field.to_string())))
                     .collect();
-                rows.push(ValueWord::from_array(Arc::new(row)));
+                rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(row)));
             }
 
-            Ok(ValueWord::from_array(Arc::new(rows)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(rows)))
         },
         ModuleFunction {
             description: "Parse CSV text into an array of rows (each row is an array of strings)"
@@ -85,7 +85,7 @@ pub fn create_csv_module() -> ModuleExports {
                 records.push(ValueWord::from_hashmap_pairs(keys, values));
             }
 
-            Ok(ValueWord::from_array(Arc::new(records)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(records)))
         },
         ModuleFunction {
             description:
@@ -304,10 +304,10 @@ pub fn create_csv_module() -> ModuleExports {
                     .iter()
                     .map(|field| ValueWord::from_string(Arc::new(field.to_string())))
                     .collect();
-                rows.push(ValueWord::from_array(Arc::new(row)));
+                rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(row)));
             }
 
-            Ok(ValueWord::from_ok(ValueWord::from_array(Arc::new(rows))))
+            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(rows))))
         },
         ModuleFunction {
             description: "Read and parse a CSV file into an array of rows".to_string(),
@@ -495,12 +495,12 @@ mod tests {
         let module = create_csv_module();
         let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let data = ValueWord::from_array(Arc::new(vec![
-            ValueWord::from_array(Arc::new(vec![
+        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new("a".to_string())),
                 ValueWord::from_string(Arc::new("b".to_string())),
             ])),
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new("1".to_string())),
                 ValueWord::from_string(Arc::new("2".to_string())),
             ])),
@@ -515,7 +515,7 @@ mod tests {
         let module = create_csv_module();
         let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let data = ValueWord::from_array(Arc::new(vec![ValueWord::from_array(Arc::new(vec![
+        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_string(Arc::new("a".to_string())),
             ValueWord::from_string(Arc::new("b".to_string())),
         ]))]));
@@ -559,7 +559,7 @@ mod tests {
                 ValueWord::from_string(Arc::new("25".to_string())),
             ],
         );
-        let data = ValueWord::from_array(Arc::new(vec![record1, record2]));
+        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![record1, record2]));
         let result = stringify_fn(&[data], &ctx).unwrap();
         let output = result.as_str().expect("should be string");
         // Should contain header row and two data rows
@@ -585,8 +585,8 @@ mod tests {
                 ValueWord::from_string(Arc::new("30".to_string())),
             ],
         );
-        let data = ValueWord::from_array(Arc::new(vec![record]));
-        let headers = ValueWord::from_array(Arc::new(vec![
+        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![record]));
+        let headers = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_string(Arc::new("age".to_string())),
             ValueWord::from_string(Arc::new("name".to_string())),
         ]));
@@ -602,7 +602,7 @@ mod tests {
         let module = create_csv_module();
         let stringify_fn = module.get_export("stringify_records").unwrap();
         let ctx = test_ctx();
-        let data = ValueWord::from_array(Arc::new(vec![]));
+        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![]));
         let result = stringify_fn(&[data], &ctx).unwrap();
         let output = result.as_str().expect("should be string");
         assert_eq!(output, "");
@@ -764,7 +764,7 @@ mod tests {
         )
         .unwrap();
 
-        let headers = ValueWord::from_array(Arc::new(vec![
+        let headers = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_string(Arc::new("name".to_string())),
             ValueWord::from_string(Arc::new("age".to_string())),
         ]));

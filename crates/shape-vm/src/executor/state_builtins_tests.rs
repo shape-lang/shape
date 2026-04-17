@@ -110,7 +110,7 @@ fn test_state_serialize_deserialize_roundtrip_bool() {
 #[test]
 fn test_state_serialize_deserialize_roundtrip_array() {
     let ctx = test_ctx();
-    let original = ValueWord::from_array(Arc::new(vec![
+    let original = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
         ValueWord::from_f64(1.0),
         ValueWord::from_f64(2.0),
         ValueWord::from_f64(3.0),
@@ -188,12 +188,12 @@ fn test_state_diff_changed() {
 fn test_state_patch_root_replacement_legacy_array() {
     let ctx = test_ctx();
     // Legacy format: [[[\".\", 99.0]], []]
-    let changed = ValueWord::from_array(Arc::new(vec![ValueWord::from_array(Arc::new(vec![
+    let changed = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_array(shape_value::vmarray_from_vec(vec![
         ValueWord::from_string(Arc::new(".".to_string())),
         ValueWord::from_f64(99.0),
     ]))]));
-    let removed = ValueWord::from_array(Arc::new(vec![]));
-    let delta = ValueWord::from_array(Arc::new(vec![changed, removed]));
+    let removed = ValueWord::from_array(shape_value::vmarray_from_vec(vec![]));
+    let delta = ValueWord::from_array(shape_value::vmarray_from_vec(vec![changed, removed]));
 
     let base = ValueWord::from_f64(42.0);
     let result = state_patch(&[base, delta], &ctx).unwrap();

@@ -17,7 +17,7 @@ fn json_value_to_nanboxed(value: serde_json::Value) -> ValueWord {
         serde_json::Value::String(s) => ValueWord::from_string(Arc::new(s)),
         serde_json::Value::Array(arr) => {
             let items: Vec<ValueWord> = arr.into_iter().map(json_value_to_nanboxed).collect();
-            ValueWord::from_array(Arc::new(items))
+            ValueWord::from_array(shape_value::vmarray_from_vec(items))
         }
         serde_json::Value::Object(map) => {
             let mut keys = Vec::with_capacity(map.len());
@@ -82,7 +82,7 @@ fn json_value_to_enum(value: serde_json::Value, schema_id: u64) -> ValueWord {
             make_json_enum(
                 schema_id,
                 JSON_VARIANT_ARRAY,
-                Some(ValueWord::from_array(Arc::new(items))),
+                Some(ValueWord::from_array(shape_value::vmarray_from_vec(items))),
             )
         }
         serde_json::Value::Object(map) => {
@@ -176,7 +176,7 @@ fn json_value_to_typed_nb(
                 .iter()
                 .map(|v| json_value_to_typed_nb(v, &FieldType::Any, registry))
                 .collect::<Result<_, _>>()?;
-            Ok(ValueWord::from_array(Arc::new(items)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(items)))
         }
         (serde_json::Value::Object(obj), FieldType::Object(type_name)) => {
             if let Some(nested_schema) = registry.get(type_name) {
@@ -531,7 +531,7 @@ mod tests {
         let module = create_json_module();
         let stringify_fn = module.get_export("stringify").unwrap();
         let ctx = test_ctx();
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));

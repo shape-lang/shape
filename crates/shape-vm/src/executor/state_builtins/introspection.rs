@@ -26,10 +26,10 @@ fn frame_info_to_nb(frame: &shape_runtime::module_exports::FrameInfo) -> ValueWo
     let function_name = ValueWord::from_string(Arc::new(frame.function_name.clone()));
     let blob_hash = blob_hash_to_nb(frame.blob_hash);
     let ip = ValueWord::from_i64(frame.local_ip as i64);
-    let locals = ValueWord::from_array(Arc::new(frame.locals.clone()));
-    let args = ValueWord::from_array(Arc::new(frame.args.clone()));
+    let locals = ValueWord::from_array(shape_value::vmarray_from_vec(frame.locals.clone()));
+    let args = ValueWord::from_array(shape_value::vmarray_from_vec(frame.args.clone()));
     let upvalues = match &frame.upvalues {
-        Some(vals) => ValueWord::from_array(Arc::new(vals.clone())),
+        Some(vals) => ValueWord::from_array(shape_value::vmarray_from_vec(vals.clone())),
         None => ValueWord::none(),
     };
 
@@ -71,19 +71,19 @@ pub(crate) fn state_capture_all_stub(
         .ok_or("state.capture_all: VM state not available")?;
     let frames = vm_state.all_frames();
     let frame_nbs: Vec<ValueWord> = frames.iter().map(frame_info_to_nb).collect();
-    let frames_arr = ValueWord::from_array(Arc::new(frame_nbs));
+    let frames_arr = ValueWord::from_array(shape_value::vmarray_from_vec(frame_nbs));
 
     let bindings = vm_state.module_bindings();
     let pairs: Vec<ValueWord> = bindings
         .into_iter()
         .map(|(name, value)| {
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new(name)),
                 value,
             ]))
         })
         .collect();
-    let bindings_arr = ValueWord::from_array(Arc::new(pairs));
+    let bindings_arr = ValueWord::from_array(shape_value::vmarray_from_vec(pairs));
     let ic = ValueWord::from_i64(vm_state.instruction_count() as i64);
 
     Ok(shape_runtime::type_schema::typed_object_from_pairs(&[
@@ -107,13 +107,13 @@ pub(crate) fn state_capture_module_stub(
     let pairs: Vec<ValueWord> = bindings
         .into_iter()
         .map(|(name, value)| {
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new(name)),
                 value,
             ]))
         })
         .collect();
-    let bindings_arr = ValueWord::from_array(Arc::new(pairs));
+    let bindings_arr = ValueWord::from_array(shape_value::vmarray_from_vec(pairs));
 
     Ok(shape_runtime::type_schema::typed_object_from_pairs(&[(
         "bindings",
@@ -167,7 +167,7 @@ pub(crate) fn state_capture_call_stub(
         return Err("state.capture_call: first argument is not a function".to_string());
     };
 
-    let args_arr = ValueWord::from_array(Arc::new(call_args.to_vec()));
+    let args_arr = ValueWord::from_array(shape_value::vmarray_from_vec(call_args.to_vec()));
 
     Ok(shape_runtime::type_schema::typed_object_from_pairs(&[
         ("hash", hash_nb),
@@ -361,7 +361,7 @@ pub(crate) fn state_args_stub(
 ) -> Result<ValueWord, String> {
     let vm_state = ctx.vm_state.ok_or("state.args: VM state not available")?;
     let current_args = vm_state.current_args();
-    Ok(ValueWord::from_array(Arc::new(current_args)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(current_args)))
 }
 
 /// `state.locals() -> Map<string, any>`
@@ -376,13 +376,13 @@ pub(crate) fn state_locals_stub(
     let pairs: Vec<ValueWord> = locals
         .into_iter()
         .map(|(name, value)| {
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new(name)),
                 value,
             ]))
         })
         .collect();
-    Ok(ValueWord::from_array(Arc::new(pairs)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(pairs)))
 }
 
 // ===========================================================================

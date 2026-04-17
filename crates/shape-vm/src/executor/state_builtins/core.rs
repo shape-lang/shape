@@ -472,7 +472,7 @@ pub(crate) fn state_serialize(
         .iter()
         .map(|&b| ValueWord::from_i64(b as i64))
         .collect();
-    Ok(ValueWord::from_array(Arc::new(arr)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))
 }
 
 /// `state.deserialize(bytes) -> Any`
@@ -554,7 +554,7 @@ pub(crate) fn state_diff(args: &[ValueWord], ctx: &ModuleContext) -> Result<Valu
         .iter()
         .map(|s| ValueWord::from_string(Arc::new(s.clone())))
         .collect();
-    let removed = ValueWord::from_array(Arc::new(removed_arr));
+    let removed = ValueWord::from_array(shape_value::vmarray_from_vec(removed_arr));
 
     // Create a proper Delta TypedObject using the registered schema
     if let Some(schema) = ctx.schemas.get("Delta") {

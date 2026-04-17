@@ -412,9 +412,17 @@ impl From<ShapeArray> for Vec<ValueWord> {
 }
 
 impl From<std::sync::Arc<Vec<ValueWord>>> for ShapeArray {
-    /// Convert from the legacy `VMArray` (`Arc<Vec<ValueWord>>`).
+    /// Convert from the legacy `Arc<Vec<ValueWord>>` form.
     /// Clones the elements since the Arc may be shared.
     fn from(arc: std::sync::Arc<Vec<ValueWord>>) -> Self {
+        Self::from_slice(&arc)
+    }
+}
+
+impl From<std::sync::Arc<crate::value::VMArrayBuf>> for ShapeArray {
+    /// Convert from the current `VMArray` (`Arc<SmallVec<[ValueWord; 8]>>`).
+    /// Clones the elements since the Arc may be shared.
+    fn from(arc: std::sync::Arc<crate::value::VMArrayBuf>) -> Self {
         Self::from_slice(&arc)
     }
 }

@@ -657,7 +657,7 @@ mod tests {
         let schema_reg = create_test_registry();
         let formatter = VMValueFormatter::new(&schema_reg);
 
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
             ValueWord::from_f64(3.0),
@@ -772,7 +772,7 @@ mod tests {
         let schema_reg = create_test_registry();
         let formatter = VMValueFormatter::new(&schema_reg);
 
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
             ValueWord::from_f64(3.0),
@@ -785,7 +785,7 @@ mod tests {
         let schema_reg = create_test_registry();
         let formatter = VMValueFormatter::new(&schema_reg);
 
-        let arr = ValueWord::from_array(Arc::new(vec![
+        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_string(Arc::new("two".to_string())),
             ValueWord::from_bool(true),

@@ -409,7 +409,7 @@ fn make_trace_info_single(frame: ValueWord) -> ValueWord {
 fn make_trace_info_full(frames: Vec<ValueWord>) -> ValueWord {
     shape_runtime::type_schema::typed_object_from_pairs(&[
         ("kind", ValueWord::from_string(Arc::new("full".to_string()))),
-        ("frames", ValueWord::from_array(Arc::new(frames))),
+        ("frames", ValueWord::from_array(shape_value::vmarray_from_vec(frames))),
     ])
 }
 

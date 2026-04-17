@@ -286,7 +286,7 @@ fn bytes_to_nanboxed_array(data: &[u8]) -> ValueWord {
         .iter()
         .map(|&b| ValueWord::from_i64(b as i64))
         .collect();
-    ValueWord::from_array(Arc::new(elements))
+    ValueWord::from_array(shape_value::vmarray_from_vec(elements))
 }
 
 /// Extract a typed `TransportHandle` from an IoHandle argument.
@@ -647,7 +647,7 @@ fn transport_memo_stats(args: &[ValueWord], _ctx: &ModuleContext) -> Result<Valu
         ValueWord::from_i64(stats.evictions as i64),
         ValueWord::from_i64(stats.total_requests as i64),
     ];
-    Ok(ValueWord::from_array(Arc::new(elements)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(elements)))
 }
 
 /// transport.memo_invalidate(handle) -> ()

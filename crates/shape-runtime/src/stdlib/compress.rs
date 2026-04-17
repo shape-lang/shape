@@ -338,7 +338,7 @@ mod tests {
         let ctx = test_ctx();
         let gunzip_fn = module.get_export("gunzip").unwrap();
 
-        let bad_data = ValueWord::from_array(Arc::new(vec![
+        let bad_data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),

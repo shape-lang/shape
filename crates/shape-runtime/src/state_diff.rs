@@ -683,7 +683,7 @@ pub fn patch_value(base: &ValueWord, delta: &Delta, schemas: &TypeSchemaRegistry
             }
         }
 
-        return ValueWord::from_array(Arc::new(new_arr));
+        return ValueWord::from_array(shape_value::vmarray_from_vec(new_arr));
     }
 
     // Try to patch HashMap entries
@@ -774,11 +774,11 @@ mod tests {
     #[test]
     fn test_diff_arrays_same() {
         let schemas = TypeSchemaRegistry::new();
-        let a = ValueWord::from_array(Arc::new(vec![
+        let a = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
-        let b = ValueWord::from_array(Arc::new(vec![
+        let b = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
@@ -790,11 +790,11 @@ mod tests {
     #[test]
     fn test_diff_arrays_element_changed() {
         let schemas = TypeSchemaRegistry::new();
-        let a = ValueWord::from_array(Arc::new(vec![
+        let a = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
-        let b = ValueWord::from_array(Arc::new(vec![
+        let b = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(99.0),
         ]));
@@ -806,8 +806,8 @@ mod tests {
     #[test]
     fn test_diff_arrays_element_added() {
         let schemas = TypeSchemaRegistry::new();
-        let a = ValueWord::from_array(Arc::new(vec![ValueWord::from_f64(1.0)]));
-        let b = ValueWord::from_array(Arc::new(vec![
+        let a = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_f64(1.0)]));
+        let b = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
@@ -819,11 +819,11 @@ mod tests {
     #[test]
     fn test_diff_arrays_element_removed() {
         let schemas = TypeSchemaRegistry::new();
-        let a = ValueWord::from_array(Arc::new(vec![
+        let a = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
-        let b = ValueWord::from_array(Arc::new(vec![ValueWord::from_f64(1.0)]));
+        let b = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_f64(1.0)]));
         let delta = diff_values(&a, &b, &schemas);
         assert_eq!(delta.removed.len(), 1);
         assert!(delta.removed.contains(&"[1]".to_string()));
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn test_patch_array_element() {
         let schemas = TypeSchemaRegistry::new();
-        let base = ValueWord::from_array(Arc::new(vec![
+        let base = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
@@ -1287,22 +1287,22 @@ mod tests {
     fn test_diff_nested_arrays_recursive() {
         let schemas = TypeSchemaRegistry::new();
         // Array of arrays: [[1, 2], [3, 4]]
-        let inner1_old = ValueWord::from_array(Arc::new(vec![
+        let inner1_old = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
-        let inner2 = ValueWord::from_array(Arc::new(vec![
+        let inner2 = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(3.0),
             ValueWord::from_f64(4.0),
         ]));
-        let a = ValueWord::from_array(Arc::new(vec![inner1_old, inner2.clone()]));
+        let a = ValueWord::from_array(shape_value::vmarray_from_vec(vec![inner1_old, inner2.clone()]));
 
         // Change inner array [0][1] from 2.0 to 99.0
-        let inner1_new = ValueWord::from_array(Arc::new(vec![
+        let inner1_new = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(99.0),
         ]));
-        let b = ValueWord::from_array(Arc::new(vec![inner1_new, inner2]));
+        let b = ValueWord::from_array(shape_value::vmarray_from_vec(vec![inner1_new, inner2]));
 
         let delta = diff_values(&a, &b, &schemas);
         // Should recursively diff and produce [0].[1] as changed
@@ -1334,8 +1334,8 @@ mod tests {
             })
         };
 
-        let a = ValueWord::from_array(Arc::new(vec![mk_point(1.0, 2.0), mk_point(3.0, 4.0)]));
-        let b = ValueWord::from_array(Arc::new(vec![mk_point(1.0, 2.0), mk_point(3.0, 99.0)]));
+        let a = ValueWord::from_array(shape_value::vmarray_from_vec(vec![mk_point(1.0, 2.0), mk_point(3.0, 4.0)]));
+        let b = ValueWord::from_array(shape_value::vmarray_from_vec(vec![mk_point(1.0, 2.0), mk_point(3.0, 99.0)]));
 
         let delta = diff_values(&a, &b, &schemas);
         // Should recursively diff: [1].y changed
@@ -1353,11 +1353,11 @@ mod tests {
         // detected recursively.
         let schemas = TypeSchemaRegistry::new();
 
-        let old_arr = ValueWord::from_array(Arc::new(vec![
+        let old_arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(2.0),
         ]));
-        let new_arr = ValueWord::from_array(Arc::new(vec![
+        let new_arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(99.0),
         ]));

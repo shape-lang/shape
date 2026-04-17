@@ -443,8 +443,9 @@ pub fn external_to_nb(ev: &ExternalValue, schemas: &dyn SchemaLookup) -> ValueWo
         ExternalValue::None => ValueWord::none(),
         ExternalValue::Unit => ValueWord::unit(),
         ExternalValue::Array(items) => {
-            let nbs: Vec<ValueWord> = items.iter().map(|v| external_to_nb(v, schemas)).collect();
-            ValueWord::from_array(std::sync::Arc::new(nbs))
+            let nbs: crate::value::VMArrayBuf =
+                items.iter().map(|v| external_to_nb(v, schemas)).collect();
+            ValueWord::from_array(crate::value::vmarray_from_vec(nbs))
         }
         ExternalValue::Decimal(s) => {
             if let Ok(d) = s.parse::<rust_decimal::Decimal>() {
@@ -640,7 +641,7 @@ mod tests {
     #[test]
     fn test_array() {
         let arr = vec![ValueWord::from_i64(1), ValueWord::from_i64(2)];
-        let nb = ValueWord::from_array(std::sync::Arc::new(arr));
+        let nb = ValueWord::from_array(crate::value::vmarray_from_vec(arr));
         let ev = nb_to_external(&nb, &NoSchemaLookup);
         assert_eq!(
             ev,

@@ -402,7 +402,7 @@ impl VirtualMachine {
         // Slots: [kind, frames] — both heap
         let slots = vec![
             ValueSlot::from_heap(HeapValue::String(Arc::new("full".to_string()))),
-            ValueSlot::from_heap(HeapValue::Array(Arc::new(frames))),
+            ValueSlot::from_heap(HeapValue::Array(shape_value::vmarray_from_vec(frames))),
         ];
         let heap_mask: u64 = 0b11;
 

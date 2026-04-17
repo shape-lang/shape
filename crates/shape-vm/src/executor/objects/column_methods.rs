@@ -227,7 +227,7 @@ pub fn v2_to_array(
     let (table, col_id) = extract_col_nb(&vw)?;
     let col = get_arrow_col(table, col_id)?;
     let nb_values = arrow_array_to_nanboxed(col)?;
-    Ok(ValueWord::from_array(Arc::new(nb_values)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(nb_values)).into_raw_bits())
 }
 
 /// `col.abs()` — element-wise absolute value, returns Array (v2).
@@ -243,7 +243,7 @@ pub fn v2_abs(
         .iter()
         .map(|v| ValueWord::from_f64(v.abs()))
         .collect();
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 // =============================================================================

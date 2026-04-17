@@ -97,7 +97,7 @@ pub fn create_env_module() -> ModuleExports {
             let args: Vec<ValueWord> = std::env::args()
                 .map(|a| ValueWord::from_string(Arc::new(a)))
                 .collect();
-            Ok(ValueWord::from_array(Arc::new(args)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(args)))
         },
         ModuleFunction {
             description: "Get command-line arguments as an array of strings".to_string(),

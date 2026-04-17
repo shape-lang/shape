@@ -106,7 +106,7 @@ pub fn source_schema_to_nb(schema: &SourceSchema) -> ValueWord {
                     "name",
                     ValueWord::from_string(Arc::new(entity.name.clone())),
                 ),
-                ("columns", ValueWord::from_array(Arc::new(columns))),
+                ("columns", ValueWord::from_array(shape_value::vmarray_from_vec(columns))),
             ]);
 
             (table_name.clone(), entity_nb)

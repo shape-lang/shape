@@ -34,5 +34,5 @@ pub fn bytes_to_array(bytes: &[u8]) -> ValueWord {
         .iter()
         .map(|&b| ValueWord::from_i64(b as i64))
         .collect();
-    ValueWord::from_array(Arc::new(items))
+    ValueWord::from_array(shape_value::vmarray_from_vec(items))
 }

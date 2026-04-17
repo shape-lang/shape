@@ -78,7 +78,7 @@ impl VirtualMachine {
             }
         }
 
-        Ok(ValueWord::from_array(Arc::new(values)))
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(values)))
     }
 
     /// Integer-only range: produces ValueWord::Int values when all args are Int
@@ -126,7 +126,7 @@ impl VirtualMachine {
             }
         }
 
-        Ok(ValueWord::from_array(Arc::new(values)))
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(values)))
     }
 
     /// Slice: Extract subarray from start to end indices
@@ -180,6 +180,6 @@ impl VirtualMachine {
             Vec::new()
         };
 
-        Ok(ValueWord::from_array(Arc::new(sliced)))
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sliced)))
     }
 }

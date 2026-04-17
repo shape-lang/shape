@@ -43,7 +43,7 @@ pub(crate) fn handle_union_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_intersect_v2(
@@ -73,7 +73,7 @@ pub(crate) fn handle_intersect_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_except_v2(
@@ -103,7 +103,7 @@ pub(crate) fn handle_except_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_unique_v2(
@@ -133,7 +133,7 @@ pub(crate) fn handle_unique_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_distinct_v2(
@@ -173,5 +173,5 @@ pub(crate) fn handle_distinct_by_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }

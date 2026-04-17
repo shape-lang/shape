@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_render_scalar_array() {
-        let arr = Arc::new(vec![
+        let arr = shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_render_empty_array() {
-        let arr = Arc::new(vec![]);
+        let arr = shape_value::vmarray_from_vec(Vec::<ValueWord>::new());
         let val = ValueWord::from_array(arr);
         let node = render_as_content(&val);
         assert_eq!(node, ContentNode::plain("[]"));
@@ -624,7 +624,7 @@ mod tests {
             ("x", ValueWord::from_i64(3)),
             ("y", ValueWord::from_i64(4)),
         ]);
-        let arr = Arc::new(vec![row1, row2]);
+        let arr = shape_value::vmarray_from_vec(vec![row1, row2]);
         let val = ValueWord::from_array(arr);
         let node = render_as_content(&val);
         match &node {

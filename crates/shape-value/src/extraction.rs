@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_require_array() {
-        let nb = ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(1)]));
+        let nb = ValueWord::from_array(crate::value::vmarray_from_vec(vec![ValueWord::from_i64(1)]));
         assert_eq!(require_array(&nb).unwrap().len(), 1);
 
         let nb = ValueWord::from_f64(1.0);

@@ -164,12 +164,12 @@ impl SimulationEngineResult {
                 ValueWord::from_f64(self.elements_processed as f64),
             ),
             ("completed", ValueWord::from_bool(self.completed)),
-            ("events", ValueWord::from_array(Arc::new(events_value))),
+            ("events", ValueWord::from_array(shape_value::vmarray_from_vec(events_value))),
         ];
 
         if let Some(history) = &self.state_history {
             let history_nb: Vec<ValueWord> = history.iter().map(|v| v.clone()).collect();
-            nb_pairs.push(("state_history", ValueWord::from_array(Arc::new(history_nb))));
+            nb_pairs.push(("state_history", ValueWord::from_array(shape_value::vmarray_from_vec(history_nb))));
         }
 
         crate::type_schema::typed_object_from_nb_pairs(&nb_pairs).clone()

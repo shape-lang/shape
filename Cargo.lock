@@ -5595,6 +5595,7 @@ dependencies = [
  "serde_json",
  "shape-ast",
  "shape-gc",
+ "smallvec",
  "thiserror 1.0.69",
 ]
 

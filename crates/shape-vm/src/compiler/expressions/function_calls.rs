@@ -104,7 +104,7 @@ pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ValueWord> {
                 .iter()
                 .map(eval_const_expr_to_nanboxed)
                 .collect::<Option<Vec<_>>>()?;
-            Some(ValueWord::from_array(Arc::new(values)))
+            Some(ValueWord::from_array(shape_value::vmarray_from_vec(values)))
         }
         Expr::UnaryOp { op, operand, .. } => {
             let value = eval_const_expr_to_nanboxed(operand)?;

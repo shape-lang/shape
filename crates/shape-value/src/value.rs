@@ -8,8 +8,16 @@ use std::sync::{Arc, RwLock};
 
 use crate::value_word::ValueWord;
 
+/// Inline capacity for small VMArrays (≤ 8 elements stored inline, no heap buffer).
+pub const VMARRAY_INLINE_CAP: usize = 8;
+
+/// Backing buffer for VMArray — SmallVec with 8-element inline capacity.
+/// Small arrays skip the separate Vec heap allocation entirely.
+pub type VMArrayBuf = smallvec::SmallVec<[ValueWord; VMARRAY_INLINE_CAP]>;
+
 /// Type alias for array storage — ValueWord elements for 9x memory reduction.
-pub type VMArray = Arc<Vec<ValueWord>>;
+/// Small arrays (≤ 8 elements) are stored inline in the SmallVec; larger arrays spill to heap.
+pub type VMArray = Arc<VMArrayBuf>;
 
 /// Upvalue - a captured variable that can be shared between closures and their enclosing scope.
 ///
@@ -197,4 +205,106 @@ pub fn vmarray_from_value_words(iter: impl IntoIterator<Item = ValueWord>) -> VM
 /// Backward-compatibility alias.
 pub fn vmarray_from_nanboxed(iter: impl IntoIterator<Item = ValueWord>) -> VMArray {
     vmarray_from_value_words(iter)
+}
+
+/// Wrap a buffer of `ValueWord`s as a VMArray.
+///
+/// Accepts either a `Vec<ValueWord>` or an existing `VMArrayBuf`. When the
+/// buffer has 8 or fewer elements the data is moved inline into the SmallVec,
+/// skipping the separate heap buffer allocation that a plain `Arc<Vec<_>>`
+/// would incur. Larger inputs reuse the existing heap buffer.
+#[inline]
+pub fn vmarray_from_vec<V: Into<VMArrayBuf>>(v: V) -> VMArray {
+    Arc::new(v.into())
+}
+
+#[cfg(test)]
+mod inline_vmarray_tests {
+    //! Verify the small-array-inline behavior of `VMArray`.
+    //!
+    //! `VMArray = Arc<SmallVec<[ValueWord; 8]>>` so arrays with up to 8
+    //! elements store their data inline in the SmallVec (no separate heap
+    //! buffer), while arrays with 9+ elements spill transparently.
+    use super::*;
+    use crate::value_word::{ValueWord, ValueWordExt};
+
+    #[test]
+    fn empty_small_array_is_inline() {
+        let arr: VMArray = vmarray_from_vec(Vec::<ValueWord>::new());
+        assert_eq!(arr.len(), 0);
+        assert!(!arr.spilled(), "empty SmallVec must stay inline");
+    }
+
+    #[test]
+    fn small_array_up_to_inline_cap_stays_inline() {
+        for n in 1..=VMARRAY_INLINE_CAP {
+            let v: Vec<ValueWord> = (0..n as i64).map(ValueWord::from_i64).collect();
+            let arr: VMArray = vmarray_from_vec(v);
+            assert_eq!(arr.len(), n);
+            assert!(
+                !arr.spilled(),
+                "len={n} (≤ {VMARRAY_INLINE_CAP}) should not spill to heap"
+            );
+            for i in 0..n {
+                assert_eq!(arr[i].as_i64(), Some(i as i64));
+            }
+        }
+    }
+
+    #[test]
+    fn large_array_spills_to_heap() {
+        let big = VMARRAY_INLINE_CAP + 4;
+        let v: Vec<ValueWord> = (0..big as i64).map(ValueWord::from_i64).collect();
+        let arr: VMArray = vmarray_from_vec(v);
+        assert_eq!(arr.len(), big);
+        assert!(arr.spilled(), "len={big} must spill to heap");
+        assert_eq!(arr[0].as_i64(), Some(0));
+        assert_eq!(arr[big - 1].as_i64(), Some((big - 1) as i64));
+    }
+
+    #[test]
+    fn push_on_unique_owner_transitions_inline_to_heap() {
+        let mut buf = VMArrayBuf::new();
+        for i in 0..VMARRAY_INLINE_CAP as i64 {
+            buf.push(ValueWord::from_i64(i));
+        }
+        assert!(!buf.spilled(), "at inline capacity we must still be inline");
+        // One past inline capacity triggers spill.
+        buf.push(ValueWord::from_i64(99));
+        assert!(buf.spilled(), "exceeding inline cap must spill");
+        assert_eq!(buf.len(), VMARRAY_INLINE_CAP + 1);
+        assert_eq!(buf[VMARRAY_INLINE_CAP].as_i64(), Some(99));
+    }
+
+    #[test]
+    fn iter_and_index_work_inline_and_spilled() {
+        // Inline case.
+        let small: VMArray = vmarray_from_vec(vec![
+            ValueWord::from_i64(10),
+            ValueWord::from_i64(20),
+            ValueWord::from_i64(30),
+        ]);
+        let sum_small: i64 = small.iter().map(|v| v.as_i64().unwrap()).sum();
+        assert_eq!(sum_small, 60);
+        assert_eq!(small[1].as_i64(), Some(20));
+
+        // Spilled case.
+        let v: Vec<ValueWord> = (0..32i64).map(ValueWord::from_i64).collect();
+        let big: VMArray = vmarray_from_vec(v);
+        assert!(big.spilled());
+        let sum_big: i64 = big.iter().map(|v| v.as_i64().unwrap()).sum();
+        assert_eq!(sum_big, (0..32i64).sum::<i64>());
+        assert_eq!(big[31].as_i64(), Some(31));
+    }
+
+    #[test]
+    fn vmarray_size_on_stack_is_reasonable() {
+        // 8 inline ValueWords (8 bytes each) + len/cap metadata.
+        // Upper bound: 8 * 8 + 24 = 88 bytes, allow slight slack.
+        let sz = std::mem::size_of::<VMArrayBuf>();
+        assert!(
+            sz <= 96,
+            "VMArrayBuf should be <=96 bytes on stack, got {sz}",
+        );
+    }
 }

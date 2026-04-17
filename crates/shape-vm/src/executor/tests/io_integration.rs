@@ -257,7 +257,7 @@ fn test_io_exec_captures_output() {
     use shape_runtime::stdlib_io::process_ops;
 
     // io_exec takes command as first arg, args array as second
-    let args_array = ValueWord::from_array(std::sync::Arc::new(vec![
+    let args_array = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
         ValueWord::from_string(Arc::new("-c".into())),
         ValueWord::from_string(Arc::new("echo hello".into())),
     ]));

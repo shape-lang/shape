@@ -143,7 +143,7 @@ fn typed_msgpack_to_nanboxed(
                             )
                         })
                         .collect();
-                    Ok(ValueWord::from_array(Arc::new(items?)))
+                    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(items?)))
                 }
                 _ => Err(marshal_error(format!(
                     "expected Vec, got {}",
@@ -260,7 +260,7 @@ fn marshal_typed_object(
             FieldType::Array(_) => {
                 let arr_nb = val
                     .map(|v| untyped_msgpack_to_nanboxed(v))
-                    .unwrap_or_else(|| ValueWord::from_array(Arc::new(Vec::new())));
+                    .unwrap_or_else(|| ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new())));
                 // Extract the inner array or wrap
                 let heap_val = if let Some(view) = arr_nb.as_any_array() {
                     HeapValue::Array(view.to_generic())
@@ -268,7 +268,7 @@ fn marshal_typed_object(
                 } else if let Some(hv) = arr_nb.as_heap_ref() { // cold-path
                     hv.clone()
                 } else {
-                    HeapValue::Array(Arc::new(Vec::new()))
+                    HeapValue::Array(shape_value::vmarray_from_vec(Vec::new()))
                 };
                 slots.push(ValueSlot::from_heap(heap_val));
                 heap_mask |= 1u64 << (slots.len() - 1);
@@ -490,7 +490,7 @@ fn untyped_msgpack_to_nanboxed(val: &rmpv::Value) -> ValueWord {
         }
         rmpv::Value::Array(arr) => {
             let items: Vec<ValueWord> = arr.iter().map(untyped_msgpack_to_nanboxed).collect();
-            ValueWord::from_array(Arc::new(items))
+            ValueWord::from_array(shape_value::vmarray_from_vec(items))
         }
         rmpv::Value::Map(entries) => {
             let mut keys = Vec::with_capacity(entries.len());
@@ -541,7 +541,7 @@ mod tests {
             ],
         );
 
-        let readings = ValueWord::from_array(Arc::new(vec![
+        let readings = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             measurement_value(measurement_schema_id, "2026-02-22T10:00:00Z", 10.0, "A"),
             measurement_value(measurement_schema_id, "2026-02-22T10:01:00Z", 10.5, "A"),
         ]));

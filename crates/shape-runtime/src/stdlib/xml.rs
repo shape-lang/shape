@@ -89,7 +89,7 @@ fn parse_element(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Value
     let mut node_values = vec![
         ValueWord::from_string(Arc::new(name)),
         attributes,
-        ValueWord::from_array(Arc::new(children)),
+        ValueWord::from_array(shape_value::vmarray_from_vec(children)),
     ];
 
     if !text_parts.is_empty() {
@@ -130,7 +130,7 @@ fn parse_empty_element(start: &BytesStart) -> Result<ValueWord, String> {
     let node_values = vec![
         ValueWord::from_string(Arc::new(name)),
         attributes,
-        ValueWord::from_array(Arc::new(Vec::new())),
+        ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new())),
     ];
 
     Ok(ValueWord::from_hashmap_pairs(node_keys, node_values))
@@ -451,7 +451,7 @@ mod tests {
         let node_values = vec![
             ValueWord::from_string(Arc::new("root".to_string())),
             ValueWord::from_hashmap_pairs(vec![], vec![]),
-            ValueWord::from_array(Arc::new(vec![])),
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
             ValueWord::from_string(Arc::new("hello".to_string())),
         ];
         let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
@@ -482,7 +482,7 @@ mod tests {
         let node_values = vec![
             ValueWord::from_string(Arc::new("item".to_string())),
             attrs,
-            ValueWord::from_array(Arc::new(vec![])),
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
         ];
         let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
 
@@ -506,7 +506,7 @@ mod tests {
         let node_values = vec![
             ValueWord::from_string(Arc::new("br".to_string())),
             ValueWord::from_hashmap_pairs(vec![], vec![]),
-            ValueWord::from_array(Arc::new(vec![])),
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
         ];
         let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
 

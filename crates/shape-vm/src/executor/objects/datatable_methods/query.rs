@@ -217,7 +217,7 @@ pub(crate) fn handle_group_by(
             let row_count = dt_arc.row_count();
 
             if row_count == 0 {
-                return Ok(ValueWord::from_array(Arc::new(Vec::<ValueWord>::new())).into_raw_bits());
+                return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(Vec::<ValueWord>::new())).into_raw_bits());
             }
 
             let mut key_row_pairs: Vec<(ValueWord, usize)> = Vec::with_capacity(row_count);
@@ -283,7 +283,7 @@ pub(crate) fn handle_group_by(
                 }
             }
 
-            return Ok(ValueWord::from_array(Arc::new(groups)).into_raw_bits());
+            return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(groups)).into_raw_bits());
         }
     }
 
@@ -318,7 +318,7 @@ pub(crate) fn handle_group_by(
 
     let row_count = sorted_dt.row_count();
     if row_count == 0 {
-        return Ok(ValueWord::from_array(Arc::new(Vec::new())).into_raw_bits());
+        return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new())).into_raw_bits());
     }
 
     let mut groups: Vec<ValueWord> = Vec::new();
@@ -356,7 +356,7 @@ pub(crate) fn handle_group_by(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(groups)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(groups)).into_raw_bits())
 }
 
 /// `dt.forEach(fn)` — iterate rows as RowView values, calling closure for each.

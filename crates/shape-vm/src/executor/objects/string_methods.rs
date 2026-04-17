@@ -335,7 +335,7 @@ pub fn v2_string_split(
         function: "split".to_string(), message: "requires a separator argument".to_string(),
     })?;
     let parts: Vec<ValueWord> = s.split(sep).map(|part| ValueWord::from_string(Arc::new(part.to_string()))).collect();
-    Ok(ValueWord::from_array(Arc::new(parts)).raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(parts)).raw_bits())
 }
 
 /// replace
@@ -412,7 +412,7 @@ pub fn v2_string_graphemes(
     let s = raw_helpers::extract_str(args[0])
         .ok_or_else(|| raw_helpers::type_error("string", args[0]))?;
     let clusters: Vec<ValueWord> = s.graphemes(true).map(|g| ValueWord::from_string(Arc::new(g.to_string()))).collect();
-    Ok(ValueWord::from_array(Arc::new(clusters)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(clusters)).into_raw_bits())
 }
 
 /// normalize

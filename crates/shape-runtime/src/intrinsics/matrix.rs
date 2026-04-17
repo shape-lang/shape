@@ -74,7 +74,7 @@ fn extract_matrix_f64(nb: &ValueWord, label: &str) -> Result<(Vec<f64>, usize, u
 
 fn matrix_to_nb(flat: &[f64], rows: usize, cols: usize) -> ValueWord {
     if rows == 0 {
-        return ValueWord::from_array(Arc::new(Vec::new()));
+        return ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new()));
     }
     let mut out_rows = Vec::with_capacity(rows);
     for i in 0..rows {
@@ -82,9 +82,9 @@ fn matrix_to_nb(flat: &[f64], rows: usize, cols: usize) -> ValueWord {
         let row = (0..cols)
             .map(|j| ValueWord::from_f64(flat[base + j]))
             .collect::<Vec<_>>();
-        out_rows.push(ValueWord::from_array(Arc::new(row)));
+        out_rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(row)));
     }
-    ValueWord::from_array(Arc::new(out_rows))
+    ValueWord::from_array(shape_value::vmarray_from_vec(out_rows))
 }
 
 /// Core matrix-vector multiplication: `Mat<number> * Vec<number> -> Vec<number>`.
@@ -170,8 +170,8 @@ mod tests {
     use crate::context::ExecutionContext;
 
     fn nb_vec(values: &[f64]) -> ValueWord {
-        ValueWord::from_array(Arc::new(
-            values.iter().copied().map(ValueWord::from_f64).collect(),
+        ValueWord::from_array(shape_value::vmarray_from_value_words(
+            values.iter().copied().map(ValueWord::from_f64),
         ))
     }
 
@@ -180,7 +180,7 @@ mod tests {
             .iter()
             .map(|row| nb_vec(row))
             .collect::<Vec<ValueWord>>();
-        ValueWord::from_array(Arc::new(out))
+        ValueWord::from_array(shape_value::vmarray_from_vec(out))
     }
 
     fn unwrap_vec(nb: ValueWord) -> Vec<f64> {

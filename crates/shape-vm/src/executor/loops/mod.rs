@@ -309,7 +309,7 @@ impl VirtualMachine {
                     ValueWord::none()
                 } else {
                     let i = idx as usize;
-                    ValueWord::from_array(Arc::new(vec![hm.keys[i].clone(), hm.values[i].clone()]))
+                    ValueWord::from_array(shape_value::vmarray_from_vec(vec![hm.keys[i].clone(), hm.values[i].clone()]))
                 }
             }
             _ => {

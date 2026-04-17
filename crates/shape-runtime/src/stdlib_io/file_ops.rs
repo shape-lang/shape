@@ -185,7 +185,7 @@ pub fn io_read_bytes(
         .iter()
         .map(|&b| ValueWord::from_i64(b as i64))
         .collect();
-    Ok(ValueWord::from_array(std::sync::Arc::new(arr)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))
 }
 
 /// io.write(handle, data) -> int (bytes written)
@@ -416,7 +416,7 @@ pub fn io_read_dir(
         })
         .collect();
 
-    Ok(ValueWord::from_array(std::sync::Arc::new(entries)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(entries)))
 }
 
 /// io.read_gzip(path: string) -> string

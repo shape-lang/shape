@@ -94,11 +94,10 @@ pub fn align_tables(ctx: &mut ExecutionContext, args: &[ValueWord]) -> Result<Va
         }
     };
 
-    let ids_val = ValueWord::from_array(Arc::new(
+    let ids_val = ValueWord::from_array(shape_value::vmarray_from_value_words(
         dataset_ids
             .iter()
-            .map(|s| ValueWord::from_string(s.clone()))
-            .collect(),
+            .map(|s| ValueWord::from_string(s.clone())),
     ));
 
     // Convert aligned data to ValueWord
@@ -115,12 +114,12 @@ pub fn align_tables(ctx: &mut ExecutionContext, args: &[ValueWord]) -> Result<Va
                 crate::type_schema::typed_object_from_nb_pairs(&pairs)
             })
             .collect();
-        aligned_data_val.push(ValueWord::from_array(Arc::new(rows_val)));
+        aligned_data_val.push(ValueWord::from_array(shape_value::vmarray_from_vec(rows_val)));
     }
 
     Ok(crate::type_schema::typed_object_from_nb_pairs(&[
         ("ids", ids_val),
-        ("data", ValueWord::from_array(Arc::new(aligned_data_val))),
+        ("data", ValueWord::from_array(shape_value::vmarray_from_vec(aligned_data_val))),
     ]))
 }
 

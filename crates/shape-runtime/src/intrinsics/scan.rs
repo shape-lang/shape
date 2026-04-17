@@ -190,7 +190,7 @@ mod tests {
     fn test_intrinsic_scan_max() {
         let mut ctx = ExecutionContext::new_empty();
 
-        let series = ValueWord::from_array(Arc::new(vec![
+        let series = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(3.0),
             ValueWord::from_f64(1.0),
             ValueWord::from_f64(4.0),
@@ -213,7 +213,7 @@ mod tests {
     fn test_intrinsic_scan_or_alerts() {
         let mut ctx = ExecutionContext::new_empty();
 
-        let alerts = ValueWord::from_array(Arc::new(vec![
+        let alerts = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_f64(0.0),
             ValueWord::from_f64(0.0),
             ValueWord::from_f64(1.0),

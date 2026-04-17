@@ -263,7 +263,7 @@ impl super::ExecutionContext {
                             self.declare_pattern(
                                 inner,
                                 kind,
-                                ValueWord::from_array(Arc::new(rest_values)),
+                                ValueWord::from_array(shape_value::vmarray_from_vec(rest_values)),
                             )?;
                             break;
                         } else {
@@ -368,7 +368,7 @@ impl super::ExecutionContext {
                             } else {
                                 Vec::new()
                             };
-                            self.set_pattern(inner, ValueWord::from_array(Arc::new(rest_values)))?;
+                            self.set_pattern(inner, ValueWord::from_array(shape_value::vmarray_from_vec(rest_values)))?;
                             break;
                         } else {
                             let val = arr.get(i).map(|nb| nb.clone()).unwrap_or(ValueWord::none());

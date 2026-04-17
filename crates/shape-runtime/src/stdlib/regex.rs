@@ -31,7 +31,7 @@ fn match_to_nanboxed(m: &regex::Match, captures: &regex::Captures) -> ValueWord 
         })
         .collect();
     keys.push(ValueWord::from_string(Arc::new("groups".to_string())));
-    values.push(ValueWord::from_array(Arc::new(groups)));
+    values.push(ValueWord::from_array(shape_value::vmarray_from_vec(groups)));
 
     ValueWord::from_hashmap_pairs(keys, values)
 }
@@ -178,7 +178,7 @@ pub fn create_regex_module() -> ModuleExports {
                 })
                 .collect();
 
-            Ok(ValueWord::from_array(Arc::new(matches)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(matches)))
         },
         ModuleFunction {
             description: "Find all non-overlapping matches of the pattern".to_string(),
@@ -331,7 +331,7 @@ pub fn create_regex_module() -> ModuleExports {
                 .map(|s| ValueWord::from_string(Arc::new(s.to_string())))
                 .collect();
 
-            Ok(ValueWord::from_array(Arc::new(parts)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(parts)))
         },
         ModuleFunction {
             description: "Split the text at each match of the pattern".to_string(),

@@ -214,7 +214,7 @@ pub fn jit_bits_to_nanboxed(bits: u64) -> shape_value::ValueWord {
         Some(HK_ARRAY) => {
             let arr = unsafe { JitArray::from_heap_bits(bits) };
             let values: Vec<ValueWord> = arr.iter().map(|&b| jit_bits_to_nanboxed(b)).collect();
-            ValueWord::from_array(Arc::new(values))
+            ValueWord::from_array(shape_value::vmarray_from_vec(values))
         }
         Some(HK_CLOSURE) => {
             let closure = unsafe { unified_unbox::<super::super::super::context::JITClosure>(bits) };
@@ -352,7 +352,7 @@ pub fn jit_bits_to_nanboxed_with_ctx(
             .iter()
             .map(|&b| jit_bits_to_nanboxed_with_ctx(b, ctx))
             .collect();
-        return ValueWord::from_array(Arc::new(values));
+        return ValueWord::from_array(shape_value::vmarray_from_vec(values));
     }
 
     // For other types, delegate to the basic converter

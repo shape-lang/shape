@@ -170,7 +170,7 @@ impl VirtualMachine {
             let mut result = Vec::with_capacity(arr_a.len() + arr_b.len());
             result.extend_from_slice(&arr_a);
             result.extend_from_slice(&arr_b);
-            return self.push_raw_u64(ValueWord::from_array(Arc::new(result)));
+            return self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(result)));
         }
 
         Err(VMError::TypeError {

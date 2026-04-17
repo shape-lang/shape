@@ -400,7 +400,7 @@ fn serializable_to_nb(sv: &shape_runtime::snapshot::SerializableVMValue) -> Valu
         SerializableVMValue::Function(id) => ValueWord::from_function(*id),
         SerializableVMValue::Array(items) => {
             let vals: Vec<_> = items.iter().map(serializable_to_nb).collect();
-            ValueWord::from_array(Arc::new(vals))
+            ValueWord::from_array(shape_value::vmarray_from_vec(vals))
         }
         SerializableVMValue::Decimal(d) => ValueWord::from_decimal(*d),
         SerializableVMValue::Some(inner) => ValueWord::from_some(serializable_to_nb(inner)),
@@ -492,7 +492,7 @@ fn remote_call(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, Str
     // Extract args array — could be an empty array or contain values
     let call_args: Vec<ValueWord> = args
         .get(2)
-        .and_then(|a| a.as_any_array().map(|view| (*view.to_generic()).clone()))
+        .and_then(|a| a.as_any_array().map(|view| view.to_generic().to_vec()))
         .unwrap_or_default();
 
     // Get the current program from thread-local

@@ -252,12 +252,12 @@ fn dispatch_method_via_trampoline(
                 }
                 "keys" => {
                     nanboxed_to_jit_bits(&shape_value::ValueWord::from_array(
-                        std::sync::Arc::new(hm.keys.clone()),
+                        shape_value::vmarray_from_vec(hm.keys.clone()),
                     ))
                 }
                 "values" => {
                     nanboxed_to_jit_bits(&shape_value::ValueWord::from_array(
-                        std::sync::Arc::new(hm.values.clone()),
+                        shape_value::vmarray_from_vec(hm.values.clone()),
                     ))
                 }
                 "length" | "len" | "size" => {
@@ -510,7 +510,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                     }
                     "keys" => {
                         return super::object::conversion::nanboxed_to_jit_bits(
-                            &shape_value::ValueWord::from_array(std::sync::Arc::new(hm.keys.clone())),
+                            &shape_value::ValueWord::from_array(shape_value::vmarray_from_vec(hm.keys.clone())),
                         );
                     }
                     "length" | "len" | "size" => {

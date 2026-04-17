@@ -84,7 +84,7 @@ pub(crate) fn handle_where_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(filtered)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(filtered)).into_raw_bits())
 }
 
 pub(crate) fn handle_select_v2(
@@ -130,7 +130,7 @@ pub(crate) fn handle_select_v2(
         results.push(ValueWord::from_raw_bits(result_bits));
     }
 
-    Ok(ValueWord::from_array(Arc::new(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
 }
 
 pub(crate) fn handle_find_v2(
@@ -478,7 +478,7 @@ pub(crate) fn handle_take_while_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_skip_while_v2(
@@ -526,7 +526,7 @@ pub(crate) fn handle_skip_while_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_for_each_v2(

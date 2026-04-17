@@ -1007,7 +1007,7 @@ pub(crate) fn handle_float_map(
         }
         Ok(ValueWord::from_float_array(Arc::new(typed.into())).into_raw_bits())
     } else {
-        Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
     }
 }
 
@@ -1247,7 +1247,7 @@ pub(crate) fn handle_int_map(
         let typed: Vec<i64> = result.iter().map(|nb| nb.as_i64().unwrap()).collect();
         Ok(ValueWord::from_int_array(Arc::new(typed.into())).into_raw_bits())
     } else {
-        Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
     }
 }
 

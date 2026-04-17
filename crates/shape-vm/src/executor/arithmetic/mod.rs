@@ -1410,7 +1410,7 @@ impl VirtualMachine {
                                 let mut result_arr = Vec::with_capacity(arr_a.len() + arr_b.len());
                                 result_arr.extend_from_slice(arr_a);
                                 result_arr.extend_from_slice(arr_b);
-                                return self.push_raw_u64(ValueWord::from_array(Arc::new(result_arr)));
+                                return self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(result_arr)));
                             }
                             // Decimal + non-decimal heap (shouldn't happen but handle)
                             (HeapValue::Decimal(a_dec), _) => {

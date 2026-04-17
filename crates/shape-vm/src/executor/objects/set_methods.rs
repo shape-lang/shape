@@ -119,7 +119,7 @@ pub fn v2_to_array(
 ) -> Result<u64, VMError> {
     if let Some(data) = extract_set(args[0]) {
         let arr: Vec<ValueWord> = data.items.clone();
-        Ok(ValueWord::from_array(Arc::new(arr)).into_raw_bits())
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)).into_raw_bits())
     } else {
         Err(type_mismatch_error("toArray", "Set"))
     }

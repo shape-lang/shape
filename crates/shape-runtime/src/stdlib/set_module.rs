@@ -354,7 +354,7 @@ pub fn create_set_module() -> ModuleExports {
                 .as_hashmap_data()
                 .ok_or_else(|| "set.to_array(): expected a set (HashMap)".to_string())?;
 
-            Ok(ValueWord::from_array(std::sync::Arc::new(
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(
                 data.keys.clone(),
             )))
         },

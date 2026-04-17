@@ -53,7 +53,7 @@ fn test_nanboxed_array_to_bytes_and_back() {
 
 #[test]
 fn test_nanboxed_array_to_bytes_out_of_range() {
-    let arr = ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(256)]));
+    let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_i64(256)]));
     let result = nanboxed_array_to_bytes(&arr);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("out of range"));

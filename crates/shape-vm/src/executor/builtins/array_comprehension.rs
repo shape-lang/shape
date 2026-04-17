@@ -70,7 +70,7 @@ impl VirtualMachine {
             results.push(mapped);
         }
 
-        Ok(ValueWord::from_array(Arc::new(results)))
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)))
     }
 
     /// Filter: Keep array elements matching predicate
@@ -106,7 +106,7 @@ impl VirtualMachine {
             }
         }
 
-        Ok(ValueWord::from_array(Arc::new(filtered)))
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(filtered)))
     }
 
     /// Reduce: Fold array to single value

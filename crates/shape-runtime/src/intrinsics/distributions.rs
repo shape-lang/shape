@@ -195,7 +195,7 @@ pub fn intrinsic_dist_sample_n(
         samples.push(sample);
     }
 
-    Ok(ValueWord::from_array(std::sync::Arc::new(samples)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(samples)))
 }
 
 #[cfg(test)]
@@ -276,7 +276,7 @@ mod tests {
         let result = intrinsic_dist_sample_n(
             &[
                 ValueWord::from_string(Arc::new("uniform".to_string())),
-                ValueWord::from_array(Arc::new(vec![
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                     ValueWord::from_f64(0.0),
                     ValueWord::from_f64(1.0),
                 ])),

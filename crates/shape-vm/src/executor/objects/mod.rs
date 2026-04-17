@@ -1307,7 +1307,7 @@ impl VirtualMachine {
                 for i in 0..view.len {
                     elems.push(v2::read_element(view, i).unwrap_or_else(ValueWord::none));
                 }
-                let legacy = ValueWord::from_array(std::sync::Arc::new(elems));
+                let legacy = ValueWord::from_array(shape_value::vmarray_from_vec(elems));
                 // Build a new SmallVec with the promoted receiver
                 let mut new_args: SmallVec<[u64; 8]> = SmallVec::with_capacity(raw_args.len());
                 new_args.push(legacy.into_raw_bits());

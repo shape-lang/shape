@@ -87,9 +87,9 @@ impl VirtualMachine {
             });
         }
         if let Some((keys, _values, _index)) = args[0].as_hashmap() {
-            Ok(ValueWord::from_array(Arc::new(keys.clone())))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(keys.clone())))
         } else {
-            Ok(ValueWord::from_array(Arc::new(Vec::new())))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new())))
         }
     }
 

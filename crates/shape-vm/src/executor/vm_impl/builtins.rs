@@ -343,7 +343,7 @@ impl VirtualMachine {
                     } else if args.len() == 1 {
                         // Set(array) — initialize from array
                         if let Some(arr) = args[0].as_any_array() {
-                            let items = std::sync::Arc::try_unwrap(arr.to_generic()).unwrap_or_else(|a| (*a).clone());
+                            let items = arr.to_generic().to_vec();
                             self.push_raw_u64(ValueWord::from_set(items))?;
                         } else {
                             // Single non-array item — wrap in set
@@ -361,7 +361,7 @@ impl VirtualMachine {
                     } else if args.len() == 1 {
                         // Deque(array) — initialize from array
                         if let Some(arr) = args[0].as_any_array() {
-                            let items = std::sync::Arc::try_unwrap(arr.to_generic()).unwrap_or_else(|a| (*a).clone());
+                            let items = arr.to_generic().to_vec();
                             self.push_raw_u64(ValueWord::from_deque(items))?;
                         } else {
                             // Single non-array item
@@ -378,7 +378,7 @@ impl VirtualMachine {
                         self.push_raw_u64(ValueWord::empty_priority_queue())?;
                     } else if args.len() == 1 {
                         if let Some(arr) = args[0].as_any_array() {
-                            let items = std::sync::Arc::try_unwrap(arr.to_generic()).unwrap_or_else(|a| (*a).clone());
+                            let items = arr.to_generic().to_vec();
                             self.push_raw_u64(ValueWord::from_priority_queue(items))?;
                         } else {
                             self.push_raw_u64(ValueWord::from_priority_queue(vec![args[0].clone()]))?;
@@ -621,7 +621,7 @@ impl VirtualMachine {
                         ValueWord::from_channel(sender),
                         ValueWord::from_channel(receiver),
                     ];
-                    self.push_raw_u64(ValueWord::from_array(std::sync::Arc::new(arr)))?;
+                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))?;
                 }
 
                 // Additional math builtins

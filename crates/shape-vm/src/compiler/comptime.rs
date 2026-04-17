@@ -760,7 +760,7 @@ fn normalize_comptime_value(nb: &ValueWord, vm: &VirtualMachine) -> ValueWord {
                 normalize_comptime_value(&elem, vm)
             })
             .collect();
-        return ValueWord::from_array(Arc::new(normalized));
+        return ValueWord::from_array(shape_value::vmarray_from_vec(normalized));
     }
 
     // cold-path: as_heap_ref retained — comptime value normalization
@@ -805,7 +805,7 @@ fn normalize_comptime_value(nb: &ValueWord, vm: &VirtualMachine) -> ValueWord {
                 .iter()
                 .map(|elem_nb| normalize_comptime_value(elem_nb, vm))
                 .collect();
-            ValueWord::from_array(Arc::new(normalized))
+            ValueWord::from_array(shape_value::vmarray_from_vec(normalized))
         }
         _ => nb.clone(),
     }
@@ -1264,11 +1264,11 @@ mod tests {
                 "name",
                 ValueWord::from_string(Arc::new("my_func".to_string())),
             ),
-            ("fields", ValueWord::from_array(Arc::new(vec![]))),
-            ("params", ValueWord::from_array(Arc::new(vec![]))),
+            ("fields", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
+            ("params", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
             ("return_type", ValueWord::none()),
-            ("annotations", ValueWord::from_array(Arc::new(vec![]))),
-            ("captures", ValueWord::from_array(Arc::new(vec![]))),
+            ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
+            ("captures", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
         ]);
 
         let result = execute_comptime_with_target(

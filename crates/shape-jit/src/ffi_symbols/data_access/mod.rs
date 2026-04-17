@@ -76,7 +76,7 @@ pub extern "C" fn jit_align_series(ctx: *mut JITContext, symbols_bits: u64, mode
                     }
                 })
                 .collect();
-            shape_value::ValueWord::from_array(Arc::new(values))
+            shape_value::ValueWord::from_array(shape_value::vmarray_from_vec(values))
         } else {
             return TAG_NULL;
         };

@@ -515,12 +515,12 @@ mod tests {
             interactive: true,
         });
         let node = ValueWord::from_content(chart);
-        let data_points = ValueWord::from_array(Arc::new(vec![
-            ValueWord::from_array(Arc::new(vec![
+        let data_points = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_f64(1.0),
                 ValueWord::from_f64(10.0),
             ])),
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_f64(2.0),
                 ValueWord::from_f64(20.0),
             ])),

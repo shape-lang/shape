@@ -105,7 +105,7 @@ pub(crate) fn handle_order_by_v2(
     }
 
     let sorted: Vec<ValueWord> = keyed.into_iter().map(|(_, v)| v).collect();
-    Ok(ValueWord::from_array(Arc::new(sorted)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted)).into_raw_bits())
 }
 
 pub(crate) fn handle_then_by_v2(

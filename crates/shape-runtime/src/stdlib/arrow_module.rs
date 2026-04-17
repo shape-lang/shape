@@ -80,7 +80,7 @@ pub fn create_arrow_module() -> ModuleExports {
                 tables.push(ValueWord::from_datatable(Arc::new(dt)));
             }
 
-            Ok(ValueWord::from_ok(ValueWord::from_array(Arc::new(tables))))
+            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(tables))))
         },
         ModuleFunction {
             description: "Read all record batches from an Arrow IPC file".to_string(),

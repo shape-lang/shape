@@ -75,7 +75,7 @@ pub(crate) fn handle_reverse_v2(
     let mut reversed = arr.to_vec();
     reversed.reverse();
 
-    Ok(ValueWord::from_array(Arc::new(reversed)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(reversed)).into_raw_bits())
 }
 
 pub(crate) fn handle_push_v2(
@@ -97,7 +97,7 @@ pub(crate) fn handle_push_v2(
     let mut result = arr.to_vec();
     result.push(value);
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_pop_v2(
@@ -114,7 +114,7 @@ pub(crate) fn handle_pop_v2(
     let mut result = arr.to_vec();
     result.pop();
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_zip_v2(
@@ -138,10 +138,10 @@ pub(crate) fn handle_zip_v2(
     let mut result = Vec::with_capacity(len);
     for i in 0..len {
         let pair: Vec<ValueWord> = vec![arr_a[i].clone(), arr_b[i].clone()];
-        result.push(ValueWord::from_array(Arc::new(pair)));
+        result.push(ValueWord::from_array(shape_value::vmarray_from_vec(pair)));
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_clone_v2(
@@ -155,5 +155,5 @@ pub(crate) fn handle_clone_v2(
         got: "other",
     })?.to_generic();
     let cloned = arr.to_vec();
-    Ok(ValueWord::from_array(Arc::new(cloned)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(cloned)).into_raw_bits())
 }

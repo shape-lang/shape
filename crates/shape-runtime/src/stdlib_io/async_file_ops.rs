@@ -104,7 +104,7 @@ pub async fn io_read_bytes_async(args: Vec<ValueWord>) -> Result<ValueWord, Stri
         .iter()
         .map(|&b| ValueWord::from_i64(b as i64))
         .collect();
-    Ok(ValueWord::from_array(Arc::new(arr)))
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))
 }
 
 /// io.exists_async(path: string) -> bool

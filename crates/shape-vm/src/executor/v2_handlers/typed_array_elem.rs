@@ -691,7 +691,7 @@ mod tests {
     fn test_get_elem_i64_generic_array_fallback() {
         let mut vm = make_test_vm();
         // Create a generic Array (not TypedArrayData).
-        let arr: Arc<Vec<ValueWord>> = Arc::new(vec![
+        let arr: shape_value::VMArray = shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(100),
             ValueWord::from_i64(200),
         ]);
@@ -709,7 +709,7 @@ mod tests {
     #[test]
     fn test_array_len_typed_generic_array() {
         let mut vm = make_test_vm();
-        let arr: Arc<Vec<ValueWord>> = Arc::new(vec![
+        let arr: shape_value::VMArray = shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),

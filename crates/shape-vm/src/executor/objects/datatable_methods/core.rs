@@ -52,7 +52,7 @@ pub(crate) fn handle_columns(
         .into_iter()
         .map(|n| ValueWord::from_string(Arc::new(n)))
         .collect();
-    Ok(ValueWord::from_array(Arc::new(names)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(names)).into_raw_bits())
 }
 
 /// `dt.column(name)`
@@ -290,7 +290,7 @@ pub(crate) fn handle_rows(
     let row_count = dt.row_count();
     let mut rows = Vec::with_capacity(row_count);
     for i in 0..row_count { rows.push(ValueWord::from_row_view(schema_id, dt.clone(), i)); }
-    Ok(ValueWord::from_array(Arc::new(rows)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(rows)).into_raw_bits())
 }
 
 /// `dt.columnsRef()`
@@ -305,5 +305,5 @@ pub(crate) fn handle_columns_ref(
     let col_count = dt.column_count();
     let mut cols = Vec::with_capacity(col_count);
     for i in 0..col_count { cols.push(ValueWord::from_column_ref(schema_id, dt.clone(), i as u32)); }
-    Ok(ValueWord::from_array(Arc::new(cols)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(cols)).into_raw_bits())
 }

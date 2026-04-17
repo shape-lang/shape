@@ -1145,7 +1145,7 @@ pub fn serializable_to_nanboxed(
             for v in arr.iter() {
                 out.push(serializable_to_nanboxed(v, store)?);
             }
-            ValueWord::from_array(std::sync::Arc::new(out))
+            ValueWord::from_array(shape_value::vmarray_from_vec(out))
         }
         SerializableVMValue::TypeAnnotation(ta) => ValueWord::from_type_annotation(ta.clone()),
         SerializableVMValue::TypeAnnotatedValue { type_name, value } => {

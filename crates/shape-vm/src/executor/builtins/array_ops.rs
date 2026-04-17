@@ -19,7 +19,7 @@ impl VirtualMachine {
         if let Some(view) = args[0].as_any_array() {
             let mut new_arr = view.to_generic().as_ref().clone();
             new_arr.push(args[1].clone());
-            Ok(ValueWord::from_array(Arc::new(new_arr)))
+            Ok(ValueWord::from_array(std::sync::Arc::new(new_arr)))
         } else {
             Err(VMError::RuntimeError(
                 "push() first argument must be an array".into(),
@@ -42,7 +42,7 @@ impl VirtualMachine {
             }
             let mut new_arr = view.to_generic().as_ref().clone();
             new_arr.pop();
-            Ok(ValueWord::from_array(Arc::new(new_arr)))
+            Ok(ValueWord::from_array(std::sync::Arc::new(new_arr)))
         } else {
             Err(VMError::RuntimeError(
                 "pop() argument must be an array".into(),
@@ -100,9 +100,9 @@ impl VirtualMachine {
         let result: Vec<ValueWord> = a
             .iter()
             .zip(b.iter())
-            .map(|(x, y)| ValueWord::from_array(Arc::new(vec![x.clone(), y.clone()])))
+            .map(|(x, y)| ValueWord::from_array(shape_value::vmarray_from_vec(vec![x.clone(), y.clone()])))
             .collect();
-        Ok(ValueWord::from_array(Arc::new(result)))
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)))
     }
 
     pub(in crate::executor) fn builtin_filled(
@@ -120,7 +120,7 @@ impl VirtualMachine {
             as usize;
         let value = args[1].clone();
         let array = vec![value; size];
-        Ok(ValueWord::from_array(Arc::new(array)))
+        Ok(ValueWord::from_array(shape_value::vmarray_from_vec(array)))
     }
 
     pub(in crate::executor) fn builtin_len(

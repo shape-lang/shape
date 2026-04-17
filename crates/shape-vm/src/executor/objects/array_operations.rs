@@ -56,7 +56,7 @@ impl VirtualMachine {
                     let generic = array_nb.as_any_array().unwrap().to_generic();
                     let mut vec = (*generic).clone();
                     vec.push(value_nb);
-                    self.push_raw_u64(ValueWord::from_array(Arc::new(vec)))?;
+                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(vec)))?;
                     return Ok(());
                 }
                 shape_value::ArrayViewMut::Float(arc_vec) => {
@@ -68,7 +68,7 @@ impl VirtualMachine {
                     let generic = array_nb.as_any_array().unwrap().to_generic();
                     let mut vec = (*generic).clone();
                     vec.push(value_nb);
-                    self.push_raw_u64(ValueWord::from_array(Arc::new(vec)))?;
+                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(vec)))?;
                     return Ok(());
                 }
                 shape_value::ArrayViewMut::Bool(arc_vec) => {
@@ -80,7 +80,7 @@ impl VirtualMachine {
                     let generic = array_nb.as_any_array().unwrap().to_generic();
                     let mut vec = (*generic).clone();
                     vec.push(value_nb);
-                    self.push_raw_u64(ValueWord::from_array(Arc::new(vec)))?;
+                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(vec)))?;
                     return Ok(());
                 }
             }
@@ -256,7 +256,7 @@ impl VirtualMachine {
                             generic.push(ValueWord::from_i64(v));
                         }
                         generic.push(value);
-                        *heap_val = HeapValue::Array(Arc::new(generic));
+                        *heap_val = HeapValue::Array(shape_value::vmarray_from_vec(generic));
                         return Ok(());
                     }
                     HeapValue::TypedArray(TypedArrayData::F64(arc_vec)) => {
@@ -270,7 +270,7 @@ impl VirtualMachine {
                             generic.push(ValueWord::from_f64(v));
                         }
                         generic.push(value);
-                        *heap_val = HeapValue::Array(Arc::new(generic));
+                        *heap_val = HeapValue::Array(shape_value::vmarray_from_vec(generic));
                         return Ok(());
                     }
                     HeapValue::TypedArray(TypedArrayData::Bool(arc_vec)) => {
@@ -284,7 +284,7 @@ impl VirtualMachine {
                             generic.push(ValueWord::from_bool(v != 0));
                         }
                         generic.push(value);
-                        *heap_val = HeapValue::Array(Arc::new(generic));
+                        *heap_val = HeapValue::Array(shape_value::vmarray_from_vec(generic));
                         return Ok(());
                     }
                     _ => {}
@@ -361,7 +361,7 @@ impl VirtualMachine {
                 } else {
                     Vec::new()
                 };
-                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
                 return Ok(());
             }
         }
@@ -389,7 +389,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
             }
             Some(HeapValue::TypedArray(TypedArrayData::I64(arr))) => {
                 let len = arr.len() as i32;
@@ -414,7 +414,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
             }
             Some(HeapValue::TypedArray(TypedArrayData::F64(arr))) => {
                 let len = arr.len() as i32;
@@ -439,7 +439,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
             }
             Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len: slice_len })) => {
                 let total = *slice_len as usize;
@@ -467,7 +467,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
             }
             Some(HeapValue::TypedArray(TypedArrayData::Bool(arr))) => {
                 let len = arr.len() as i32;
@@ -492,7 +492,7 @@ impl VirtualMachine {
                     Vec::new()
                 };
 
-                self.push_raw_u64(ValueWord::from_array(Arc::new(slice)))?;
+                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
             }
             Some(HeapValue::String(s)) => {
                 let len = s.len() as i32;

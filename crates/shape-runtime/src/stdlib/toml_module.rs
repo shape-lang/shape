@@ -16,7 +16,7 @@ fn toml_value_to_nanboxed(value: toml::Value) -> ValueWord {
         toml::Value::Datetime(dt) => ValueWord::from_string(Arc::new(dt.to_string())),
         toml::Value::Array(arr) => {
             let items: Vec<ValueWord> = arr.into_iter().map(toml_value_to_nanboxed).collect();
-            ValueWord::from_array(Arc::new(items))
+            ValueWord::from_array(shape_value::vmarray_from_vec(items))
         }
         toml::Value::Table(map) => {
             let mut keys = Vec::with_capacity(map.len());

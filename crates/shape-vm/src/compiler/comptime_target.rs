@@ -216,7 +216,7 @@ impl ComptimeTarget {
                             aargs.iter().map(|a| nb_string(a.clone())).collect();
                         typed_object_from_nb_pairs(&[
                             ("name", nb_string(aname.clone())),
-                            ("args", ValueWord::from_array(Arc::new(args_arr))),
+                            ("args", ValueWord::from_array(shape_value::vmarray_from_vec(args_arr))),
                         ])
                     })
                     .collect();
@@ -230,7 +230,7 @@ impl ComptimeTarget {
                 typed_object_from_nb_pairs(&[
                     ("name", nb_string(fname.clone())),
                     ("type", nb_string(effective_type)),
-                    ("annotations", ValueWord::from_array(Arc::new(anns_arr))),
+                    ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(anns_arr))),
                     ("optional", ValueWord::from_bool(is_optional)),
                 ])
             })
@@ -270,11 +270,11 @@ impl ComptimeTarget {
         typed_object_from_nb_pairs(&[
             ("kind", nb_str(kind_str)),
             ("name", nb_string(self.name.clone())),
-            ("fields", ValueWord::from_array(Arc::new(fields_arr))),
-            ("params", ValueWord::from_array(Arc::new(params_arr))),
+            ("fields", ValueWord::from_array(shape_value::vmarray_from_vec(fields_arr))),
+            ("params", ValueWord::from_array(shape_value::vmarray_from_vec(params_arr))),
             ("return_type", ret),
-            ("annotations", ValueWord::from_array(Arc::new(ann_arr))),
-            ("captures", ValueWord::from_array(Arc::new(captures_arr))),
+            ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(ann_arr))),
+            ("captures", ValueWord::from_array(shape_value::vmarray_from_vec(captures_arr))),
         ])
     }
 }

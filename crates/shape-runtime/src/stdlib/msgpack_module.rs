@@ -24,7 +24,7 @@ fn json_value_to_valueword(value: serde_json::Value) -> ValueWord {
         serde_json::Value::String(s) => ValueWord::from_string(Arc::new(s)),
         serde_json::Value::Array(arr) => {
             let items: Vec<ValueWord> = arr.into_iter().map(json_value_to_valueword).collect();
-            ValueWord::from_array(Arc::new(items))
+            ValueWord::from_array(shape_value::vmarray_from_vec(items))
         }
         serde_json::Value::Object(map) => {
             let mut keys = Vec::with_capacity(map.len());
@@ -122,7 +122,7 @@ pub fn create_msgpack_module() -> ModuleExports {
                 .map(|&b| ValueWord::from_i64(b as i64))
                 .collect();
 
-            Ok(ValueWord::from_ok(ValueWord::from_array(Arc::new(items))))
+            Ok(ValueWord::from_ok(ValueWord::from_array(shape_value::vmarray_from_vec(items))))
         },
         ModuleFunction {
             description: "Encode a value to MessagePack as a byte array".to_string(),
@@ -285,7 +285,7 @@ mod tests {
         let decode_fn = module.get_export("decode").unwrap();
         let ctx = test_ctx();
 
-        let input = ValueWord::from_array(Arc::new(vec![
+        let input = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
             ValueWord::from_i64(3),
@@ -405,7 +405,7 @@ mod tests {
         let ctx = test_ctx();
 
         // Array with value > 255
-        let input = ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(300)]));
+        let input = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_i64(300)]));
         let result = decode_bytes_fn(&[input], &ctx);
         assert!(result.is_err());
     }
@@ -483,7 +483,7 @@ mod tests {
         );
         let input = ValueWord::from_hashmap_pairs(
             vec![ValueWord::from_string(Arc::new("users".to_string()))],
-            vec![ValueWord::from_array(Arc::new(vec![user1, user2]))],
+            vec![ValueWord::from_array(shape_value::vmarray_from_vec(vec![user1, user2]))],
         );
 
         let encoded = encode_fn(&[input], &ctx).unwrap();

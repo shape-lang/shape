@@ -130,7 +130,7 @@ fn source_element_at(source: &ValueWord, position: usize) -> Option<ValueWord> {
         HeapValue::HashMap(hm) => {
             if position < hm.keys.len() {
                 let pair = vec![hm.keys[position].clone(), hm.values[position].clone()];
-                Some(ValueWord::from_array(Arc::new(pair)))
+                Some(ValueWord::from_array(shape_value::vmarray_from_vec(pair)))
             } else {
                 std::option::Option::None
             }
@@ -552,10 +552,10 @@ pub(crate) fn handle_enumerate(
     let pairs: Vec<ValueWord> = elements
         .into_iter()
         .enumerate()
-        .map(|(i, v)| ValueWord::from_array(Arc::new(vec![ValueWord::from_i64(i as i64), v])))
+        .map(|(i, v)| ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_i64(i as i64), v])))
         .collect();
     let new_state = IteratorState {
-        source: ValueWord::from_array(Arc::new(pairs)),
+        source: ValueWord::from_array(shape_value::vmarray_from_vec(pairs)),
         position: 0,
         transforms: vec![],
         done: false,
@@ -591,8 +591,7 @@ pub(crate) fn handle_chain(
         let mut state2 = it2.clone();
         collect_all(vm, &mut state2, &mut ctx)?
     } else if let Some(view) = arg1_vw.as_any_array() {
-        let generic = view.to_generic();
-        (*generic).clone()
+        view.to_generic().to_vec()
     } else {
         return Err(VMError::RuntimeError(
             "Iterator.chain() argument must be an iterator or array".to_string(),
@@ -603,7 +602,7 @@ pub(crate) fn handle_chain(
     combined.extend(elems2);
 
     let new_state = IteratorState {
-        source: ValueWord::from_array(Arc::new(combined)),
+        source: ValueWord::from_array(shape_value::vmarray_from_vec(combined)),
         position: 0,
         transforms: vec![],
         done: false,
@@ -626,7 +625,7 @@ pub(crate) fn handle_collect(
         })?
         .clone();
     let results = collect_all(vm, &mut state, &mut ctx)?;
-    Ok(ValueWord::from_array(Arc::new(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
 }
 
 /// Iterator.forEach(fn) -> none (v2 native)

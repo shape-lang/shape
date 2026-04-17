@@ -319,14 +319,14 @@ fn test_aggregate_sum_mean() {
     let spec = predeclared_object(&[
         (
             "total_price",
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new("sum".to_string())),
                 ValueWord::from_string(Arc::new("price".to_string())),
             ])),
         ),
         (
             "avg_price",
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new("mean".to_string())),
                 ValueWord::from_string(Arc::new("price".to_string())),
             ])),
@@ -350,21 +350,21 @@ fn test_aggregate_min_max_count() {
     let spec = predeclared_object(&[
         (
             "min_price",
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new("min".to_string())),
                 ValueWord::from_string(Arc::new("price".to_string())),
             ])),
         ),
         (
             "max_price",
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new("max".to_string())),
                 ValueWord::from_string(Arc::new("price".to_string())),
             ])),
         ),
         (
             "n",
-            ValueWord::from_array(Arc::new(vec![
+            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
                 ValueWord::from_string(Arc::new("count".to_string())),
                 ValueWord::from_string(Arc::new("price".to_string())),
             ])),

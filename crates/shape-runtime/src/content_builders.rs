@@ -377,9 +377,9 @@ mod tests {
 
     #[test]
     fn test_content_table() {
-        let headers = ValueWord::from_array(Arc::new(vec![nb_str("Name"), nb_str("Value")]));
-        let row1 = ValueWord::from_array(Arc::new(vec![nb_str("a"), nb_str("1")]));
-        let rows = ValueWord::from_array(Arc::new(vec![row1]));
+        let headers = ValueWord::from_array(shape_value::vmarray_from_vec(vec![nb_str("Name"), nb_str("Value")]));
+        let row1 = ValueWord::from_array(shape_value::vmarray_from_vec(vec![nb_str("a"), nb_str("1")]));
+        let rows = ValueWord::from_array(shape_value::vmarray_from_vec(vec![row1]));
         let result = content_table(&[headers, rows]).unwrap();
         let node = result.as_content().unwrap();
         match node {
@@ -438,9 +438,9 @@ mod tests {
 
     #[test]
     fn test_content_kv() {
-        let pair1 = ValueWord::from_array(Arc::new(vec![nb_str("name"), nb_str("Alice")]));
-        let pair2 = ValueWord::from_array(Arc::new(vec![nb_str("age"), nb_str("30")]));
-        let pairs = ValueWord::from_array(Arc::new(vec![pair1, pair2]));
+        let pair1 = ValueWord::from_array(shape_value::vmarray_from_vec(vec![nb_str("name"), nb_str("Alice")]));
+        let pair2 = ValueWord::from_array(shape_value::vmarray_from_vec(vec![nb_str("age"), nb_str("30")]));
+        let pairs = ValueWord::from_array(shape_value::vmarray_from_vec(vec![pair1, pair2]));
         let result = content_kv(&[pairs]).unwrap();
         let node = result.as_content().unwrap();
         match node {
@@ -457,7 +457,7 @@ mod tests {
     fn test_content_fragment() {
         let n1 = ValueWord::from_content(ContentNode::plain("hello "));
         let n2 = ValueWord::from_content(ContentNode::plain("world"));
-        let parts = ValueWord::from_array(Arc::new(vec![n1, n2]));
+        let parts = ValueWord::from_array(shape_value::vmarray_from_vec(vec![n1, n2]));
         let result = content_fragment(&[parts]).unwrap();
         let node = result.as_content().unwrap();
         match node {
@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_content_fragment_with_string_coercion() {
-        let parts = ValueWord::from_array(Arc::new(vec![nb_str("text")]));
+        let parts = ValueWord::from_array(shape_value::vmarray_from_vec(vec![nb_str("text")]));
         let result = content_fragment(&[parts]).unwrap();
         let node = result.as_content().unwrap();
         match node {

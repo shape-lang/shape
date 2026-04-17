@@ -83,7 +83,7 @@ pub(crate) fn handle_inner_join_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
 }
 
 /// v2 `leftJoin` — left join two arrays with key functions
@@ -166,7 +166,7 @@ pub(crate) fn handle_left_join_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
 }
 
 /// v2 `crossJoin` — cross join two arrays (Cartesian product)
@@ -217,5 +217,5 @@ pub(crate) fn handle_cross_join_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
 }

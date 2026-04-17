@@ -169,7 +169,7 @@ pub fn create_archive_module() -> ModuleExports {
                 entries.push(make_entry(&name, &contents));
             }
 
-            Ok(ValueWord::from_array(Arc::new(entries)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(entries)))
         },
         ModuleFunction {
             description: "Extract a zip archive from a byte array into an array of entries"
@@ -270,7 +270,7 @@ pub fn create_archive_module() -> ModuleExports {
                 entries.push(make_entry(&name, &contents));
             }
 
-            Ok(ValueWord::from_array(Arc::new(entries)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(entries)))
         },
         ModuleFunction {
             description: "Extract a tar archive from a byte array into an array of entries"
@@ -313,7 +313,7 @@ mod tests {
             make_entry("hello.txt", "Hello, World!"),
             make_entry("data/numbers.txt", "1 2 3 4 5"),
         ];
-        ValueWord::from_array(Arc::new(entries))
+        ValueWord::from_array(shape_value::vmarray_from_vec(entries))
     }
 
     #[test]
@@ -386,7 +386,7 @@ mod tests {
         let zip_create_fn = module.get_export("zip_create").unwrap();
         let zip_extract_fn = module.get_export("zip_extract").unwrap();
 
-        let empty = ValueWord::from_array(Arc::new(Vec::new()));
+        let empty = ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new()));
         let zip_bytes = zip_create_fn(&[empty], &ctx).unwrap();
 
         let extracted = zip_extract_fn(&[zip_bytes], &ctx).unwrap();
@@ -401,7 +401,7 @@ mod tests {
         let tar_create_fn = module.get_export("tar_create").unwrap();
         let tar_extract_fn = module.get_export("tar_extract").unwrap();
 
-        let empty = ValueWord::from_array(Arc::new(Vec::new()));
+        let empty = ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new()));
         let tar_bytes = tar_create_fn(&[empty], &ctx).unwrap();
 
         let extracted = tar_extract_fn(&[tar_bytes], &ctx).unwrap();
@@ -415,7 +415,7 @@ mod tests {
         let ctx = test_ctx();
         let zip_extract_fn = module.get_export("zip_extract").unwrap();
 
-        let bad_data = ValueWord::from_array(Arc::new(vec![
+        let bad_data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
         ]));
@@ -429,7 +429,7 @@ mod tests {
         let ctx = test_ctx();
         let tar_extract_fn = module.get_export("tar_extract").unwrap();
 
-        let bad_data = ValueWord::from_array(Arc::new(vec![
+        let bad_data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
             ValueWord::from_i64(1),
             ValueWord::from_i64(2),
         ]));
@@ -485,7 +485,7 @@ mod tests {
         let zip_extract_fn = module.get_export("zip_extract").unwrap();
 
         let entries = vec![make_entry("unicode.txt", "Hello \u{1F600} World \u{00E9}")];
-        let input = ValueWord::from_array(Arc::new(entries));
+        let input = ValueWord::from_array(shape_value::vmarray_from_vec(entries));
         let zip_bytes = zip_create_fn(&[input], &ctx).unwrap();
 
         let extracted = zip_extract_fn(&[zip_bytes], &ctx).unwrap();

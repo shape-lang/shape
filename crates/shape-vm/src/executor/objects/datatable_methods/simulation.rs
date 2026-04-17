@@ -211,12 +211,12 @@ pub(crate) fn handle_simulate(
     // Build return object using builtin SimulateReturn schema (6 slots)
     let sim_schema = vm.builtin_schemas.simulate_return;
     let event_log_val = if collect_event_log {
-        ValueWord::from_array(Arc::new(event_log))
+        ValueWord::from_array(shape_value::vmarray_from_vec(event_log))
     } else {
         ValueWord::none()
     };
     let seed_val = seed.unwrap_or_else(ValueWord::none);
-    let results_val = ValueWord::from_array(Arc::new(results));
+    let results_val = ValueWord::from_array(shape_value::vmarray_from_vec(results));
     let processed_val = ValueWord::from_i64(row_count as i64);
     let completed_val = ValueWord::from_bool(true);
 

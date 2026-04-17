@@ -75,7 +75,7 @@ pub(crate) fn handle_map_v2(
         results.push(ValueWord::from_raw_bits(result_bits));
     }
 
-    Ok(ValueWord::from_array(Arc::new(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
 }
 
 pub(crate) fn handle_filter_v2(
@@ -123,7 +123,7 @@ pub(crate) fn handle_filter_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(filtered)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(filtered)).into_raw_bits())
 }
 
 pub(crate) fn handle_sort_v2(
@@ -141,7 +141,7 @@ pub(crate) fn handle_sort_v2(
         .to_generic();
 
     if array.is_empty() {
-        return Ok(ValueWord::from_array(Arc::new(vec![])).into_raw_bits());
+        return Ok(ValueWord::from_array(shape_value::vmarray_from_vec(vec![])).into_raw_bits());
     }
 
     let mut sorted = array.to_vec();
@@ -182,7 +182,7 @@ pub(crate) fn handle_sort_v2(
         sorted = keyed.into_iter().map(|(_, v)| v).collect();
     }
 
-    Ok(ValueWord::from_array(Arc::new(sorted)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted)).into_raw_bits())
 }
 
 pub(crate) fn handle_slice_v2(
@@ -228,7 +228,7 @@ pub(crate) fn handle_slice_v2(
     let start = start.min(arr.len());
     let end = end.min(arr.len());
 
-    Ok(ValueWord::from_array(Arc::new(arr[start..end].to_vec())).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr[start..end].to_vec())).into_raw_bits())
 }
 
 pub(crate) fn handle_concat_v2(
@@ -257,7 +257,7 @@ pub(crate) fn handle_concat_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(result)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result)).into_raw_bits())
 }
 
 pub(crate) fn handle_take_v2(
@@ -289,7 +289,7 @@ pub(crate) fn handle_take_v2(
         })? as usize;
     let n = n.min(arr.len());
 
-    Ok(ValueWord::from_array(Arc::new(arr[..n].to_vec())).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr[..n].to_vec())).into_raw_bits())
 }
 
 pub(crate) fn handle_drop_v2(
@@ -321,7 +321,7 @@ pub(crate) fn handle_drop_v2(
         })? as usize;
     let n = n.min(arr.len());
 
-    Ok(ValueWord::from_array(Arc::new(arr[n..].to_vec())).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr[n..].to_vec())).into_raw_bits())
 }
 
 pub(crate) fn handle_skip_v2(
@@ -357,7 +357,7 @@ pub(crate) fn handle_flatten_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(flattened)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(flattened)).into_raw_bits())
 }
 
 pub(crate) fn handle_flat_map_v2(
@@ -409,7 +409,7 @@ pub(crate) fn handle_flat_map_v2(
         }
     }
 
-    Ok(ValueWord::from_array(Arc::new(results)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results)).into_raw_bits())
 }
 
 pub(crate) fn handle_group_by_v2(
@@ -461,10 +461,10 @@ pub(crate) fn handle_group_by_v2(
     for (i, _) in group_keys.iter().enumerate() {
         let pair = vec![
             group_key_nbs[i].clone(),
-            ValueWord::from_array(Arc::new(std::mem::take(&mut group_elements[i]))),
+            ValueWord::from_array(shape_value::vmarray_from_vec(std::mem::take(&mut group_elements[i]))),
         ];
-        pairs.push(ValueWord::from_array(Arc::new(pair)));
+        pairs.push(ValueWord::from_array(shape_value::vmarray_from_vec(pair)));
     }
 
-    Ok(ValueWord::from_array(Arc::new(pairs)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(pairs)).into_raw_bits())
 }

@@ -160,7 +160,7 @@ impl VirtualMachine {
             }
             elements.reverse();
 
-            self.push_raw_u64(ValueWord::from_array(Arc::new(elements)))?;
+            self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(elements)))?;
         } else {
             return Err(VMError::InvalidOperand);
         }
@@ -189,7 +189,7 @@ impl VirtualMachine {
 
         if count == 0 {
             // Empty array — default to generic array
-            return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
+            return self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(elements)));
         }
 
         // Detect element type from first element, then verify all match
@@ -205,10 +205,10 @@ impl VirtualMachine {
                         ints.push(f as i64);
                     } else {
                         // Fallback to generic
-                        return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
+                        return self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(elements)));
                     }
                 } else {
-                    return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
+                    return self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(elements)));
                 }
             }
             self.push_raw_u64(ValueWord::from_int_array(Arc::new(ints.into())))
@@ -221,7 +221,7 @@ impl VirtualMachine {
                 } else if let Some(i) = elem.as_i64() {
                     floats.push(i as f64);
                 } else {
-                    return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
+                    return self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(elements)));
                 }
             }
             self.push_raw_u64(ValueWord::from_float_array(Arc::new(floats.into())))
@@ -232,13 +232,13 @@ impl VirtualMachine {
                 if let Some(b) = elem.as_bool() {
                     bools.push(b as u8);
                 } else {
-                    return self.push_raw_u64(ValueWord::from_array(Arc::new(elements)));
+                    return self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(elements)));
                 }
             }
             self.push_raw_u64(ValueWord::from_bool_array(Arc::new(bools.into())))
         } else {
             // Not a typed-array-eligible type, fall back to generic
-            self.push_raw_u64(ValueWord::from_array(Arc::new(elements)))
+            self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(elements)))
         }
     }
 }

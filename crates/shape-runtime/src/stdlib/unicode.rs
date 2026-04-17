@@ -169,7 +169,7 @@ pub fn create_unicode_module() -> ModuleExports {
                 .map(|g| ValueWord::from_string(Arc::new(g.to_string())))
                 .collect();
 
-            Ok(ValueWord::from_array(Arc::new(clusters)))
+            Ok(ValueWord::from_array(shape_value::vmarray_from_vec(clusters)))
         },
         ModuleFunction {
             description: "Split a string into Unicode grapheme clusters".to_string(),

@@ -170,7 +170,7 @@ impl ConstEvaluator {
                 for elem in elements {
                     arr.push(self.eval_nb(elem)?);
                 }
-                Ok(ValueWord::from_array(Arc::new(arr)))
+                Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))
             }
 
             // Identifiers - only allowed if they're annotation parameters

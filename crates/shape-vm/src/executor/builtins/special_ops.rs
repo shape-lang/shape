@@ -422,7 +422,7 @@ impl VirtualMachine {
                     schema_id: ann_schema as u64,
                     slots: vec![
                         shape_value::ValueSlot::from_heap(HeapValue::String(Arc::new(ann_name))),
-                        shape_value::ValueSlot::from_heap(HeapValue::Array(Arc::new(args_arr))),
+                        shape_value::ValueSlot::from_heap(HeapValue::Array(shape_value::vmarray_from_vec(args_arr))),
                     ]
                     .into_boxed_slice(),
                     heap_mask: 0b11,
@@ -433,7 +433,7 @@ impl VirtualMachine {
                 slots: vec![
                     shape_value::ValueSlot::from_heap(HeapValue::String(Arc::new(name))),
                     shape_value::ValueSlot::from_heap(HeapValue::String(Arc::new(field_type))),
-                    shape_value::ValueSlot::from_heap(HeapValue::Array(Arc::new(ann_values))),
+                    shape_value::ValueSlot::from_heap(HeapValue::Array(shape_value::vmarray_from_vec(ann_values))),
                 ]
                 .into_boxed_slice(),
                 heap_mask: 0b111,
@@ -444,7 +444,7 @@ impl VirtualMachine {
             schema_id: result_schema as u64,
             slots: vec![
                 shape_value::ValueSlot::from_heap(HeapValue::String(Arc::new(type_name))),
-                shape_value::ValueSlot::from_heap(HeapValue::Array(Arc::new(fields))),
+                shape_value::ValueSlot::from_heap(HeapValue::Array(shape_value::vmarray_from_vec(fields))),
             ]
             .into_boxed_slice(),
             heap_mask: 0b11,

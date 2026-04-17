@@ -86,7 +86,7 @@ pub fn v2_shape(
         ValueWord::from_i64(rows as i64),
         ValueWord::from_i64(cols as i64),
     ];
-    Ok(ValueWord::from_array(Arc::new(pair)).into_raw_bits())
+    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(pair)).into_raw_bits())
 }
 
 /// mat.reshape(rows, cols) -> Matrix (v2)
