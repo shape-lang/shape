@@ -1238,3 +1238,162 @@ After Phase H:
 This document supersedes `docs/enhanced-escape-analysis-v2.md` Phase 5.D. Phase 5.D's narrow "change SharedCow → Direct for non-escaping closure captures" proposal was an optimization on top of the v1 runtime. The v2 answer is structurally different: typed closure layouts, per-closure monomorphization, stack allocation by default, heap fallback via typed `TypedClosure` — not via `Arc<dyn Fn>`.
 
 Phase 5.D may be removed or reduced to a pointer to this document.
+
+---
+
+## §13 — Phase H1–H5: Legacy Path Deletion
+
+§6 Phase H landed as a minimal field-removal commit (`bbc0779`). The audit found five legacy runtime paths still load-bearing — each requires net-new implementation, not deletion, to remove. §13 is the plan for that follow-up work. Phases run in the stated order; H2–H5 depend on H1 landing first.
+
+### H1 — `emit_heap_closure` Cranelift codegen
+
+**Goal**: replace the `jit_make_closure` FFI with in-line Cranelift lowering that allocates and initializes a `TypedClosureHeader` block. This is the delta that unlocks the §10 "≥ 30% improvement on closure-heavy benchmarks" gate — Phase E shipped stack allocation for non-escaping closures; H1 gives the heap path the same Arc-free treatment.
+
+**Files**:
+- `crates/shape-jit/src/mir_compiler/statements.rs` — new `emit_heap_closure` routine mirroring Phase E's `emit_stack_closure`.
+- `crates/shape-jit/src/mir_compiler/mod.rs` — plumb `compiler.closure_type_ids()` into `MirToIR` so the routine can look up per-closure layouts.
+- `crates/shape-jit/src/ffi/` — mark `jit_make_closure` `#[deprecated]` (do not delete; H2 still consumes it from the interpreter side).
+- `crates/shape-vm/src/bytecode/content_addressed.rs` (maybe) — content-addressed program needs to carry `closure_type_ids` alongside functions so the JIT worker has them.
+
+**Sub-tasks**:
+1. Thread `closure_type_ids: Vec<(u16, ClosureTypeId)>` through the `BytecodeProgram` / `ContentAddressedProgram` → JIT worker pipeline. Today Phase F's registry is compile-time only.
+2. In `MirToIR`, build a `function_id → ClosureLayout` map from `closure_type_ids` + `ClosureRegistry`.
+3. Implement `emit_heap_closure(type_id, function_id, capture_values)`:
+   - Allocate via `std::alloc::alloc(Layout::from_size_align(layout.total_heap_size(), 8))` (call through a stable Rust FFI shim — Cranelift can't call `alloc` directly; reuse the pattern in `jit_alloc_raw_heap_block` or introduce a thin `shape_alloc_closure(layout_size, type_id) -> *mut u8` FFI).
+   - Write `HeapHeader { refcount: 1, kind: HEAP_KIND_V2_CLOSURE, flags: 0 }` at offset 0 (4 stores: refcount u32, kind u16, flags u8, pad u8).
+   - Write `function_id: u32` at offset 8, `type_id: u32` at offset 12.
+   - For each capture `i`, emit a typed `store.T captures[i], [closure_ptr + layout.heap_capture_offset(i)]`.
+   - Emit `atomic_rmw add [capture_ptr + 0], 1` for every heap-mask bit set in `layout.heap_capture_mask`.
+4. Switch the `MakeClosureHeap` opcode lowering in `mir_compiler/statements.rs` from the `jit_make_closure` FFI call to `emit_heap_closure`.
+5. Keep the FFI path as a deprecated fallback for `MakeClosure` (the legacy opcode) — H5 removes that opcode entirely.
+
+**Tests** (≥8):
+- `fn make(n: int): Function<(int) -> int> { |x| x + n }` → heap-allocated, correctness + zero atomic ops on the allocation itself (only the expected capture retain). Inspect Cranelift IR or instrument `jit_make_closure` with a panic-in-debug to prove the FFI is no longer called.
+- Multi-capture heap closure: `|x| x + a + b + s` where `s: string` → one atomic retain for `s`, none for `a`/`b`.
+- Drop: closure refcount → 0 releases captures in `heap_capture_mask` order.
+- Nested: closure captures another closure; outer refcount increment on inner correctly emitted.
+- Parity: `arr.map(|x| x + n)` result matches the non-JIT baseline.
+- Cross-tier: warm a closure through Tier 1 → Tier 2, verify Tier 2 uses `emit_heap_closure` directly (no deopt).
+- Allocator rejection: closures with > `u32::MAX`-ish captures produce an OOM path, not UB.
+- IC + deopt: a mixed `Array<Function<A,R>>` with closures of different `ClosureTypeId`s dispatches and deopts correctly post-H1.
+
+**Risks**:
+- Allocator FFI: Cranelift lowering must call a C-ABI allocator shim. Reuse existing `shape_alloc_*` FFIs or add a single new one. Mis-alignment is a crash risk — use `Layout::from_size_align_unchecked` only with `assert!(layout.align.is_power_of_two())`.
+- Refcount fence: H1 uses `Ordering::Relaxed` for retain (matches `HeapHeader::retain`). Release semantics come in on drop — that's H2's contract, not H1's.
+
+**Dependencies**: none beyond Phase A–G.
+
+**Agent team size (estimate)**: 2 agents — (a) FFI plumbing + `closure_type_ids` threading; (b) `emit_heap_closure` + tests.
+
+**Post-H1 decision point**: run the closure-heavy benchmarks from §8 — if `arr.map(f).filter(g).reduce(h, 0)` hits within 2× of imperative, H2–H5 are greenlit. If not, diagnose before proceeding.
+
+---
+
+### H2 — VM interpreter `TypedClosureHeader` switch
+
+**Goal**: `op_make_closure` / `op_make_closure_heap` stop going through `HeapValue::Closure { … }` (Arc-boxed enum) and instead allocate a raw `TypedClosureHeader` block matching the JIT's H1 layout. Unifies the VM and JIT heap closure representation.
+
+**Files**:
+- `crates/shape-vm/src/executor/control_flow/mod.rs` — `op_make_closure_heap` handler rewrite.
+- `crates/shape-value/src/heap_value.rs` — deprecate/remove `HeapValue::Closure` variant (or repurpose as a shim over raw allocation).
+- `crates/shape-runtime/src/snapshot.rs` — serialize the new closure representation.
+- `crates/shape-wire/src/codec.rs` or equivalent — wire protocol carries typed closures.
+- `crates/shape-vm/src/executor/dispatch.rs` — closure `CallClosure` / `CallFunctionIndirect` handlers dereference raw `*const TypedClosureHeader` instead of `Arc<HeapValue>`.
+
+**Sub-tasks**:
+1. Introduce `VmClosureHandle` — a typed `*const TypedClosureHeader` wrapper with refcount and Drop glue.
+2. Rewrite `op_make_closure_heap` to match the JIT's allocation / write shape from H1.
+3. Rewrite VM-side call paths (`CallClosure`, `CallFunctionIndirect`) to read captures typed at their `ClosureLayout::heap_capture_offset(i)` offsets, with no NaN-box round-trip.
+4. Snapshot / wire serialization: serialize `(function_id, type_id, captures_as_typed_blob)` and deserialize by re-allocating via the same path.
+5. Retire `HeapValue::Closure`; ensure `HeapKind` rendering (REPL pretty-printing, debugger) reads `function_id` + `type_id` via the header and looks up the registry.
+
+**Tests** (≥10): snapshot roundtrip, wire serialization, REPL closure display, multiple refcount paths, GC-like cycle detection (none — atomic refcounts only), Array<Function> with mixed ClosureTypeIds, cross-crate closures, closures in typed structs, async scope boundary, error propagation through closure captures.
+
+**Risks**:
+- Snapshot replay must re-materialize captures with correct refcount semantics — easy to leak or double-free if careless.
+- Wire protocol change is a serialization-format bump. Confirm whether v1 wire protocol has a version byte and whether this is a compatible addition or a breaking change.
+
+**Dependencies**: H1 (VM and JIT must agree on the allocation layout).
+
+**Agent team size**: 3 agents — VM handler; snapshot+wire; pretty-printing+GC audit.
+
+---
+
+### H3 — `Upvalue::Mutable` → typed stack-slot pointer migration
+
+**Goal**: delete `Upvalue::Mutable(Arc<RwLock<ValueWord>>)`. Interpreter frames hold their captures inline in a per-frame capture area; closures read/write through stable frame pointers (`*mut T` typed per the capture's `ConcreteType`). Mirrors the JIT's Phase E stack allocation for non-escaping closures, generalized to all mutable captures.
+
+**Files**:
+- `crates/shape-vm/src/executor/frame.rs` (or wherever frame descriptors live — grep for `FrameDescriptor`) — each frame reserves a capture area.
+- `crates/shape-runtime/src/closure.rs` — `Upvalue` enum loses the `Mutable` variant; `Immutable(ValueWord)` stays for pass-by-value captures.
+- `crates/shape-vm/src/compiler/expressions/closures.rs` — emit capture as `*mut T` into the frame's capture area; all captures (module binding, `async scope`, flexible storage) take this path.
+- `crates/shape-vm/src/bytecode/opcode_defs.rs` — `LoadCaptureMutPtr*` / `StoreCaptureMutPtr*` become universal; `LoadClosure`/`StoreClosure` are removed.
+
+**Sub-tasks**:
+1. Design a frame-local capture layout. Each frame reserves `N × sizeof(ValueWord)` at a known offset; a closure captures the frame pointer + per-capture offset. Frame lifetime dominates closure lifetime (solver-verified in Phase B/D).
+2. Rewrite `Upvalue` to hold a `*mut ValueWord` instead of `Arc<RwLock<ValueWord>>`. Refcount on the frame itself if needed; more likely the frame's lifetime is bounded by the dominator scope.
+3. Update compiler emission: every mutable capture (local, module binding, async-scope) gets a frame-slot pointer. `BoxLocal`/`BoxModuleBinding` fall out as unused.
+4. Extend `LocalMutablePtr` eligibility to cover what H4 would have handled (H3 and H4 probably collapse into one phase once H3's frame model is in place).
+5. Delete `LoadClosure`, `StoreClosure`, `Upvalue::Mutable`, and the `Arc<RwLock>` instantiations across the codebase.
+
+**Tests** (≥12): mutable captures across every scope class (local, module-binding, async-scope, flexible-storage), nested closures, mutual mutation, borrow-check regressions (re-run Phase D's matrix on the new backing), snapshot of a frame with active captures, multi-threaded task boundaries (async `scope`), refcount instrumentation (zero atomic ops for non-escaping mut captures).
+
+**Risks**:
+- Frame model change. Today's frame may not survive into closures that outlive the frame — the borrow checker's existing rules are what makes this safe, but the invariant must hold across ALL paths (snapshots, task boundaries, deopt).
+- Async scope is the hardest case. If `async scope { … }` spawns tasks whose closures capture the scope's frame, those tasks must not outlive the scope. Phase G's task-boundary heap promotion handles this today by forcing heap for all task boundaries; H3 can keep that behavior (structured-boundary closures heap-promote; only non-escaping in-scope captures use the frame-pointer path).
+
+**Dependencies**: H1 + H2 (frame model can only change after the VM is using raw `TypedClosureHeader`).
+
+**Agent team size**: 3 agents — frame model; compiler emission; cleanup + tests.
+
+---
+
+### H4 — `BoxLocal` / `BoxModuleBinding` deletion
+
+**Goal**: zero emission of `BoxLocal` / `BoxModuleBinding` from the compiler; ultimately remove the opcodes.
+
+**Files**:
+- `crates/shape-vm/src/compiler/expressions/closures.rs` — remove the legacy emission branches.
+- `crates/shape-vm/src/compiler/expressions/assignment.rs` / `identifiers.rs` — remove any `BoxLocal`/`BoxModuleBinding` consumers.
+- `crates/shape-vm/src/bytecode/opcode_defs.rs` — delete the opcodes.
+- `crates/shape-vm/src/executor/` — delete handlers.
+
+**Sub-tasks**:
+1. Audit every emission site of `BoxLocal` / `BoxModuleBinding`; each should have a replacement path from H3's universal `LoadCaptureMutPtr*` family or from Phase F's `MakeClosureHeap` flow.
+2. Make `closures.rs` emit only typed capture flows.
+3. Delete the opcodes and handlers. Verify `grep -rn "BoxLocal" crates/` returns zero.
+
+**Tests**: re-run the full closure test suite (Phases A–G) to verify no regressions. ≥4 new tests targeting the module-binding capture and `async scope` capture paths that previously fell back to `BoxLocal`.
+
+**Risks**: low — this is deletion after H3 makes it safe. Main risk is overlooked emission site; the grep gate catches that.
+
+**Dependencies**: H3.
+
+**Agent team size**: 1 agent.
+
+---
+
+### H5 — `MakeClosure` + `MakeClosureHeap` opcode merge
+
+**Goal**: one `MakeClosure` opcode carrying an `escape_flag` in its operand. Shrinks opcode table by one entry; unifies JIT escape-analysis input.
+
+**Files**:
+- `crates/shape-vm/src/bytecode/opcode_defs.rs` — merge the two opcodes; encode `escape_flag` in the operand or in a new 1-bit flag field.
+- `crates/shape-jit/src/optimizer/escape_analysis.rs` — consume `escape_flag` from the operand instead of from opcode identity.
+- `crates/shape-jit/src/optimizer/hof_inline.rs` — same refactor.
+- `crates/shape-vm/src/compiler/expressions/closures.rs` — emit the unified opcode with the correct flag.
+
+**Sub-tasks**:
+1. Design the operand encoding. Options: (a) one bit in the operand's low bits; (b) new opcode variant with a flag byte; (c) keep separate opcodes (don't do H5 — cosmetic cleanup only).
+2. If (a) or (b): refactor JIT consumers. Ensure the hot path (escape-analysis lookup) doesn't become slower.
+3. Measure: this is the one H phase where we might regress perf if done carelessly. Benchmark before/after.
+
+**Tests**: re-run the suite; no net-new test shape. Verify opcode-dispatch micro-benchmark is within noise.
+
+**Risks**: if the JIT escape-signal lookup becomes a memory read instead of a compile-time constant, Tier 2 codegen may regress. Measure before committing.
+
+**Dependencies**: H1 (so the JIT is using `emit_heap_closure`, not FFI — the FFI path is what would otherwise need the separate opcode for backwards-compat).
+
+**Agent team size**: 1 agent.
+
+**Go/no-go**: if H2–H4 lands and opcode surface is already well-bounded, H5 is optional cosmetic cleanup. Skip if the benchmark regresses or if the implementation complexity outweighs one-opcode savings.
