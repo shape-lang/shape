@@ -105,15 +105,30 @@ fn combined_span(left: &Expr, right: &Expr) -> Span {
 /// Returns `true` if a helper was used, `false` if the caller should
 /// fall through to `compile_binary_op()` for remaining ops (And/Or/BitOps/
 /// NullCoalesce/ErrorContext).
+///
+/// V3.2 (Tranche A — arithmetic): arithmetic arms (Add/Sub/Mul/Div/Mod/Pow)
+/// route through the `emit_binary_op` shim with `BinOperandKind::Unknown`
+/// operands — this is a fallback path reached only after typed emission has
+/// declined, so the shim's Dynamic-fallback branch emits byte-identical
+/// `AddDynamic`/etc. V3.3 (Tranche B) will migrate the comparison arms.
 fn emit_generic_via_helper(compiler: &mut BytecodeCompiler, op: &BinaryOp) -> bool {
     use crate::compiler::helpers;
+    use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
     match op {
-        BinaryOp::Add => { helpers::emit_dynamic_add(compiler); true }
-        BinaryOp::Sub => { helpers::emit_dynamic_sub(compiler); true }
-        BinaryOp::Mul => { helpers::emit_dynamic_mul(compiler); true }
-        BinaryOp::Div => { helpers::emit_dynamic_div(compiler); true }
-        BinaryOp::Mod => { helpers::emit_dynamic_mod(compiler); true }
-        BinaryOp::Pow => { helpers::emit_dynamic_pow(compiler); true }
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::Pow => {
+            // V3.2: unified shim call. Operand kinds are Unknown because this
+            // path is only reached after typed emission declined — the shim
+            // emits the `*Dynamic` opcode, matching the pre-migration
+            // `emit_dynamic_*` helpers bit-for-bit.
+            let _ = emit_binary_op(compiler, *op, BinOperandKind::Unknown, BinOperandKind::Unknown)
+                .expect("emit_binary_op never returns Err for arithmetic ops");
+            true
+        }
         BinaryOp::Greater => { helpers::emit_dynamic_gt(compiler); true }
         BinaryOp::Less => { helpers::emit_dynamic_lt(compiler); true }
         BinaryOp::GreaterEq => { helpers::emit_dynamic_gte(compiler); true }
@@ -867,7 +882,20 @@ impl BytecodeCompiler {
                             // Runtime-dispatched fallback for unresolvable operand
                             // types. The VM's exec_arithmetic handles type dispatch
                             // (numeric, string concat, DateTime, etc.) at runtime.
-                            crate::compiler::helpers::emit_dynamic_add(self);
+                            //
+                            // V3.2 (Tranche A): route through the `emit_binary_op`
+                            // shim. Operand kinds are `Unknown` because the typed
+                            // Add-numeric path above has already declined for this
+                            // operand pair; the shim then emits `AddDynamic`,
+                            // byte-identical to the previous `emit_dynamic_add`.
+                            use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+                            let _ = emit_binary_op(
+                                self,
+                                BinaryOp::Add,
+                                BinOperandKind::Unknown,
+                                BinOperandKind::Unknown,
+                            )
+                            .expect("emit_binary_op never returns Err for BinaryOp::Add");
                         }
                     }
                 }
