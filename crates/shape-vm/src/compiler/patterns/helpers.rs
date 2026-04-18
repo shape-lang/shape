@@ -11,11 +11,16 @@ use crate::compiler::BytecodeCompiler;
 /// site (`Bool` desugars to direct conditional jump; `None` is a null
 /// check).
 ///
-/// Stage 2.6.4: replaces generic `OpCode::EqDynamic` emission in pattern matching
-/// with type-specialized opcodes when the literal type is known.
+/// Stage 2.6.4: replaces generic `OpCode::EqDynamic` emission in pattern
+/// matching with type-specialized opcodes when the literal type is known.
 ///
-/// Stage 2.6.5.4: all reachable literal kinds must return `Some`. The
-/// generic `OpCode::EqDynamic` fallback is being eliminated.
+/// Stage 2.6.5.4: all reachable literal kinds return `Some`; callers
+/// (`compile_pattern_check` in `patterns/checking.rs`,
+/// `compile_pattern_binding` in `patterns/binding.rs`) emit a compile
+/// error via `SemanticError` when this returns `None`. There is no
+/// Dynamic-opcode fallback in the pattern compiler, so V3.4 (Tranche C
+/// of the `emit_binary_op` shim migration) has nothing to migrate —
+/// this file is already on the post-V3 end state.
 pub(super) fn typed_eq_opcode_for_literal(lit: &Literal) -> Option<OpCode> {
     match lit {
         Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(..) => Some(OpCode::EqInt),
