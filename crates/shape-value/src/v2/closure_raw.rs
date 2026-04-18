@@ -152,6 +152,10 @@ pub unsafe fn retain_typed_closure(ptr: *const u8) {
 ///   contain a valid raw `ValueWord` bit pattern for which `drop_raw_bits`
 ///   semantics apply (i.e. either a NaN-boxed Arc<HeapValue> or an owned
 ///   heap pointer; inline values are a no-op on release).
+/// - If the caller has already transferred the heap-typed capture shares
+///   elsewhere (for instance, the JIT finalizer moves them into
+///   `Upvalue`s) the caller MUST use [`dealloc_typed_closure_no_drop`]
+///   instead to avoid a double-decrement.
 #[inline]
 pub unsafe fn release_typed_closure(ptr: *mut u8, layout: &ClosureLayout) {
     // SAFETY: caller upholds that `ptr` is a live block. Reading the
@@ -181,10 +185,38 @@ pub unsafe fn release_typed_closure(ptr: *mut u8, layout: &ClosureLayout) {
         }
     }
 
+    // SAFETY: `ptr` was allocated with `alloc_zeroed` using the matching
+    // size/align layout. This path is fast-moved into
+    // `dealloc_typed_closure_no_drop` for deallocation.
+    unsafe { dealloc_typed_closure_no_drop(ptr, layout) };
+}
+
+/// Deallocate a `TypedClosureHeader` block **without** walking the
+/// heap-capture mask. The caller is responsible for having already
+/// consumed or released each heap-typed capture's refcount share.
+///
+/// This is the right entry point when the caller has physically moved
+/// capture shares out of the block (for instance the JIT's
+/// `jit_finalize_heap_closure`, which transfers heap-typed captures into
+/// `Upvalue`s). Calling [`release_typed_closure`] in that situation would
+/// double-release each capture.
+///
+/// # Safety
+///
+/// - `ptr` must point to a block originally allocated by
+///   [`alloc_typed_closure`] (or `jit_v2_alloc_struct` with the same
+///   size/align contract — both use `std::alloc::alloc_zeroed` with
+///   `Layout::from_size_align(layout.total_heap_size(), 8)`).
+/// - The caller must have already dealt with every heap-typed capture's
+///   refcount share — this function does NOT release them.
+/// - After this call returns, `ptr` must not be dereferenced.
+#[inline]
+pub unsafe fn dealloc_typed_closure_no_drop(ptr: *mut u8, layout: &ClosureLayout) {
     let size = layout.total_heap_size();
     let alloc_layout = std::alloc::Layout::from_size_align(size, 8)
         .expect("TypedClosureHeader size/align must be valid");
-    // SAFETY: `ptr` was allocated with `alloc_zeroed(alloc_layout)` above.
+    // SAFETY: caller upholds that `ptr` was allocated with `alloc_zeroed`
+    // using the matching size/align layout.
     unsafe { std::alloc::dealloc(ptr, alloc_layout) };
 }
 
@@ -568,6 +600,35 @@ mod tests {
             let ptr = alloc_typed_closure(1, 2, &layout);
             assert_eq!(typed_closure_kind(ptr), HEAP_KIND_V2_CLOSURE);
             release_typed_closure(ptr, &layout);
+        }
+    }
+
+    #[test]
+    fn dealloc_no_drop_does_not_release_heap_captures() {
+        // When heap-capture shares have been transferred elsewhere (e.g. the
+        // JIT finalizer moves them into Upvalues), the caller must use
+        // `dealloc_typed_closure_no_drop` to avoid double-releasing. Verify
+        // that the no-drop path does NOT decrement a String capture's Arc
+        // refcount.
+        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String]);
+        let s = ValueWord::from_string(Arc::new("owned-by-upvalue".to_string()));
+        let s_bits = s.into_raw_bits();
+        unsafe {
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            // Write the share into the block without retaining — simulates
+            // the state after the finalizer has already moved the share out.
+            write_capture_raw_u64(ptr, &layout, 0, s_bits);
+
+            // Force refcount to exactly 1 before dealloc (simulating the
+            // single share the closure held at construction).
+            assert_eq!(typed_closure_refcount(ptr), 1);
+
+            // Dealloc without walking captures.
+            dealloc_typed_closure_no_drop(ptr, &layout);
+
+            // The original `s` reference is still live; refcount should
+            // remain 1. Drop it via the shape-value helper to reclaim.
+            release_raw_value_bits(s_bits);
         }
     }
 

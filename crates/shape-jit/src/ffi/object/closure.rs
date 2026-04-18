@@ -119,9 +119,9 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
 ) -> u64 {
     use shape_value::heap_value::HeapValue;
     use shape_value::v2::closure_layout::{ClosureLayout, TypedClosureHeader};
+    use shape_value::v2::closure_raw::dealloc_typed_closure_no_drop;
     use shape_value::v2::struct_layout::FieldKind;
     use shape_value::{Upvalue, ValueWord, ValueWordExt};
-    use std::alloc::Layout;
 
     unsafe {
         if header_ptr.is_null() || layout_ptr.is_null() {
@@ -211,11 +211,12 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
 
         // Deallocate the TypedClosureHeader block. The captures' refcount
         // shares transferred into the Upvalues above; releasing them again on
-        // Drop would double-decrement. Use raw `std::alloc::dealloc` to match
-        // the `jit_v2_alloc_struct` allocator shim's allocator choice.
-        let size = layout.total_heap_size();
-        let dealloc_layout = Layout::from_size_align_unchecked(size, 8);
-        std::alloc::dealloc(header_ptr, dealloc_layout);
+        // Drop would double-decrement. Route through
+        // `dealloc_typed_closure_no_drop` (Closure spec §13 H3.B.1) so the
+        // allocator contract (size = `layout.total_heap_size()`, align = 8,
+        // allocator = `std::alloc`) stays in lockstep with the VM-side
+        // `alloc_typed_closure`.
+        dealloc_typed_closure_no_drop(header_ptr, &*layout_ptr);
 
         // Build the NaN-boxed Arc<HeapValue::Closure>. This preserves the
         // v1 dispatch ABI (jit_call_value + VM op_call_closure both recognise
