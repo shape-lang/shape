@@ -525,19 +525,22 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "toArray" => crate::executor::objects::typed_array_methods::handle_int_to_array,
 };
 
-/// PHF registry for native v2 `TypedArray<i64>` methods (scaffolding, V0.c).
+/// PHF registry for native v2 `TypedArray<i64>` methods.
 ///
-/// **Status:** scaffolding only — NOT wired into the dispatch cascade yet.
-/// Phase V2.a of `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md`
-/// wires this map into `executor/objects/mod.rs` ahead of the generic
-/// `ARRAY_METHODS` lookup so native typed-int arrays skip the HeapKind match.
+/// **Status:** wired into the dispatch cascade in
+/// [`executor::objects`](crate::executor::objects) (V2.a). When a method call
+/// receives a native v2 `TypedArray<i64>` pointer, this PHF is consulted
+/// before the bespoke match in `dispatch_v2_typed_array_method` and before
+/// the generic [`ARRAY_METHODS`] lookup. Method names not present here fall
+/// through to the bespoke path (which in turn falls through to
+/// [`ARRAY_METHODS`] for higher-order methods like `map/filter/reduce`).
+///
 /// Handlers live in
 /// [`typed_int_array_methods`](crate::executor::objects::typed_int_array_methods)
 /// and delegate to the typed element primitives in
 /// `executor::v2_handlers::v2_array_detect` (read/write/push/pop/sum).
 ///
-/// **Methods:** len, push, pop, sum, first, last, get, set.
-#[allow(dead_code)] // V2.a wires this up; see module-level doc.
+/// **Methods:** len, length, push, pop, sum, first, last, get, set.
 pub static TYPED_INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "len" => crate::executor::objects::typed_int_array_methods::len,
     "length" => crate::executor::objects::typed_int_array_methods::len,
@@ -550,13 +553,14 @@ pub static TYPED_INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_
     "set" => crate::executor::objects::typed_int_array_methods::set,
 };
 
-/// PHF registry for native v2 `TypedArray<f64>` methods (scaffolding, V0.c).
+/// PHF registry for native v2 `TypedArray<f64>` methods.
 ///
-/// **Status:** scaffolding only — NOT wired into the dispatch cascade yet.
-/// See [`TYPED_INT_ARRAY_METHODS`] above; wiring lands in V2.a.
+/// **Status:** wired into the dispatch cascade in
+/// [`executor::objects`](crate::executor::objects) (V2.a). See
+/// [`TYPED_INT_ARRAY_METHODS`] for the dispatch contract; this map is the
+/// `f64` counterpart.
 ///
-/// **Methods:** len, push, pop, sum, first, last, get, set.
-#[allow(dead_code)] // V2.a wires this up; see module-level doc.
+/// **Methods:** len, length, push, pop, sum, first, last, get, set.
 pub static TYPED_NUMBER_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "len" => crate::executor::objects::typed_number_array_methods::len,
     "length" => crate::executor::objects::typed_number_array_methods::len,

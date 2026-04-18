@@ -4,25 +4,19 @@
 //! `TypedArray<i64>` and delegate to the typed element primitives exposed by
 //! `v2_handlers::v2_array_detect` (read/write/push/pop/sum, …).
 //!
-//! ## Status (V0.c scaffolding)
+//! ## Status (V2.a — wired)
 //!
 //! Registered in the [`TYPED_INT_ARRAY_METHODS`] PHF map in
-//! [`method_registry`](super::method_registry) but **not wired into the
-//! dispatch cascade yet**. The v2 typed-array dispatch path in
-//! `objects/mod.rs` currently handles `Vec<int>` receivers via the legacy
-//! `HeapKind::IntArray` → `INT_ARRAY_METHODS` cascade (for v1 `Arc<TypedBuffer>`
-//! receivers) and via `dispatch_v2_typed_array_method` (for native v2
-//! `TypedArray<i64>` receivers).
+//! [`method_registry`](super::method_registry) and wired into the dispatch
+//! cascade in [`objects`](super): when the receiver is a native v2
+//! `TypedArray<i64>`, the PHF is consulted before the bespoke match in
+//! `dispatch_v2_typed_array_method` and before the generic `ARRAY_METHODS`
+//! lookup. Method names not in the PHF (e.g. higher-order `map/filter/reduce`)
+//! fall through to the bespoke path, which in turn falls through to the
+//! generic `ARRAY_METHODS` handler via element materialization.
 //!
-//! Phase V2.a of the plan at
-//! `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` wires these
-//! handlers into the cascade ahead of the generic `ARRAY_METHODS` lookup so
-//! that calls on a native-typed `TypedArray<i64>` dispatch straight here,
-//! eliminating the runtime HeapKind match.
-//!
-//! Until then, the entries in [`TYPED_INT_ARRAY_METHODS`] are unreachable
-//! dead code. That is intentional — this file exists so that V2.a becomes a
-//! one-file wiring change rather than a mixed scaffolding + wiring commit.
+//! The legacy `HeapKind::IntArray` → `INT_ARRAY_METHODS` cascade still
+//! handles v1 `Arc<TypedBuffer<i64>>` receivers on the slow path.
 
 use crate::executor::VirtualMachine;
 use crate::executor::v2_handlers::v2_array_detect::{

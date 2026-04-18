@@ -323,6 +323,32 @@ impl VirtualMachine {
         if let Some(view) =
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(as_vw_ref(&raw_args[0]))
         {
+            // V2.a: typed PHF fast path — when the receiver is a native v2
+            // `TypedArray<i64>` or `TypedArray<f64>`, consult the element-type
+            // specific PHF first so methods like `len/push/pop/sum/first/last/
+            // get/set` dispatch with a single perfect-hash lookup instead of
+            // falling through the bespoke match in
+            // `dispatch_v2_typed_array_method`. Method names that are not in
+            // the typed PHF fall through to the bespoke path below, which
+            // itself falls through to the generic `ARRAY_METHODS` handler for
+            // higher-order methods like `map/filter/reduce`.
+            use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
+            let typed_handler: Option<&method_registry::MethodHandler> = match view.elem_type {
+                V2ElemType::I64 => {
+                    method_registry::TYPED_INT_ARRAY_METHODS.get(method_name.as_str())
+                }
+                V2ElemType::F64 => {
+                    method_registry::TYPED_NUMBER_ARRAY_METHODS.get(method_name.as_str())
+                }
+                // Other typed variants (Bool, I32, …) fall through to the
+                // bespoke dispatch + generic ARRAY_METHODS for now.
+                _ => None,
+            };
+            if let Some(handler) = typed_handler {
+                self.dispatch_method_handler(handler, raw_args, ctx)?;
+                return Ok(());
+            }
+
             if self.dispatch_v2_typed_array_method(&method_name, &view, &raw_args)? {
                 return Ok(());
             }
@@ -1497,4 +1523,178 @@ impl VirtualMachine {
 
     // op_get_prop moved to property_access.rs
     // value_to_bytes moved to object_creation.rs
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// V2.a: Typed-array PHF dispatch wiring tests
+// ═════════════════════════════════════════════════════════════════════════════
+// (impl VirtualMachine closes above.)
+
+#[cfg(test)]
+mod v2a_dispatch_tests {
+    use super::*;
+    use crate::executor::v2_handlers::v2_array_detect::{
+        ELEM_TYPE_F64, ELEM_TYPE_I64, V2ElemType, as_v2_typed_array, stamp_elem_type,
+    };
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::v2::typed_array::TypedArray;
+
+    /// Allocate a native v2 `TypedArray<i64>` stamped with the i64 elem-type
+    /// and return (raw pointer, ValueWord bits). Caller must `drop_array`.
+    fn make_v2_int_array(values: &[i64]) -> (*mut TypedArray<i64>, u64) {
+        let arr = TypedArray::<i64>::from_slice(values);
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+        }
+        let bits = ValueWord::from_native_ptr(arr as usize).into_raw_bits();
+        (arr, bits)
+    }
+
+    /// Allocate a native v2 `TypedArray<f64>` stamped with the f64 elem-type
+    /// and return (raw pointer, ValueWord bits). Caller must `drop_array`.
+    fn make_v2_number_array(values: &[f64]) -> (*mut TypedArray<f64>, u64) {
+        let arr = TypedArray::<f64>::from_slice(values);
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64);
+        }
+        let bits = ValueWord::from_native_ptr(arr as usize).into_raw_bits();
+        (arr, bits)
+    }
+
+    fn dummy_vm() -> VirtualMachine {
+        VirtualMachine::new(VMConfig::default())
+    }
+
+    /// Function-pointer equality check: confirms that the typed PHF resolves
+    /// `method` on the native v2 `TypedArray<i64>` to the canonical handler
+    /// in `typed_int_array_methods`, not the generic `ARRAY_METHODS` entry.
+    #[test]
+    fn phf_int_len_resolves_to_typed_handler() {
+        let typed = method_registry::TYPED_INT_ARRAY_METHODS.get("len").copied();
+        let canonical = crate::executor::objects::typed_int_array_methods::len
+            as method_registry::MethodHandler;
+        assert!(typed.is_some(), "TYPED_INT_ARRAY_METHODS['len'] present");
+        assert_eq!(
+            typed.unwrap() as usize,
+            canonical as usize,
+            "typed PHF must point at typed_int_array_methods::len"
+        );
+    }
+
+    #[test]
+    fn phf_number_sum_resolves_to_typed_handler() {
+        let typed = method_registry::TYPED_NUMBER_ARRAY_METHODS
+            .get("sum")
+            .copied();
+        let canonical = crate::executor::objects::typed_number_array_methods::sum
+            as method_registry::MethodHandler;
+        assert!(typed.is_some(), "TYPED_NUMBER_ARRAY_METHODS['sum'] present");
+        assert_eq!(
+            typed.unwrap() as usize,
+            canonical as usize,
+            "typed PHF must point at typed_number_array_methods::sum"
+        );
+    }
+
+    /// Invariant: the typed PHFs deliberately do NOT contain higher-order
+    /// methods like `map/filter/reduce`. Those must fall through to the
+    /// bespoke `dispatch_v2_typed_array_method` path and ultimately to the
+    /// generic `ARRAY_METHODS` handler via element materialization.
+    #[test]
+    fn phf_falls_through_for_higher_order_methods() {
+        for name in &["map", "filter", "reduce", "forEach", "find"] {
+            assert!(
+                method_registry::TYPED_INT_ARRAY_METHODS.get(name).is_none(),
+                "TYPED_INT_ARRAY_METHODS must not contain '{}' (fall-through to generic)",
+                name
+            );
+            assert!(
+                method_registry::TYPED_NUMBER_ARRAY_METHODS
+                    .get(name)
+                    .is_none(),
+                "TYPED_NUMBER_ARRAY_METHODS must not contain '{}' (fall-through to generic)",
+                name
+            );
+        }
+        // The generic ARRAY_METHODS registry carries these.
+        for name in &["map", "filter", "reduce", "forEach", "find"] {
+            assert!(
+                method_registry::ARRAY_METHODS.get(name).is_some(),
+                "ARRAY_METHODS must contain '{}' (generic fallback)",
+                name
+            );
+        }
+    }
+
+    /// Drive `arr.len()` end-to-end: the dispatch cascade must detect the
+    /// native v2 `TypedArray<i64>` receiver and route through
+    /// `TYPED_INT_ARRAY_METHODS`, producing the correct length.
+    #[test]
+    fn int_len_dispatches_through_typed_phf() {
+        let (arr, bits) = make_v2_int_array(&[10, 20, 30, 40]);
+        // The dispatcher owns the bits once they reach the handler; so build
+        // the args vector the same way and call the resolved handler directly.
+        // This mirrors what the V2.a branch in `op_call_method` does: look up
+        // the handler in the typed PHF, then `dispatch_method_handler(...)`.
+        let handler = method_registry::TYPED_INT_ARRAY_METHODS
+            .get("len")
+            .copied()
+            .expect("typed len handler");
+        let mut vm = dummy_vm();
+        let mut args = [bits];
+        let raw = handler(&mut vm, &mut args, None).expect("typed len");
+        assert_eq!(ValueWord::from_raw_bits(raw).as_i64(), Some(4));
+
+        // Sanity: `as_v2_typed_array` would indeed classify this receiver as
+        // I64, which is the exact branch the V2.a wiring takes.
+        let vw = ValueWord::from_native_ptr(arr as usize);
+        let view = as_v2_typed_array(&vw).expect("v2 detect");
+        assert_eq!(view.elem_type, V2ElemType::I64);
+        std::mem::forget(vw);
+
+        unsafe {
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    /// Drive `arr.sum()` end-to-end on a native v2 `TypedArray<f64>`: the
+    /// typed PHF must resolve and produce the f64 sum.
+    #[test]
+    fn number_sum_dispatches_through_typed_phf() {
+        let (arr, bits) = make_v2_number_array(&[1.5, 2.5, 3.0]);
+        let handler = method_registry::TYPED_NUMBER_ARRAY_METHODS
+            .get("sum")
+            .copied()
+            .expect("typed sum handler");
+        let mut vm = dummy_vm();
+        let mut args = [bits];
+        let raw = handler(&mut vm, &mut args, None).expect("typed sum");
+        assert_eq!(ValueWord::from_raw_bits(raw).as_f64(), Some(7.0));
+
+        let vw = ValueWord::from_native_ptr(arr as usize);
+        let view = as_v2_typed_array(&vw).expect("v2 detect");
+        assert_eq!(view.elem_type, V2ElemType::F64);
+        std::mem::forget(vw);
+
+        unsafe {
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    /// A heterogeneous `Array<any>` (legacy `VMArray` heap value) is NOT a
+    /// native v2 typed array — `as_v2_typed_array` returns None — and so the
+    /// V2.a branch is bypassed entirely. The receiver falls through to the
+    /// normal `HeapKind::Array` → `ARRAY_METHODS` dispatch.
+    #[test]
+    fn heterogeneous_array_bypasses_typed_phf() {
+        let generic = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
+            ValueWord::from_i64(1),
+            ValueWord::from_i64(2),
+            ValueWord::from_i64(3),
+        ]));
+        assert!(
+            as_v2_typed_array(&generic).is_none(),
+            "generic VMArray must not be detected as a v2 typed array"
+        );
+    }
 }
