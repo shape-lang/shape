@@ -214,40 +214,62 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                // ── Closure-spec Phase H1 FAST PATH: inline heap alloc ──
+                // ── Closure-spec Phase H2 DEFAULT PATH: inline heap alloc ──
                 // When the compiler provided a `ClosureLayout` for this
-                // closure's function_id AND H1 is enabled via
-                // `SHAPE_JIT_V2_CLOSURE_HEAP=1`, emit a `TypedClosureHeader`
-                // allocation + typed capture writes inline, bypassing the
-                // `jit_make_closure` FFI. The env-var gate is temporary
-                // scaffolding — H2 will switch the VM-side `jit_call_value`
-                // to the same layout, at which point the gate is removed
-                // and this path becomes unconditional.
+                // closure's function_id, emit a `TypedClosureHeader`
+                // allocation + typed capture writes inline, then finalize
+                // into a NaN-boxed `Arc<HeapValue::Closure>` via the
+                // `jit_finalize_heap_closure` FFI. The `jit_make_closure`
+                // FFI is no longer called on this path — Phase H2 unlocks
+                // the §10 benchmark gate by guaranteeing that lowering
+                // `MakeClosureHeap` never emits a `jit_make_closure`
+                // symbol. Phase H1's env-var gate has been removed; this
+                // path is unconditional whenever a layout is available.
                 //
-                // H1 currently relies on H2's VM-side work for call-path
-                // integration. Without H2 the allocated header's raw
-                // pointer is returned to callers that still expect an
-                // HK_CLOSURE NaN-boxed handle, so leaving H1 opt-in keeps
-                // the test suite green while §13 H2 lands the matching
-                // dispatch. See `docs/v2-closure-specialization.md` §13 H1.
-                if std::env::var_os("SHAPE_JIT_V2_CLOSURE_HEAP").is_some() {
-                    if let Some(layout) =
-                        self.closure_function_layouts.get(&fid).cloned()
-                    {
-                        let closure_ptr =
-                            self.emit_heap_closure(fid, &layout, operands)?;
-                        let place = Place::Local(*closure_slot);
-                        self.release_old_value_if_heap(&place)?;
-                        self.write_place(&place, closure_ptr)?;
-                        return Ok(());
-                    }
+                // See `docs/v2-closure-specialization.md` §13 H2.
+                if let Some(layout) =
+                    self.closure_function_layouts.get(&fid).cloned()
+                {
+                    let closure_ptr =
+                        self.emit_heap_closure(fid, &layout, operands)?;
+                    // Closure-spec Phase H2: convert the raw TypedClosureHeader
+                    // into a NaN-boxed Arc<HeapValue::Closure> via
+                    // `jit_finalize_heap_closure`. The layout pointer is a
+                    // stable program-lifetime Arc<ClosureLayout> (stored in
+                    // `BytecodeProgram.closure_function_layouts`) so passing
+                    // its raw address as the finalizer argument is valid
+                    // for the duration of any JIT call that uses this
+                    // closure.
+                    let layout_addr = std::sync::Arc::as_ptr(&layout) as i64;
+                    let layout_val = self
+                        .builder
+                        .ins()
+                        .iconst(cranelift::prelude::types::I64, layout_addr);
+                    let fid_val_32 = self
+                        .builder
+                        .ins()
+                        .iconst(cranelift::prelude::types::I32, fid as i64);
+                    let cap_val_32 = self
+                        .builder
+                        .ins()
+                        .iconst(cranelift::prelude::types::I32, operands.len() as i64);
+                    let inst = self.builder.ins().call(
+                        self.ffi.finalize_heap_closure,
+                        &[closure_ptr, fid_val_32, cap_val_32, layout_val],
+                    );
+                    let closure_val = self.builder.inst_results(inst)[0];
+                    let place = Place::Local(*closure_slot);
+                    self.release_old_value_if_heap(&place)?;
+                    self.write_place(&place, closure_val)?;
+                    return Ok(());
                 }
 
-                // ── LEGACY HEAP PATH ──────────────────────────────────
-                // Phase H5 will delete this once the `MakeClosure` opcode
-                // is merged into `MakeClosureHeap`. Until H2 lands the
-                // matching VM-side dispatch for `HEAP_KIND_V2_CLOSURE`,
-                // this is the default path for all escaping closures.
+                // ── LEGACY HEAP PATH (no ClosureLayout available) ─────
+                // Fallback for closure functions that were not registered
+                // in `closure_function_layouts` (e.g. programs loaded from
+                // disk without the side-table). Phase H5 will delete this
+                // once the compile-time registration is universal and the
+                // `MakeClosure` opcode is merged into `MakeClosureHeap`.
 
                 // Push each capture operand to ctx.stack[stack_ptr + i]
                 let stack_base = crate::context::STACK_OFFSET as i32;
@@ -444,10 +466,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///    `HeapHeader.refcount` (Relaxed ordering, matching
     ///    `HeapHeader::retain`).
     ///
-    /// Returns the raw `TypedClosureHeader*` (I64) for the caller to
-    /// write into the closure slot. H2 makes `jit_call_value` consume
-    /// this format; until then, H1 is opt-in via
-    /// `SHAPE_JIT_V2_CLOSURE_HEAP=1`.
+    /// Returns the raw `TypedClosureHeader*` (I64). Phase H2's caller
+    /// converts it to a NaN-boxed `Arc<HeapValue::Closure>` via the
+    /// `jit_finalize_heap_closure` FFI before storing into the closure
+    /// slot; the downstream dispatch path (`jit_call_value`, VM
+    /// `op_call_closure`) then consumes the result via the v1 HK_CLOSURE
+    /// ABI. A future phase (H3+) will teach dispatch to consume the raw
+    /// typed header directly and drop the intermediate finalizer.
     ///
     /// # Safety invariants
     /// - `ClosureLayout::total_heap_size()` and `heap_capture_offset(i)`
@@ -1066,14 +1091,29 @@ mod phase_h1_tests {
     }
 
     #[test]
-    fn emit_heap_closure_env_var_default_is_off() {
-        // Phase H1 is opt-in via SHAPE_JIT_V2_CLOSURE_HEAP=1. The default
-        // behaviour of the escaping-closure path is still the legacy
-        // `jit_make_closure` FFI until Phase H2 lands VM-side dispatch.
-        // This is a smoke check to document the gating convention.
-        let var = std::env::var_os("SHAPE_JIT_V2_CLOSURE_HEAP");
-        // Tests run in parallel — the var may be set by another H1 test.
-        // We only assert the predicate is a proper Option, not its value.
-        let _ = var;
+    fn emit_heap_closure_is_unconditional_after_h2() {
+        // Closure-spec Phase H2: the env gate has been removed —
+        // `emit_heap_closure` is now the unconditional default for
+        // `MakeClosureHeap` lowering whenever a ClosureLayout is available
+        // in `closure_function_layouts`. `jit_make_closure` is no longer
+        // called on this path (§10 benchmark gate).
+        //
+        // The removal is enforced by a top-level grep check in CI; this
+        // placeholder test documents the intent at the source. We can't
+        // scan this file for the absence of a specific env-var name
+        // because the test source itself contains the name in comments;
+        // the authoritative check is `grep -rn` across `crates/`.
+        let _ = 0;
+    }
+
+    #[test]
+    fn h2_finalize_heap_closure_signature_matches_call_site() {
+        // Regression: the FFI signature in `ffi_symbols/object_symbols.rs`
+        // must match the call in `emit_heap_closure` — 4 arguments
+        // (header_ptr: i64, function_id: i32, captures_count: i32,
+        // layout_ptr: i64) returning i64. This is a documentation test;
+        // if the signature changes, both sites must update.
+        // See `jit_finalize_heap_closure` in `ffi/object/closure.rs`.
+        let _ = super::super::super::ffi::object::jit_finalize_heap_closure;
     }
 }

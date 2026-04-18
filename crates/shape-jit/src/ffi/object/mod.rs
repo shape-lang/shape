@@ -34,4 +34,6 @@ pub use format::jit_format;
 #[allow(deprecated)]
 pub use closure::jit_make_closure;
 
+pub use closure::jit_finalize_heap_closure;
+
 pub use pattern::{jit_pattern_check_constructor, jit_pattern_extract_constructor};

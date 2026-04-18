@@ -240,6 +240,9 @@ impl JITCompiler {
             make_closure: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_make_closure"], builder.func),
+            finalize_heap_closure: self
+                .module
+                .declare_func_in_func(self.ffi_funcs["jit_finalize_heap_closure"], builder.func),
             eval_datetime_expr: self
                 .module
                 .declare_func_in_func(self.ffi_funcs["jit_eval_datetime_expr"], builder.func),

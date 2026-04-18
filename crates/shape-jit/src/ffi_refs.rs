@@ -86,6 +86,11 @@ pub struct FFIFuncRefs {
     pub(crate) array_reverse: FuncRef,
     pub(crate) array_push_element: FuncRef,
     pub(crate) make_closure: FuncRef,
+    /// Closure-spec Phase H2: `TypedClosureHeader` finalizer (see
+    /// `jit_finalize_heap_closure`). Called at the tail of
+    /// `MirToIR::emit_heap_closure` to convert the raw typed block into a
+    /// NaN-boxed `Arc<HeapValue::Closure>` for downstream dispatch.
+    pub(crate) finalize_heap_closure: FuncRef,
     pub(crate) eval_datetime_expr: FuncRef,
     pub(crate) eval_time_reference: FuncRef,
     pub(crate) eval_data_datetime_ref: FuncRef,

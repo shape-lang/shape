@@ -14,8 +14,9 @@ use super::super::ffi::conversion::{
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
-    jit_format, jit_get_prop, jit_hashmap_shape_id, jit_hashmap_value_at, jit_length,
-    jit_make_closure, jit_new_object, jit_object_rest, jit_set_prop,
+    jit_finalize_heap_closure, jit_format, jit_get_prop, jit_hashmap_shape_id,
+    jit_hashmap_value_at, jit_length, jit_make_closure, jit_new_object, jit_object_rest,
+    jit_set_prop,
 };
 use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
 use super::super::ffi::typed_object::jit_typed_object_get_field;
@@ -35,6 +36,14 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_to_number", jit_to_number as *const u8);
     builder.symbol("jit_print", jit_print as *const u8);
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
+    // Closure-spec Phase H2: TypedClosureHeader finalizer used by
+    // `MirToIR::emit_heap_closure` to convert the raw typed block into a
+    // NaN-boxed `Arc<HeapValue::Closure>` for downstream dispatch. Replaces
+    // `jit_make_closure` on the `MakeClosureHeap` lowering path.
+    builder.symbol(
+        "jit_finalize_heap_closure",
+        jit_finalize_heap_closure as *const u8,
+    );
     builder.symbol("jit_object_rest", jit_object_rest as *const u8);
     builder.symbol("jit_format", jit_format as *const u8);
     builder.symbol("jit_format_error", jit_format_error as *const u8);
@@ -174,6 +183,24 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_make_closure", Linkage::Import, &sig)
             .expect("Failed to declare jit_make_closure");
         ffi_funcs.insert("jit_make_closure".to_string(), func_id);
+    }
+
+    // Closure-spec Phase H2: jit_finalize_heap_closure(header_ptr, function_id,
+    // captures_count, layout_ptr) -> u64. Converts a `TypedClosureHeader`
+    // block allocated by `emit_heap_closure` into a NaN-boxed
+    // `Arc<HeapValue::Closure>` for downstream dispatch. See
+    // docs/v2-closure-specialization.md §13 H2.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // header_ptr
+        sig.params.push(AbiParam::new(types::I32)); // function_id (u16 promoted)
+        sig.params.push(AbiParam::new(types::I32)); // captures_count (u16 promoted)
+        sig.params.push(AbiParam::new(types::I64)); // layout_ptr
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function("jit_finalize_heap_closure", Linkage::Import, &sig)
+            .expect("Failed to declare jit_finalize_heap_closure");
+        ffi_funcs.insert("jit_finalize_heap_closure".to_string(), func_id);
     }
 
     // jit_object_rest(obj_bits: u64, keys_bits: u64) -> u64
