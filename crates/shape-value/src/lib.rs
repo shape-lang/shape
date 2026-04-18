@@ -46,7 +46,6 @@ pub mod tags {
         // Dual-heap ownership flag
         HEAP_OWNED_BIT, HEAP_PTR_MASK,
         is_heap_owned, is_heap_shared, get_heap_ptr,
-        vw_heap_box_owned,
         // Unified heap object discrimination
         UNIFIED_HEAP_FLAG, UNIFIED_PTR_MASK,
         is_unified_heap, unified_heap_ptr, unified_heap_kind, make_unified_heap,
@@ -110,7 +109,7 @@ pub use heap_value::{
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use method_id::MethodId;
 pub use scalar::{ScalarKind, TypedScalar, ValueWordScalarExt};
-pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueBits, ValueWord, ValueWordDisplay, ValueWordExt, nan_tag_type_name, nan_tag_is_truthy};
+pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueBits, ValueWord, ValueWordDisplay, ValueWordExt};
 pub use shape_array::ShapeArray;
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,

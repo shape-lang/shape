@@ -311,8 +311,10 @@ pub const HEAP_KIND_TABLE_VIEW: u8 = 76;
 /// F64 is handled before the tag match (via `!is_tagged()`), and Heap delegates
 /// to HeapValue. Both are kept out of the inline dispatch.
 /// Map a raw tag constant to its type name string.
+///
+/// Internal helper: external callers should use [`ValueBits::tag_type_name`].
 #[inline]
-pub fn nan_tag_type_name(tag: u64) -> &'static str {
+pub(crate) fn nan_tag_type_name(tag: u64) -> &'static str {
     match tag {
         TAG_INT => "int",
         TAG_BOOL => "bool",
@@ -327,8 +329,10 @@ pub fn nan_tag_type_name(tag: u64) -> &'static str {
 
 
 /// Evaluate truthiness for an inline tag value.
+///
+/// Internal helper: external callers should use [`ValueBits::tag_is_truthy`].
 #[inline]
-pub fn nan_tag_is_truthy(tag: u64, payload: u64) -> bool {
+pub(crate) fn nan_tag_is_truthy(tag: u64, payload: u64) -> bool {
     match tag {
         TAG_INT => sign_extend_i48(payload) != 0,
         TAG_BOOL => payload != 0,
@@ -470,10 +474,14 @@ pub(crate) fn vw_heap_box(v: HeapValue) -> ValueWord {
 
 /// Heap-box a HeapValue as uniquely owned (Box, no refcount).
 /// Use for values proven to have a single owner by the compiler.
-/// Not yet used as the default — available for Phase 3 integration.
+///
+/// Internal implementation detail: external callers should go through
+/// [`ValueBits::heap_box_owned`] instead. V5.6 scoped this down from
+/// `pub` to `pub(crate)` so the free-function API surface outside
+/// `value_word.rs` is limited to the `ValueBits` / `ValueWordExt` surface.
 #[inline]
 #[cfg(not(feature = "gc"))]
-pub fn vw_heap_box_owned(v: HeapValue) -> ValueWord {
+pub(crate) fn vw_heap_box_owned(v: HeapValue) -> ValueWord {
     let ptr = Box::into_raw(Box::new(v));
     let addr = ptr as u64;
     debug_assert!(addr & !PAYLOAD_MASK == 0, "pointer exceeds 48 bits");
