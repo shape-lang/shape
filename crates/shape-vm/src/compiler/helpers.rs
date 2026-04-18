@@ -441,6 +441,208 @@ pub(in crate::compiler) fn emit_dynamic_lte(compiler: &mut BytecodeCompiler) {
     compiler.last_expr_numeric_type = None;
 }
 
+/// Phase V3.1: typed-vs-dynamic binary-op dispatch kind.
+///
+/// Generalizes `NumericType` with a few non-numeric categories the binary-op
+/// emission path cares about (string, bool) plus an `Unknown` sentinel so
+/// callers can thread through `Option<NumericType>` or richer inference
+/// results. V3.1 only wires in the Numeric and String cases today — Bool is
+/// reserved for the future when an `EqBool` typed opcode lands (no such
+/// opcode exists in V3, so bool equality falls back to `EqDynamic`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::compiler) enum BinOperandKind {
+    /// Resolved to a specific numeric type (Int, Number, Decimal, IntWidth).
+    Numeric(NumericType),
+    /// Resolved to `string` or `char` — triggers `StringConcatTyped` for `+`.
+    String,
+    /// Resolved to `bool`. V3.1: no typed bool-eq opcode; always falls back
+    /// to the Dynamic opcode family for now. Reserved for future typed bool
+    /// opcodes without a caller migration.
+    Bool,
+    /// Type is not known at compile time — emit the Dynamic fallback.
+    Unknown,
+}
+
+impl BinOperandKind {
+    /// Build a `BinOperandKind` from an `Option<NumericType>` — the most
+    /// common shape used by existing binary-op emission sites.
+    pub(in crate::compiler) fn from_numeric(nt: Option<NumericType>) -> Self {
+        match nt {
+            Some(n) => BinOperandKind::Numeric(n),
+            None => BinOperandKind::Unknown,
+        }
+    }
+}
+
+/// Phase V3.1 shim: pick the typed opcode for a (BinaryOp, NumericType,
+/// NumericType) triple when both operands resolve to the same numeric
+/// category, else return `None` (caller falls back to the Dynamic opcode).
+///
+/// Mirrors the numeric-only subset of
+/// `compiler::expressions::numeric_ops::typed_opcode_for` so that
+/// `emit_binary_op` can live in the helpers module without a module-visibility
+/// dance. The two tables stay in lockstep; the expressions-side helper
+/// additionally handles `IntWidth` coercions which V3.1 intentionally does
+/// NOT generalize (width handling stays in `emit_numeric_binary_with_coercion`
+/// until V3.2+ tranches migrate those callers).
+fn typed_numeric_opcode(op: shape_ast::ast::BinaryOp, nt: NumericType) -> Option<OpCode> {
+    use shape_ast::ast::BinaryOp;
+    // V3.1 shim: handle only scalar Int/Number/Decimal paths. IntWidth is
+    // left to the existing width-aware emission path in the expressions
+    // module — migrating those sites is V3.3+ work.
+    let matched = match (op, nt) {
+        // Arithmetic — Int
+        (BinaryOp::Add, NumericType::Int) => OpCode::AddInt,
+        (BinaryOp::Sub, NumericType::Int) => OpCode::SubInt,
+        (BinaryOp::Mul, NumericType::Int) => OpCode::MulInt,
+        (BinaryOp::Div, NumericType::Int) => OpCode::DivInt,
+        (BinaryOp::Mod, NumericType::Int) => OpCode::ModInt,
+        (BinaryOp::Pow, NumericType::Int) => OpCode::PowInt,
+        // Arithmetic — Number (f64)
+        (BinaryOp::Add, NumericType::Number) => OpCode::AddNumber,
+        (BinaryOp::Sub, NumericType::Number) => OpCode::SubNumber,
+        (BinaryOp::Mul, NumericType::Number) => OpCode::MulNumber,
+        (BinaryOp::Div, NumericType::Number) => OpCode::DivNumber,
+        (BinaryOp::Mod, NumericType::Number) => OpCode::ModNumber,
+        (BinaryOp::Pow, NumericType::Number) => OpCode::PowNumber,
+        // Arithmetic — Decimal (no ModDecimal/PowDecimal opcodes)
+        (BinaryOp::Add, NumericType::Decimal) => OpCode::AddDecimal,
+        (BinaryOp::Sub, NumericType::Decimal) => OpCode::SubDecimal,
+        (BinaryOp::Mul, NumericType::Decimal) => OpCode::MulDecimal,
+        (BinaryOp::Div, NumericType::Decimal) => OpCode::DivDecimal,
+        // Comparison — Int
+        (BinaryOp::Greater, NumericType::Int) => OpCode::GtInt,
+        (BinaryOp::Less, NumericType::Int) => OpCode::LtInt,
+        (BinaryOp::GreaterEq, NumericType::Int) => OpCode::GteInt,
+        (BinaryOp::LessEq, NumericType::Int) => OpCode::LteInt,
+        (BinaryOp::Equal, NumericType::Int) => OpCode::EqInt,
+        (BinaryOp::NotEqual, NumericType::Int) => OpCode::NeqInt,
+        // Comparison — Number
+        (BinaryOp::Greater, NumericType::Number) => OpCode::GtNumber,
+        (BinaryOp::Less, NumericType::Number) => OpCode::LtNumber,
+        (BinaryOp::GreaterEq, NumericType::Number) => OpCode::GteNumber,
+        (BinaryOp::LessEq, NumericType::Number) => OpCode::LteNumber,
+        (BinaryOp::Equal, NumericType::Number) => OpCode::EqNumber,
+        (BinaryOp::NotEqual, NumericType::Number) => OpCode::NeqNumber,
+        // Comparison — Decimal (no Gt/Lt/Neq typed opcodes; fall back)
+        (BinaryOp::Equal, NumericType::Decimal) => OpCode::EqDecimal,
+        _ => return None,
+    };
+    Some(matched)
+}
+
+/// Map a `BinaryOp` to its `Dynamic`-family opcode. Returns `None` for ops
+/// that are NOT arithmetic/comparison (And/Or/BitOps/NullCoalesce/…) —
+/// those follow a separate code path in `compile_expr_binary_op`.
+fn dynamic_opcode_for(op: shape_ast::ast::BinaryOp) -> Option<OpCode> {
+    use shape_ast::ast::BinaryOp;
+    Some(match op {
+        BinaryOp::Add => OpCode::AddDynamic,
+        BinaryOp::Sub => OpCode::SubDynamic,
+        BinaryOp::Mul => OpCode::MulDynamic,
+        BinaryOp::Div => OpCode::DivDynamic,
+        BinaryOp::Mod => OpCode::ModDynamic,
+        BinaryOp::Pow => OpCode::PowDynamic,
+        BinaryOp::Greater => OpCode::GtDynamic,
+        BinaryOp::Less => OpCode::LtDynamic,
+        BinaryOp::GreaterEq => OpCode::GteDynamic,
+        BinaryOp::LessEq => OpCode::LteDynamic,
+        BinaryOp::Equal => OpCode::EqDynamic,
+        BinaryOp::NotEqual => OpCode::NeqDynamic,
+        _ => return None,
+    })
+}
+
+/// Phase V3.1: unified typed-vs-dynamic binary-op emission shim.
+///
+/// Given a `BinaryOp` plus inferred operand kinds, emits the best-matching
+/// bytecode opcode:
+///
+///   * Both operands `Numeric(nt)` with matching `nt` AND a typed opcode
+///     exists for `(op, nt)` → emit the typed opcode (`AddInt`, `MulNumber`,
+///     `EqDecimal`, …).
+///   * Both operands `String` AND `op == Add` → emit `StringConcatTyped`
+///     (matches the existing string-concat short-circuit in `compile_expr_binary_op`).
+///   * Otherwise (mismatched kinds, `Unknown`, `Bool`, or no typed opcode) →
+///     emit the `Dynamic`-family opcode (`AddDynamic`, `EqDynamic`, …).
+///
+/// Returns:
+///   * `Ok(true)` when an opcode was emitted (either typed or dynamic).
+///   * `Ok(false)` when `op` is NOT one this shim handles (And/Or/BitOps/
+///     NullCoalesce/ErrorContext/Pipe/Fuzzy*) — the caller is expected to
+///     route those ops through their dedicated emission paths.
+///
+/// This is a V3.1 **shim only** — no callers migrate yet. V3.2 (arithmetic),
+/// V3.3 (comparisons), V3.4 (pattern-match `Eq`), and V3.5 (leftover sites)
+/// will mechanically switch the ~48 existing emission sites over to this
+/// helper. Until then, existing inline dispatch in
+/// `compiler/expressions/binary_ops.rs` and friends continues to produce
+/// identical bytecode.
+///
+/// Side effects: on emit (typed or dynamic), resets
+/// `last_expr_schema` / `last_expr_type_info` / `last_expr_numeric_type`
+/// to match the legacy `emit_dynamic_*` helpers. Typed-numeric emissions
+/// additionally restore `last_expr_numeric_type = Some(nt)` for arithmetic
+/// so downstream numeric-propagation logic keeps working. Comparisons always
+/// clear the numeric hint because the result is a `bool`.
+#[allow(dead_code)] // V3.1 helper — consumers land in V3.2+ tranches.
+pub(in crate::compiler) fn emit_binary_op(
+    compiler: &mut BytecodeCompiler,
+    op: shape_ast::ast::BinaryOp,
+    lhs: BinOperandKind,
+    rhs: BinOperandKind,
+) -> Result<bool> {
+    use shape_ast::ast::BinaryOp;
+
+    // Non-arithmetic / non-comparison ops are not the shim's responsibility.
+    // And/Or short-circuit, bitwise ops emit dedicated opcodes, NullCoalesce
+    // has its own jump sequence, etc.
+    let Some(dyn_opcode) = dynamic_opcode_for(op) else {
+        return Ok(false);
+    };
+
+    // Priority 1: both operands are proven same numeric type — emit typed.
+    if let (BinOperandKind::Numeric(lnt), BinOperandKind::Numeric(rnt)) = (lhs, rhs) {
+        if lnt == rnt {
+            if let Some(typed) = typed_numeric_opcode(op, lnt) {
+                compiler.emit(Instruction::simple(typed));
+                compiler.last_expr_schema = None;
+                compiler.last_expr_type_info = None;
+                // Arithmetic preserves the numeric kind; comparison collapses to bool.
+                compiler.last_expr_numeric_type = match op {
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Pow => Some(lnt),
+                    _ => None,
+                };
+                return Ok(true);
+            }
+        }
+    }
+
+    // Priority 2: both operands are String and op is Add — emit StringConcatTyped.
+    // Matches the short-circuit already wired into `compile_expr_binary_op`
+    // for the proven-strings case.
+    if matches!((lhs, rhs, op), (BinOperandKind::String, BinOperandKind::String, BinaryOp::Add)) {
+        compiler.emit(Instruction::simple(OpCode::StringConcatTyped));
+        compiler.last_expr_schema = None;
+        compiler.last_expr_type_info = None;
+        compiler.last_expr_numeric_type = None;
+        return Ok(true);
+    }
+
+    // Fallback: emit the Dynamic-family opcode. Mirrors the per-op
+    // `emit_dynamic_*` helpers so we preserve their state-reset discipline.
+    compiler.emit(Instruction::simple(dyn_opcode));
+    compiler.last_expr_schema = None;
+    compiler.last_expr_type_info = None;
+    compiler.last_expr_numeric_type = None;
+    Ok(true)
+}
+
 /// Extract the core error message from a ShapeError, stripping redundant
 /// "Type error:", "Runtime error:", "Compile error:", etc. prefixes that
 /// thiserror's Display impl adds.  This prevents nested comptime errors
@@ -3001,6 +3203,334 @@ mod tests {
                 .get_local_binding_semantics(slot)
                 .map(|semantics| semantics.storage_class),
             Some(BindingStorageClass::Deferred)
+        );
+    }
+
+    // ========================================================================
+    // Phase V3.1: emit_binary_op shim tests
+    // ========================================================================
+
+    /// Helper: read the opcode of the last instruction emitted to the
+    /// compiler's program. Used by the `emit_binary_op` tests below.
+    fn last_emitted_opcode(compiler: &BytecodeCompiler) -> crate::bytecode::OpCode {
+        compiler
+            .program
+            .instructions
+            .last()
+            .expect("compiler program is empty")
+            .opcode
+    }
+
+    #[test]
+    fn emit_binary_op_int_int_add_emits_add_int() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        let handled = emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Numeric(NumericType::Int),
+            BinOperandKind::Numeric(NumericType::Int),
+        )
+        .expect("emit_binary_op should succeed");
+        assert!(handled, "Add should be a handled op");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddInt);
+    }
+
+    #[test]
+    fn emit_binary_op_number_number_add_emits_add_number() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        let handled = emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Numeric(NumericType::Number),
+            BinOperandKind::Numeric(NumericType::Number),
+        )
+        .expect("emit_binary_op should succeed");
+        assert!(handled);
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddNumber);
+    }
+
+    #[test]
+    fn emit_binary_op_number_number_mul_emits_mul_number() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Mul,
+            BinOperandKind::Numeric(NumericType::Number),
+            BinOperandKind::Numeric(NumericType::Number),
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::MulNumber);
+    }
+
+    #[test]
+    fn emit_binary_op_int_int_cmp_emits_typed_cmp_opcodes() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let cases = [
+            (BinaryOp::Greater, OpCode::GtInt),
+            (BinaryOp::Less, OpCode::LtInt),
+            (BinaryOp::GreaterEq, OpCode::GteInt),
+            (BinaryOp::LessEq, OpCode::LteInt),
+            (BinaryOp::Equal, OpCode::EqInt),
+            (BinaryOp::NotEqual, OpCode::NeqInt),
+        ];
+        for (op, expected) in cases {
+            let mut compiler = BytecodeCompiler::new();
+            emit_binary_op(
+                &mut compiler,
+                op,
+                BinOperandKind::Numeric(NumericType::Int),
+                BinOperandKind::Numeric(NumericType::Int),
+            )
+            .expect("emit_binary_op should succeed");
+            assert_eq!(
+                last_emitted_opcode(&compiler),
+                expected,
+                "wrong opcode for Int {:?}",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn emit_binary_op_decimal_decimal_emits_typed_decimal_opcodes() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let cases = [
+            (BinaryOp::Add, OpCode::AddDecimal),
+            (BinaryOp::Sub, OpCode::SubDecimal),
+            (BinaryOp::Mul, OpCode::MulDecimal),
+            (BinaryOp::Div, OpCode::DivDecimal),
+            (BinaryOp::Equal, OpCode::EqDecimal),
+        ];
+        for (op, expected) in cases {
+            let mut compiler = BytecodeCompiler::new();
+            emit_binary_op(
+                &mut compiler,
+                op,
+                BinOperandKind::Numeric(NumericType::Decimal),
+                BinOperandKind::Numeric(NumericType::Decimal),
+            )
+            .expect("emit_binary_op should succeed");
+            assert_eq!(
+                last_emitted_opcode(&compiler),
+                expected,
+                "wrong opcode for Decimal {:?}",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn emit_binary_op_lhs_known_rhs_unknown_emits_dynamic() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Numeric(NumericType::Int),
+            BinOperandKind::Unknown,
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddDynamic);
+    }
+
+    #[test]
+    fn emit_binary_op_both_unknown_emits_dynamic() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Unknown,
+            BinOperandKind::Unknown,
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddDynamic);
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Equal,
+            BinOperandKind::Unknown,
+            BinOperandKind::Unknown,
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::EqDynamic);
+    }
+
+    #[test]
+    fn emit_binary_op_mismatched_numeric_types_emits_dynamic() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        // Int + Number with no coercion available: shim falls back to Dynamic.
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Numeric(NumericType::Int),
+            BinOperandKind::Numeric(NumericType::Number),
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddDynamic);
+    }
+
+    #[test]
+    fn emit_binary_op_string_string_add_emits_string_concat_typed() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::String,
+            BinOperandKind::String,
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::StringConcatTyped);
+    }
+
+    #[test]
+    fn emit_binary_op_bool_bool_equal_falls_back_to_dynamic() {
+        // V3.1: no typed EqBool opcode exists yet. Bool equality must fall
+        // back to EqDynamic. This test pins that contract so a future
+        // EqBool addition is a deliberate, reviewable change.
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Equal,
+            BinOperandKind::Bool,
+            BinOperandKind::Bool,
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::EqDynamic);
+    }
+
+    #[test]
+    fn emit_binary_op_returns_false_for_unsupported_ops() {
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use shape_ast::ast::BinaryOp;
+
+        // And/Or/BitOps/NullCoalesce/ErrorContext/Pipe/Fuzzy* are NOT the
+        // shim's responsibility — they return Ok(false) so the caller routes
+        // them through their dedicated paths.
+        let unsupported = [
+            BinaryOp::And,
+            BinaryOp::Or,
+            BinaryOp::BitAnd,
+            BinaryOp::BitOr,
+            BinaryOp::BitXor,
+            BinaryOp::BitShl,
+            BinaryOp::BitShr,
+            BinaryOp::NullCoalesce,
+            BinaryOp::ErrorContext,
+            BinaryOp::Pipe,
+            BinaryOp::FuzzyEqual,
+            BinaryOp::FuzzyGreater,
+            BinaryOp::FuzzyLess,
+        ];
+        for op in unsupported {
+            let mut compiler = BytecodeCompiler::new();
+            let handled = emit_binary_op(
+                &mut compiler,
+                op,
+                BinOperandKind::Unknown,
+                BinOperandKind::Unknown,
+            )
+            .expect("emit_binary_op should succeed");
+            assert!(!handled, "{:?} should be unhandled (Ok(false))", op);
+            assert!(
+                compiler.program.instructions.is_empty(),
+                "{:?} must not emit any instruction on refusal",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn emit_binary_op_preserves_numeric_hint_for_arithmetic_only() {
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        // Arithmetic: typed-numeric emission should propagate
+        // last_expr_numeric_type so downstream numeric hints still flow.
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Numeric(NumericType::Int),
+            BinOperandKind::Numeric(NumericType::Int),
+        )
+        .expect("ok");
+        assert_eq!(compiler.last_expr_numeric_type, Some(NumericType::Int));
+
+        // Comparison: result is bool, so numeric hint must be cleared.
+        let mut compiler = BytecodeCompiler::new();
+        compiler.last_expr_numeric_type = Some(NumericType::Number);
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Less,
+            BinOperandKind::Numeric(NumericType::Int),
+            BinOperandKind::Numeric(NumericType::Int),
+        )
+        .expect("ok");
+        assert_eq!(compiler.last_expr_numeric_type, None);
+    }
+
+    #[test]
+    fn from_numeric_maps_none_to_unknown() {
+        use crate::compiler::helpers::BinOperandKind;
+        use crate::type_tracking::NumericType;
+
+        assert_eq!(
+            BinOperandKind::from_numeric(None),
+            BinOperandKind::Unknown
+        );
+        assert_eq!(
+            BinOperandKind::from_numeric(Some(NumericType::Int)),
+            BinOperandKind::Numeric(NumericType::Int)
+        );
+        assert_eq!(
+            BinOperandKind::from_numeric(Some(NumericType::Number)),
+            BinOperandKind::Numeric(NumericType::Number)
         );
     }
 }
