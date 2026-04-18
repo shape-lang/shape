@@ -133,16 +133,9 @@ pub use v2::struct_layout::{FieldInfo, FieldKind, StructLayout};
 pub use v2::typed_array::TypedArray as V2TypedArray;
 
 // v2 runtime types (zero-tag native values)
-/// v1 tag-discriminated typed-array layout (`TypedArrayHeader` + `ElemType`).
-///
-/// **Deprecated as of Phase V2.b.** The canonical v2 typed array is
-/// [`v2::typed_array::TypedArray<T>`], which uses compile-time
-/// monomorphization rather than a runtime `ElemType` tag. This module remains
-/// only to keep historical helpers available during the V2.b migration and
-/// will be removed once the parallel V2.a PHF dispatch work lands.
-///
-/// Individual items within the module carry their own `#[deprecated]`
-/// attributes — we avoid applying one to the module declaration here so the
-/// deprecation does not transitively mark every `#[test]` inside the file.
-pub mod v2_typed_array;
+//
+// V2.b: `v2_typed_array` (v1 tag-discriminated `TypedArrayHeader` + `ElemType`)
+// was deleted in favour of the monomorphized `v2::typed_array::TypedArray<T>`.
+// Use `shape_value::V2TypedArray` (re-exported above) or
+// `shape_value::v2::typed_array::TypedArray<T>` directly.
 pub mod v2_struct_layout;

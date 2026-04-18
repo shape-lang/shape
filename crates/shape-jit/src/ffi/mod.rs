@@ -25,7 +25,7 @@ pub mod simd;
 pub mod typed_object;
 pub mod v2;
 pub mod value_ffi;
-pub mod v2_array;
+// V2.b: v2_array (v1 TypedArrayHeader FFI) deleted — canonical FFI is `v2/mod.rs`
 pub mod v2_core;
 pub mod v2_math;
 pub mod v2_string_ffi;
