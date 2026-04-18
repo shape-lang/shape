@@ -747,6 +747,20 @@ impl VirtualMachine {
             // Stage 2.6.5.0: Debug opcode removed; slot 0xF2 reused for IsNull.
             // No compiler ever emitted Debug — it was a stale runtime hook.
 
+            // V1.1A: unwired — V1.1B adds handlers.
+            //
+            // The MoveLocal/CloneLocal/DropLocal opcodes were added to the
+            // opcode table in V1.1A (see `bytecode/opcode_defs.rs`) but do
+            // not have executor handlers or compiler emission yet. Reaching
+            // any of them here indicates a bug — no compile path currently
+            // emits them.
+            MoveLocal | CloneLocal | DropLocal => {
+                panic!(
+                    "V1.1A unreachable: {:?} has no executor handler (adds in V1.1B)",
+                    instruction.opcode
+                );
+            }
+
             _ => return Err(VMError::InvalidOperand),
         }
 

@@ -798,6 +798,31 @@ define_opcodes! {
     /// Count(arity). Same stack layout as `CallClosure`.
     CallFunctionIndirect = 0x124, Control, pops: 0, pushes: 0;
 
+    // ===== V1.1A: Ownership-aware Move/Clone/Drop (UNWIRED — V1.1B adds handlers) =====
+    //
+    // These opcodes are added to the enum table per the staged A/B/C/D gating
+    // pattern described in `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md`
+    // §V1.1A. V1.1A lands the enum variants only. V1.1B adds executor handlers,
+    // V1.1C adds compiler emission behind a flag, V1.1D flips the default.
+    //
+    // See `docs/ownership-aware-runtime-v2.md` §Phase 1.1 for semantics.
+    //
+    // Operand: `Operand::Local(u16)` — the local slot to move/clone/drop.
+    /// V1.1A (UNWIRED): Move value out of a local slot — transfers ownership
+    /// without refcount bump, source slot is invalidated. Pushes the value.
+    /// Executor handler added in V1.1B; currently unreachable via dispatch.
+    MoveLocal = 0x125, Variable, pops: 0, pushes: 1;
+    /// V1.1A (UNWIRED): Clone value from a local slot with refcount-aware
+    /// semantics — for heap-tagged shared values bumps Arc refcount; for owned
+    /// values performs a deep clone. Source stays live. Pushes the value.
+    /// Executor handler added in V1.1B; currently unreachable via dispatch.
+    CloneLocal = 0x126, Variable, pops: 0, pushes: 1;
+    /// V1.1A (UNWIRED): Explicit drop of a local slot at scope exit — for
+    /// owned heap values frees immediately; for shared values decrements the
+    /// refcount. No stack effect.
+    /// Executor handler added in V1.1B; currently unreachable via dispatch.
+    DropLocal = 0x127, Variable, pops: 0, pushes: 0;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;
@@ -1691,5 +1716,84 @@ impl BuiltinFunction {
             BuiltinFunction::MakeTableFromRows,
         ];
         VARIANTS.get(id as usize).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// V1.1A: verify the new ownership opcodes round-trip through their u16
+    /// discriminants — the opcode byte table assigns 0x125/0x126/0x127, and
+    /// the `#[repr(u16)]` enum must produce exactly those values.
+    #[test]
+    fn v11a_move_local_discriminant() {
+        let op = OpCode::MoveLocal;
+        assert_eq!(op as u16, 0x125);
+    }
+
+    #[test]
+    fn v11a_clone_local_discriminant() {
+        let op = OpCode::CloneLocal;
+        assert_eq!(op as u16, 0x126);
+    }
+
+    #[test]
+    fn v11a_drop_local_discriminant() {
+        let op = OpCode::DropLocal;
+        assert_eq!(op as u16, 0x127);
+    }
+
+    /// V1.1A: the three ownership opcodes are classified as Variable-category
+    /// (they operate on a local slot by index).
+    #[test]
+    fn v11a_ownership_opcodes_are_variable_category() {
+        assert_eq!(OpCode::MoveLocal.category(), OpcodeCategory::Variable);
+        assert_eq!(OpCode::CloneLocal.category(), OpcodeCategory::Variable);
+        assert_eq!(OpCode::DropLocal.category(), OpcodeCategory::Variable);
+    }
+
+    /// V1.1A: stack effects — Move/Clone push one value, Drop is zero-effect.
+    #[test]
+    fn v11a_ownership_opcode_stack_effects() {
+        // MoveLocal: reads local, pushes onto stack → 0 pops, 1 push
+        assert_eq!(OpCode::MoveLocal.stack_pops(), 0);
+        assert_eq!(OpCode::MoveLocal.stack_pushes(), 1);
+        // CloneLocal: reads local, pushes onto stack → 0 pops, 1 push
+        assert_eq!(OpCode::CloneLocal.stack_pops(), 0);
+        assert_eq!(OpCode::CloneLocal.stack_pushes(), 1);
+        // DropLocal: drops a local slot in place → 0 pops, 0 pushes
+        assert_eq!(OpCode::DropLocal.stack_pops(), 0);
+        assert_eq!(OpCode::DropLocal.stack_pushes(), 0);
+    }
+
+    /// V1.1A: the new opcodes are neither trusted nor v2-typed.
+    /// They're ownership-aware variants that will be validated by a dedicated
+    /// verifier pass once V1.1B/C land.
+    #[test]
+    fn v11a_ownership_opcodes_not_classified_as_trusted_or_v2() {
+        for op in [OpCode::MoveLocal, OpCode::CloneLocal, OpCode::DropLocal] {
+            assert!(!op.is_trusted(), "{:?} should not be trusted", op);
+            assert!(!op.is_v2_typed(), "{:?} should not be v2_typed", op);
+        }
+    }
+
+    /// V1.1A: Instruction-level construction round-trips the opcode and
+    /// preserves the `Local(u16)` operand. Mirrors the "decoder on
+    /// manually-encoded bytes" check requested by the V1.1A plan — Shape
+    /// constructs Instruction values directly rather than byte-decoding.
+    #[test]
+    fn v11a_ownership_instructions_preserve_operand() {
+        let m = Instruction::new(OpCode::MoveLocal, Some(Operand::Local(7)));
+        assert_eq!(m.opcode, OpCode::MoveLocal);
+        assert!(matches!(m.operand, Some(Operand::Local(7))));
+
+        let c = Instruction::new(OpCode::CloneLocal, Some(Operand::Local(3)));
+        assert_eq!(c.opcode, OpCode::CloneLocal);
+        assert!(matches!(c.operand, Some(Operand::Local(3))));
+
+        let d = Instruction::new(OpCode::DropLocal, Some(Operand::Local(42)));
+        assert_eq!(d.opcode, OpCode::DropLocal);
+        assert!(matches!(d.operand, Some(Operand::Local(42))));
     }
 }

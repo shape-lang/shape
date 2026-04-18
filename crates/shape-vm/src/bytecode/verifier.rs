@@ -622,6 +622,48 @@ mod tests {
         assert!(!OpCode::LoadLocal.is_v2_typed());
     }
 
+    /// V1.1A: the new MoveLocal/CloneLocal/DropLocal opcodes are not trusted
+    /// and are not v2-typed. Both verifier passes should accept them as no-ops
+    /// (they pass through without the respective FrameDescriptor requirements).
+    /// V1.1B will add an ownership-specific verifier pass; until then, these
+    /// opcodes are unreachable in execution, so no verification is required.
+    #[test]
+    fn v11a_ownership_opcodes_pass_both_verifiers() {
+        use crate::bytecode::Operand;
+        let func = Function {
+            name: "own_fn".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 1,
+            entry_point: 0,
+            body_length: 4,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: None,
+            osr_entry_points: vec![],
+            mir_data: None,
+        };
+        let instructions = vec![
+            Instruction::new(OpCode::MoveLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::CloneLocal, Some(Operand::Local(0))),
+            Instruction::new(OpCode::DropLocal, Some(Operand::Local(0))),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(vec![func], instructions);
+        assert!(
+            verify_trusted_opcodes(&prog).is_ok(),
+            "V1.1A ownership opcodes should pass trusted verification"
+        );
+        assert!(
+            verify_v2_typed_opcodes(&prog).is_ok(),
+            "V1.1A ownership opcodes should pass v2-typed verification"
+        );
+    }
+
     #[test]
     fn v2_multiple_errors_collected() {
         let func = Function {
