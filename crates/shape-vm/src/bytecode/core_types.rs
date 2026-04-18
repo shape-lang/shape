@@ -669,6 +669,8 @@ impl Instruction {
                 Operand::TypedModuleBinding(_, _) => 3,
                 // FieldOffset: u16 (2 bytes)
                 Operand::FieldOffset(_) => 2,
+                // ClosureAlloc: fid (2) + escapes flag (1) = 3 bytes
+                Operand::ClosureAlloc { .. } => 3,
             },
         }
     }

@@ -211,7 +211,17 @@ define_opcodes! {
     LoadClosure = 0x54, Variable, pops: 0, pushes: 1;
     /// Store to closure upvalue
     StoreClosure = 0x55, Variable, pops: 1, pushes: 0;
-    /// Create a closure with captured upvalues
+    /// Create a closure with captured upvalues.
+    ///
+    /// Operand encoding:
+    /// - `Operand::Function(fid)`: non-escaping closure (stack-safe in JIT Phase E).
+    /// - `Operand::ClosureAlloc { fid, escapes: true }`: escaping closure — always
+    ///   heap-allocated via `TypedClosureHeader` (JIT Phase H2 path).
+    /// - `Operand::ClosureAlloc { fid, escapes: false }`: non-escaping closure
+    ///   (equivalent to `Function(fid)`; supported for uniform operand readers).
+    ///
+    /// Closure spec H5 merged the former `MakeClosureHeap` into this opcode.
+    /// See `docs/v2-closure-specialization.md` §13 H5.
     MakeClosure = 0x56, Variable, pops: 0, pushes: 1;
     /// Close upvalue - moves stack local to heap when leaving scope
     CloseUpvalue = 0x57, Variable, pops: 0, pushes: 0;
@@ -758,21 +768,14 @@ define_opcodes! {
     /// Store heap pointer through a mutable capture pointer. Operand: Local(idx).
     StoreCaptureMutPtrPtr = 0x121, Variable, pops: 1, pushes: 0;
 
-    // ===== Closure Spec Phase F: escape-fallback heap allocation + dispatch =====
+    // ===== Closure Spec Phase F: escape-fallback dispatch =====
     //
     // These opcodes implement the v2 escape-fallback ABI (see
-    // `docs/v2-closure-specialization.md` §1.3, §5.3, §5.4). They are ADDITIVE
-    // to the legacy `MakeClosure` / `CallValue` path; Phase H deletes the
-    // legacy path after the JIT fully honours the new ABI.
+    // `docs/v2-closure-specialization.md` §1.3, §5.3, §5.4).
     //
-    // - `MakeClosureHeap(fn_id)`: allocate a `TypedClosureHeader`-shaped heap
-    //   block with a known `ClosureTypeId` and capture layout. Captures are
-    //   popped from the stack (same ordering as `MakeClosure`) and written
-    //   into the typed capture area; each heap-typed capture is retained per
-    //   the layout's `heap_capture_mask`. The produced value is a ValueWord
-    //   carrying a `HeapValue::Closure` in Phase F (with `type_id` recorded on
-    //   the side); later phases switch the interpreter to read the raw
-    //   `TypedClosureHeader` directly.
+    // The former `MakeClosureHeap` opcode was merged into `MakeClosure` in
+    // Phase H5 — escape status is now carried by the operand variant
+    // (`Operand::ClosureAlloc { escapes }`). See `MakeClosure` above.
     //
     // - `CallClosure(arity)`: direct dispatch on a closure value whose
     //   `ClosureTypeId` is known at the call site. Pops the closure pointer
@@ -785,10 +788,6 @@ define_opcodes! {
     //   pick a `call_indirect` signature; the VM treats it as a sanity tag).
     //   Falls back to the same runtime path as `CallClosure` when the callee
     //   is a closure or `CallValue` when it's a bare function id.
-    /// Allocate a heap-resident `TypedClosureHeader` with captures. Operand:
-    /// Function(func_id). Captures are already on the stack (same order as
-    /// `MakeClosure`). Pushes the closure value.
-    MakeClosureHeap = 0x122, Variable, pops: 0, pushes: 1;
     /// Direct dispatch on a closure value whose `ClosureTypeId` is statically
     /// known at the call site. Operand: Count(arity).
     ///
@@ -1151,6 +1150,21 @@ pub enum Operand {
     TypedModuleBinding(u16, NumericWidth),
     /// Byte offset into a typed struct for FieldLoad/FieldStore v2 opcodes
     FieldOffset(u16),
+    /// Closure allocation operand used exclusively by `MakeClosure` (Phase H5).
+    ///
+    /// Carries both the function id and a compile-time escape flag. The flag is
+    /// read at MIR lowering time to pick between stack-allocated (Phase E) and
+    /// heap-allocated (Phase H2) codegen; the interpreter ignores it (both
+    /// variants build a `HeapValue::Closure` in the VM).
+    ///
+    /// `Operand::Function(fid)` is also accepted by `MakeClosure` and is
+    /// equivalent to `ClosureAlloc { fid, escapes: false }` — the compiler
+    /// emits the richer form only when the storage planner has concluded the
+    /// closure escapes.
+    ClosureAlloc {
+        fid: shape_value::FunctionId,
+        escapes: bool,
+    },
 }
 
 /// Built-in functions

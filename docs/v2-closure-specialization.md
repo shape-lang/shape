@@ -1375,25 +1375,37 @@ Phase 5.D may be removed or reduced to a pointer to this document.
 
 ### H5 — `MakeClosure` + `MakeClosureHeap` opcode merge
 
+**Status**: LANDED (option b — structured operand variant).
+
 **Goal**: one `MakeClosure` opcode carrying an `escape_flag` in its operand. Shrinks opcode table by one entry; unifies JIT escape-analysis input.
 
-**Files**:
-- `crates/shape-vm/src/bytecode/opcode_defs.rs` — merge the two opcodes; encode `escape_flag` in the operand or in a new 1-bit flag field.
-- `crates/shape-jit/src/optimizer/escape_analysis.rs` — consume `escape_flag` from the operand instead of from opcode identity.
-- `crates/shape-jit/src/optimizer/hof_inline.rs` — same refactor.
-- `crates/shape-vm/src/compiler/expressions/closures.rs` — emit the unified opcode with the correct flag.
+**Audit results** (consumers of the two-opcode distinction):
 
-**Sub-tasks**:
-1. Design the operand encoding. Options: (a) one bit in the operand's low bits; (b) new opcode variant with a flag byte; (c) keep separate opcodes (don't do H5 — cosmetic cleanup only).
-2. If (a) or (b): refactor JIT consumers. Ensure the hot path (escape-analysis lookup) doesn't become slower.
-3. Measure: this is the one H phase where we might regress perf if done carelessly. Benchmark before/after.
+| Consumer | Count | Notes |
+|---|---|---|
+| Compiler emission (`closures.rs`) | 1 site | picks opcode based on `emit_make_closure_heap_next` flag |
+| JIT `escape_analysis.rs` | 1 site | treats `MakeClosure` and `MakeClosureHeap` identically (`(OpCode::MakeClosure, _) \| (OpCode::MakeClosureHeap, _) => ...`) |
+| JIT `hof_inline.rs` | 1 site | treats them identically (callback can't be statically resolved in either case) |
+| JIT MIR lowering (`statements.rs`) | 0 sites reading opcode identity | uses `StatementKind::ClosureCapture` + `non_escaping_closure_slots` set populated by the storage planner |
+| JIT `accessors.rs` allow-list | 2 → 1 entry | |
+| Interpreter dispatch (`dispatch.rs`, `objects/mod.rs`) | 2 arms | `op_make_closure_heap` was a one-line delegate to `op_make_closure` |
 
-**Tests**: re-run the suite; no net-new test shape. Verify opcode-dispatch micro-benchmark is within noise.
+**Decision**: GO. The JIT consumers already treated the two opcodes identically; the "fast-path on opcode identity" risk cited in the original plan was not real in the current code — escape information flows into the JIT through the storage-planner side table, not through opcode identity. The merge is purely a simplification.
 
-**Risks**: if the JIT escape-signal lookup becomes a memory read instead of a compile-time constant, Tier 2 codegen may regress. Measure before committing.
+**Encoding**: new `Operand::ClosureAlloc { fid: FunctionId, escapes: bool }` variant.
+- Non-escaping closures keep emitting `MakeClosure` with `Operand::Function(fid)` (backwards-compatible at the operand level).
+- Escaping closures emit `MakeClosure` with `Operand::ClosureAlloc { fid, escapes: true }`.
+- Interpreter dispatch accepts both operand shapes in `op_make_closure`; the escape flag is VM-ignored (captures_count and dispatch are identical).
+- Content-addressed blob generation and linker were extended to treat `ClosureAlloc.fid` as a dependency edge (parallel path to `Operand::Function(fid)` → shared `remap_fid` helper).
 
-**Dependencies**: H1 (so the JIT is using `emit_heap_closure`, not FFI — the FFI path is what would otherwise need the separate opcode for backwards-compat).
+**Tests added** (all in `crates/shape-vm/src/compiler/expressions/closures.rs`):
+- `test_phase_h5_non_escaping_uses_function_operand` — non-escaping closures use `Operand::Function(fid)`.
+- `test_phase_h5_escaping_uses_closure_alloc_operand_with_escapes_true` — escaping closures use `ClosureAlloc { escapes: true }`.
+- `test_phase_h5_interpreter_ignores_escape_flag` — end-to-end runtime on both paths produces the same result.
+- `test_phase_h5_make_closure_heap_opcode_absent` — discriminant 0x122 (the old `MakeClosureHeap` byte) is never emitted.
 
-**Agent team size**: 1 agent.
+Pre-H5 Phase F/G test assertions on opcode identity (`|op| op == OC::MakeClosureHeap`) were migrated to operand-shape assertions via `any_escaping_make_closure` / `any_non_escaping_make_closure` helpers.
 
-**Go/no-go**: if H2–H4 lands and opcode surface is already well-bounded, H5 is optional cosmetic cleanup. Skip if the benchmark regresses or if the implementation complexity outweighs one-opcode savings.
+**Verification**: `cargo check --workspace` clean; `shape-vm` lib 2026 passed / 0 failed; `shape-jit` lib 371 passed / 0 failed; `just test-fast` all green.
+
+**Dependencies satisfied**: H1 landed (JIT uses `emit_heap_closure`, not the `jit_make_closure` FFI), so there was no backwards-compat need for the separate opcode.

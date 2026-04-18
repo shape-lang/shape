@@ -125,7 +125,7 @@ fn resolve_callback_fn_id(
                 // If it's a MakeClosure or other non-function, we can't inline
                 return None;
             }
-            OpCode::MakeClosure | OpCode::MakeClosureHeap => {
+            OpCode::MakeClosure => {
                 if pushes_to_skip > 0 {
                     pushes_to_skip -= 1;
                     continue;

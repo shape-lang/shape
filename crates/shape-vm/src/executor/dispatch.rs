@@ -523,7 +523,6 @@ impl VirtualMachine {
             | ArrayPushLocal
             | ArrayPop
             | MakeClosure
-            | MakeClosureHeap
             | MergeObject
             | NewTypedObject
             | NewTypedArray

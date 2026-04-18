@@ -626,7 +626,17 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         use shape_value::Upvalue;
 
-        if let Some(Operand::Function(func_id)) = instruction.operand {
+        // Closure spec H5: `MakeClosure` accepts two operand shapes:
+        //   - `Operand::Function(fid)`            — non-escaping closure.
+        //   - `Operand::ClosureAlloc { fid, .. }` — compiler-tagged with
+        //     escape status (the VM path is identical; the JIT's MIR
+        //     lowering reads `escapes` to pick stack vs. heap codegen).
+        let func_id_opt = match instruction.operand {
+            Some(Operand::Function(fid)) => Some(fid),
+            Some(Operand::ClosureAlloc { fid, .. }) => Some(fid),
+            _ => None,
+        };
+        if let Some(func_id) = func_id_opt {
             let function = self
                 .program
                 .functions
@@ -668,49 +678,6 @@ impl VirtualMachine {
         } else {
             Err(VMError::InvalidOperand)
         }
-    }
-
-    /// Closure spec Phase F — escape-fallback heap allocation.
-    ///
-    /// `MakeClosureHeap(Function(fid))` is the opcode emitted for closures
-    /// whose storage plan classifies them as ESCAPING. Semantically this
-    /// builds a `TypedClosureHeader`-shaped value with the closure's
-    /// `function_id` and the compiler-minted `ClosureTypeId`; captures are
-    /// popped from the stack and written into the typed capture area; each
-    /// heap-typed capture is retained per the layout's `heap_capture_mask`.
-    ///
-    /// In Phase F the interpreter backing is still `HeapValue::Closure` (the
-    /// legacy representation). The opcode encodes the intent, and Phase H
-    /// will migrate the interpreter to read a real raw `TypedClosureHeader`
-    /// allocation with a proper `HeapHeader` (refcount lives with the
-    /// standard v2 atomic retain/release machinery — the Closure HeapValue
-    /// shares the exact lifetime semantics via `Arc<HeapValue>`, so drop
-    /// semantics are preserved end-to-end).
-    ///
-    /// # Invariants (documented for Phase H migration)
-    /// - `function_id` must index a closure-compiled `Function` in
-    ///   `program.functions`.
-    /// - `captures_count` captures are consumed from the top of the stack;
-    ///   if the actual stack is shorter, `StackUnderflow` is raised.
-    /// - Ownership: each heap-typed capture's refcount is preserved — the
-    ///   pop + re-wrap into the `Upvalue` preserves Arc clones via
-    ///   `Upvalue::new` (no atomic ops on scalar captures, standard Arc
-    ///   clone on heap captures).
-    pub(in crate::executor) fn op_make_closure_heap(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
-        // Behaviourally identical to `op_make_closure` in Phase F — the new
-        // opcode exists to let the JIT distinguish escaping closures
-        // (always heap-allocated) from the legacy `MakeClosure` path, which
-        // is retained for unresolved-escape-status closures until Phase H.
-        //
-        // Once Phase H lands, this handler will switch to allocating a raw
-        // `TypedClosureHeader` block via `std::alloc::alloc` with
-        // `HEAP_KIND_V2_CLOSURE` in the header and each capture written at
-        // its typed offset inside the layout — matching the JIT's memory
-        // layout exactly.
-        self.op_make_closure(instruction)
     }
 
     // Foreign function call

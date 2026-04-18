@@ -21,18 +21,22 @@ use crate::ffi::value_ffi::*;
 ///
 /// Supports unlimited captures via heap-allocated capture array.
 ///
-/// # Deprecation (Closure-spec Phase H1)
+/// # Deprecation (Closure-spec Phase H1/H5)
 ///
 /// Phase H1 introduces `MirToIR::emit_heap_closure` which inlines the
 /// allocation + `TypedClosureHeader` init directly in Cranelift IR. Phase H2
-/// makes `emit_heap_closure` the unconditional default for `MakeClosureHeap`
-/// — this FFI is no longer called from that opcode's lowering and exists
-/// only to service residual v1 `MakeClosure` emission paths. Phase H5 will
-/// merge those opcodes and this FFI can be deleted.
+/// makes `emit_heap_closure` the unconditional default for escaping
+/// closures — this FFI is no longer called from that opcode's lowering and
+/// exists only to service the legacy non-layout fallback in the unified
+/// `MakeClosure` opcode. Phase H5 merged `MakeClosureHeap` into
+/// `MakeClosure` (the escape flag now lives in the operand variant
+/// `ClosureAlloc { escapes }`); a follow-up phase can delete this FFI once
+/// all closure functions are guaranteed to have a registered
+/// `ClosureLayout`.
 #[deprecated(
     note = "Closure-spec Phase H2: `emit_heap_closure` + `jit_finalize_heap_closure` \
-            is now the unconditional path for `MakeClosureHeap`. This FFI remains \
-            only for residual `MakeClosure` emission paths; Phase H5 deletes it."
+            is now the unconditional path for escaping closures. This FFI remains \
+            only for residual non-layout fallback paths; a follow-up phase deletes it."
 )]
 #[inline(always)]
 pub extern "C" fn jit_make_closure(

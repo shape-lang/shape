@@ -214,6 +214,7 @@ impl BytecodeProgram {
                     Operand::Const(idx) => *idx += const_offset,
                     Operand::Property(idx) => *idx += string_offset,
                     Operand::Function(idx) => idx.0 += func_offset,
+                    Operand::ClosureAlloc { fid, .. } => fid.0 += func_offset,
                     Operand::Name(id) => id.0 += string_offset as u32,
                     Operand::TypedMethodCall { string_id, .. } => {
                         *string_id += string_offset;

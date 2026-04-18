@@ -190,7 +190,6 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::LoadClosure,
     OpCode::StoreClosure,
     OpCode::MakeClosure,
-    OpCode::MakeClosureHeap,
     OpCode::CloseUpvalue,
     OpCode::MakeRef,
     OpCode::DerefLoad,

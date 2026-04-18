@@ -124,7 +124,6 @@ impl VirtualMachine {
             ArrayPushLocal => self.op_array_push_local(instruction)?,
             ArrayPop => self.op_array_pop()?,
             MakeClosure => self.op_make_closure(instruction)?,
-            MakeClosureHeap => self.op_make_closure_heap(instruction)?,
             MergeObject => self.op_merge_object()?,
             NewTypedObject => self.op_new_typed_object(instruction)?,
             TypedMergeObject => self.op_typed_merge_object(instruction)?,

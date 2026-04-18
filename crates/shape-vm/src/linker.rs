@@ -99,6 +99,45 @@ fn topo_sort(program: &Program) -> Result<Vec<FunctionHash>, LinkError> {
 // Operand remapping
 // ---------------------------------------------------------------------------
 
+/// Resolve a blob-relative function dependency index to a globally linked
+/// function id. Shared between `Operand::Function` and `Operand::ClosureAlloc`
+/// (closure spec H5 merged opcode identity into the operand).
+fn remap_fid(
+    dep_idx: u16,
+    blob: &FunctionBlob,
+    current_function_id: usize,
+    hash_to_id: &HashMap<FunctionHash, usize>,
+    name_to_id: &HashMap<&str, usize>,
+) -> u16 {
+    if let Some(dep_hash) = blob.dependencies.get(dep_idx as usize) {
+        if *dep_hash == FunctionHash::ZERO {
+            // ZERO sentinel: self-recursion or mutual recursion.
+            if let Some(callee_name) = blob.callee_names.get(dep_idx as usize) {
+                if callee_name != &blob.name {
+                    // Mutual recursion: look up the target by name.
+                    if let Some(target_id) = name_to_id.get(callee_name.as_str()) {
+                        *target_id as u16
+                    } else {
+                        // Fallback: self (shouldn't happen for valid programs).
+                        current_function_id as u16
+                    }
+                } else {
+                    // Self-recursion.
+                    current_function_id as u16
+                }
+            } else {
+                // No callee name info; assume self-recursion.
+                current_function_id as u16
+            }
+        } else {
+            hash_to_id[dep_hash] as u16
+        }
+    } else {
+        // Defensive fallback for blobs emitted with already-global function ids.
+        dep_idx
+    }
+}
+
 /// Remap a single operand given the per-blob base offsets and function
 /// hash-to-id mapping.
 fn remap_operand(
@@ -115,34 +154,24 @@ fn remap_operand(
         Operand::Property(i) => Operand::Property((string_base + i as usize) as u16),
         Operand::Name(StringId(i)) => Operand::Name(StringId((string_base + i as usize) as u32)),
         Operand::Function(FunctionId(dep_idx)) => {
-            if let Some(dep_hash) = blob.dependencies.get(dep_idx as usize) {
-                if *dep_hash == FunctionHash::ZERO {
-                    // ZERO sentinel: self-recursion or mutual recursion.
-                    // Check callee_names to determine which function to target.
-                    if let Some(callee_name) = blob.callee_names.get(dep_idx as usize) {
-                        if callee_name != &blob.name {
-                            // Mutual recursion: look up the target by name.
-                            if let Some(target_id) = name_to_id.get(callee_name.as_str()) {
-                                Operand::Function(FunctionId(*target_id as u16))
-                            } else {
-                                // Fallback: self (shouldn't happen for valid programs).
-                                Operand::Function(FunctionId(current_function_id as u16))
-                            }
-                        } else {
-                            // Self-recursion.
-                            Operand::Function(FunctionId(current_function_id as u16))
-                        }
-                    } else {
-                        // No callee name info; assume self-recursion.
-                        Operand::Function(FunctionId(current_function_id as u16))
-                    }
-                } else {
-                    let linked_id = hash_to_id[dep_hash];
-                    Operand::Function(FunctionId(linked_id as u16))
-                }
-            } else {
-                // Defensive fallback for blobs emitted with already-global function ids.
-                Operand::Function(FunctionId(dep_idx))
+            Operand::Function(FunctionId(remap_fid(
+                dep_idx,
+                blob,
+                current_function_id,
+                hash_to_id,
+                name_to_id,
+            )))
+        }
+        Operand::ClosureAlloc { fid: FunctionId(dep_idx), escapes } => {
+            Operand::ClosureAlloc {
+                fid: FunctionId(remap_fid(
+                    dep_idx,
+                    blob,
+                    current_function_id,
+                    hash_to_id,
+                    name_to_id,
+                )),
+                escapes,
             }
         }
         Operand::TypedMethodCall {

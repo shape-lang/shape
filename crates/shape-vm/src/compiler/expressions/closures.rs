@@ -435,29 +435,27 @@ impl BytecodeCompiler {
         }
 
         // Phase F: when the compiler has been told to emit the heap-ABI
-        // opcode for this closure (e.g. by an outer expression that knows the
+        // form for this closure (e.g. by an outer expression that knows the
         // closure escapes — the most common driver is return-of-closure and
-        // store-into-array patterns), emit `MakeClosureHeap` instead of the
-        // legacy `MakeClosure`. In Phase F both opcodes allocate an
-        // equivalent `HeapValue::Closure` value; the distinction exists so
-        // the JIT can specialise escaping closures on the heap ABI while
-        // Phase E's stack-closure path handles non-escaping literals.
+        // store-into-array patterns), tag the `MakeClosure` operand with
+        // `escapes: true`. Phase H5 merged the former `MakeClosureHeap`
+        // opcode into `MakeClosure`; the JIT reads `escapes` from the
+        // operand variant (compile-time constant — no memory load on the
+        // dispatch fast path).
         //
         // The `emit_make_closure_heap_next` flag is a single-shot hook: the
         // caller sets it before `compile_expr_closure` runs and the
         // closure lowerer consumes it at emission time. This keeps the
         // decision close to the escape signal without threading a second
         // parameter through the closure-compilation API.
-        let use_heap_opcode = std::mem::take(&mut self.emit_make_closure_heap_next);
-        let make_closure_op = if use_heap_opcode {
-            OpCode::MakeClosureHeap
+        let escapes = std::mem::take(&mut self.emit_make_closure_heap_next);
+        let fid = shape_value::FunctionId(func_idx as u16);
+        let operand = if escapes {
+            Operand::ClosureAlloc { fid, escapes: true }
         } else {
-            OpCode::MakeClosure
+            Operand::Function(fid)
         };
-        self.emit(Instruction::new(
-            make_closure_op,
-            Some(Operand::Function(shape_value::FunctionId(func_idx as u16))),
-        ));
+        self.emit(Instruction::new(OpCode::MakeClosure, Some(operand)));
         // Closures don't produce TypedObjects
         self.last_expr_schema = None;
         Ok(())
@@ -918,6 +916,42 @@ mod tests {
         false
     }
 
+    /// Closure spec H5: assertion helper replacing the old
+    /// `any_opcode_in_program(..., |op| op == OC::MakeClosureHeap)`. The
+    /// escape flag now lives in the operand variant (`ClosureAlloc { escapes }`),
+    /// so test assertions inspect the operand, not the opcode.
+    fn any_escaping_make_closure(program: &crate::bytecode::BytecodeProgram) -> bool {
+        for instr in &program.instructions {
+            if instr.opcode == OC::MakeClosure {
+                if let Some(crate::bytecode::Operand::ClosureAlloc { escapes: true, .. }) =
+                    instr.operand
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Closure spec H5: assertion helper for the non-escaping form.
+    /// Matches both `Operand::Function(_)` (the canonical non-escape encoding
+    /// used by the current compiler) and `ClosureAlloc { escapes: false }`
+    /// (accepted for symmetry — not currently emitted).
+    fn any_non_escaping_make_closure(program: &crate::bytecode::BytecodeProgram) -> bool {
+        for instr in &program.instructions {
+            if instr.opcode == OC::MakeClosure {
+                match instr.operand {
+                    Some(crate::bytecode::Operand::Function(_)) => return true,
+                    Some(crate::bytecode::Operand::ClosureAlloc { escapes: false, .. }) => {
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
     #[test]
     fn test_phase_d_let_mut_non_escaping_emits_typed_capture_opcodes() {
         // Run inside a function so `n` is a local (Phase D queries the MIR
@@ -1223,7 +1257,8 @@ mod tests {
     #[test]
     fn test_phase_f_return_closure_emits_make_closure_heap() {
         // Escape vector #1 (return): a closure literal returned from a
-        // function escapes; the compiler must emit `MakeClosureHeap`.
+        // function escapes; the compiler must emit `MakeClosure` tagged
+        // with `escapes: true` (Phase H5 — operand-encoded escape flag).
         // The returned closure uses its captured variable `n`.
         let program = compile_source(
             "fn make() -> any {\n\
@@ -1233,15 +1268,16 @@ mod tests {
              make()",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::MakeClosureHeap),
-            "expected MakeClosureHeap for return-of-closure, got only MakeClosure"
+            any_escaping_make_closure(&program),
+            "expected MakeClosure with escapes=true for return-of-closure"
         );
     }
 
     #[test]
     fn test_phase_f_array_of_closures_emits_make_closure_heap() {
         // Escape vector #2 (container store): a closure stored into an
-        // array literal escapes; the compiler must emit `MakeClosureHeap`.
+        // array literal escapes; the compiler must emit `MakeClosure`
+        // with `escapes: true`.
         // Use closures without type annotations (untyped-param closures
         // in array literals parse cleanly).
         let program = compile_source(
@@ -1252,16 +1288,16 @@ mod tests {
              setup()",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::MakeClosureHeap),
-            "expected MakeClosureHeap for closures stored in array"
+            any_escaping_make_closure(&program),
+            "expected MakeClosure with escapes=true for closures stored in array"
         );
     }
 
     #[test]
     fn test_phase_f_local_closure_keeps_legacy_make_closure() {
         // A closure bound to a local and only called via the local name
-        // does NOT escape; the legacy `MakeClosure` opcode is still used.
-        // This verifies Phase F is strictly additive.
+        // does NOT escape; the compiler emits `MakeClosure` with the
+        // non-escaping operand form (`Operand::Function(fid)`).
         let program = compile_source(
             "fn main() -> int {\n\
                  let f = |x| x + 1\n\
@@ -1270,8 +1306,13 @@ mod tests {
              main()",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::MakeClosure),
-            "expected legacy MakeClosure for non-escaping closure"
+            any_non_escaping_make_closure(&program),
+            "expected MakeClosure with non-escape operand for non-escaping closure"
+        );
+        // And NOT the escaping form.
+        assert!(
+            !any_escaping_make_closure(&program),
+            "non-escaping closure should not carry escapes=true operand"
         );
     }
 
@@ -1498,8 +1539,8 @@ mod tests {
              0",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::MakeClosureHeap),
-            "expected MakeClosureHeap for closure literal crossing a detached task boundary"
+            any_escaping_make_closure(&program),
+            "expected escaping MakeClosure for closure literal crossing a detached task boundary"
         );
     }
 
@@ -1516,14 +1557,14 @@ mod tests {
              0",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::MakeClosureHeap),
-            "expected MakeClosureHeap for closure literal as async scope result"
+            any_escaping_make_closure(&program),
+            "expected escaping MakeClosure for closure literal as async scope result"
         );
     }
 
-    /// Non-task-boundary closure still uses the legacy `MakeClosure` opcode.
-    /// This is the control group: Phase G's task-boundary hook must not
-    /// regress non-escaping closures inside async functions.
+    /// Non-task-boundary closure uses the non-escape `MakeClosure` operand
+    /// form. This is the control group: Phase G's task-boundary hook must
+    /// not regress non-escaping closures inside async functions.
     #[test]
     fn test_phase_g_non_task_closure_keeps_legacy_make_closure() {
         let program = compile_source(
@@ -1534,8 +1575,8 @@ mod tests {
              0",
         );
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::MakeClosure),
-            "expected legacy MakeClosure for non-escaping closure in async fn"
+            any_non_escaping_make_closure(&program),
+            "expected non-escaping MakeClosure operand for closure in async fn"
         );
     }
 
@@ -1570,10 +1611,10 @@ mod tests {
              }\n\
              0",
         );
-        // Both MakeClosureHeap and the capture load must be present.
+        // Both the escaping MakeClosure form and the capture load must be present.
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::MakeClosureHeap),
-            "expected MakeClosureHeap for closure capturing a heap binding across \
+            any_escaping_make_closure(&program),
+            "expected escaping MakeClosure for closure capturing a heap binding across \
              a task boundary"
         );
     }
@@ -1988,10 +2029,10 @@ mod tests {
         // escaping closure (n is a local here, not a module binding, but
         // the same `emit_make_closure_heap_next` gate also covers module
         // bindings). We express the invariant indirectly: escaping
-        // closures go through MakeClosureHeap.
+        // closures emit `MakeClosure` with `escapes: true`.
         assert!(
-            any_opcode_in_program(&program, |op| op == OC::MakeClosureHeap),
-            "expected MakeClosureHeap for returned closure"
+            any_escaping_make_closure(&program),
+            "expected escaping MakeClosure for returned closure"
         );
     }
 
@@ -2102,5 +2143,131 @@ mod tests {
             Some(10),
             "H4 typed path + legacy BoxModuleBinding hybrid must still propagate writes"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Closure Spec Phase H5 — MakeClosure / MakeClosureHeap opcode merge
+    //
+    // See `docs/v2-closure-specialization.md` §13 H5. The former
+    // `MakeClosureHeap` opcode has been folded into `MakeClosure`; escape
+    // status is carried by the operand (`ClosureAlloc { escapes }`). These
+    // tests lock in the new encoding at every surface:
+    //   - compiler emission (non-escape → `Operand::Function`; escape →
+    //     `Operand::ClosureAlloc { escapes: true }`).
+    //   - Interpreter dispatch accepts both operand shapes uniformly.
+    //   - End-to-end execution through each path.
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// H5 compile-time: non-escaping closure → `MakeClosure` +
+    /// `Operand::Function(fid)` (the legacy non-escape operand shape is
+    /// preserved; the compiler only promotes to `ClosureAlloc` when the
+    /// escape hint is set).
+    #[test]
+    fn test_phase_h5_non_escaping_uses_function_operand() {
+        let program = compile_source(
+            "fn main() -> int {\n\
+                 let f = |x| x + 1\n\
+                 f(5)\n\
+             }\n\
+             main()",
+        );
+        // Find the MakeClosure instruction and verify its operand shape.
+        let mk = program
+            .instructions
+            .iter()
+            .find(|i| i.opcode == OC::MakeClosure)
+            .expect("expected at least one MakeClosure opcode");
+        match mk.operand {
+            Some(crate::bytecode::Operand::Function(_)) => { /* expected */ }
+            other => panic!(
+                "non-escaping closure must carry Operand::Function(fid); got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// H5 compile-time: escaping closure → `MakeClosure` +
+    /// `Operand::ClosureAlloc { fid, escapes: true }`.
+    #[test]
+    fn test_phase_h5_escaping_uses_closure_alloc_operand_with_escapes_true() {
+        let program = compile_source(
+            "fn make() -> any {\n\
+                 let n = 5\n\
+                 return |x| x + n\n\
+             }\n\
+             make()",
+        );
+        let escaping_mk = program.instructions.iter().find(|i| {
+            i.opcode == OC::MakeClosure
+                && matches!(
+                    i.operand,
+                    Some(crate::bytecode::Operand::ClosureAlloc {
+                        escapes: true,
+                        ..
+                    })
+                )
+        });
+        assert!(
+            escaping_mk.is_some(),
+            "escaping closure must emit MakeClosure with ClosureAlloc {{ escapes: true }}"
+        );
+    }
+
+    /// H5 interpreter: escape flag is VM-ignored — both operand shapes
+    /// produce the same observable runtime result when the captured
+    /// closure is invoked.
+    #[test]
+    fn test_phase_h5_interpreter_ignores_escape_flag() {
+        // Non-escape path (inlined call).
+        let v1 = run_program_top_level(
+            "fn run() -> int {\n\
+                 let f = |x| x * 2\n\
+                 f(21)\n\
+             }\n\
+             run()",
+        );
+        assert_eq!(v1.as_i64(), Some(42));
+
+        // Escape path (closure returned from make()).
+        let v2 = run_program_top_level(
+            "fn make() -> any {\n\
+                 let k = 40\n\
+                 return |x| x + k\n\
+             }\n\
+             let g = make()\n\
+             g(2)",
+        );
+        assert_eq!(v2.as_i64(), Some(42));
+    }
+
+    /// H5 opcode-table shrink: `MakeClosureHeap` no longer exists as an
+    /// enum variant. The compiler must not emit it, and its absence is
+    /// witnessed by pattern-matching every emitted opcode's numeric tag.
+    #[test]
+    fn test_phase_h5_make_closure_heap_opcode_absent() {
+        // Compile a program exercising BOTH escape paths and verify every
+        // emitted instruction's discriminant is !=  the old `MakeClosureHeap`
+        // value (0x122). The merged opcode is `MakeClosure` (0x56).
+        let program = compile_source(
+            "fn escape() -> any {\n\
+                 let n = 1\n\
+                 return |x| x + n\n\
+             }\n\
+             fn local() -> int {\n\
+                 let f = |x| x + 1\n\
+                 f(1)\n\
+             }\n\
+             escape()\n\
+             local()",
+        );
+        for instr in &program.instructions {
+            let discriminant = instr.opcode as u16;
+            assert_ne!(
+                discriminant, 0x122,
+                "H5: MakeClosureHeap (0x122) must never be emitted after merge"
+            );
+        }
+        // The escape path still produces `MakeClosure` with escapes=true.
+        assert!(any_escaping_make_closure(&program));
     }
 }

@@ -353,6 +353,20 @@ impl FunctionBlobBuilder {
                             }
                         }
                     }
+                    // Closure spec H5: `MakeClosure` now carries the function id
+                    // (plus the escape flag) in a `ClosureAlloc` operand when the
+                    // closure escapes. Treat it exactly like `Operand::Function`
+                    // for dependency tracking — the content-addressed blob must
+                    // record the closure's compiled body as a dependency.
+                    Operand::ClosureAlloc { fid, .. } => {
+                        let global_idx = fid.0 as usize;
+                        if !func_remap.contains_key(&fid.0) {
+                            if let Some(callee) = program.functions.get(global_idx) {
+                                let dep_idx = ensure_called(&callee.name);
+                                func_remap.insert(fid.0, dep_idx);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -386,6 +400,12 @@ impl FunctionBlobBuilder {
                             }
                         }
                         Operand::Function(fid) => {
+                            if let Some(&local) = func_remap.get(&fid.0) {
+                                fid.0 = local;
+                            }
+                        }
+                        // Closure spec H5: parallel remap for `ClosureAlloc`.
+                        Operand::ClosureAlloc { fid, .. } => {
                             if let Some(&local) = func_remap.get(&fid.0) {
                                 fid.0 = local;
                             }
