@@ -22,6 +22,7 @@
 //! The pass runs once per function and produces a `StoragePlan` consumed by codegen.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use crate::mir::analysis::{BorrowAnalysis, FunctionBorrowSummary};
 use crate::mir::types::*;
@@ -29,6 +30,35 @@ use crate::type_tracking::{
     Aliasability, BindingOwnershipClass, BindingSemantics, BindingStorageClass, EscapeStatus,
     MutationCapability,
 };
+
+/// Phase V0.a bisect-safety gate; remove once ownership Phase 1 lands.
+///
+/// When `true` (the default), `var` bindings — i.e. bindings whose ownership
+/// class is `BindingOwnershipClass::Flexible` — are assigned
+/// `BindingStorageClass::SharedCow` regardless of aliasing/mutation status.
+/// This matches the ownership-aware runtime v2 contract: `var` opts into
+/// SharedCow aliasing by construction. Flip the flag off (set
+/// `SHAPE_V2_VAR_SHAREDCOW=0`) to fall back to the narrower pre-V0.a rule
+/// that only promotes to SharedCow when the binding is both aliased AND
+/// mutated. This is a temporary bisect safety net; once the rest of ownership
+/// Phase 1 lands, the flag (and this helper) can be deleted.
+///
+/// The env var is read once per process and cached in a `OnceLock`. Values
+/// `0`/`false`/`off`/`no` (case-insensitive, trimmed) or an empty string
+/// disable the flag; anything else (or the env var being unset) leaves the
+/// default `true`.
+fn var_sharedcow_default_enabled() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_VAR_SHAREDCOW") {
+        // Explicit opt-out values disable the flag.
+        Ok(v) => !matches!(
+            v.trim(),
+            "0" | "false" | "FALSE" | "False" | "off" | "OFF" | "Off" | "no" | "NO" | "No" | ""
+        ),
+        // Not set → default on.
+        Err(_) => true,
+    })
+}
 
 /// Maximum element count for a non-escaping aggregate to be eligible for the
 /// stack-allocated / inline optimization hint. Arrays larger than this are
@@ -279,9 +309,11 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
         };
     }
 
+    let var_sharedcow_enabled = var_sharedcow_default_enabled();
     for slot_idx in 0..input.mir.num_locals {
         let slot = SlotId(slot_idx);
-        let (storage_class, semantics) = decide_slot_storage(slot, input);
+        let (storage_class, semantics) =
+            decide_slot_storage(slot, input, var_sharedcow_enabled);
         slot_classes.insert(slot, storage_class);
         slot_semantics.insert(slot, semantics);
     }
@@ -833,14 +865,24 @@ fn operand_uses_any_slot(op: &Operand, slots: &HashSet<SlotId>) -> bool {
 ///
 /// Priority order (first matching rule wins):
 ///
-/// | # | Condition                                      | Storage class  |
-/// |---|------------------------------------------------|----------------|
-/// | 0 | Explicit `Reference` already set               | `Reference`    |
-/// | 1 | Slot holds a first-class reference              | `Reference`    |
-/// | 2 | Captured by closure with mutation               | `UniqueHeap`   |
-/// | 3 | `var` (Flexible) + aliased + mutated            | `SharedCow`    |
-/// | 3b| Escaped + aliased + mutated (any ownership)     | `SharedCow`    |
-/// | 4 | Everything else                                 | `Direct`       |
+/// | #  | Condition                                      | Storage class  |
+/// |----|------------------------------------------------|----------------|
+/// | 0  | Explicit `Reference` already set               | `Reference`    |
+/// | 1  | Slot holds a first-class reference              | `Reference`    |
+/// | 1b | **V0.a**: `var` (Flexible) + flag on           | `SharedCow`    |
+/// | 2  | Captured by closure with mutation               | `UniqueHeap`   |
+/// | 3  | `var` (Flexible) + aliased + mutated            | `SharedCow`    |
+/// | 3b | Escaped + aliased + mutated (any ownership)     | `SharedCow`    |
+/// | 4  | Everything else                                 | `Direct`       |
+///
+/// Rule 1b (Phase V0.a): when `SHAPE_V2_VAR_SHAREDCOW` is enabled (the
+/// default), every `var` binding is promoted to `SharedCow` regardless of
+/// aliasing/mutation. The legacy Rule 3 remains as a safety net and as the
+/// behavior observed when the flag is disabled. Rule 1b runs BEFORE Rule 2
+/// so that a `var` slot that happens to be mutably captured stays `SharedCow`
+/// rather than being routed through the `UniqueHeap` → `LocalMutablePtr`
+/// promotion: the spec's Phase 4 contract is that `var` is aliased by
+/// construction.
 ///
 /// Notes:
 /// - "Aliased" means either captured by a closure or referenced from multiple
@@ -851,6 +893,7 @@ fn operand_uses_any_slot(op: &Operand, slots: &HashSet<SlotId>) -> bool {
 fn decide_slot_storage(
     slot: SlotId,
     input: &StoragePlannerInput<'_>,
+    var_sharedcow_enabled: bool,
 ) -> (BindingStorageClass, BindingSemantics) {
     let is_captured = input.closure_captures.contains(&slot);
     let is_mutably_captured = input.mutable_captures.contains(&slot);
@@ -879,6 +922,14 @@ fn decide_slot_storage(
     } else if slot_holds_reference(slot, input.mir) {
         // Rule 1: Bindings that hold first-class references.
         BindingStorageClass::Reference
+    } else if matches!(ownership, Some(BindingOwnershipClass::Flexible)) && var_sharedcow_enabled {
+        // Rule 1b (Phase V0.a): `var` bindings are SharedCow by default when
+        // the `SHAPE_V2_VAR_SHAREDCOW` flag is on. `var`'s ownership class is
+        // `Flexible`, which the spec's Phase 4 defines as "aliased by
+        // construction" — SharedCow regardless of whether the MIR pass
+        // observed an actual alias+mutation pair. The flag defaults to on;
+        // setting the env var to `0` falls back to the narrower Rule 3.
+        BindingStorageClass::SharedCow
     } else if is_mutably_captured {
         // Rule 2: Captured by closure with mutation → UniqueHeap.
         BindingStorageClass::UniqueHeap
@@ -887,6 +938,8 @@ fn decide_slot_storage(
         && is_mutated
     {
         // Rule 3: `var` bindings that are aliased AND mutated → SharedCow.
+        // Still present as a safety net: when the V0.a flag is disabled the
+        // planner falls back to this narrower rule.
         BindingStorageClass::SharedCow
     } else if is_escaped && is_aliased && is_mutated {
         // Rule 3b: Escaped mutable aliased bindings → SharedCow.
@@ -1698,15 +1751,41 @@ mod tests {
             callee_summaries: None,
         };
 
+        // Phase V0.a changes the storage class depending on the
+        // `SHAPE_V2_VAR_SHAREDCOW` flag state observed at process start:
+        //
+        //   * Flag ON (default): Rule 1b fires first and promotes the `var`
+        //     slot to `SharedCow`; Phase D's promotion leaves `SharedCow`
+        //     untouched.
+        //   * Flag OFF: Rule 1b is suppressed; Rule 2 fires → `UniqueHeap`;
+        //     Phase D then demotes to `LocalMutablePtr` because the closure
+        //     is non-escaping.
+        //
+        // `plan_storage` consults the cached env-backed flag, so we accept
+        // whichever outcome matches the process's flag state and cross-check
+        // the other outcome via `decide_slot_storage` directly.
         let plan = plan_storage(&input);
-        // Phase D: when the closure is non-escaping, a mutably-captured `var`
-        // slot that would previously have been `UniqueHeap` is demoted to
-        // `LocalMutablePtr`. Escaping closures stay on the legacy path.
-        assert_eq!(
-            plan.slot_classes.get(&SlotId(0)),
-            Some(&BindingStorageClass::LocalMutablePtr),
-            "non-escaping mutable capture → LocalMutablePtr (Phase D)"
-        );
+        let actual = plan.slot_classes.get(&SlotId(0)).copied();
+        if var_sharedcow_default_enabled() {
+            assert_eq!(
+                actual,
+                Some(BindingStorageClass::SharedCow),
+                "Phase V0.a flag on: mutably-captured `var` is SharedCow"
+            );
+            // Cross-check: with the flag forced off, the legacy
+            // UniqueHeap → Phase-D-demote path is still exercised.
+            assert_eq!(
+                decide_slot_storage(SlotId(0), &input, /* var_sharedcow_enabled */ false).0,
+                BindingStorageClass::UniqueHeap,
+                "legacy path (flag off) still assigns UniqueHeap before Phase D demotion"
+            );
+        } else {
+            assert_eq!(
+                actual,
+                Some(BindingStorageClass::LocalMutablePtr),
+                "Phase V0.a flag off: non-escaping mutable capture → LocalMutablePtr (Phase D)"
+            );
+        }
     }
 
     // ── Test: detect_escape_status ───────────────────────────────────────
@@ -3548,5 +3627,187 @@ mod tests {
              got {:?}",
             plan.non_escaping_closure_slots
         );
+    }
+
+    // ─── Phase V0.a: `var` → `SharedCow` default ─────────────────────────
+    //
+    // These tests exercise `decide_slot_storage` directly with an explicit
+    // `var_sharedcow_enabled` flag so they don't depend on — and aren't
+    // affected by — the process-wide `SHAPE_V2_VAR_SHAREDCOW` env-var cache
+    // that `plan_storage` consults.
+
+    fn run_decide(
+        slot: SlotId,
+        mir: &MirFunction,
+        binding_semantics: &HashMap<u16, BindingSemantics>,
+        flag_on: bool,
+    ) -> BindingStorageClass {
+        let analysis = empty_analysis();
+        let closure_captures = HashSet::new();
+        let mutable_captures = HashSet::new();
+        let input = StoragePlannerInput {
+            mir,
+            analysis: &analysis,
+            binding_semantics,
+            closure_captures: &closure_captures,
+            mutable_captures: &mutable_captures,
+            had_fallbacks: false,
+            callee_summaries: None,
+        };
+        decide_slot_storage(slot, &input, flag_on).0
+    }
+
+    #[test]
+    fn test_v0a_var_gets_sharedcow_when_flag_on() {
+        // `var x = 0; x = x + 1;` — no closure capture, no cross-scope
+        // reference. With the V0.a flag on, Rule 1b fires unconditionally
+        // because the binding is `Flexible`; with the flag off, the binding
+        // is neither aliased nor (by the planner's single-rvalue heuristic)
+        // alias-chained, so it falls through to `Direct`.
+        let mir = make_mir(
+            "v0a_var_flag_on",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::BinaryOp(
+                                BinOp::Add,
+                                Operand::Copy(Place::Local(SlotId(0))),
+                                Operand::Constant(MirConstant::Int(1)),
+                            ),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            1,
+        );
+
+        let mut binding_semantics = HashMap::new();
+        binding_semantics.insert(
+            0u16,
+            BindingSemantics::deferred(BindingOwnershipClass::Flexible),
+        );
+
+        // Flag on: Rule 1b promotes `var` → SharedCow regardless of aliasing.
+        assert_eq!(
+            run_decide(SlotId(0), &mir, &binding_semantics, true),
+            BindingStorageClass::SharedCow,
+            "Phase V0.a: `var` binding with flag on must be SharedCow"
+        );
+
+        // Flag off: Rule 1b is suppressed. The binding is not aliased
+        // (only one rvalue read), so Rule 3 does not fire. The planner
+        // falls through to `Direct`.
+        assert_eq!(
+            run_decide(SlotId(0), &mir, &binding_semantics, false),
+            BindingStorageClass::Direct,
+            "Phase V0.a: `var` binding with flag off falls back to Direct when not aliased+mutated"
+        );
+    }
+
+    #[test]
+    fn test_v0a_let_stays_direct_regardless_of_flag() {
+        // `let x = 0;` — `OwnedImmutable`. Never promoted to SharedCow
+        // under either flag state.
+        let mir = make_mir(
+            "v0a_let_direct",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(0)),
+                        Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+                    ),
+                    0,
+                )],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            1,
+        );
+
+        let mut binding_semantics = HashMap::new();
+        binding_semantics.insert(
+            0u16,
+            BindingSemantics::deferred(BindingOwnershipClass::OwnedImmutable),
+        );
+
+        for flag_on in [true, false] {
+            assert_eq!(
+                run_decide(SlotId(0), &mir, &binding_semantics, flag_on),
+                BindingStorageClass::Direct,
+                "Phase V0.a: `let` binding stays Direct (flag_on = {flag_on})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_v0a_let_mut_not_sharedcow_under_flag() {
+        // `let mut x = 0; x = x + 1;` — `OwnedMutable`, no closure capture,
+        // no cross-scope reference. Rule 1b must NOT fire (only Flexible
+        // bindings get the V0.a promotion). Rule 3 also does not fire
+        // (OwnedMutable is not Flexible). Slot stays `Direct` under both
+        // flag states.
+        let mir = make_mir(
+            "v0a_let_mut_no_cow",
+            vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::BinaryOp(
+                                BinOp::Add,
+                                Operand::Copy(Place::Local(SlotId(0))),
+                                Operand::Constant(MirConstant::Int(1)),
+                            ),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            1,
+        );
+
+        let mut binding_semantics = HashMap::new();
+        binding_semantics.insert(
+            0u16,
+            BindingSemantics::deferred(BindingOwnershipClass::OwnedMutable),
+        );
+
+        for flag_on in [true, false] {
+            let class = run_decide(SlotId(0), &mir, &binding_semantics, flag_on);
+            assert!(
+                matches!(
+                    class,
+                    BindingStorageClass::Direct | BindingStorageClass::UniqueHeap
+                ),
+                "Phase V0.a: `let mut` must not become SharedCow under V0.a \
+                 flag (flag_on = {flag_on}); got {class:?}"
+            );
+            assert_ne!(
+                class,
+                BindingStorageClass::SharedCow,
+                "Phase V0.a: `let mut` must NEVER become SharedCow (flag_on = {flag_on})"
+            );
+        }
     }
 }
