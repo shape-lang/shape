@@ -49,7 +49,7 @@ impl UnifiedString {
     }
     #[inline] pub fn len(&self) -> usize { self.len as usize }
     #[inline] pub fn is_empty(&self) -> bool { self.len == 0 }
-    #[inline] pub fn heap_box(self) -> u64 { let ptr = Box::into_raw(Box::new(self)); tags::make_unified_heap(ptr as *const u8) }
+    #[inline] pub fn heap_box(self) -> u64 { let ptr = Box::into_raw(Box::new(self)); crate::value_word::ValueBits::make_unified_heap(ptr as *const u8).raw() }
     #[inline] pub unsafe fn from_heap_bits(bits: u64) -> &'static Self { let ptr = tags::unified_heap_ptr(bits) as *const Self; unsafe { &*ptr } }
     pub unsafe fn heap_drop(bits: u64) { let ptr = tags::unified_heap_ptr(bits) as *mut Self; unsafe { drop(Box::from_raw(ptr)) }; }
 }

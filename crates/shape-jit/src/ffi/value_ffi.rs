@@ -73,9 +73,6 @@ pub use shape_value::tags::{
     PAYLOAD_MASK,
     TAG_BASE,
     TAG_SHIFT,
-    // Shared tag helpers
-    make_tagged,
-    sign_extend_i48,
 };
 use shape_value::unified_string::UnifiedString;
 use shape_value::unified_wrapper::UnifiedWrapper;
@@ -237,7 +234,7 @@ pub const fn box_bool(b: bool) -> u64 {
 /// Box an inline function reference (shared TAG_FUNCTION, payload = function_id).
 #[inline]
 pub fn box_function(fn_id: u16) -> u64 {
-    make_tagged(shape_value::tags::TAG_FUNCTION, fn_id as u64)
+    shape_value::ValueBits::make_tagged(shape_value::tags::TAG_FUNCTION, fn_id as u64).raw()
 }
 
 /// Check if a value is an inline function reference.
@@ -541,10 +538,10 @@ mod tests {
 
     #[test]
     fn test_inline_constants_match_shared_scheme() {
-        assert_eq!(TAG_NULL, make_tagged(shape_value::tags::TAG_NONE, 0));
-        assert_eq!(TAG_BOOL_FALSE, make_tagged(shape_value::tags::TAG_BOOL, 0));
-        assert_eq!(TAG_BOOL_TRUE, make_tagged(shape_value::tags::TAG_BOOL, 1));
-        assert_eq!(TAG_UNIT, make_tagged(shape_value::tags::TAG_UNIT, 0));
+        assert_eq!(TAG_NULL, shape_value::ValueBits::make_tagged(shape_value::tags::TAG_NONE, 0).raw());
+        assert_eq!(TAG_BOOL_FALSE, shape_value::ValueBits::make_tagged(shape_value::tags::TAG_BOOL, 0).raw());
+        assert_eq!(TAG_BOOL_TRUE, shape_value::ValueBits::make_tagged(shape_value::tags::TAG_BOOL, 1).raw());
+        assert_eq!(TAG_UNIT, shape_value::ValueBits::make_tagged(shape_value::tags::TAG_UNIT, 0).raw());
     }
 
     #[test]

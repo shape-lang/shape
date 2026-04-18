@@ -34,7 +34,7 @@ impl UnifiedWrapper {
     #[inline]
     pub fn heap_box(self) -> u64 {
         let ptr = Box::into_raw(Box::new(self));
-        tags::make_unified_heap(ptr as *const u8)
+        crate::value_word::ValueBits::make_unified_heap(ptr as *const u8).raw()
     }
     #[inline]
     pub unsafe fn from_heap_bits(bits: u64) -> &'static Self {

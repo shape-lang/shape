@@ -329,7 +329,7 @@ impl UnifiedArray {
     #[inline]
     pub fn heap_box_unified(self) -> u64 {
         let ptr = Box::into_raw(Box::new(self));
-        tags::make_unified_heap(ptr as *const u8)
+        crate::value_word::ValueBits::make_unified_heap(ptr as *const u8).raw()
     }
 
     /// Get a reference from NaN-boxed TAG_HEAP bits (any format).
