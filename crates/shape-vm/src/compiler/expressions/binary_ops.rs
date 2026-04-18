@@ -467,8 +467,9 @@ impl BytecodeCompiler {
         // V3.3 (Tranche B): route through the `emit_binary_op` shim with
         // `BinOperandKind::Unknown` operands. The typed-equality dispatch
         // above has already declined, so the shim emits the matching
-        // `EqDynamic` / `NeqDynamic` opcode, byte-identical to the previous
-        // `emit_dynamic_eq` / `emit_dynamic_neq` helpers.
+        // `EqDynamic` / `NeqDynamic` opcode. V3.6 audit: this is a class-(a)
+        // / class-(b) fallback — `resolve_eq_type` returned `None` for both
+        // operands (untyped params, generic stdlib code, polyglot values).
         self.compile_expr(left)?;
         self.compile_expr(right)?;
         use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
@@ -871,8 +872,11 @@ impl BytecodeCompiler {
                             // V3.2 (Tranche A): route through the `emit_binary_op`
                             // shim. Operand kinds are `Unknown` because the typed
                             // Add-numeric path above has already declined for this
-                            // operand pair; the shim then emits `AddDynamic`,
-                            // byte-identical to the previous `emit_dynamic_add`.
+                            // operand pair; the shim then emits `AddDynamic`.
+                            // V3.6 audit: class-(a) fallback — reached when an
+                            // operand is non-numeric (DateTime, mixed string, or
+                            // polyglot value), so dispatch legitimately happens
+                            // at runtime in `exec_arithmetic`.
                             use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
                             let _ = emit_binary_op(
                                 self,

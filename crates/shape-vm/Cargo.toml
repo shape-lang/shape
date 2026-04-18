@@ -61,6 +61,11 @@ jit = ["cranelift", "cranelift-jit", "cranelift-module", "cranelift-native", "ta
 gc = ["shape-gc", "shape-value/gc"]
 gc_barrier_debug = [] # Debug-mode write barrier coverage counters
 quic = ["shape-wire/quic"]
+# V3.6 audit knob: print a stderr line every time `emit_binary_op` falls back
+# to a `*Dynamic` opcode. Off by default — reserved for debugging residual
+# Dynamic emissions (expected only at polyglot / comptime / untyped-identifier
+# boundaries, see `compiler/helpers.rs::emit_binary_op`).
+audit-dynamic-fallback = []
 
 # Binary dependencies
 [dependencies.tokio]

@@ -268,178 +268,17 @@ pub(crate) fn with_box_by_default_flag<R>(enabled: bool, f: impl FnOnce() -> R) 
     f()
 }
 
-/// Emit a runtime-dispatched addition instruction.
-///
-/// This is the fallback path for `+` when the compiler cannot prove both
-/// operand types at compile time (e.g. untyped locals, mixed
-/// string/numeric contexts, DateTime arithmetic). The VM's
-/// `exec_arithmetic` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `AddInt`, `AddNumber`, `AddDecimal`,
-/// `StringConcat`, or `ArrayConcat` when the operand types are proven.
-pub(super) fn emit_dynamic_add(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::AddDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched equality instruction.
-///
-/// This is the fallback path for `==` when the compiler cannot prove both
-/// operand types at compile time (e.g. untyped function params, generic
-/// stdlib code). The VM's `exec_comparison` handles type dispatch at runtime
-/// via `vw_equals`.
-///
-/// Typed callers should prefer `EqInt`, `EqNumber`, `EqDecimal`, or
-/// `EqString` when the operand types are proven.
-pub(super) fn emit_dynamic_eq(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::EqDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched not-equal instruction.
-///
-/// This is the fallback path for `!=` when the compiler cannot prove both
-/// operand types at compile time. The VM's `exec_comparison` handles type
-/// dispatch at runtime via `vw_equals`.
-///
-/// Typed callers should prefer `NeqInt`, `NeqNumber`, or typed equality +
-/// `Not` when the operand types are proven.
-pub(super) fn emit_dynamic_neq(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::NeqDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched subtraction instruction.
-///
-/// Fallback for `-` when operand types are not proven at compile time.
-/// The VM's `exec_arithmetic` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `SubInt`, `SubNumber`, `SubDecimal`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_sub(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::SubDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched multiplication instruction.
-///
-/// Fallback for `*` when operand types are not proven at compile time.
-/// The VM's `exec_arithmetic` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `MulInt`, `MulNumber`, `MulDecimal`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_mul(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::MulDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched division instruction.
-///
-/// Fallback for `/` when operand types are not proven at compile time.
-/// The VM's `exec_arithmetic` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `DivInt`, `DivNumber`, `DivDecimal`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_div(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::DivDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched modulo instruction.
-///
-/// Fallback for `%` when operand types are not proven at compile time.
-/// The VM's `exec_arithmetic` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `ModInt`, `ModNumber`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_mod(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::ModDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched power/exponentiation instruction.
-///
-/// Fallback for `**` when operand types are not proven at compile time.
-/// The VM's `exec_arithmetic` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `PowInt`, `PowNumber`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_pow(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::PowDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched greater-than instruction.
-///
-/// Fallback for `>` when operand types are not proven at compile time.
-/// The VM's `exec_comparison` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `GtInt`, `GtNumber`, `GtDecimal`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_gt(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::GtDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched less-than instruction.
-///
-/// Fallback for `<` when operand types are not proven at compile time.
-/// The VM's `exec_comparison` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `LtInt`, `LtNumber`, `LtDecimal`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_lt(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::LtDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched greater-than-or-equal instruction.
-///
-/// Fallback for `>=` when operand types are not proven at compile time.
-/// The VM's `exec_comparison` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `GteInt`, `GteNumber`, `GteDecimal`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_gte(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::GteDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
-
-/// Emit a runtime-dispatched less-than-or-equal instruction.
-///
-/// Fallback for `<=` when operand types are not proven at compile time.
-/// The VM's `exec_comparison` handles type dispatch at runtime.
-///
-/// Typed callers should prefer `LteInt`, `LteNumber`, `LteDecimal`
-/// when the operand types are proven.
-pub(in crate::compiler) fn emit_dynamic_lte(compiler: &mut BytecodeCompiler) {
-    compiler.emit(Instruction::simple(OpCode::LteDynamic));
-    compiler.last_expr_schema = None;
-    compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
-}
+// ── Phase V3.6: `emit_dynamic_*` helpers deleted ─────────────────────────
+//
+// V3.2-V3.5 migrated every arithmetic, comparison, and pattern-`Eq` emission
+// site onto the unified `emit_binary_op` shim. After V3.5 (`c7af294`) all
+// 12 former `emit_dynamic_{add,sub,mul,div,mod,pow,eq,neq,gt,lt,gte,lte}`
+// helpers had zero callers. V3.6 deletes them: the shim's Dynamic-fallback
+// branch now owns every `*Dynamic` opcode emission in the compiler.
+//
+// See V3.6 commit body for the residual-emission audit — every remaining
+// Dynamic emission is a class-(a) polyglot / class-(b) comptime / untyped-
+// identifier fallback documented on `emit_binary_op` below.
 
 /// Phase V3.1: typed-vs-dynamic binary-op dispatch kind.
 ///
@@ -572,20 +411,37 @@ fn dynamic_opcode_for(op: shape_ast::ast::BinaryOp) -> Option<OpCode> {
 ///     NullCoalesce/ErrorContext/Pipe/Fuzzy*) — the caller is expected to
 ///     route those ops through their dedicated emission paths.
 ///
-/// This is a V3.1 **shim only** — no callers migrate yet. V3.2 (arithmetic),
-/// V3.3 (comparisons), V3.4 (pattern-match `Eq`), and V3.5 (leftover sites)
-/// will mechanically switch the ~48 existing emission sites over to this
-/// helper. Until then, existing inline dispatch in
-/// `compiler/expressions/binary_ops.rs` and friends continues to produce
-/// identical bytecode.
+/// Phase V3.2-V3.5 migrated all 48 binary-op emission sites onto this shim;
+/// V3.6 deleted the legacy per-op `emit_dynamic_*` helpers (zero callers).
+/// This function is now the **sole** path through which the compiler emits
+/// any arithmetic / comparison opcode — typed or Dynamic.
+///
+/// ── Residual Dynamic emission (post-V3) ─────────────────────────────────
+/// Every `*Dynamic` opcode this shim still emits is reserved for one of:
+///
+///   (a) **polyglot boundary** — an operand originated in an `extern C fn`,
+///       inline-python/typescript block, or an untyped FFI call where the
+///       compiler cannot statically prove a type.
+///   (b) **comptime / generic scope** — an untyped function parameter or
+///       generic stdlib code operating on values whose concrete type is
+///       only known at invocation.
+///
+/// Class-(c) "inference bug" residuals — where the type COULD have been
+/// resolved but wasn't — were audited in V3.6 and are documented as None:
+/// the three call-sites in `compiler/expressions/binary_ops.rs`
+/// (`emit_generic_via_helper`, `compile_typed_equality`'s fallback,
+/// and the `BinaryOp::Add` coerced-or-no-plan branch) each sit strictly
+/// AFTER a typed-emission attempt has already declined, so operand kinds
+/// are passed as `BinOperandKind::Unknown` by construction.
+///
+/// See V3.6 commit body for the full audit.
 ///
 /// Side effects: on emit (typed or dynamic), resets
-/// `last_expr_schema` / `last_expr_type_info` / `last_expr_numeric_type`
-/// to match the legacy `emit_dynamic_*` helpers. Typed-numeric emissions
-/// additionally restore `last_expr_numeric_type = Some(nt)` for arithmetic
-/// so downstream numeric-propagation logic keeps working. Comparisons always
-/// clear the numeric hint because the result is a `bool`.
-#[allow(dead_code)] // V3.1 helper — consumers land in V3.2+ tranches.
+/// `last_expr_schema` / `last_expr_type_info` / `last_expr_numeric_type`.
+/// Typed-numeric emissions additionally restore
+/// `last_expr_numeric_type = Some(nt)` for arithmetic so downstream
+/// numeric-propagation logic keeps working. Comparisons always clear the
+/// numeric hint because the result is a `bool`.
 pub(in crate::compiler) fn emit_binary_op(
     compiler: &mut BytecodeCompiler,
     op: shape_ast::ast::BinaryOp,
@@ -634,8 +490,18 @@ pub(in crate::compiler) fn emit_binary_op(
         return Ok(true);
     }
 
-    // Fallback: emit the Dynamic-family opcode. Mirrors the per-op
-    // `emit_dynamic_*` helpers so we preserve their state-reset discipline.
+    // Fallback: emit the Dynamic-family opcode. This is the post-V3 home of
+    // the state-reset discipline that used to live in the per-op
+    // `emit_dynamic_*` helpers (deleted in V3.6). See the function-level
+    // rustdoc for the residual-emission audit (class-(a) polyglot / class-(b)
+    // comptime only; zero class-(c) inference bugs).
+    #[cfg(feature = "audit-dynamic-fallback")]
+    {
+        eprintln!(
+            "emit_binary_op: Dynamic fallback for {:?} (lhs={:?}, rhs={:?})",
+            op, lhs, rhs,
+        );
+    }
     compiler.emit(Instruction::simple(dyn_opcode));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
