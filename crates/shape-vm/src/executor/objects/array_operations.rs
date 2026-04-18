@@ -25,8 +25,9 @@ impl VirtualMachine {
         }
 
         // Handle unified arrays (bit-47 tagged) for push.
-        if shape_value::tags::is_unified_heap(array_nb.raw_bits()) {
-            let kind = unsafe { shape_value::tags::unified_heap_kind(array_nb.raw_bits()) };
+        let vb = shape_value::ValueBits::from_raw(array_nb.raw_bits());
+        if vb.is_unified_heap() {
+            let kind = unsafe { vb.unified_heap_kind() };
             if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits_mut(array_nb.raw_bits())
@@ -215,8 +216,9 @@ impl VirtualMachine {
         let tag = (bits >> 48) & 0x7;
 
         // Handle unified arrays (bit-47 tagged).
-        if is_tagged && tag == 0 && shape_value::tags::is_unified_heap(bits) {
-            let kind = unsafe { shape_value::tags::unified_heap_kind(bits) };
+        let vb_bits = shape_value::ValueBits::from_raw(bits);
+        if is_tagged && tag == 0 && vb_bits.is_unified_heap() {
+            let kind = unsafe { vb_bits.unified_heap_kind() };
             if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits_mut(bits)
@@ -336,8 +338,9 @@ impl VirtualMachine {
         })? as i32;
 
         // Handle unified arrays (bit-47 tagged) for slice access.
-        if shape_value::tags::is_unified_heap(array_nb.raw_bits()) {
-            let kind = unsafe { shape_value::tags::unified_heap_kind(array_nb.raw_bits()) };
+        let vb = shape_value::ValueBits::from_raw(array_nb.raw_bits());
+        if vb.is_unified_heap() {
+            let kind = unsafe { vb.unified_heap_kind() };
             if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(array_nb.raw_bits())

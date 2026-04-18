@@ -344,7 +344,7 @@ impl VirtualMachine {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
             // Construct tagged i48 inline: TAG_BASE | (TAG_INT << 48) | (payload & PAYLOAD_MASK)
             let payload = (value as u64) & shape_value::tags::PAYLOAD_MASK;
-            let bits = shape_value::tags::make_tagged(shape_value::tags::TAG_INT, payload);
+            let bits = shape_value::ValueBits::make_tagged(shape_value::tags::TAG_INT, payload).raw();
             std::ptr::write(ptr, bits);
         }
         self.sp += 1;
@@ -449,7 +449,7 @@ impl VirtualMachine {
         }
         unsafe {
             let ptr = self.stack.as_mut_ptr().add(self.sp) as *mut u64;
-            let bits = shape_value::tags::make_tagged(shape_value::tags::TAG_BOOL, value as u64);
+            let bits = shape_value::ValueBits::make_tagged(shape_value::tags::TAG_BOOL, value as u64).raw();
             std::ptr::write(ptr, bits);
         }
         self.sp += 1;

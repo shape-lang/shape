@@ -47,8 +47,9 @@ pub fn iter_source_element_at(source: &ValueWord, position: usize) -> Option<Val
 
 fn source_len(source: &ValueWord) -> Option<usize> {
     // Handle unified arrays.
-    if shape_value::tags::is_unified_heap(source.raw_bits()) {
-        let kind = unsafe { shape_value::tags::unified_heap_kind(source.raw_bits()) };
+    let vb = shape_value::ValueBits::from_raw(source.raw_bits());
+    if vb.is_unified_heap() {
+        let kind = unsafe { vb.unified_heap_kind() };
         if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
             let arr = unsafe {
                 shape_value::unified_array::UnifiedArray::from_heap_bits(source.raw_bits())
@@ -85,8 +86,9 @@ fn source_len(source: &ValueWord) -> Option<usize> {
 /// Fetch element at `position` from the source collection.
 fn source_element_at(source: &ValueWord, position: usize) -> Option<ValueWord> {
     // Handle unified arrays.
-    if shape_value::tags::is_unified_heap(source.raw_bits()) {
-        let kind = unsafe { shape_value::tags::unified_heap_kind(source.raw_bits()) };
+    let vb = shape_value::ValueBits::from_raw(source.raw_bits());
+    if vb.is_unified_heap() {
+        let kind = unsafe { vb.unified_heap_kind() };
         if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
             let arr = unsafe {
                 shape_value::unified_array::UnifiedArray::from_heap_bits(source.raw_bits())

@@ -556,7 +556,7 @@ pub fn clone_raw_bits(bits: u64) -> u64 {
             if (payload & shape_value::tags::HEAP_OWNED_BIT) != 0 {
                 // Owned (Box-backed): deep clone into a new owned allocation
                 let hv = unsafe { &*ptr };
-                return shape_value::tags::vw_heap_box_owned(hv.clone());
+                return shape_value::ValueBits::heap_box_owned(hv.clone()).raw();
             } else {
                 // Shared (Arc-backed): cheap refcount bump
                 unsafe { std::sync::Arc::increment_strong_count(ptr) };

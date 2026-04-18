@@ -379,8 +379,9 @@ impl VirtualMachine {
         let key_str = key_nb.as_str();
 
         // Handle unified arrays (bit-47 tagged) before HeapValue dispatch.
-        if shape_value::tags::is_unified_heap(obj_ref.raw_bits()) {
-            let kind = unsafe { shape_value::tags::unified_heap_kind(obj_ref.raw_bits()) };
+        let vb = shape_value::ValueBits::from_raw(obj_ref.raw_bits());
+        if vb.is_unified_heap() {
+            let kind = unsafe { vb.unified_heap_kind() };
             if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(obj_ref.raw_bits())
@@ -905,8 +906,9 @@ impl VirtualMachine {
         }
 
         // Handle unified arrays (bit-47 tagged) for index assignment.
-        if shape_value::tags::is_unified_heap(object_nb.raw_bits()) {
-            let kind = unsafe { shape_value::tags::unified_heap_kind(object_nb.raw_bits()) };
+        let vb = shape_value::ValueBits::from_raw(object_nb.raw_bits());
+        if vb.is_unified_heap() {
+            let kind = unsafe { vb.unified_heap_kind() };
             if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
                 let idx = Self::parse_array_index(key_nb)?;
                 let arr = unsafe {
@@ -1133,8 +1135,9 @@ impl VirtualMachine {
             return self.push_raw_u64(ValueWord::from_i64(view.len as i64));
         }
         // Handle unified arrays (bit-47 tagged).
-        if shape_value::tags::is_unified_heap(nb.raw_bits()) {
-            let kind = unsafe { shape_value::tags::unified_heap_kind(nb.raw_bits()) };
+        let vb = shape_value::ValueBits::from_raw(nb.raw_bits());
+        if vb.is_unified_heap() {
+            let kind = unsafe { vb.unified_heap_kind() };
             if kind == shape_value::tags::HEAP_KIND_ARRAY as u16 {
                 let arr = unsafe {
                     shape_value::unified_array::UnifiedArray::from_heap_bits(nb.raw_bits())

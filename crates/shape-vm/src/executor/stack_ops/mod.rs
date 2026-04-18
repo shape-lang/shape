@@ -107,7 +107,7 @@ impl VirtualMachine {
                 let arc = std::mem::ManuallyDrop::into_inner(arc);
                 match Arc::try_unwrap(arc) {
                     Ok(hv) => {
-                        let new_bits = shape_value::tags::vw_heap_box_owned(hv);
+                        let new_bits = shape_value::ValueBits::heap_box_owned(hv).raw();
                         // Replace top of stack in-place (no push/pop needed).
                         self.stack[index] = new_bits;
                     }
@@ -379,7 +379,7 @@ mod promote_to_shared_tests {
         // An Arc-backed string (default PushConst String path) already has
         // HEAP_OWNED_BIT clear. PromoteToShared must leave it untouched —
         // same pointer, same refcount (1).
-        use shape_value::tags::{get_heap_ptr, is_heap_owned, is_heap_shared};
+        use shape_value::ValueBits;
 
         let mut program = BytecodeProgram::default();
         let c0 = program.add_constant(Constant::String("arc-noop".to_string()));
@@ -393,16 +393,17 @@ mod promote_to_shared_tests {
         vm.load_program(program);
         let result = vm.execute(None).unwrap();
         let bits = result.raw_bits();
+        let vb = ValueBits::from_raw(bits);
         assert!(
-            !is_heap_owned(bits),
+            !vb.is_heap_owned(),
             "Arc-backed value must remain shared after PromoteToShared",
         );
         assert!(
-            is_heap_shared(bits),
+            vb.is_heap_shared(),
             "Arc-backed value must remain a heap-shared tag",
         );
         // Refcount is still 1 — the stack-top holds the sole live reference.
-        let ptr = get_heap_ptr(bits);
+        let ptr = vb.heap_ptr();
         assert!(!ptr.is_null());
         // SAFETY: ptr is a valid Arc-backed heap pointer; ManuallyDrop keeps
         // the refcount unchanged for inspection.
@@ -426,7 +427,7 @@ mod promote_to_shared_tests {
         // Produce a Box-owned string via PromoteToOwned, then convert it
         // back to Arc via PromoteToShared. After the round-trip, the
         // HEAP_OWNED_BIT must be clear and the value must be heap-shared.
-        use shape_value::tags::{is_heap_owned, is_heap_shared};
+        use shape_value::ValueBits;
 
         let mut program = BytecodeProgram::default();
         let c0 = program.add_constant(Constant::String("box-to-arc".to_string()));
@@ -444,13 +445,14 @@ mod promote_to_shared_tests {
         vm.load_program(program);
         let result = vm.execute(None).unwrap();
         let bits = result.raw_bits();
+        let vb = ValueBits::from_raw(bits);
 
         assert!(
-            !is_heap_owned(bits),
+            !vb.is_heap_owned(),
             "after PromoteToShared the owned bit must be clear",
         );
         assert!(
-            is_heap_shared(bits),
+            vb.is_heap_shared(),
             "after PromoteToShared the value must be heap-shared (Arc-backed)",
         );
         assert_eq!(
@@ -467,7 +469,7 @@ mod promote_to_shared_tests {
         // strong_count == 1. This confirms a fresh Arc allocation (not a
         // smuggled existing one) and that the Box ownership was fully
         // consumed.
-        use shape_value::tags::{get_heap_ptr, is_heap_shared};
+        use shape_value::ValueBits;
 
         let mut program = BytecodeProgram::default();
         let c0 = program.add_constant(Constant::String("rc-transfer".to_string()));
@@ -482,9 +484,10 @@ mod promote_to_shared_tests {
         vm.load_program(program);
         let result = vm.execute(None).unwrap();
         let bits = result.raw_bits();
+        let vb = ValueBits::from_raw(bits);
 
-        assert!(is_heap_shared(bits));
-        let ptr = get_heap_ptr(bits);
+        assert!(vb.is_heap_shared());
+        let ptr = vb.heap_ptr();
         assert!(!ptr.is_null());
         // SAFETY: `bits` is a freshly produced Arc-backed heap ValueWord
         // from `PromoteToShared`. ManuallyDrop avoids altering the count.
@@ -506,7 +509,7 @@ mod promote_to_shared_tests {
         // via StoreLocal + CloneLocal to bump the refcount, confirming
         // Arc semantics. The final stack-top is the clone; the original
         // Arc lives in slot 0, so strong_count must be 2.
-        use shape_value::tags::{get_heap_ptr, is_heap_shared};
+        use shape_value::ValueBits;
 
         let mut program = BytecodeProgram::default();
         let c0 = program.add_constant(Constant::String("clone-after".to_string()));
@@ -526,12 +529,13 @@ mod promote_to_shared_tests {
         vm.load_program(program);
         let result = vm.execute(None).unwrap();
         let bits = result.raw_bits();
+        let vb = ValueBits::from_raw(bits);
 
         assert!(
-            is_heap_shared(bits),
+            vb.is_heap_shared(),
             "CloneLocal of an Arc slot must yield a shared heap ref",
         );
-        let ptr = get_heap_ptr(bits);
+        let ptr = vb.heap_ptr();
         assert!(!ptr.is_null());
         // SAFETY: `bits` is Arc-backed; ManuallyDrop preserves rc.
         let arc = std::mem::ManuallyDrop::new(unsafe {

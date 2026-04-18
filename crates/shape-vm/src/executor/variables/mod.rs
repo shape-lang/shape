@@ -2293,7 +2293,7 @@ mod tests {
         vm.load_program(program);
         let result = vm.execute(None).unwrap();
         assert!(
-            shape_value::tags::is_heap_owned(result),
+            shape_value::ValueBits::from_raw(result).is_heap_owned(),
             "string after PromoteToOwned should have owned bit set"
         );
         assert_eq!(
