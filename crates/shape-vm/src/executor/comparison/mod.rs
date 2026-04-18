@@ -1,6 +1,27 @@
 //! Comparison operations for the VM executor
 //!
 //! Handles: Gt, Lt, Gte, Lte, Eq, Neq
+//!
+//! # Dynamic fallback
+//!
+//! The [`exec_comparison_dynamic_fallback`] handler only services the
+//! `*Dynamic` opcodes (`GtDynamic`, `LtDynamic`, ...). The V3 compiler
+//! migration (see `emit_binary_op` in
+//! `crates/shape-runtime/src/compiler/expressions/binary_ops.rs`) routes every
+//! compiled comparison site through a shim that emits typed opcodes when the
+//! compiler can prove both operand types. The only remaining emitters of the
+//! Dynamic variants are the three class-(a)/(b) sites audited in commit
+//! `c1d7727` (V3.6) — polyglot boundaries, comptime evaluation, and a small
+//! set of pattern/prelude paths.
+//!
+//! No class-(c) compiler bugs remained after V3.6. Typed code never reaches
+//! the dispatch in this file. The handler name is suffixed
+//! `_dynamic_fallback` to make that contract visible at every call site.
+//!
+//! # Typed path
+//!
+//! Typed opcodes (`GtInt`, `GtNumber`, `EqString`, ...) live in
+//! `exec_typed_comparison` and are the hot path for production code.
 
 use crate::{
     bytecode::{Instruction, OpCode},
@@ -403,8 +424,14 @@ impl VirtualMachine {
         Ok(())
     }
 
+    /// Dynamic comparison dispatch for `*Dynamic` opcodes only.
+    ///
+    /// Services the polyglot / comptime / untyped callers described in the
+    /// module-level rustdoc. Typed comparison opcodes (`GtInt`, `EqString`,
+    /// ...) do NOT reach this function — see V3.6 audit (commit `c1d7727`)
+    /// and `emit_binary_op` in the compiler.
     #[inline(always)]
-    pub(in crate::executor) fn exec_comparison(
+    pub(in crate::executor) fn exec_comparison_dynamic_fallback(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
@@ -509,7 +536,7 @@ impl VirtualMachine {
                 }
             }
             _ => unreachable!(
-                "exec_comparison called with non-comparison opcode: {:?}",
+                "exec_comparison_dynamic_fallback called with non-comparison opcode: {:?}",
                 instruction.opcode
             ),
         }

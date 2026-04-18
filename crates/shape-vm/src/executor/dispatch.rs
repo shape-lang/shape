@@ -425,10 +425,13 @@ impl VirtualMachine {
                 return self.exec_stack_ops(instruction);
             }
 
-            // Arithmetic (dynamic runtime dispatch -- types unresolvable at compile time)
+            // Arithmetic (dynamic runtime dispatch -- types unresolvable at compile time).
+            // Post-V3.6: reserved for polyglot / comptime / untyped callers; the compiler
+            // routes every typed site through the V3 `emit_binary_op` shim, so typed
+            // Shape code never lands here.
             AddDynamic | SubDynamic | MulDynamic | DivDynamic | ModDynamic | PowDynamic
             | BitAnd | BitOr | BitXor | BitShl | BitShr | BitNot => {
-                return self.exec_arithmetic(instruction);
+                return self.exec_arithmetic_dynamic_fallback(instruction);
             }
 
             // Typed arithmetic (compiler-guaranteed types, zero dispatch)
@@ -452,9 +455,12 @@ impl VirtualMachine {
                 return self.op_cast_width(instruction);
             }
 
-            // Comparison (dynamic runtime dispatch -- types unresolvable at compile time)
+            // Comparison (dynamic runtime dispatch -- types unresolvable at compile time).
+            // Post-V3.6: reserved for polyglot / comptime / untyped callers; typed sites
+            // are emitted through the V3 `emit_binary_op` shim and reach
+            // `exec_typed_comparison` below.
             GtDynamic | LtDynamic | GteDynamic | LteDynamic | EqDynamic | NeqDynamic => {
-                return self.exec_comparison(instruction);
+                return self.exec_comparison_dynamic_fallback(instruction);
             }
 
             // Typed comparison (compiler-guaranteed types, zero dispatch)

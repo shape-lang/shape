@@ -1,6 +1,36 @@
 //! Arithmetic operations for the VM executor
 //!
 //! Handles: Add, Sub, Mul, Div, Mod, Neg, Pow
+//!
+//! # Dynamic fallback
+//!
+//! The [`exec_arithmetic_dynamic_fallback`] handler only services the
+//! `*Dynamic` opcodes (`AddDynamic`, `SubDynamic`, ...). The V3 compiler
+//! migration (see `crates/shape-runtime/src/compiler/expressions/binary_ops.rs`
+//! `emit_binary_op`) routes every compiled arithmetic site through a shim that
+//! emits typed opcodes when the compiler can prove both operand types. The
+//! only remaining emitters of the Dynamic variants are the three
+//! class-(a)/(b) sites audited in commit `c1d7727` (V3.6):
+//!
+//! - polyglot boundaries where a foreign-language value (Python/TypeScript)
+//!   materialises as a `ValueWord` without a Shape static type;
+//! - `comptime` expressions whose operand types are only known at comptime
+//!   evaluation;
+//! - certain prelude/pattern paths that still fall through to the dynamic
+//!   representation.
+//!
+//! No class-(c) compiler bugs remained after V3.6. Typed code never reaches
+//! the dispatch in this file. The handler name is suffixed `_dynamic_fallback`
+//! to make that contract visible at every call site.
+//!
+//! # Typed path
+//!
+//! Typed opcodes (`AddInt`, `AddNumber`, `AddDecimal`, ...) live in
+//! `exec_typed_arithmetic`. That is the hot path for production code.
+//! Compact/width-parameterised opcodes (`AddTyped`, ...) live in
+//! `exec_compact_typed_arithmetic`. Operator-trait method dispatch and
+//! IC profiling helpers remain here because the Dynamic fallback still
+//! needs them for polyglot/comptime values.
 
 use crate::{
     bytecode::{Instruction, NumericWidth, OpCode, Operand},
@@ -1196,8 +1226,14 @@ impl VirtualMachine {
         Ok(None)
     }
 
+    /// Dynamic arithmetic dispatch for `*Dynamic` opcodes only.
+    ///
+    /// Services the polyglot / comptime / untyped callers described in the
+    /// module-level rustdoc. The typed fast path (`AddInt`, `AddNumber`,
+    /// `AddDecimal`, ...) does NOT reach this function — see V3.6 audit
+    /// (commit `c1d7727`) and `emit_binary_op` in the compiler.
     #[inline(always)]
-    pub(in crate::executor) fn exec_arithmetic(
+    pub(in crate::executor) fn exec_arithmetic_dynamic_fallback(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
@@ -2782,7 +2818,7 @@ impl VirtualMachine {
                 }
             }
             _ => unreachable!(
-                "exec_arithmetic called with non-arithmetic opcode: {:?}",
+                "exec_arithmetic_dynamic_fallback called with non-arithmetic opcode: {:?}",
                 instruction.opcode
             ),
         }
