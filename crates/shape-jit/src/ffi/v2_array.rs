@@ -4,6 +4,21 @@
 //! These operate on native types (f64, i64, i32) directly — no NaN-boxing.
 //! The JIT uses Cranelift `F64`/`I64`/`I32` params/returns instead of the
 //! universal `I64`-as-u64 convention of the v1 array FFI.
+//!
+//! # V2.b: TODO migrate to `shape_value::v2::typed_array::TypedArray<T>`
+//!
+//! These wrappers still target the deprecated `v2_typed_array::TypedArrayHeader`
+//! layout. Their symbol-registration helper (`register_v2_array_symbols` in
+//! `ffi_symbols/v2_array_symbols.rs`) is never invoked from the live JIT
+//! builder, so the functions below are compiled but never dispatched. The
+//! canonical live FFI lives in `ffi/v2/mod.rs` and operates on the v2
+//! `TypedArray<T>` directly.
+//!
+//! Once V2.a wires PHF dispatch, this file should either be deleted entirely
+//! or rewritten against `TypedArray<T>`. For now we suppress the deprecation
+//! warnings so the workspace builds cleanly.
+
+#![allow(deprecated)]
 
 use shape_value::v2_typed_array::*;
 

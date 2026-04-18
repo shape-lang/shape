@@ -1,3 +1,29 @@
+//! **DEPRECATED — v1 TypedArray (tag-discriminated).** Superseded by
+//! [`crate::v2::typed_array::TypedArray<T>`], which uses compile-time
+//! monomorphization instead of a runtime `ElemType` tag.
+//!
+//! # Migration status (Phase V2.b)
+//!
+//! As of Phase V2.b, this module is **dead code in all live paths**:
+//!
+//! - The live VM consumer ([`crates/shape-vm/src/executor/v2_handlers/v2_array_detect.rs`])
+//!   operates on [`crate::v2::typed_array::TypedArray<T>`] pointers and stamps
+//!   element-type discriminants into the `_pad` byte of the v2 `HeapHeader` at
+//!   offset 7, so no `TypedArrayHeader` from this module is produced at runtime.
+//! - The live JIT FFI ([`crates/shape-jit/src/ffi/v2/mod.rs`]) also operates on
+//!   `TypedArray<T>`. A parallel FFI layer in `shape-jit/src/ffi/v2_array.rs`
+//!   still targets `TypedArrayHeader`, but its symbol-registration helper
+//!   (`register_v2_array_symbols`) is never invoked, so those symbols are
+//!   never wired into the JIT builder.
+//! - Stale consumer files (`executor/typed_handlers/*`, `executor/v2_handlers/typed_array.rs`,
+//!   `shape-jit/src/v2_regression_tests.rs`) are not included in their parent
+//!   `mod.rs` and therefore do not compile against this module.
+//!
+//! The items below are marked `#[deprecated]` so any future consumer is
+//! steered toward `v2::typed_array::TypedArray<T>`. The plan is to delete this
+//! module entirely in the V2.b follow-up commit once the parallel V2.a PHF
+//! dispatch work lands.
+//!
 //! v2 runtime: `TypedArray<T>` — contiguous native-element arrays.
 //!
 //! This is the v2 replacement for the NaN-boxed `HeapValue::Array`. Each array
@@ -22,6 +48,11 @@
 //! The element buffer at `*data` is a contiguous `[T; cap]` allocation whose
 //! element size is determined by `elem_type`.
 
+// The whole module is deprecated in favour of `v2::typed_array::TypedArray<T>`,
+// but the impl/tests below still reference the deprecated items internally.
+// Suppress the self-use warnings to keep the deprecation purely consumer-facing.
+#![allow(deprecated)]
+
 use std::alloc::{self, Layout};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -30,6 +61,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // ---------------------------------------------------------------------------
 
 /// Element type tag stored in `TypedArrayHeader::elem_type`.
+#[deprecated(
+    since = "V2.b",
+    note = "use `shape_value::v2::typed_array::TypedArray<T>` — v2 is compile-time \
+            monomorphized (no runtime ElemType tag)."
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ElemType {
@@ -91,6 +127,11 @@ impl ElemType {
 ///
 /// The element buffer is a separate heap allocation; `data` points to its start.
 /// This keeps the header a fixed 24 bytes regardless of element type.
+#[deprecated(
+    since = "V2.b",
+    note = "use `shape_value::v2::typed_array::TypedArray<T>` — v2 embeds the \
+            element type in the struct parameter so no runtime tag is needed."
+)]
 #[repr(C)]
 pub struct TypedArrayHeader {
     /// Reference count (offset 0, 4 bytes).
@@ -128,9 +169,17 @@ const _: () = {
     assert!(std::mem::offset_of!(TypedArrayHeader, cap) == 20);
 };
 
-/// HeapKind discriminant value used for v2 typed arrays.
-/// This is a placeholder — it will be unified with `HeapKind` once the v2
-/// runtime is wired end-to-end.
+/// HeapKind discriminant value used for v1 `TypedArrayHeader`.
+///
+/// This does not collide with the canonical v2 ordinal
+/// [`crate::v2::heap_header::HEAP_KIND_V2_TYPED_ARRAY`] (v2 uses its own
+/// low-numbered discriminant). The two values intentionally differ so that
+/// detection code (`as_v2_typed_array` in shape-vm) only matches the v2 kind.
+#[deprecated(
+    since = "V2.b",
+    note = "use `shape_value::v2::heap_header::HEAP_KIND_V2_TYPED_ARRAY` via \
+            `TypedArray<T>` instead."
+)]
 pub const HEAP_KIND_TYPED_ARRAY: u16 = 0xFF;
 
 // ---------------------------------------------------------------------------
@@ -156,6 +205,11 @@ fn data_layout(et: ElemType, cap: u32) -> Option<Layout> {
 /// # Panics
 ///
 /// Panics if the header or data allocation fails (OOM).
+#[deprecated(
+    since = "V2.b",
+    note = "use `shape_value::v2::typed_array::TypedArray::<T>::with_capacity` — \
+            the v2 API is monomorphic and avoids the runtime `elem_type` tag."
+)]
 pub fn typed_array_alloc(elem_type: u8, cap: u32) -> *mut TypedArrayHeader {
     let et = ElemType::from_u8(elem_type).expect("invalid elem_type");
 
@@ -196,6 +250,10 @@ pub fn typed_array_alloc(elem_type: u8, cap: u32) -> *mut TypedArrayHeader {
 ///
 /// `ptr` must have been returned by [`typed_array_alloc`] and must not be used
 /// after this call.
+#[deprecated(
+    since = "V2.b",
+    note = "use `shape_value::v2::typed_array::TypedArray::<T>::drop_array`."
+)]
 pub fn typed_array_free(ptr: *mut TypedArrayHeader) {
     if ptr.is_null() {
         return;
@@ -228,6 +286,7 @@ pub fn typed_array_free(ptr: *mut TypedArrayHeader) {
 /// # Panics
 ///
 /// Panics if `index >= len` or `elem_type != ElemType::F64`.
+#[deprecated(since = "V2.b", note = "use `TypedArray::<f64>::get` from `v2::typed_array`.")]
 #[inline]
 pub fn typed_array_get_f64(arr: *mut TypedArrayHeader, index: u32) -> f64 {
     unsafe {
@@ -245,6 +304,7 @@ pub fn typed_array_get_f64(arr: *mut TypedArrayHeader, index: u32) -> f64 {
 /// # Panics
 ///
 /// Panics if `elem_type != ElemType::F64` or allocation fails.
+#[deprecated(since = "V2.b", note = "use `TypedArray::<f64>::push` from `v2::typed_array`.")]
 pub fn typed_array_push_f64(arr: *mut TypedArrayHeader, val: f64) -> *mut TypedArrayHeader {
     unsafe {
         debug_assert_eq!((*arr).elem_type, ElemType::F64 as u8);
@@ -265,6 +325,7 @@ pub fn typed_array_push_f64(arr: *mut TypedArrayHeader, val: f64) -> *mut TypedA
 // ---------------------------------------------------------------------------
 
 /// Read `arr[index]` as `i64`.
+#[deprecated(since = "V2.b", note = "use `TypedArray::<i64>::get` from `v2::typed_array`.")]
 #[inline]
 pub fn typed_array_get_i64(arr: *mut TypedArrayHeader, index: u32) -> i64 {
     unsafe {
@@ -276,6 +337,7 @@ pub fn typed_array_get_i64(arr: *mut TypedArrayHeader, index: u32) -> i64 {
 }
 
 /// Push an `i64` element. Returns the (possibly reallocated) header pointer.
+#[deprecated(since = "V2.b", note = "use `TypedArray::<i64>::push` from `v2::typed_array`.")]
 pub fn typed_array_push_i64(arr: *mut TypedArrayHeader, val: i64) -> *mut TypedArrayHeader {
     unsafe {
         debug_assert_eq!((*arr).elem_type, ElemType::I64 as u8);
@@ -296,6 +358,7 @@ pub fn typed_array_push_i64(arr: *mut TypedArrayHeader, val: i64) -> *mut TypedA
 // ---------------------------------------------------------------------------
 
 /// Read `arr[index]` as `i32`.
+#[deprecated(since = "V2.b", note = "use `TypedArray::<i32>::get` from `v2::typed_array`.")]
 #[inline]
 pub fn typed_array_get_i32(arr: *mut TypedArrayHeader, index: u32) -> i32 {
     unsafe {
@@ -307,6 +370,7 @@ pub fn typed_array_get_i32(arr: *mut TypedArrayHeader, index: u32) -> i32 {
 }
 
 /// Push an `i32` element. Returns the (possibly reallocated) header pointer.
+#[deprecated(since = "V2.b", note = "use `TypedArray::<i32>::push` from `v2::typed_array`.")]
 pub fn typed_array_push_i32(arr: *mut TypedArrayHeader, val: i32) -> *mut TypedArrayHeader {
     unsafe {
         debug_assert_eq!((*arr).elem_type, ElemType::I32 as u8);
@@ -327,6 +391,10 @@ pub fn typed_array_push_i32(arr: *mut TypedArrayHeader, val: i32) -> *mut TypedA
 // ---------------------------------------------------------------------------
 
 /// Read `arr[index]` as `bool`.
+#[deprecated(
+    since = "V2.b",
+    note = "use `TypedArray::<u8>::get` from `v2::typed_array` and compare `!= 0`."
+)]
 #[inline]
 pub fn typed_array_get_bool(arr: *mut TypedArrayHeader, index: u32) -> bool {
     unsafe {
@@ -338,6 +406,10 @@ pub fn typed_array_get_bool(arr: *mut TypedArrayHeader, index: u32) -> bool {
 }
 
 /// Push a `bool` element. Returns the (possibly reallocated) header pointer.
+#[deprecated(
+    since = "V2.b",
+    note = "use `TypedArray::<u8>::push` from `v2::typed_array` (store `val as u8`)."
+)]
 pub fn typed_array_push_bool(arr: *mut TypedArrayHeader, val: bool) -> *mut TypedArrayHeader {
     unsafe {
         debug_assert_eq!((*arr).elem_type, ElemType::Bool as u8);
@@ -396,6 +468,11 @@ unsafe fn grow(arr: *mut TypedArrayHeader, et: ElemType) {
 // ---------------------------------------------------------------------------
 
 /// Increment the reference count. Returns the new count.
+#[deprecated(
+    since = "V2.b",
+    note = "use the generic v2 refcount API (`shape_value::v2::refcount::v2_retain`) \
+            on `TypedArray<T>::header`."
+)]
 #[inline]
 pub fn typed_array_retain(arr: *mut TypedArrayHeader) -> u32 {
     unsafe { (*arr).refcount.fetch_add(1, Ordering::Relaxed) + 1 }
@@ -403,6 +480,11 @@ pub fn typed_array_retain(arr: *mut TypedArrayHeader) -> u32 {
 
 /// Decrement the reference count. If it reaches zero, frees the array.
 /// Returns the new count.
+#[deprecated(
+    since = "V2.b",
+    note = "use the generic v2 refcount API (`shape_value::v2::refcount::v2_release`) \
+            on `TypedArray<T>::header`."
+)]
 #[inline]
 pub fn typed_array_release(arr: *mut TypedArrayHeader) -> u32 {
     unsafe {
