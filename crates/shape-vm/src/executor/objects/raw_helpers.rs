@@ -521,8 +521,12 @@ pub fn is_callable_raw(bits: u64) -> bool {
     match tag {
         TAG_FUNCTION | TAG_MODULE_FN => true,
         TAG_HEAP => unsafe {
+            // Closure spec H6.2: route closure detection through the shim so
+            // H6.5's producer swap transparently flips the backing.
             extract_heap_ref(bits)
-                .map(|hv| matches!(hv, HeapValue::Closure { .. } | HeapValue::HostClosure(..)))
+                .map(|hv| {
+                    hv.as_closure_handle().is_some() || matches!(hv, HeapValue::HostClosure(..))
+                })
                 .unwrap_or(false)
         },
         _ => false,
@@ -589,16 +593,32 @@ pub fn drop_raw_bits(bits: u64) {
 
 /// Extract closure info (function_id, upvalues) from raw heap-tagged bits.
 /// Returns borrowed references — no Vec clone.
+///
+/// Closure spec H6.2: the body goes through [`VmClosureHandle`], pulling
+/// the `Upvalue` slice out through the Legacy-only `upvalues_legacy`
+/// escape hatch. This is an acceptable (c)-class compromise for H6.2 —
+/// VM dispatch consumers (H6.3's scope) still pass around `&[Upvalue]`,
+/// so we preserve the signature now and rewrite both helper and callers
+/// together once H6.5 retires the Legacy backing.
 #[inline]
 pub fn extract_closure_info(bits: u64) -> Option<(u16, &'static [shape_value::Upvalue])> {
     unsafe {
-        extract_heap_ref(bits).and_then(|hv| match hv {
-            HeapValue::Closure {
-                function_id,
-                upvalues,
-            } => Some((*function_id, upvalues.as_slice())),
-            _ => None,
-        })
+        // `extract_heap_ref` returns `Option<&'static HeapValue>` — the
+        // underlying Arc is kept alive by the caller-owned stack slot.
+        // We preserve the `'static` lifetime through the shim by binding
+        // `hv: &'static HeapValue` before constructing the handle; the
+        // handle's borrow then inherits `'static`, and so does
+        // `upvalues_legacy()`.
+        let hv: &'static HeapValue = extract_heap_ref(bits)?;
+        let handle = hv.as_closure_handle()?;
+        let fid = handle.function_id() as u16;
+        // H6.2: Legacy is the only backing until H6.5 swaps the producer.
+        // The escape hatch will be retired at the same time this helper
+        // gets rewritten to consume the Raw backing directly.
+        let upvalues: &'static [shape_value::Upvalue] = handle
+            .upvalues_legacy()
+            .expect("H6.2: Legacy backing is the only producer until H6.5");
+        Some((fid, upvalues))
     }
 }
 

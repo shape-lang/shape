@@ -1542,10 +1542,17 @@ impl ValueWordExt for u64 {
     }
     #[inline]
     fn as_closure(&self) -> Option<(u16, &[crate::value::Upvalue])> {
-        match self.as_heap_ref()? {
-            HeapValue::Closure { function_id, upvalues } => Some((*function_id, upvalues)),
-            _ => None,
-        }
+        // Closure spec H6.2: read through the shim so H6.5's producer swap
+        // does not revisit this body. The `upvalues_legacy` escape hatch
+        // preserves the `&[Upvalue]` return type that existing callers
+        // (VM dispatch — H6.3 scope) still consume; both this accessor
+        // and the hatch are retired together in H6.5–H6.6.
+        let handle = self.as_closure_handle()?;
+        let fid = handle.function_id() as u16;
+        let upvalues = handle
+            .upvalues_legacy()
+            .expect("H6.2: Legacy backing is the only producer until H6.5");
+        Some((fid, upvalues))
     }
 
     #[inline]
@@ -3159,5 +3166,57 @@ mod tests {
         // Duplicates must be Arc-equal to their first occurrence.
         assert!(Arc::ptr_eq(&results[0], &results[3]), "dup 'a' must share Arc");
         assert!(Arc::ptr_eq(&results[1], &results[4]), "dup 'b' must share Arc");
+    }
+
+    // ── Closure spec H6.2 — ValueWord::as_closure_handle integration ────
+    //
+    // H6.2 migrates introspection readers to `VmClosureHandle`. These
+    // tests exercise the accessor directly on a `ValueWord` so the shim
+    // path is covered at the `ValueWordExt` layer (not just on
+    // `HeapValue`, which `vm_closure_handle::tests` already covers).
+
+    #[test]
+    fn test_value_word_as_closure_handle_reads_function_id_and_captures() {
+        use crate::heap_value::HeapValue;
+        use crate::value::Upvalue;
+
+        let captures = vec![
+            Upvalue::new(ValueWord::from_i64(11)),
+            Upvalue::new(ValueWord::from_f64(2.5)),
+            Upvalue::new(ValueWord::from_bool(false)),
+        ];
+        let vw = ValueWord::from_heap_value(HeapValue::Closure {
+            function_id: 17,
+            upvalues: captures,
+        });
+
+        let handle = vw.as_closure_handle().expect("closure handle");
+        assert_eq!(handle.function_id(), 17);
+        assert_eq!(handle.capture_count(), 3);
+
+        let vs = handle.captures_as_values();
+        assert_eq!(vs[0].as_i64(), Some(11));
+        assert_eq!(vs[1].as_f64(), Some(2.5));
+        assert_eq!(vs[2].as_bool(), Some(false));
+
+        // `as_closure` body (also H6.2-migrated) must agree with the
+        // handle on both `function_id` and the borrowed `Upvalue` slice.
+        let (fid, upvalues) = vw.as_closure().expect("legacy accessor");
+        assert_eq!(fid, 17);
+        assert_eq!(upvalues.len(), 3);
+        assert_eq!(upvalues[0].get().as_i64(), Some(11));
+    }
+
+    #[test]
+    fn test_value_word_as_closure_handle_none_on_non_closure() {
+        // Non-closure values (inline + heap) must return None.
+        assert!(ValueWord::from_i64(0).as_closure_handle().is_none());
+        assert!(ValueWord::from_f64(3.14).as_closure_handle().is_none());
+        assert!(ValueWord::from_bool(true).as_closure_handle().is_none());
+        assert!(ValueWord::none().as_closure_handle().is_none());
+        assert!(ValueWord::unit().as_closure_handle().is_none());
+
+        let str_vw = ValueWord::from_string(Arc::new("hello".to_string()));
+        assert!(str_vw.as_closure_handle().is_none());
     }
 }

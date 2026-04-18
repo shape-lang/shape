@@ -1460,7 +1460,7 @@ mod tests {
     fn test_phase_f_runtime_heap_ok_after_outer_scope_drops() {
         // After the caller's local `f` binding drops at end of function,
         // the returned closure we passed up is still alive (refcount
-        // preserved via HeapValue::Closure Arc sharing). This validates
+        // preserved via the heap closure's Arc sharing). This validates
         // the drop glue semantics described in §1.4.
         let val = run_program_top_level(
             "fn outer() -> any {\n\
@@ -1671,7 +1671,7 @@ mod tests {
     // struct whose `get` / `set` auto-deref through a SharedCell-carried
     // `HeapValue::SharedCell` when one is present. The legacy mutable
     // enum variant is gone. H2's deferred sub-tasks (raw TypedClosureHeader
-    // allocation in `op_make_closure_heap`, direct `HeapValue::Closure`-free
+    // allocation in `op_make_closure_heap`, direct heap-closure-free
     // dispatch in `CallClosure` / `CallFunctionIndirect`) are tracked
     // separately; this phase focuses on the Upvalue layer that structurally
     // unblocks them.

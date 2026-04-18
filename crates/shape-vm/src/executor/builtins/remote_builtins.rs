@@ -292,16 +292,18 @@ fn nb_to_serializable(nb: &ValueWord) -> shape_runtime::snapshot::SerializableVM
                     let items: Vec<_> = arr.iter().map(|v| nb_to_serializable(v)).collect();
                     SerializableVMValue::Array(items)
                 }
-                Some(HeapValue::Closure {
-                    function_id,
-                    upvalues,
-                }) => {
-                    let ups: Vec<_> = upvalues
+                _ if nb.as_closure_handle().is_some() => {
+                    // Closure spec H6.2: read via the shim so the producer
+                    // swap in H6.5 doesn't need to revisit this site.
+                    let handle = nb.as_closure_handle().unwrap();
+                    let function_id = handle.function_id() as u16;
+                    let ups: Vec<_> = handle
+                        .captures_as_values()
                         .iter()
-                        .map(|u| nb_to_serializable(&u.get()))
+                        .map(nb_to_serializable)
                         .collect();
                     SerializableVMValue::Closure {
-                        function_id: *function_id,
+                        function_id,
                         upvalues: ups,
                     }
                 }

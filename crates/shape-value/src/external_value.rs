@@ -201,8 +201,15 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
                 fields,
             }
         }
-        HeapValue::Closure { function_id, .. } => {
-            ExternalValue::Opaque(format!("<closure:{function_id}>"))
+        HeapValue::Closure { .. } => {
+            // Closure spec H6.2: pattern stays wildcarded to preserve
+            // exhaustive match coverage; the `function_id` read goes
+            // through `VmClosureHandle` so H6.5's producer swap does not
+            // revisit this site.
+            let handle = hv
+                .as_closure_handle()
+                .expect("closure arm implies a closure handle");
+            ExternalValue::Opaque(format!("<closure:{}>", handle.function_id()))
         }
         HeapValue::Decimal(d) => ExternalValue::Decimal(d.to_string()),
         HeapValue::BigInt(i) => ExternalValue::Int(*i),
@@ -678,5 +685,32 @@ mod tests {
         let json = serde_json::to_string(&ev).unwrap();
         let back: ExternalValue = serde_json::from_str(&json).unwrap();
         assert_eq!(ev, back);
+    }
+
+    /// Closure spec H6.2: the `heap_to_external` closure arm formats via
+    /// `VmClosureHandle` rather than direct destructure. This test
+    /// exercises the migrated consumer site end-to-end — a heap closure
+    /// value flowing through `nb_to_external` must produce the same
+    /// `<closure:{function_id}>` opaque envelope that the destructuring
+    /// path previously produced.
+    #[test]
+    fn test_closure_to_external_reads_via_shim() {
+        use crate::heap_value::HeapValue;
+        use crate::value::Upvalue;
+
+        let closure = HeapValue::Closure {
+            function_id: 31,
+            upvalues: vec![
+                Upvalue::new(ValueWord::from_i64(7)),
+                Upvalue::new(ValueWord::from_string(std::sync::Arc::new("s".to_string()))),
+            ],
+        };
+        let nb = ValueWord::from_heap_value(closure);
+
+        let ev = nb_to_external(&nb, &NoSchemaLookup);
+        match ev {
+            ExternalValue::Opaque(text) => assert_eq!(text, "<closure:31>"),
+            other => panic!("expected Opaque closure envelope, got {other:?}"),
+        }
     }
 }

@@ -1155,7 +1155,7 @@ pub enum Operand {
     /// Carries both the function id and a compile-time escape flag. The flag is
     /// read at MIR lowering time to pick between stack-allocated (Phase E) and
     /// heap-allocated (Phase H2) codegen; the interpreter ignores it (both
-    /// variants build a `HeapValue::Closure` in the VM).
+    /// variants build a heap closure in the VM).
     ///
     /// `Operand::Function(fid)` is also accepted by `MakeClosure` and is
     /// equivalent to `ClosureAlloc { fid, escapes: false }` — the compiler

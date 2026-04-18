@@ -934,7 +934,8 @@ fn nb_to_expr(nb: &ValueWord, span: Span) -> std::result::Result<Expr, String> {
             HeapValue::TableView(shape_value::TableViewData::ColumnRef { .. }) | HeapValue::TableView(shape_value::TableViewData::RowView { .. }) => {
                 "row/column view values are not valid comptime literals".to_string()
             }
-            HeapValue::Closure { .. } | HeapValue::HostClosure(_) => {
+            _ if heap.as_closure_handle().is_some() || matches!(heap, HeapValue::HostClosure(_)) => {
+                // Closure spec H6.2: closure detection goes through the shim.
                 "function values are not valid comptime literals".to_string()
             }
             _ => format!("unsupported comptime literal value: {}", nb),

@@ -212,6 +212,40 @@ impl<'a> VmClosureHandle<'a> {
             }
         }
     }
+
+    /// Legacy-only escape hatch: borrow the underlying `&[Upvalue]` slice.
+    ///
+    /// Returns `Some` only when the handle was constructed from the Legacy
+    /// backing (i.e. from a `HeapValue::Closure`). The Raw backing has no
+    /// `Upvalue` slice — captures are stored as typed native widths inside
+    /// a `TypedClosureHeader` block — so this method returns `None` there.
+    ///
+    /// Added for H6.2 to let low-blast-radius consumers whose current code
+    /// passes `&[Upvalue]` further downstream (e.g.
+    /// `raw_helpers::extract_closure_info`) migrate to the shim without
+    /// rewriting unfamiliar consumer logic. **H6.5 swaps the producer to
+    /// the Raw backing**, at which point every Legacy-only hatch becomes
+    /// a dead branch; H6.5/H6.6 will remove this method along with the
+    /// `ClosureBacking::Legacy` variant.
+    ///
+    /// # Compromise
+    ///
+    /// Preferring `captures_as_values()` (which works on both backings) is
+    /// the goal everywhere it fits; this hatch is strictly for sites that
+    /// cannot accept a `Vec<ValueWord>` without rewriting their consumers.
+    ///
+    /// The return type threads the handle's `'a` through so consumers that
+    /// constructed the handle from a `&'static HeapValue` (e.g. raw
+    /// heap-bit helpers that launder the Arc's lifetime) get a
+    /// correspondingly-lifetimed slice back, not one bound to the shorter
+    /// `&self` borrow.
+    #[inline]
+    pub fn upvalues_legacy(&self) -> Option<&'a [Upvalue]> {
+        match self.backing {
+            ClosureBacking::Legacy { upvalues, .. } => Some(upvalues),
+            ClosureBacking::Raw { .. } => None,
+        }
+    }
 }
 
 #[cfg(test)]

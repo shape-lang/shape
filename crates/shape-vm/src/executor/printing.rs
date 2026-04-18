@@ -153,7 +153,16 @@ impl<'a> ValueFormatter<'a> {
             }) => self.format_typed_object(*schema_id as u32, slots, *heap_mask, depth),
             Some(HeapValue::Decimal(d)) => format!("{}D", d),
             Some(HeapValue::BigInt(i)) => i.to_string(),
-            Some(HeapValue::Closure { function_id, .. }) => format!("[Closure:{}]", function_id),
+            Some(HeapValue::Closure { .. }) => {
+                // Closure spec H6.2: the variant pattern stays because
+                // `as_heap_ref()`'s match is exhaustive; the `function_id`
+                // read goes through `VmClosureHandle` so the H6.5 producer
+                // swap does not revisit this site.
+                let handle = value
+                    .as_closure_handle()
+                    .expect("closure arm implies a closure handle");
+                format!("[Closure:{}]", handle.function_id())
+            }
             Some(HeapValue::HostClosure(_)) => "<HostClosure>".to_string(),
             Some(HeapValue::DataTable(dt)) => format!("{}", dt),
             Some(HeapValue::TableView(TableViewData::TypedTable { table, .. })) => format!("{}", table),
@@ -944,5 +953,30 @@ mod tests {
         let ref_val = ValueWord::from_ref(42);
         let formatted = formatter.format_nb(&ref_val);
         assert_eq!(formatted, "99");
+    }
+
+    /// Closure spec H6.2: the REPL formatting arm for a heap closure
+    /// reads `function_id` through `VmClosureHandle`, not via direct
+    /// variant destructuring. Cover a heap closure with non-zero
+    /// captures so the shim walks the Legacy backing end-to-end.
+    #[test]
+    fn test_format_heap_closure_via_shim() {
+        use shape_value::heap_value::HeapValue;
+        use shape_value::value::Upvalue;
+
+        let schema_reg = create_test_registry();
+        let formatter = VMValueFormatter::new(&schema_reg);
+
+        let closure = HeapValue::Closure {
+            function_id: 7,
+            upvalues: vec![
+                Upvalue::new(ValueWord::from_i64(1)),
+                Upvalue::new(ValueWord::from_f64(2.5)),
+                Upvalue::new(ValueWord::from_bool(true)),
+            ],
+        };
+        let nb = ValueWord::from_heap_value(closure);
+        let formatted = formatter.format_nb(&nb);
+        assert_eq!(formatted, "[Closure:7]");
     }
 }
