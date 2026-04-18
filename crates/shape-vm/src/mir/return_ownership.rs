@@ -22,10 +22,14 @@
 //!      EnumStore, ClosureCapture, or Call — trace one level deeper.
 //!    - `Rvalue::Use(Copy(Place::Local(param)))` where `param` is a parameter
 //!      slot — `BorrowedFromParam(idx)`.
-//!    - `Rvalue::Use(Constant(..))` — a primitive / immediate, no heap
-//!      allocation; still safe to treat as `NewlyOwned` since the caller's
-//!      storage handles primitives directly without Arc wrapping.
+//!    - `Rvalue::Use(Constant(Str | StringId | Function | Method))` —
+//!      statically-lifetime immutable data: `Static`.
+//!    - `Rvalue::Use(Constant(Int | Bool | Float | None | ..))` — a primitive
+//!      / immediate, no heap allocation; treated as `NewlyOwned` since the
+//!      caller's storage handles primitives directly without Arc wrapping.
 //!    - `Rvalue::Borrow(..)` — explicit reference return.
+//!    - A `Call` terminator whose callee summary says the callee returns
+//!      `Shared` / `Static` — the mode propagates through.
 //!    - Anything else — `Unknown`.
 //! 3. If the function has multiple `Return` terminators, combine the modes
 //!    via `meet`: identical modes survive, mismatches collapse to `Unknown`.
@@ -169,11 +173,34 @@ fn classify_operand(
     callee_modes: &HashMap<String, ReturnOwnershipMode>,
 ) -> ReturnOwnershipMode {
     match operand {
-        // Primitives and string literals — no Arc wrap needed, safe as NewlyOwned.
-        Operand::Constant(_) => ReturnOwnershipMode::NewlyOwned,
+        Operand::Constant(c) => classify_constant(c),
         Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
             classify_place(place, mir, callee_modes)
         }
+    }
+}
+
+/// Classify a `MirConstant` used as a return value.
+///
+/// String literals and function/method references live in the program's
+/// static data segment — their lifetime is the whole program, so they're
+/// safely classified as `Static`. Primitive immediates (`int`, `bool`, `f64`,
+/// `None`) allocate nothing and are returned by value; `NewlyOwned` preserves
+/// the pre-existing semantics for those.
+///
+/// `ClosurePlaceholder` is a bytecode-resolution marker and should never
+/// appear in a completed MIR — treat as `Unknown` for safety.
+fn classify_constant(c: &MirConstant) -> ReturnOwnershipMode {
+    match c {
+        MirConstant::Str(_)
+        | MirConstant::StringId(_)
+        | MirConstant::Function(_)
+        | MirConstant::Method(_) => ReturnOwnershipMode::Static,
+        MirConstant::Int(_)
+        | MirConstant::Bool(_)
+        | MirConstant::Float(_)
+        | MirConstant::None => ReturnOwnershipMode::NewlyOwned,
+        MirConstant::ClosurePlaceholder => ReturnOwnershipMode::Unknown,
     }
 }
 
@@ -268,7 +295,7 @@ fn classify_defining_rvalue(
         Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
         Rvalue::Borrow(kind, p) => classify_borrow_rvalue(*kind, p, mir),
         Rvalue::Use(op) => match op {
-            Operand::Constant(_) => ReturnOwnershipMode::NewlyOwned,
+            Operand::Constant(c) => classify_constant(c),
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
                 let root = p.root_local();
                 if let Some(idx) = mir.param_slots.iter().position(|s| *s == root) {
@@ -742,6 +769,468 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
+    // V0.b: Shared / Static emission (diagnostic only).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_string_literal_return_is_static() {
+        // fn static_string() -> string { "hello" }
+        //   bb0:
+        //     _0 = use const Str("hello")
+        //     return
+        let mut mir = empty_mir("static_string");
+        mir.local_types = vec![LocalTypeInfo::NonCopy];
+        let mut bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb0,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Constant(MirConstant::Str("hello".into()))),
+            ),
+            0,
+        );
+        mir.blocks.push(bb0);
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &HashMap::new()),
+            ReturnOwnershipMode::Static
+        );
+    }
+
+    #[test]
+    fn test_interned_string_id_return_is_static() {
+        // Same as above but via StringId (legacy interned form).
+        let mut mir = empty_mir("interned");
+        mir.local_types = vec![LocalTypeInfo::NonCopy];
+        let mut bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb0,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Constant(MirConstant::StringId(7))),
+            ),
+            0,
+        );
+        mir.blocks.push(bb0);
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &HashMap::new()),
+            ReturnOwnershipMode::Static
+        );
+    }
+
+    #[test]
+    fn test_function_ref_return_is_static() {
+        // A bare `fn foo` reference has static lifetime.
+        let mut mir = empty_mir("returns_fn");
+        mir.local_types = vec![LocalTypeInfo::NonCopy];
+        let mut bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb0,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Constant(MirConstant::Function("foo".into()))),
+            ),
+            0,
+        );
+        mir.blocks.push(bb0);
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &HashMap::new()),
+            ReturnOwnershipMode::Static
+        );
+    }
+
+    #[test]
+    fn test_static_string_via_temp_is_static() {
+        // Tracing a temp all the way back to a Str constant still yields Static.
+        //   bb0:
+        //     _1 = use const Str("greet")
+        //     _0 = move _1
+        //     return
+        let mut mir = empty_mir("static_via_temp");
+        mir.num_locals = 2;
+        mir.local_types = vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy];
+        let mut bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb0,
+            StatementKind::Assign(
+                Place::Local(SlotId(1)),
+                Rvalue::Use(Operand::Constant(MirConstant::Str("greet".into()))),
+            ),
+            0,
+        );
+        push_stmt(
+            &mut bb0,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Move(Place::Local(SlotId(1)))),
+            ),
+            1,
+        );
+        mir.blocks.push(bb0);
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &HashMap::new()),
+            ReturnOwnershipMode::Static
+        );
+    }
+
+    #[test]
+    fn test_call_returning_shared_propagates_shared() {
+        // fn wrap_arc() -> Arc<T> { arc_new() }   // conceptually
+        //   bb0: Call(func=arc_new, dest=_1, next=bb1)
+        //   bb1: _0 = move _1; return
+        //
+        // With `arc_new` registered as Shared in callee_modes, `wrap_arc`
+        // inherits Shared.
+        let mut mir = empty_mir("wrap_arc");
+        mir.num_locals = 2;
+        mir.local_types = vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy];
+
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Function("arc_new".into())),
+                    args: Vec::new(),
+                    destination: Place::Local(SlotId(1)),
+                    next: BasicBlockId(1),
+                },
+                span: dummy_span(),
+            },
+        };
+        let mut bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb1,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Move(Place::Local(SlotId(1)))),
+            ),
+            0,
+        );
+        mir.blocks = vec![bb0, bb1];
+
+        let mut callee_modes = HashMap::new();
+        callee_modes.insert("arc_new".to_string(), ReturnOwnershipMode::Shared);
+
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &callee_modes),
+            ReturnOwnershipMode::Shared
+        );
+    }
+
+    #[test]
+    fn test_call_returning_static_propagates_static() {
+        // A callee classified as Static flows through a simple wrapper.
+        let mut mir = empty_mir("wrap_singleton");
+        mir.num_locals = 2;
+        mir.local_types = vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy];
+
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Function("get_singleton".into())),
+                    args: Vec::new(),
+                    destination: Place::Local(SlotId(1)),
+                    next: BasicBlockId(1),
+                },
+                span: dummy_span(),
+            },
+        };
+        let mut bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb1,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Move(Place::Local(SlotId(1)))),
+            ),
+            0,
+        );
+        mir.blocks = vec![bb0, bb1];
+
+        let mut callee_modes = HashMap::new();
+        callee_modes.insert(
+            "get_singleton".to_string(),
+            ReturnOwnershipMode::Static,
+        );
+
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &callee_modes),
+            ReturnOwnershipMode::Static
+        );
+    }
+
+    #[test]
+    fn test_arc_param_passthrough_stays_borrowed_not_shared() {
+        // fn make_shared(x: Arc<T>) -> Arc<T> { x }
+        // Returning an `Arc`-typed parameter is still BorrowedFromParam —
+        // the caller already owns the Arc, and the "borrowed-from-param"
+        // semantics take precedence over the Shared classification.
+        let mut mir = empty_mir("passthrough_arc");
+        mir.num_locals = 2;
+        mir.param_slots = vec![SlotId(1)];
+        mir.param_reference_kinds = vec![None];
+        mir.local_types = vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy];
+
+        let mut bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb0,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+            ),
+            0,
+        );
+        mir.blocks.push(bb0);
+
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &HashMap::new()),
+            ReturnOwnershipMode::BorrowedFromParam(0)
+        );
+    }
+
+    #[test]
+    fn test_static_and_newly_owned_branches_meet_to_unknown() {
+        // Two branches: one returns a string literal (Static), the other
+        // returns an aggregate (NewlyOwned). The meet must collapse to
+        // Unknown — the conservative fallback.
+        //   bb0: switchBool(cond, bb1, bb2)
+        //   bb1: _0 = const Str("hi"); return            -> Static
+        //   bb2: _1 = [1]; _0 = move _1; return          -> NewlyOwned
+        let mut mir = empty_mir("mixed");
+        mir.num_locals = 3;
+        mir.param_slots = vec![SlotId(2)];
+        mir.param_reference_kinds = vec![None];
+        mir.local_types = vec![
+            LocalTypeInfo::NonCopy,
+            LocalTypeInfo::NonCopy,
+            LocalTypeInfo::Copy,
+        ];
+
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: Terminator {
+                kind: TerminatorKind::SwitchBool {
+                    operand: Operand::Copy(Place::Local(SlotId(2))),
+                    true_bb: BasicBlockId(1),
+                    false_bb: BasicBlockId(2),
+                },
+                span: dummy_span(),
+            },
+        };
+
+        let mut bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb1,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Constant(MirConstant::Str("hi".into()))),
+            ),
+            0,
+        );
+
+        let mut bb2 = BasicBlock {
+            id: BasicBlockId(2),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb2,
+            StatementKind::Assign(
+                Place::Local(SlotId(1)),
+                Rvalue::Aggregate(vec![Operand::Constant(MirConstant::Int(1))]),
+            ),
+            1,
+        );
+        push_stmt(
+            &mut bb2,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Move(Place::Local(SlotId(1)))),
+            ),
+            2,
+        );
+
+        mir.blocks = vec![bb0, bb1, bb2];
+
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &HashMap::new()),
+            ReturnOwnershipMode::Unknown
+        );
+    }
+
+    #[test]
+    fn test_two_static_branches_meet_to_static() {
+        // Both branches return string literals — the meet stays Static.
+        let mut mir = empty_mir("pick_word");
+        mir.num_locals = 2;
+        mir.param_slots = vec![SlotId(1)];
+        mir.param_reference_kinds = vec![None];
+        mir.local_types = vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy];
+
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: Terminator {
+                kind: TerminatorKind::SwitchBool {
+                    operand: Operand::Copy(Place::Local(SlotId(1))),
+                    true_bb: BasicBlockId(1),
+                    false_bb: BasicBlockId(2),
+                },
+                span: dummy_span(),
+            },
+        };
+        let mut bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb1,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Constant(MirConstant::Str("yes".into()))),
+            ),
+            0,
+        );
+        let mut bb2 = BasicBlock {
+            id: BasicBlockId(2),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb2,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Constant(MirConstant::Str("no".into()))),
+            ),
+            1,
+        );
+        mir.blocks = vec![bb0, bb1, bb2];
+
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &HashMap::new()),
+            ReturnOwnershipMode::Static
+        );
+    }
+
+    #[test]
+    fn test_meet_shared_and_static_collapses_to_unknown() {
+        // Lattice spot-checks for the new variants.
+        assert_eq!(
+            ReturnOwnershipMode::Shared.meet(ReturnOwnershipMode::Shared),
+            ReturnOwnershipMode::Shared
+        );
+        assert_eq!(
+            ReturnOwnershipMode::Static.meet(ReturnOwnershipMode::Static),
+            ReturnOwnershipMode::Static
+        );
+        assert_eq!(
+            ReturnOwnershipMode::Shared.meet(ReturnOwnershipMode::Static),
+            ReturnOwnershipMode::Unknown
+        );
+        assert_eq!(
+            ReturnOwnershipMode::Static.meet(ReturnOwnershipMode::NewlyOwned),
+            ReturnOwnershipMode::Unknown
+        );
+        assert_eq!(
+            ReturnOwnershipMode::Shared.meet(ReturnOwnershipMode::NewlyOwned),
+            ReturnOwnershipMode::Unknown
+        );
+    }
+
+    #[test]
+    fn test_int_conditional_return_stays_newly_owned() {
+        // fn return_unknown(x: bool) -> int { if x { 1 } else { 2 } }
+        // Two branches, both int constants, both NewlyOwned under the new
+        // classification: the meet stays NewlyOwned — per the task's
+        // "classification per existing rules (likely NewlyOwned for int)".
+        let mut mir = empty_mir("return_unknown");
+        mir.num_locals = 2;
+        mir.param_slots = vec![SlotId(1)];
+        mir.param_reference_kinds = vec![None];
+        mir.local_types = vec![LocalTypeInfo::Copy, LocalTypeInfo::Copy];
+
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: Vec::new(),
+            terminator: Terminator {
+                kind: TerminatorKind::SwitchBool {
+                    operand: Operand::Copy(Place::Local(SlotId(1))),
+                    true_bb: BasicBlockId(1),
+                    false_bb: BasicBlockId(2),
+                },
+                span: dummy_span(),
+            },
+        };
+        let mut bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb1,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Constant(MirConstant::Int(1))),
+            ),
+            0,
+        );
+        let mut bb2 = BasicBlock {
+            id: BasicBlockId(2),
+            statements: Vec::new(),
+            terminator: return_terminator(),
+        };
+        push_stmt(
+            &mut bb2,
+            StatementKind::Assign(
+                Place::Local(SlotId(0)),
+                Rvalue::Use(Operand::Constant(MirConstant::Int(2))),
+            ),
+            1,
+        );
+        mir.blocks = vec![bb0, bb1, bb2];
+
+        assert_eq!(
+            infer_return_ownership_mode(&mir, &HashMap::new()),
+            ReturnOwnershipMode::NewlyOwned
+        );
+    }
+
+    // ---------------------------------------------------------------------
     // End-to-end: parse Shape source, lower to MIR, run inference.
     // These cover the real lowering shapes (ArrayStore, implicit return,
     // etc.) rather than hand-built MIR.
@@ -851,6 +1340,12 @@ mod tests {
         let modes = infer_from_source("fn wrap() -> Array<int> { external() }");
         // `external` is never defined here; Call has no callee info.
         assert_eq!(mode_of(&modes, "wrap"), ReturnOwnershipMode::Unknown);
+    }
+
+    #[test]
+    fn test_source_string_literal_return_is_static() {
+        let modes = infer_from_source(r#"fn greet() -> string { "hello" }"#);
+        assert_eq!(mode_of(&modes, "greet"), ReturnOwnershipMode::Static);
     }
 
     #[test]
