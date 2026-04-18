@@ -694,17 +694,24 @@ fn heap_value_to_serializable(
             }
             SerializableVMValue::Array(out)
         }
-        HeapValue::Closure {
-            function_id,
-            upvalues,
-        } => {
-            let mut ups = Vec::new();
-            for up in upvalues.iter() {
-                let nb = up.get();
-                ups.push(nanboxed_to_serializable(&nb, store)?);
+        HeapValue::Closure { .. } => {
+            // Closure spec H6.4: read via `VmClosureHandle` so the H6.5
+            // producer swap (Arc<HeapValue::Closure> → raw
+            // TypedClosureHeader) does not have to revisit this site.
+            // The variant pattern stays because the enclosing match over
+            // `HeapValue` is exhaustive. Byte format is unchanged — the
+            // shim is transparent and `function_id` widens from u32 back
+            // to u16 for the stored `SerializableVMValue::Closure` field.
+            let handle = hv
+                .as_closure_handle()
+                .expect("closure arm implies a closure handle");
+            let function_id = handle.function_id() as u16;
+            let mut ups = Vec::with_capacity(handle.capture_count());
+            for nb in handle.captures_as_values().iter() {
+                ups.push(nanboxed_to_serializable(nb, store)?);
             }
             SerializableVMValue::Closure {
-                function_id: *function_id,
+                function_id,
                 upvalues: ups,
             }
         }
@@ -2023,5 +2030,105 @@ mod tests {
         let decoded: ExecutionSnapshot =
             bincode::deserialize(&bytes).expect("deserialize ExecutionSnapshot");
         assert_eq!(decoded.version, SNAPSHOT_VERSION);
+    }
+
+    /// Closure spec H6.4: snapshot round-trip through a `HeapValue::Closure`
+    /// proves that the migrated reader in `heap_value_to_serializable`
+    /// agrees bit-for-bit with the pre-H6.4 destructure. The producer on
+    /// the deserialize side is unchanged (it is H6.5's scope), so a full
+    /// round-trip exercises only the H6.4 migration on the serialize side
+    /// while the deserialize side round-trips the byte format back into a
+    /// fresh `HeapValue::Closure`. If the shim ever diverges from the
+    /// legacy destructure (wrong `function_id`, wrong capture count,
+    /// wrong capture values, wrong ordering) this test catches it.
+    #[test]
+    fn test_h6_4_closure_snapshot_roundtrip_preserves_function_id_and_captures() {
+        use shape_value::heap_value::HeapValue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path().join("store")).unwrap();
+
+        // Mixed-type captures exercise the shim's `captures_as_values`
+        // path (f64 / i64 / bool / string) — each widens through
+        // `Upvalue::get()` today; post-H6.5 each will widen through
+        // `read_capture_as_value_bits` and this test keeps the contract.
+        let original_captures: Vec<ValueWord> = vec![
+            ValueWord::from_f64(1.5),
+            ValueWord::from_i64(42),
+            ValueWord::from_bool(true),
+            ValueWord::from_heap_value(HeapValue::String(std::sync::Arc::new(
+                "hi".to_string(),
+            ))),
+        ];
+        let original_nb = ValueWord::from_heap_value(HeapValue::Closure {
+            function_id: 73,
+            upvalues: original_captures
+                .iter()
+                .cloned()
+                .map(Upvalue::new)
+                .collect(),
+        });
+
+        // Serialize — this drives the H6.4 migrated reader.
+        let serialized = nanboxed_to_serializable(&original_nb, &store)
+            .expect("closure serialization must succeed");
+        match &serialized {
+            SerializableVMValue::Closure {
+                function_id,
+                upvalues,
+            } => {
+                assert_eq!(*function_id, 73, "function_id must round-trip as u16");
+                assert_eq!(upvalues.len(), 4, "4 captures preserved");
+                match &upvalues[0] {
+                    SerializableVMValue::Number(f) => assert_eq!(*f, 1.5),
+                    other => panic!("expected Number capture, got {:?}", other),
+                }
+                match &upvalues[1] {
+                    SerializableVMValue::Int(i) => assert_eq!(*i, 42),
+                    other => panic!("expected Int capture, got {:?}", other),
+                }
+                match &upvalues[2] {
+                    SerializableVMValue::Bool(b) => assert_eq!(*b, true),
+                    other => panic!("expected Bool capture, got {:?}", other),
+                }
+                match &upvalues[3] {
+                    SerializableVMValue::String(s) => assert_eq!(s, "hi"),
+                    other => panic!("expected String capture, got {:?}", other),
+                }
+            }
+            other => panic!("expected SerializableVMValue::Closure, got {:?}", other),
+        }
+
+        // Deserialize through the unchanged producer — byte format is
+        // transparent under H6.4.
+        let restored_nb = serializable_to_nanboxed(&serialized, &store)
+            .expect("closure deserialization must succeed");
+        let restored_handle = restored_nb
+            .as_closure_handle()
+            .expect("restored value must be a closure");
+        assert_eq!(
+            restored_handle.function_id(),
+            73,
+            "function_id survives the round-trip"
+        );
+        assert_eq!(
+            restored_handle.capture_count(),
+            4,
+            "capture count survives the round-trip"
+        );
+        let restored_caps = restored_handle.captures_as_values();
+        assert_eq!(restored_caps[0].as_f64(), Some(1.5));
+        assert_eq!(restored_caps[1].as_i64(), Some(42));
+        assert_eq!(restored_caps[2].as_bool(), Some(true));
+        // The string capture comes back via a HeapValue::String on the
+        // heap — verify the restored reference still parses as a string.
+        let restored_str = restored_caps[3]
+            .as_heap_ref()
+            .and_then(|hv| match hv {
+                HeapValue::String(s) => Some((**s).clone()),
+                _ => None,
+            })
+            .expect("string capture restored as HeapValue::String");
+        assert_eq!(restored_str, "hi");
     }
 }

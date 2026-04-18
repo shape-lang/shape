@@ -354,6 +354,13 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
 
         HeapValue::FunctionRef { name, .. } => WireValue::FunctionRef { name: name.clone() },
 
+        // Closure spec H6.4: pure discriminator — no field reads, so
+        // there is nothing to route through `VmClosureHandle`. The wire
+        // format erases closure internals and emits a fixed
+        // "<closure>" FunctionRef regardless of the backing. The variant
+        // pattern stays for exhaustive-match coverage; the H6.5 producer
+        // swap (Arc<HeapValue::Closure> → raw TypedClosureHeader) is
+        // transparent here — wire bytes are unchanged.
         HeapValue::Closure { .. } => WireValue::FunctionRef {
             name: "<closure>".to_string(),
         },
