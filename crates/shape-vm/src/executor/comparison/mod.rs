@@ -437,84 +437,20 @@ impl VirtualMachine {
     ) -> Result<(), VMError> {
         use OpCode::*;
         match instruction.opcode {
-            GtDynamic => {
-                let b_nb = self.pop_raw_u64()?;
-                let a_nb = self.pop_raw_u64()?;
-                // ValueWord-native: try ExprProxy, then numeric comparison
-                if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Gt) {
-                    self.push_raw_u64(expr)?;
-                } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
-                    self.push_raw_bool(ord == Ordering::Greater)?;
-                } else {
-                    // String comparison
-                    if let (Some(a_str), Some(b_str)) = (a_nb.as_str(), b_nb.as_str()) {
-                        self.push_raw_bool(a_str > b_str)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Cannot compare '>' on {} and {}",
-                            a_nb.type_name(),
-                            b_nb.type_name()
-                        )));
-                    }
-                }
-            }
-            LtDynamic => {
-                let b_nb = self.pop_raw_u64()?;
-                let a_nb = self.pop_raw_u64()?;
-                if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Lt) {
-                    self.push_raw_u64(expr)?;
-                } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
-                    self.push_raw_bool(ord == Ordering::Less)?;
-                } else {
-                    if let (Some(a_str), Some(b_str)) = (a_nb.as_str(), b_nb.as_str()) {
-                        self.push_raw_bool(a_str < b_str)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Cannot compare '<' on {} and {}",
-                            a_nb.type_name(),
-                            b_nb.type_name()
-                        )));
-                    }
-                }
-            }
-            GteDynamic => {
-                let b_nb = self.pop_raw_u64()?;
-                let a_nb = self.pop_raw_u64()?;
-                if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Gte) {
-                    self.push_raw_u64(expr)?;
-                } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
-                    self.push_raw_bool(ord == Ordering::Greater || ord == Ordering::Equal)?;
-                } else {
-                    if let (Some(a_str), Some(b_str)) = (a_nb.as_str(), b_nb.as_str()) {
-                        self.push_raw_bool(a_str >= b_str)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Cannot compare '>=' on {} and {}",
-                            a_nb.type_name(),
-                            b_nb.type_name()
-                        )));
-                    }
-                }
-            }
-            LteDynamic => {
-                let b_nb = self.pop_raw_u64()?;
-                let a_nb = self.pop_raw_u64()?;
-                if let Some(expr) = Self::try_nb_expr_proxy_compare(&a_nb, &b_nb, FilterOp::Lte) {
-                    self.push_raw_u64(expr)?;
-                } else if let Some(ord) = Self::nb_compare_numeric(&a_nb, &b_nb) {
-                    self.push_raw_bool(ord == Ordering::Less || ord == Ordering::Equal)?;
-                } else {
-                    if let (Some(a_str), Some(b_str)) = (a_nb.as_str(), b_nb.as_str()) {
-                        self.push_raw_bool(a_str <= b_str)?;
-                    } else {
-                        return Err(VMError::RuntimeError(format!(
-                            "Cannot compare '<=' on {} and {}",
-                            a_nb.type_name(),
-                            b_nb.type_name()
-                        )));
-                    }
-                }
-            }
+            GtDynamic => self.dyn_ord_cmp(FilterOp::Gt, ">", |o| o == Ordering::Greater, |a, b| a > b)?,
+            LtDynamic => self.dyn_ord_cmp(FilterOp::Lt, "<", |o| o == Ordering::Less, |a, b| a < b)?,
+            GteDynamic => self.dyn_ord_cmp(
+                FilterOp::Gte,
+                ">=",
+                |o| o == Ordering::Greater || o == Ordering::Equal,
+                |a, b| a >= b,
+            )?,
+            LteDynamic => self.dyn_ord_cmp(
+                FilterOp::Lte,
+                "<=",
+                |o| o == Ordering::Less || o == Ordering::Equal,
+                |a, b| a <= b,
+            )?,
             EqDynamic => {
                 let b_nb = self.pop_raw_u64()?;
                 let a_nb = self.pop_raw_u64()?;
@@ -541,6 +477,39 @@ impl VirtualMachine {
             ),
         }
         Ok(())
+    }
+
+    /// Shared ordered-compare helper for `Gt/Lt/Gte/Lte Dynamic`.
+    ///
+    /// Attempts in order: (1) `ExprProxy` SQL pushdown, (2) numeric
+    /// comparison (covers int/int, f64/f64, decimal/decimal), (3) lex string
+    /// comparison, (4) type error. The `ord_pred` closure turns a numeric
+    /// `Ordering` into a bool; `str_pred` is the direct string predicate.
+    #[inline]
+    fn dyn_ord_cmp(
+        &mut self,
+        op: FilterOp,
+        sym: &'static str,
+        ord_pred: impl FnOnce(Ordering) -> bool,
+        str_pred: impl FnOnce(&str, &str) -> bool,
+    ) -> Result<(), VMError> {
+        let b = self.pop_raw_u64()?;
+        let a = self.pop_raw_u64()?;
+        if let Some(expr) = Self::try_nb_expr_proxy_compare(&a, &b, op) {
+            return self.push_raw_u64(expr);
+        }
+        if let Some(ord) = Self::nb_compare_numeric(&a, &b) {
+            return self.push_raw_bool(ord_pred(ord));
+        }
+        if let (Some(a_str), Some(b_str)) = (a.as_str(), b.as_str()) {
+            return self.push_raw_bool(str_pred(a_str, b_str));
+        }
+        Err(VMError::RuntimeError(format!(
+            "Cannot compare '{}' on {} and {}",
+            sym,
+            a.type_name(),
+            b.type_name()
+        )))
     }
 }
 
