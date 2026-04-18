@@ -156,6 +156,17 @@ macro_rules! define_heap_types {
                 function_id: u16,
                 upvalues: Vec<$crate::value::Upvalue>,
             },
+            /// Closure spec §14.6 (H6.5): raw `TypedClosureHeader`-backed
+            /// closure. Captures live in a typed C-laid-out block allocated
+            /// by `closure_raw::alloc_typed_closure` and owned by the
+            /// embedded [`OwnedClosureBlock`]. Cloning / dropping this
+            /// variant manages the block's refcount in lockstep with the
+            /// enclosing `Arc<HeapValue>` so the existing dispatch plumbing
+            /// (`TAG_HEAP → as_heap_ref → …`) keeps working unchanged;
+            /// readers go through `VmClosureHandle` to remain oblivious to
+            /// the swap. H6.6 deletes the legacy `Closure { function_id,
+            /// upvalues }` variant once every producer emits `ClosureRaw`.
+            ClosureRaw($crate::v2::closure_raw::OwnedClosureBlock),
             Range {
                 start: Option<Box<$crate::value_word::ValueWord>>,
                 end: Option<Box<$crate::value_word::ValueWord>>,
@@ -219,6 +230,7 @@ macro_rules! define_heap_types {
                     // Struct
                     HeapValue::TypedObject { .. } => HeapKind::TypedObject,
                     HeapValue::Closure { .. } => HeapKind::Closure,
+                    HeapValue::ClosureRaw(..) => HeapKind::Closure,
                     HeapValue::Range { .. } => HeapKind::Range,
                     HeapValue::TaskGroup { .. } => HeapKind::TaskGroup,
                     HeapValue::TraitObject { .. } => HeapKind::TraitObject,
@@ -265,6 +277,7 @@ macro_rules! define_heap_types {
                     // Struct
                     HeapValue::TypedObject { slots, .. } => !slots.is_empty(),
                     HeapValue::Closure { .. } => true,
+                    HeapValue::ClosureRaw(..) => true,
                     HeapValue::Range { .. } => true,
                     HeapValue::TaskGroup { .. } => true,
                     HeapValue::TraitObject { value, .. } => value.is_truthy(),
@@ -317,6 +330,7 @@ macro_rules! define_heap_types {
                     // Struct
                     HeapValue::TypedObject { .. } => "object",
                     HeapValue::Closure { .. } => "closure",
+                    HeapValue::ClosureRaw(..) => "closure",
                     HeapValue::Range { .. } => "range",
                     HeapValue::TaskGroup { .. } => "task_group",
                     HeapValue::TraitObject { .. } => "trait_object",

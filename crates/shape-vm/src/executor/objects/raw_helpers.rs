@@ -592,32 +592,39 @@ pub fn drop_raw_bits(bits: u64) {
 // ─── Closure / callable inspection from raw bits ─────────────────────────
 
 /// Extract closure info (function_id, upvalues) from raw heap-tagged bits.
-/// Returns borrowed references — no Vec clone.
 ///
-/// Closure spec H6.2: the body goes through [`VmClosureHandle`], pulling
-/// the `Upvalue` slice out through the Legacy-only `upvalues_legacy`
-/// escape hatch. This is an acceptable (c)-class compromise for H6.2 —
-/// VM dispatch consumers (H6.3's scope) still pass around `&[Upvalue]`,
-/// so we preserve the signature now and rewrite both helper and callers
-/// together once H6.5 retires the Legacy backing.
+/// Closure spec H6.5: returns an owned `Vec<Upvalue>` because the new
+/// `HeapValue::ClosureRaw` backing stores captures as typed bytes in a
+/// `TypedClosureHeader` block — there is no `&[Upvalue]` to borrow. For
+/// the legacy `HeapValue::Closure { upvalues }` backing the original
+/// `Upvalue` slice is cloned verbatim (NOT re-constructed from
+/// `captures_as_values()`) so `SharedCell`-backed mutable captures
+/// retain their pointer identity — the auto-deref in `Upvalue::get()` /
+/// `set()` only preserves shared mutation semantics when the SharedCell
+/// `ValueWord` itself is the stored capture, not the cell's inner value.
 #[inline]
-pub fn extract_closure_info(bits: u64) -> Option<(u16, &'static [shape_value::Upvalue])> {
+pub fn extract_closure_info(bits: u64) -> Option<(u16, Vec<shape_value::Upvalue>)> {
     unsafe {
-        // `extract_heap_ref` returns `Option<&'static HeapValue>` — the
-        // underlying Arc is kept alive by the caller-owned stack slot.
-        // We preserve the `'static` lifetime through the shim by binding
-        // `hv: &'static HeapValue` before constructing the handle; the
-        // handle's borrow then inherits `'static`, and so does
-        // `upvalues_legacy()`.
         let hv: &'static HeapValue = extract_heap_ref(bits)?;
         let handle = hv.as_closure_handle()?;
         let fid = handle.function_id() as u16;
-        // H6.2: Legacy is the only backing until H6.5 swaps the producer.
-        // The escape hatch will be retired at the same time this helper
-        // gets rewritten to consume the Raw backing directly.
-        let upvalues: &'static [shape_value::Upvalue] = handle
-            .upvalues_legacy()
-            .expect("H6.2: Legacy backing is the only producer until H6.5");
+        // Legacy backing: preserve the `Upvalue` values verbatim so
+        // SharedCell-backed captures keep their identity. The Raw backing
+        // has no `Upvalue` slice — its captures are raw typed bytes — so
+        // fall through to `captures_as_values` + fresh `Upvalue::new` for
+        // it. Raw-backed closures can only carry SharedCell-free captures
+        // in practice (the VM producer guards on `any_mutable_capture`),
+        // so widening through `captures_as_values` is correct there.
+        let upvalues: Vec<shape_value::Upvalue> =
+            if let Some(slice) = handle.upvalues_legacy() {
+                slice.to_vec()
+            } else {
+                handle
+                    .captures_as_values()
+                    .into_iter()
+                    .map(shape_value::Upvalue::new)
+                    .collect()
+            };
         Some((fid, upvalues))
     }
 }

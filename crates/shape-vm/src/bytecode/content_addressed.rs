@@ -212,6 +212,20 @@ pub struct Program {
 
     /// Debug information (source files, variable names).
     pub debug_info: DebugInfo,
+
+    /// Closure spec §14.6 (H6.5): per-function-name `ClosureLayout`
+    /// side-table threaded through the content-addressed `Program` so it
+    /// survives the `link()` → `LinkedProgram` → `BytecodeProgram` round-
+    /// trip. Keyed by function name because the content-addressed store
+    /// reorders blobs topologically; the linker remaps to post-link
+    /// function-id positions in `LinkedProgram.closure_function_layouts`.
+    /// Not serialised — programs loaded from disk fall back to the
+    /// legacy `HeapValue::Closure` variant.
+    #[serde(skip, default)]
+    pub closure_function_layouts_by_name: std::collections::HashMap<
+        String,
+        std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>,
+    >,
 }
 
 /// A linked function ready for execution in a flat instruction array.
@@ -319,4 +333,15 @@ pub struct LinkedProgram {
     /// Computed by the linker during `link()`.
     #[serde(default = "default_permission_set")]
     pub total_required_permissions: PermissionSet,
+
+    /// Closure spec §14.6 (H6.5): per-function `ClosureLayout` propagated
+    /// from `BytecodeProgram.closure_function_layouts` so the linked
+    /// program carries enough metadata for `op_make_closure`'s raw
+    /// producer path. `None` entries indicate the function is not a
+    /// closure body or the layout wasn't computed. Not serialised —
+    /// programs loaded from disk fall back to the legacy `HeapValue::
+    /// Closure` variant in the VM producer.
+    #[serde(skip, default)]
+    pub closure_function_layouts:
+        Vec<Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
 }

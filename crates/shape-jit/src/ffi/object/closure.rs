@@ -75,29 +75,26 @@ pub extern "C" fn jit_make_closure(
 // Closure-spec Phase H2: TypedClosureHeader finalizer
 // ============================================================================
 
-/// Closure-spec Phase H2: convert an H1-allocated `TypedClosureHeader` block
-/// into a NaN-boxed `Arc<HeapValue::Closure>` bits value.
+/// Closure-spec Phase H2 → §14.6 (H6.5): wrap an H1-allocated
+/// `TypedClosureHeader` block into a NaN-boxed `Arc<HeapValue::ClosureRaw>`
+/// bits value.
 ///
-/// Phase H1 (`MirToIR::emit_heap_closure`) allocates a `TypedClosureHeader`
-/// with the correct layout (HeapHeader + function_id + type_id + typed
-/// captures) and writes each capture at its `ClosureLayout::heap_capture_offset(i)`
-/// byte offset. Phase H2 adds this finalizer so that the downstream
-/// `jit_call_value` / VM dispatch path can consume the result via the
-/// existing `HK_CLOSURE` (v1) ABI while the deeper raw-pointer VM rework is
-/// staged in follow-up phases (H3+).
+/// Phase H1 (`MirToIR::emit_heap_closure`) allocates the block and writes
+/// captures at their `ClosureLayout::heap_capture_offset(i)` offsets.
+/// Pre-H6.5 this FFI then rebuilt an `Arc<HeapValue::Closure { function_id,
+/// upvalues }>` by copying every capture into a `Vec<Upvalue>` — a hot-path
+/// allocation that dominated `arr.map(|x| x + n)` profiles. H6.5 deletes
+/// that rebuild: the raw block is already the canonical representation of
+/// the closure. We simply hand ownership of the `*const TypedClosureHeader`
+/// (and one refcount share, allocated by `emit_heap_closure`) to a fresh
+/// `OwnedClosureBlock` and wrap it in `HeapValue::ClosureRaw`. Downstream
+/// dispatch paths go through the `VmClosureHandle` shim, which transparently
+/// reads captures out of the raw block via `read_capture_as_value_bits`.
 ///
-/// The finalizer:
-/// 1. Reads the `function_id` at offset 8.
-/// 2. Walks the layout's captures, loading each typed value (f64/i64/i32/
-///    i8/i16/bool/ptr) and converting it to a `ValueWord` bit pattern.
-///    Pointer captures have already been atomically retained by
-///    `emit_heap_closure` (one retain per `heap_capture_mask` bit), so the
-///    reconstructed `Upvalue` owns its refcount share — no additional
-///    retain here.
-/// 3. Builds an `Arc<HeapValue::Closure>` with those `Upvalue`s.
-/// 4. Deallocates the `TypedClosureHeader` block (via
-///    `Layout::from_size_align` matching the original allocator shim).
-/// 5. Returns the NaN-boxed `Arc<HeapValue::Closure>` bits.
+/// The `function_id` and `captures_count` FFI arguments are kept for the
+/// Cranelift-level signature stability — the authoritative values live in
+/// the block's header (`function_id` at offset 8) and the layout
+/// (`capture_count()`). The function asserts the two agree in debug builds.
 ///
 /// # Safety
 ///
@@ -105,15 +102,18 @@ pub extern "C" fn jit_make_closure(
 ///   `jit_v2_alloc_struct` with `kind = HEAP_KIND_V2_CLOSURE` and a capture
 ///   area matching the `layout_ptr` argument.
 /// - `layout_ptr` must point to a live `ClosureLayout` whose lifetime
-///   dominates this call (program owns the Arc; the JIT emits the raw
-///   pointer at compile time).
+///   dominates this call. Programs own `Arc<ClosureLayout>`s in
+///   `BytecodeProgram.closure_function_layouts`; `emit_heap_closure`
+///   materialises the raw address via `Arc::as_ptr`, so we reconstruct the
+///   Arc below with `Arc::increment_strong_count` + `Arc::from_raw` to
+///   acquire a counted share for the new `OwnedClosureBlock`.
 /// - `captures_count` must equal `(*layout_ptr).capture_count()`.
-/// - This function takes ownership of the `TypedClosureHeader` block: it is
-///   freed before return. The pointer must not be reused.
+/// - This function takes ownership of the `TypedClosureHeader` block: the
+///   caller must not release the raw pointer after the call.
 /// - Heap-typed captures (`heap_capture_mask` bits) in the block own one
-///   refcount share apiece (as `emit_heap_closure` emitted `atomic_rmw add
-///   … 1` for each). Those shares transfer to the constructed `Upvalue`s;
-///   the block's deallocation does NOT release them again.
+///   refcount share apiece (emit_heap_closure emits `atomic_rmw add … 1`
+///   for each). Those shares stay with the block and release automatically
+///   via `release_typed_closure` when `OwnedClosureBlock::Drop` runs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_finalize_heap_closure(
     header_ptr: *mut u8,
@@ -122,134 +122,74 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
     layout_ptr: *const shape_value::v2::closure_layout::ClosureLayout,
 ) -> u64 {
     use shape_value::heap_value::HeapValue;
-    use shape_value::v2::closure_layout::{ClosureLayout, TypedClosureHeader};
-    use shape_value::v2::closure_raw::dealloc_typed_closure_no_drop;
-    use shape_value::v2::struct_layout::FieldKind;
-    use shape_value::{Upvalue, ValueWord, ValueWordExt};
+    use shape_value::v2::closure_layout::ClosureLayout;
+    use shape_value::v2::closure_raw::OwnedClosureBlock;
+    use shape_value::{ValueWord, ValueWordExt};
+    use std::sync::Arc;
 
     unsafe {
         if header_ptr.is_null() || layout_ptr.is_null() {
             // Safety valve: refuse to construct an invalid closure. Callers
-            // must not deref the TAG_NULL return as a function — this is a
+            // must not deref the TAG_NONE return as a function — this is a
             // codegen bug if it ever fires.
             return shape_value::tags::TAG_BASE
                 | (shape_value::tags::TAG_NONE << shape_value::tags::TAG_SHIFT);
         }
 
-        let layout: &ClosureLayout = &*layout_ptr;
-        let header = &*(header_ptr as *const TypedClosureHeader);
-        // `function_id` is stored in the header at offset 8; the `_function_id`
-        // parameter is kept for the FFI ABI and ignored in favour of the
-        // authoritative in-block value.
-        let fid = header.function_id as u16;
-
+        let layout_ref: &ClosureLayout = &*layout_ptr;
         let count = captures_count as usize;
         debug_assert_eq!(
             count,
-            layout.capture_count(),
+            layout_ref.capture_count(),
             "jit_finalize_heap_closure: captures_count {} != layout.capture_count() {}",
             count,
-            layout.capture_count()
+            layout_ref.capture_count()
         );
+        let _ = count; // kept for the assert in release builds
 
-        let mut upvalues: Vec<Upvalue> = Vec::with_capacity(count);
-        for i in 0..layout.capture_count() {
-            let kind = layout.capture_kind(i);
-            let off = layout.heap_capture_offset(i);
-            let field_ptr = header_ptr.add(off);
-            let nb: ValueWord = match kind {
-                FieldKind::F64 => {
-                    let v = *(field_ptr as *const f64);
-                    ValueWord::from_f64(v)
-                }
-                FieldKind::I64 | FieldKind::U64 => {
-                    // I64 captures are stored as native i64 — but the JIT's
-                    // `coerce_for_capture_store` will have NaN-boxed the value
-                    // when the Cranelift source value type was I64 (it uses the
-                    // `ensure_nanboxed` fallback). For consistency with the
-                    // existing closure ABI we read the raw 64 bits and let the
-                    // downstream call site decode them as a ValueWord.
-                    let bits = *(field_ptr as *const u64);
-                    ValueWord::from_raw_bits(bits)
-                }
-                FieldKind::I32 => {
-                    let v = *(field_ptr as *const i32) as i64;
-                    ValueWord::from_i64(v)
-                }
-                FieldKind::U32 => {
-                    let v = *(field_ptr as *const u32) as i64;
-                    ValueWord::from_i64(v)
-                }
-                FieldKind::I16 => {
-                    let v = *(field_ptr as *const i16) as i64;
-                    ValueWord::from_i64(v)
-                }
-                FieldKind::U16 => {
-                    let v = *(field_ptr as *const u16) as i64;
-                    ValueWord::from_i64(v)
-                }
-                FieldKind::I8 => {
-                    let v = *(field_ptr as *const i8) as i64;
-                    ValueWord::from_i64(v)
-                }
-                FieldKind::U8 => {
-                    let v = *(field_ptr as *const u8) as i64;
-                    ValueWord::from_i64(v)
-                }
-                FieldKind::Bool => {
-                    let v = *(field_ptr as *const u8) != 0;
-                    ValueWord::from_bool(v)
-                }
-                FieldKind::Ptr => {
-                    // Heap-typed captures are stored as raw u64 (NaN-boxed
-                    // Arc<HeapValue> pointer or other unified-heap pointer).
-                    // The atomic retain emitted by `emit_heap_closure` for this
-                    // slot already adjusted the refcount — we transfer that
-                    // share into the Upvalue without additional increment.
-                    let bits = *(field_ptr as *const u64);
-                    ValueWord::from_raw_bits(bits)
-                }
-            };
-            upvalues.push(Upvalue::new(nb));
-        }
+        // Acquire a counted share of the `Arc<ClosureLayout>` so the owning
+        // block keeps the layout alive on its own. `emit_heap_closure`
+        // passed in `Arc::as_ptr(&layout)` which is a raw pointer into a
+        // program-lifetime Arc; we bump its refcount once, then reconstruct
+        // the share via `Arc::from_raw` (matching `increment_strong_count`
+        // pairs with exactly one `Arc::from_raw` drop).
+        Arc::increment_strong_count(layout_ptr);
+        let layout_arc: Arc<ClosureLayout> = Arc::from_raw(layout_ptr);
 
-        // Deallocate the TypedClosureHeader block. The captures' refcount
-        // shares transferred into the Upvalues above; releasing them again on
-        // Drop would double-decrement. Route through
-        // `dealloc_typed_closure_no_drop` (Closure spec §13 H3.B.1) so the
-        // allocator contract (size = `layout.total_heap_size()`, align = 8,
-        // allocator = `std::alloc`) stays in lockstep with the VM-side
-        // `alloc_typed_closure`.
-        dealloc_typed_closure_no_drop(header_ptr, &*layout_ptr);
+        // SAFETY: `header_ptr` was freshly-allocated with refcount=1 by
+        // `emit_heap_closure`; that share transfers to the new
+        // `OwnedClosureBlock` (its Drop calls `release_typed_closure`). Heap
+        // captures retain their own shares as emitted by H1's
+        // `atomic_rmw add 1` loop — those stay with the block.
+        let owned = OwnedClosureBlock::from_raw(header_ptr as *const u8, layout_arc);
 
-        // Build the NaN-boxed Arc<HeapValue::Closure>. This preserves the
-        // v1 dispatch ABI (jit_call_value + VM op_call_closure both recognise
-        // HeapValue::Closure) while the H3+ raw-pointer VM path is staged.
-        let closure_hv = HeapValue::Closure {
-            function_id: fid,
-            upvalues,
-        };
-        ValueWord::from_heap_value(closure_hv)
+        // Wrap in the H6.5 `HeapValue::ClosureRaw` variant. Readers migrated
+        // through `VmClosureHandle` (H6.2–H6.4) see the Raw backing
+        // transparently; the legacy `Closure { function_id, upvalues }`
+        // rebuild is gone.
+        ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
     }
 }
 
 #[cfg(test)]
 mod phase_h2_finalizer_tests {
-    //! Closure-spec Phase H2 unit tests for `jit_finalize_heap_closure`.
+    //! Closure-spec Phase H2 (updated for §14.6 / H6.5) unit tests for
+    //! `jit_finalize_heap_closure`.
     //!
     //! These exercise the finalizer directly with manually-constructed
     //! `TypedClosureHeader` blocks (matching what `emit_heap_closure` emits
     //! in Cranelift) to verify:
-    //! - The finalizer correctly reads captures at their typed offsets.
-    //! - The resulting `Arc<HeapValue::Closure>` has correct function_id
-    //!   and upvalues.
-    //! - The TypedClosureHeader block is properly deallocated (no leak).
-    //! - Heap-typed captures transfer refcount ownership without double-
-    //!   counting.
-    //! - The NaN-boxed return value decodes back to `HeapValue::Closure`
-    //!   via `extract_heap_ref`.
+    //! - The finalizer hands the raw block off to an `OwnedClosureBlock`
+    //!   without rebuilding captures into a `Vec<Upvalue>`.
+    //! - The resulting `HeapValue::ClosureRaw` reads captures back through
+    //!   the `VmClosureHandle` shim at their typed widths.
+    //! - The `TypedClosureHeader` block's refcount is owned by the returned
+    //!   ValueWord; dropping the value releases the block and, for heap-
+    //!   typed captures, the corresponding capture share.
+    //! - The NaN-boxed return value decodes back to `HeapValue::ClosureRaw`
+    //!   via `as_heap_ref`.
     //!
-    //! See `docs/v2-closure-specialization.md` §13 H2.
+    //! See `docs/v2-closure-specialization.md` §13 H2 and §14.6 (H6.5).
     use super::*;
     use shape_value::heap_value::HeapValue;
     use shape_value::v2::closure_layout::{
@@ -283,6 +223,29 @@ mod phase_h2_finalizer_tests {
         ptr
     }
 
+    /// Helper: assert that a ValueWord-bits value decodes to a
+    /// `HeapValue::ClosureRaw` whose `VmClosureHandle` matches the given
+    /// `function_id` and capture count. Returns the handle for further
+    /// capture reads.
+    fn assert_closure_raw(bits: u64, expected_fid: u16, expected_caps: usize) -> (u16, usize) {
+        // Clone the bits to get an owned ValueWord that still holds the
+        // Arc share; the test's `drop_bits_via_raw(bits)` releases the
+        // original share at the end of the scope.
+        let vw = unsafe { ValueWord::clone_from_bits(bits) };
+        let hv = vw.as_heap_ref().expect("finalizer should produce a heap value");
+        assert!(
+            matches!(hv, HeapValue::ClosureRaw(..)),
+            "expected ClosureRaw variant, got {:?}",
+            hv.type_name()
+        );
+        let handle = hv.as_closure_handle().expect("closure handle");
+        assert_eq!(handle.function_id() as u16, expected_fid);
+        assert_eq!(handle.capture_count(), expected_caps);
+        let out = (handle.function_id() as u16, handle.capture_count());
+        drop(vw);
+        out
+    }
+
     #[test]
     fn finalizer_empty_captures() {
         // Zero-capture closure: header only, captures area is empty.
@@ -291,21 +254,9 @@ mod phase_h2_finalizer_tests {
         let bits = unsafe {
             jit_finalize_heap_closure(ptr, 42, 0, Arc::as_ptr(&layout))
         };
-        // Decode: must be a HeapValue::Closure with function_id=42 and 0 upvalues.
-        let vw = unsafe { ValueWord::clone_from_bits(bits) };
-        let hv = vw.as_heap_ref().expect("should be heap value");
-        match hv {
-            HeapValue::Closure {
-                function_id,
-                upvalues,
-            } => {
-                assert_eq!(*function_id, 42);
-                assert_eq!(upvalues.len(), 0);
-            }
-            _ => panic!("expected Closure variant"),
-        }
-        // Drop via Clone::drop — releases the Arc.
-        drop(vw);
+        assert_closure_raw(bits, 42, 0);
+        // Final drop releases the owning share — ClosureRaw's OwnedClosureBlock
+        // Drop routes through `release_typed_closure` and frees the block.
         unsafe { drop_bits_via_raw(bits) };
     }
 
@@ -335,18 +286,11 @@ mod phase_h2_finalizer_tests {
         };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("should be heap value");
-        match hv {
-            HeapValue::Closure {
-                function_id,
-                upvalues,
-            } => {
-                assert_eq!(*function_id, 7);
-                assert_eq!(upvalues.len(), 1);
-                let captured = upvalues[0].get();
-                assert_eq!(captured.as_i64(), Some(123));
-            }
-            _ => panic!("expected Closure variant"),
-        }
+        let handle = hv.as_closure_handle().expect("closure handle");
+        assert!(matches!(hv, HeapValue::ClosureRaw(..)));
+        assert_eq!(handle.function_id() as u16, 7);
+        assert_eq!(handle.capture_count(), 1);
+        assert_eq!(handle.capture_as_value(0).as_i64(), Some(123));
         drop(vw);
         unsafe { drop_bits_via_raw(bits) };
     }
@@ -365,18 +309,11 @@ mod phase_h2_finalizer_tests {
         };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("heap");
-        match hv {
-            HeapValue::Closure {
-                function_id,
-                upvalues,
-            } => {
-                assert_eq!(*function_id, 9);
-                assert_eq!(upvalues.len(), 1);
-                let captured = upvalues[0].get();
-                assert_eq!(captured.as_f64(), Some(3.14));
-            }
-            _ => panic!(),
-        }
+        assert!(matches!(hv, HeapValue::ClosureRaw(..)));
+        let handle = hv.as_closure_handle().expect("handle");
+        assert_eq!(handle.function_id() as u16, 9);
+        assert_eq!(handle.capture_count(), 1);
+        assert_eq!(handle.capture_as_value(0).as_f64(), Some(3.14));
         drop(vw);
         unsafe { drop_bits_via_raw(bits) };
     }
@@ -394,11 +331,9 @@ mod phase_h2_finalizer_tests {
         };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("heap");
-        if let HeapValue::Closure { upvalues, .. } = hv {
-            assert_eq!(upvalues[0].get().as_bool(), Some(true));
-        } else {
-            panic!();
-        }
+        assert!(matches!(hv, HeapValue::ClosureRaw(..)));
+        let handle = hv.as_closure_handle().expect("handle");
+        assert_eq!(handle.capture_as_value(0).as_bool(), Some(true));
         drop(vw);
         unsafe { drop_bits_via_raw(bits) };
     }
@@ -415,11 +350,10 @@ mod phase_h2_finalizer_tests {
             jit_finalize_heap_closure(ptr, 2, 1, Arc::as_ptr(&layout))
         };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
-        if let Some(HeapValue::Closure { upvalues, .. }) = vw.as_heap_ref() {
-            assert_eq!(upvalues[0].get().as_i64(), Some(-12345));
-        } else {
-            panic!();
-        }
+        let hv = vw.as_heap_ref().expect("heap");
+        assert!(matches!(hv, HeapValue::ClosureRaw(..)));
+        let handle = hv.as_closure_handle().expect("handle");
+        assert_eq!(handle.capture_as_value(0).as_i64(), Some(-12345));
         drop(vw);
         unsafe { drop_bits_via_raw(bits) };
     }
@@ -443,18 +377,13 @@ mod phase_h2_finalizer_tests {
             jit_finalize_heap_closure(ptr, 100, 2, Arc::as_ptr(&layout))
         };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
-        if let Some(HeapValue::Closure {
-            function_id,
-            upvalues,
-        }) = vw.as_heap_ref()
-        {
-            assert_eq!(*function_id, 100);
-            assert_eq!(upvalues.len(), 2);
-            assert_eq!(upvalues[0].get().as_f64(), Some(2.71));
-            assert_eq!(upvalues[1].get().as_i64(), Some(99));
-        } else {
-            panic!();
-        }
+        let hv = vw.as_heap_ref().expect("heap");
+        assert!(matches!(hv, HeapValue::ClosureRaw(..)));
+        let handle = hv.as_closure_handle().expect("handle");
+        assert_eq!(handle.function_id() as u16, 100);
+        assert_eq!(handle.capture_count(), 2);
+        assert_eq!(handle.capture_as_value(0).as_f64(), Some(2.71));
+        assert_eq!(handle.capture_as_value(1).as_i64(), Some(99));
         drop(vw);
         unsafe { drop_bits_via_raw(bits) };
     }
@@ -462,8 +391,10 @@ mod phase_h2_finalizer_tests {
     #[test]
     fn finalizer_heap_typed_string_capture_preserves_refcount() {
         // A string capture: the JIT's emit_heap_closure would have emitted
-        // one atomic retain on the string's HeapHeader. The finalizer must
-        // transfer that retain into the Upvalue — no additional increment.
+        // one atomic retain on the string's HeapHeader. Under H6.5 that
+        // retained share stays with the block — `OwnedClosureBlock::Drop`
+        // releases it when the ClosureRaw value's refcount hits zero via
+        // `release_typed_closure`'s heap_capture_mask walk.
         let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::String]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 55, 0) };
         // Allocate a string ValueWord (refcount = 1 initially).
@@ -484,16 +415,19 @@ mod phase_h2_finalizer_tests {
             jit_finalize_heap_closure(ptr, 55, 1, Arc::as_ptr(&layout))
         };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
-        if let Some(HeapValue::Closure { upvalues, .. }) = vw.as_heap_ref() {
-            let captured = upvalues[0].get();
-            let captured_str = captured.as_heap_ref().and_then(|h| match h {
-                HeapValue::String(s) => Some(s.as_str()),
-                _ => None,
-            });
-            assert_eq!(captured_str, Some("hello"));
-        } else {
-            panic!();
-        }
+        let hv = vw.as_heap_ref().expect("heap");
+        assert!(matches!(hv, HeapValue::ClosureRaw(..)));
+        let handle = hv.as_closure_handle().expect("handle");
+        // Widen the captured string bits through the shim — this calls
+        // `read_capture_as_value_bits` (Ptr kind → verbatim 8-byte read).
+        let captured_bits = handle.capture_as_value(0).into_raw_bits();
+        let captured = unsafe { ValueWord::clone_from_bits(captured_bits) };
+        let captured_str = captured.as_heap_ref().and_then(|h| match h {
+            HeapValue::String(s) => Some(s.as_str().to_string()),
+            _ => None,
+        });
+        assert_eq!(captured_str.as_deref(), Some("hello"));
+        drop(captured);
         drop(vw);
         unsafe { drop_bits_via_raw(bits) };
         // Drop the original reference (released via its own ValueWord's Drop
@@ -530,11 +464,10 @@ mod phase_h2_finalizer_tests {
             jit_finalize_heap_closure(ptr, 555, 0, Arc::as_ptr(&layout))
         };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
-        if let Some(HeapValue::Closure { function_id, .. }) = vw.as_heap_ref() {
-            assert_eq!(*function_id, 777);
-        } else {
-            panic!();
-        }
+        let hv = vw.as_heap_ref().expect("heap");
+        assert!(matches!(hv, HeapValue::ClosureRaw(..)));
+        let handle = hv.as_closure_handle().expect("handle");
+        assert_eq!(handle.function_id() as u16, 777);
         drop(vw);
         unsafe { drop_bits_via_raw(bits) };
     }
@@ -596,10 +529,12 @@ mod phase_h2_finalizer_tests {
 
     #[test]
     fn finalizer_interpreter_baseline_is_callable() {
-        // The interpreter's op_make_closure also builds HeapValue::Closure —
-        // the format produced by the finalizer must match. This is a
-        // structural regression test: we verify that a manually-constructed
-        // HeapValue::Closure has the same shape we produce.
+        // Closure spec H6.5: both the JIT finalizer AND
+        // `op_make_closure` (when a layout is available and captures are
+        // immutable) produce a `HeapValue::ClosureRaw`. The VM dispatch
+        // reads both backings through the same `VmClosureHandle` shim —
+        // this is a structural regression test verifying the finalizer's
+        // output is `ClosureRaw` and is readable via the shim.
         let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::I64]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 3, 0) };
         unsafe {
@@ -612,45 +547,102 @@ mod phase_h2_finalizer_tests {
         let bits = unsafe {
             jit_finalize_heap_closure(ptr, 3, 1, Arc::as_ptr(&layout))
         };
-        // The finalizer must produce an Arc<HeapValue::Closure> — the same
-        // shape the interpreter produces via op_make_closure. We verify by
-        // matching on the enum variant directly.
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
-        let is_closure = matches!(
+        let is_closure_raw = matches!(
             vw.as_heap_ref(),
-            Some(HeapValue::Closure { .. })
+            Some(HeapValue::ClosureRaw(..))
         );
         assert!(
-            is_closure,
-            "finalizer must produce HeapValue::Closure for interpreter-compat dispatch"
+            is_closure_raw,
+            "finalizer must produce HeapValue::ClosureRaw for H6.5 dispatch"
         );
+        // Shim-backed read must surface the capture.
+        let handle = vw.as_heap_ref().unwrap().as_closure_handle().unwrap();
+        assert_eq!(handle.function_id() as u16, 3);
+        assert_eq!(handle.capture_as_value(0).as_i64(), Some(7));
         drop(vw);
         unsafe { drop_bits_via_raw(bits) };
     }
 
     #[test]
     fn finalizer_arc_strong_count_after_explicit_release() {
-        // Structural refcount lifecycle test. `ValueWord` is a bare `u64` so
-        // refcount management is explicit (via `clone_from_bits` /
-        // `Arc::decrement_strong_count`). We verify the Arc<HeapValue>
-        // lifecycle: emit_heap_closure retains, finalizer transfers the
-        // share into an Upvalue (Immutable holds the u64), explicit
-        // decrement balances it back.
-        let inner_arc: Arc<HeapValue> =
-            Arc::new(HeapValue::String(Arc::new("tracked".to_string())));
-        assert_eq!(Arc::strong_count(&inner_arc), 1);
-        // emit_heap_closure's retain: one atomic bump for the closure.
+        // Structural refcount lifecycle test (H6.5-native).
+        //
+        // `emit_heap_closure` allocates the TypedClosureHeader with
+        // refcount=1, writes captures, and retains each heap-typed
+        // capture. The finalizer transfers the block's own share to a
+        // fresh `OwnedClosureBlock` (embedded in
+        // `HeapValue::ClosureRaw`). Dropping the ValueWord drops the
+        // outer Arc<HeapValue> → drops OwnedClosureBlock →
+        // `release_typed_closure` → decrements the outer-Arc share on
+        // each heap-typed capture, then deallocates the block.
+        //
+        // The refcount observable via the ValueWord path is
+        // `Arc<HeapValue>::strong_count` — the inner `Arc<String>` is
+        // unrelated to the shared-heap retain protocol. Track the
+        // outer count by pulling a dedicated ValueWord share
+        // alongside the capture slot.
+        let layout = Arc::new(ClosureLayout::from_capture_types(&[ConcreteType::String]));
+        let ptr = unsafe { alloc_typed_closure_for_test(&layout, 71, 0) };
+
+        // Build a unique (non-interned) outer Arc<HeapValue::String> by
+        // boxing a long string. The `from_string` interning path keys on
+        // string content — 256+ bytes of repeated text skip the cache.
+        let long_payload = "lifecycle".repeat(32);
+        let original_vw = ValueWord::from_string(Arc::new(long_payload));
+        let s_bits = original_vw.into_raw_bits();
+
+        // Acquire an independent Arc<HeapValue> "observer" share via
+        // increment_strong_count + from_raw. This share is kept through
+        // the test so `Arc::strong_count` reflects the live count; we
+        // drop it at the very end.
+        let outer_ptr = {
+            let payload = shape_value::tags::get_payload(s_bits);
+            let masked = payload & shape_value::tags::HEAP_PTR_MASK;
+            masked as *const HeapValue
+        };
+        // +1 observer share on top of s_bits' own share.
+        unsafe { Arc::increment_strong_count(outer_ptr); }
+        let observer: Arc<HeapValue> = unsafe { Arc::from_raw(outer_ptr) };
+        // observer share + s_bits share = 2 live shares.
+        assert_eq!(Arc::strong_count(&observer), 2);
+
+        // Simulate emit_heap_closure: store the capture bits and retain
+        // one extra share for the block (JIT `atomic_rmw add 1`).
         unsafe {
-            Arc::increment_strong_count(Arc::as_ptr(&inner_arc));
+            let off = layout.heap_capture_offset(0);
+            std::ptr::write(ptr.add(off) as *mut u64, s_bits);
+            let _retained = ValueWord::clone_from_bits(s_bits);
+            std::mem::forget(_retained);
         }
-        assert_eq!(Arc::strong_count(&inner_arc), 2);
-        // Finalizer transfers the retained share into the Upvalue's raw
-        // ValueWord bits. When the closure (Arc<HeapValue::Closure>) drops,
-        // its Upvalues are dropped, which triggers the release. We
-        // explicitly simulate that release via `Arc::decrement_strong_count`.
+        // observer + s_bits + block = 3 shares.
+        assert_eq!(Arc::strong_count(&observer), 3);
+
+        // Finalize — produces the ClosureRaw ValueWord.
+        let bits = unsafe {
+            jit_finalize_heap_closure(ptr, 71, 1, Arc::as_ptr(&layout))
+        };
+        // Still 3 shares — finalizer just wraps the block pointer.
+        assert_eq!(Arc::strong_count(&observer), 3);
+
+        // ValueWord is a `u64` alias — it has no `Drop` impl. Release
+        // the outer `Arc<HeapValue::ClosureRaw>` share by extracting the
+        // payload pointer and calling `Arc::decrement_strong_count`. That
+        // drops the HeapValue, which drops OwnedClosureBlock, which
+        // calls `release_typed_closure` → block refcount 1→0 → heap-
+        // capture mask walk → outer String Arc count 3→2.
         unsafe {
-            Arc::decrement_strong_count(Arc::as_ptr(&inner_arc));
+            let payload = shape_value::tags::get_payload(bits);
+            let block_ptr = (payload & shape_value::tags::HEAP_PTR_MASK)
+                as *const HeapValue;
+            Arc::decrement_strong_count(block_ptr);
         }
-        assert_eq!(Arc::strong_count(&inner_arc), 1);
+        assert_eq!(Arc::strong_count(&observer), 2);
+
+        // Drop the original outer share via `s_bits`. ValueWord has no
+        // Drop impl, so release the Arc share by hand.
+        unsafe { Arc::decrement_strong_count(outer_ptr); }
+        assert_eq!(Arc::strong_count(&observer), 1);
+        drop(observer);
     }
 }

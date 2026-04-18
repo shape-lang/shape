@@ -694,14 +694,13 @@ fn heap_value_to_serializable(
             }
             SerializableVMValue::Array(out)
         }
-        HeapValue::Closure { .. } => {
-            // Closure spec H6.4: read via `VmClosureHandle` so the H6.5
-            // producer swap (Arc<HeapValue::Closure> → raw
-            // TypedClosureHeader) does not have to revisit this site.
-            // The variant pattern stays because the enclosing match over
-            // `HeapValue` is exhaustive. Byte format is unchanged — the
-            // shim is transparent and `function_id` widens from u32 back
-            // to u16 for the stored `SerializableVMValue::Closure` field.
+        HeapValue::Closure { .. } | HeapValue::ClosureRaw(..) => {
+            // Closure spec H6.4/H6.5: read via `VmClosureHandle` so both
+            // the legacy `Closure { function_id, upvalues }` and the new
+            // `ClosureRaw(OwnedClosureBlock)` backings serialize through
+            // the same path. Byte format is unchanged — the shim widens
+            // `function_id` back to u16 and renders captures via
+            // `captures_as_values`, which handles the raw typed read.
             let handle = hv
                 .as_closure_handle()
                 .expect("closure arm implies a closure handle");
@@ -1346,6 +1345,17 @@ pub fn serializable_to_nanboxed(
             function_id,
             upvalues,
         } => {
+            // Closure spec §14.6 (H6.5): snapshot deserialize keeps
+            // emitting the legacy `HeapValue::Closure { function_id,
+            // upvalues }` variant — the byte format is unchanged, and
+            // reloaded programs don't necessarily carry a matching
+            // `ClosureLayout` (the side-table is `#[serde(skip)]` — see
+            // `BytecodeProgram.closure_function_layouts`). The H6.2–H6.4
+            // reader migrations already route snapshot-resurrected
+            // closures through `VmClosureHandle`, so no call-site sees a
+            // difference. A follow-up phase may promote snapshot format
+            // to a typed blob once every program ships its layout
+            // side-table.
             let mut ups = Vec::new();
             for v in upvalues.iter() {
                 ups.push(Upvalue::new(serializable_to_nanboxed(v, store)?));
@@ -2130,5 +2140,88 @@ mod tests {
             })
             .expect("string capture restored as HeapValue::String");
         assert_eq!(restored_str, "hi");
+    }
+
+    /// Closure spec §14.6 (H6.5): round-trip a
+    /// `HeapValue::ClosureRaw`-backed closure through the snapshot
+    /// serialize → deserialize pipeline and verify the reconstructed
+    /// value exposes the same function_id + captures through the
+    /// `VmClosureHandle` shim.
+    ///
+    /// The H6.5 deserialize producer continues to emit the legacy
+    /// `HeapValue::Closure { function_id, upvalues }` variant — the byte
+    /// format is unchanged and reloaded programs don't always ship a
+    /// matching `ClosureLayout` side-table. This test cements that
+    /// cross-variant interop: the shim resolves both `Closure` and
+    /// `ClosureRaw` through the same path, so the deserialized value
+    /// reads identically regardless of which variant the original
+    /// snapshot-taker produced.
+    #[test]
+    fn test_h6_5_closure_raw_snapshot_roundtrip() {
+        use shape_value::heap_value::HeapValue;
+        use shape_value::v2::closure_layout::ClosureLayout;
+        use shape_value::v2::closure_raw::{
+            OwnedClosureBlock, alloc_typed_closure, write_capture_typed,
+        };
+        use shape_value::v2::concrete_type::ConcreteType;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path().join("store")).unwrap();
+
+        // Build a ClosureRaw value directly (bypassing the compiler —
+        // we're testing the serialize path, not the producer).
+        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(&[
+            ConcreteType::I64,
+            ConcreteType::F64,
+            ConcreteType::Bool,
+        ]));
+        let original_nb = unsafe {
+            let ptr = alloc_typed_closure(91, 0, &layout);
+            write_capture_typed(ptr, &layout, 0, ValueWord::from_i64(-5).into_raw_bits());
+            write_capture_typed(ptr, &layout, 1, ValueWord::from_f64(6.5).into_raw_bits());
+            write_capture_typed(ptr, &layout, 2, ValueWord::from_bool(true).into_raw_bits());
+            let owned =
+                OwnedClosureBlock::from_raw(ptr as *const u8, std::sync::Arc::clone(&layout));
+            ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
+        };
+
+        // Sanity: the original reads through the shim as expected.
+        let orig_handle = original_nb
+            .as_closure_handle()
+            .expect("original must be a closure");
+        assert_eq!(orig_handle.function_id(), 91);
+        assert_eq!(orig_handle.capture_count(), 3);
+        assert_eq!(orig_handle.capture_as_value(0).as_i64(), Some(-5));
+        assert_eq!(orig_handle.capture_as_value(1).as_f64(), Some(6.5));
+        assert_eq!(orig_handle.capture_as_value(2).as_bool(), Some(true));
+
+        // Serialize through the H6.4 producer path.
+        let serialized = nanboxed_to_serializable(&original_nb, &store)
+            .expect("ClosureRaw serialization must succeed");
+        match &serialized {
+            SerializableVMValue::Closure {
+                function_id,
+                upvalues,
+            } => {
+                assert_eq!(*function_id, 91, "function_id preserved");
+                assert_eq!(upvalues.len(), 3, "3 captures preserved");
+            }
+            other => panic!("expected SerializableVMValue::Closure, got {:?}", other),
+        }
+
+        // Deserialize — byte format is unchanged under H6.5, so the
+        // reconstructed value is a legacy `HeapValue::Closure`. The
+        // shim reads it identically.
+        let restored_nb = serializable_to_nanboxed(&serialized, &store)
+            .expect("closure deserialization must succeed");
+        let restored_handle = restored_nb
+            .as_closure_handle()
+            .expect("restored value must be a closure");
+        assert_eq!(restored_handle.function_id(), 91);
+        assert_eq!(restored_handle.capture_count(), 3);
+        let caps = restored_handle.captures_as_values();
+        assert_eq!(caps[0].as_i64(), Some(-5));
+        assert_eq!(caps[1].as_f64(), Some(6.5));
+        assert_eq!(caps[2].as_bool(), Some(true));
     }
 }

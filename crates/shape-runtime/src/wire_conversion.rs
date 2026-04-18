@@ -361,7 +361,7 @@ fn nb_heap_to_wire(nb: &ValueWord, ctx: &Context) -> WireValue {
         // pattern stays for exhaustive-match coverage; the H6.5 producer
         // swap (Arc<HeapValue::Closure> → raw TypedClosureHeader) is
         // transparent here — wire bytes are unchanged.
-        HeapValue::Closure { .. } => WireValue::FunctionRef {
+        HeapValue::Closure { .. } | HeapValue::ClosureRaw(..) => WireValue::FunctionRef {
             name: "<closure>".to_string(),
         },
 
@@ -1647,5 +1647,50 @@ mod tests {
             let roundtrip = wire_to_nb(&wire);
             assert_eq!(roundtrip.as_native_scalar(), Some(expected_scalar));
         }
+    }
+
+    /// Closure spec §14.6 (H6.5): a `HeapValue::ClosureRaw` must
+    /// serialize to the same `WireValue::FunctionRef { name: "<closure>" }`
+    /// shape as the legacy `HeapValue::Closure` variant — the wire format
+    /// erases closure internals and downstream peers need to observe no
+    /// difference between the two producer backings.
+    #[test]
+    fn test_h6_5_closure_raw_wire_roundtrip() {
+        use shape_value::heap_value::HeapValue;
+        use shape_value::v2::closure_layout::ClosureLayout;
+        use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
+        use shape_value::v2::concrete_type::ConcreteType;
+        use shape_value::value_word::ValueWordExt;
+
+        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(&[
+            ConcreteType::I64,
+        ]));
+        let raw_nb = unsafe {
+            let ptr = alloc_typed_closure(3, 0, &layout);
+            let owned =
+                OwnedClosureBlock::from_raw(ptr as *const u8, std::sync::Arc::clone(&layout));
+            shape_value::ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
+        };
+
+        // Also build a legacy closure value for comparison.
+        let legacy_nb = shape_value::ValueWord::from_heap_value(HeapValue::Closure {
+            function_id: 3,
+            upvalues: vec![shape_value::Upvalue::new(
+                shape_value::ValueWord::from_i64(0),
+            )],
+        });
+
+        let ctx = get_dummy_context();
+        let raw_wire = nb_to_wire(&raw_nb, &ctx);
+        let legacy_wire = nb_to_wire(&legacy_nb, &ctx);
+
+        // Both variants erase to the same WireValue.
+        assert_eq!(
+            raw_wire,
+            WireValue::FunctionRef {
+                name: "<closure>".to_string()
+            }
+        );
+        assert_eq!(raw_wire, legacy_wire);
     }
 }

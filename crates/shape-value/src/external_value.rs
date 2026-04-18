@@ -201,11 +201,13 @@ fn heap_to_external(hv: &HeapValue, schemas: &dyn SchemaLookup) -> ExternalValue
                 fields,
             }
         }
-        HeapValue::Closure { .. } => {
+        HeapValue::Closure { .. } | HeapValue::ClosureRaw(..) => {
             // Closure spec H6.2: pattern stays wildcarded to preserve
             // exhaustive match coverage; the `function_id` read goes
             // through `VmClosureHandle` so H6.5's producer swap does not
-            // revisit this site.
+            // revisit this site. H6.5 adds the `ClosureRaw` arm alongside
+            // the legacy `Closure` variant — both resolve through the
+            // same shim accessor.
             let handle = hv
                 .as_closure_handle()
                 .expect("closure arm implies a closure handle");

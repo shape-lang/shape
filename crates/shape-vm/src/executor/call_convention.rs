@@ -431,25 +431,30 @@ impl VirtualMachine {
                 let result_nb = self.invoke_module_fn(&module_fn, &args_vec)?;
                 return Ok(result_nb);
             }
-            // Closure spec H6.3: closure dispatch routes through
-            // `VmClosureHandle` so H6.5's producer swap transparently flips
-            // the backing. The `upvalues_legacy()` escape hatch returns the
-            // Legacy backing's `&[Upvalue]` directly — the Raw backing has
-            // no `Upvalue` slice, so H6.5 replaces the call below with a
-            // Raw-aware `call_closure_with_nb_args` variant that consumes
-            // the raw capture block.
+            // Closure spec H6.3/H6.5: closure dispatch routes through
+            // `VmClosureHandle`. The Legacy backing still yields an
+            // `&[Upvalue]` via `upvalues_legacy()` (cloned to preserve
+            // SharedCell-backed mutable-capture identity); the Raw
+            // backing widens its typed captures through
+            // `captures_as_values()` — raw-backed closures never carry
+            // SharedCells (the VM producer guards on
+            // `any_mutable_capture`), so fresh `Upvalue::new` around
+            // each widened value is semantically correct.
             // cold-path: as_heap_ref retained — multi-variant callee dispatch
             TAG_HEAP => {
                 let heap_ref = callee.as_heap_ref(); // cold-path
                 if let Some(handle) = heap_ref.and_then(|hv| hv.as_closure_handle()) {
                     let fid = handle.function_id() as u16;
-                    // H6.3: Legacy is the only backing until H6.5 swaps the
-                    // producer. Preserves the `Vec<Upvalue>` shape that
-                    // `call_closure_with_nb_args` consumes today.
-                    let upvalues = handle
-                        .upvalues_legacy()
-                        .expect("H6.3: Legacy backing is the only producer until H6.5")
-                        .to_vec();
+                    let upvalues: Vec<Upvalue> =
+                        if let Some(slice) = handle.upvalues_legacy() {
+                            slice.to_vec()
+                        } else {
+                            handle
+                                .captures_as_values()
+                                .into_iter()
+                                .map(Upvalue::new)
+                                .collect()
+                        };
                     self.call_closure_with_nb_args(fid, upvalues, args)?;
                 } else if let Some(shape_value::HeapValue::HostClosure(callable)) = heap_ref {
                     let args_vec: Vec<ValueWord> = args.to_vec();
@@ -517,7 +522,7 @@ impl VirtualMachine {
                 if let Some((function_id, upvalues)) =
                     raw_helpers::extract_closure_info(callee_bits)
                 {
-                    self.call_closure_with_raw_args(function_id, upvalues, args)?;
+                    self.call_closure_with_raw_args(function_id, &upvalues, args)?;
                 } else if let Some(result) =
                     raw_helpers::try_call_host_closure(callee_bits, args)
                 {

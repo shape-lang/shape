@@ -476,6 +476,10 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             foreign_functions: program.foreign_functions.clone(),
             native_struct_layouts: program.native_struct_layouts.clone(),
             total_required_permissions: total_required_permissions.clone(),
+            closure_function_layouts: remap_closure_function_layouts(
+                program,
+                &blobs,
+            ),
         });
     }
 
@@ -579,7 +583,31 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         foreign_functions: program.foreign_functions.clone(),
         native_struct_layouts: program.native_struct_layouts.clone(),
         total_required_permissions,
+        closure_function_layouts: remap_closure_function_layouts(program, &blobs),
     })
+}
+
+/// Closure spec §14.6 (H6.5): remap the program's name-keyed
+/// `closure_function_layouts_by_name` into a post-link-id-indexed Vec.
+/// The result is a `Vec<Option<Arc<ClosureLayout>>>` whose position
+/// matches `LinkedProgram.functions`'s ordering (i.e. the same index
+/// the VM passes as `func_id` to `op_make_closure`).
+fn remap_closure_function_layouts(
+    program: &Program,
+    blobs: &[&FunctionBlob],
+) -> Vec<Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>>> {
+    if program.closure_function_layouts_by_name.is_empty() {
+        return Vec::new();
+    }
+    blobs
+        .iter()
+        .map(|blob| {
+            program
+                .closure_function_layouts_by_name
+                .get(&blob.name)
+                .cloned()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -645,7 +673,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
             })
             .collect(),
         monomorphization_keys: Vec::new(),
-        closure_function_layouts: Vec::new(),
+        closure_function_layouts: linked.closure_function_layouts.clone(),
     }
 }
 

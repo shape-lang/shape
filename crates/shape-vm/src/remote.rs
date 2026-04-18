@@ -530,6 +530,15 @@ pub fn program_from_blobs_by_hash(
         foreign_functions: source.foreign_functions.clone(),
         native_struct_layouts: source.native_struct_layouts.clone(),
         debug_info: source.debug_info.clone(),
+        // Closure spec §14.6 (H6.5): propagate the per-name layout side-
+        // table. Remote-stream origins that lack the side-table fall
+        // back to the legacy HeapValue::Closure variant in the VM
+        // producer.
+        closure_function_layouts_by_name: source
+            .content_addressed
+            .as_ref()
+            .map(|ca| ca.closure_function_layouts_by_name.clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -1000,6 +1009,9 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             foreign_functions: ca.foreign_functions.clone(),
             native_struct_layouts: ca.native_struct_layouts.clone(),
             debug_info: ca.debug_info.clone(),
+            closure_function_layouts_by_name: ca
+                .closure_function_layouts_by_name
+                .clone(),
         });
     }
     // Copy top-level metadata needed by program_from_blobs
@@ -1937,6 +1949,7 @@ mod tests {
             foreign_functions: Vec::new(),
             native_struct_layouts: Vec::new(),
             debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
+            closure_function_layouts_by_name: HashMap::new(),
         });
 
         assert!(
@@ -2081,6 +2094,7 @@ mod tests {
             foreign_functions: Vec::new(),
             native_struct_layouts: Vec::new(),
             debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
+            closure_function_layouts_by_name: HashMap::new(),
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2519,6 +2533,7 @@ mod tests {
             foreign_functions: Vec::new(),
             native_struct_layouts: Vec::new(),
             debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
+            closure_function_layouts_by_name: HashMap::new(),
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2573,6 +2588,7 @@ mod tests {
             foreign_functions: Vec::new(),
             native_struct_layouts: Vec::new(),
             debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
+            closure_function_layouts_by_name: HashMap::new(),
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),

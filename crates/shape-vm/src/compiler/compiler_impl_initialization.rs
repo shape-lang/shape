@@ -447,6 +447,27 @@ impl BytecodeCompiler {
                 native_struct_layouts: self.program.native_struct_layouts.clone(),
                 debug_info: self.program.debug_info.clone(),
                 top_level_frame: None,
+                // Closure spec §14.6 (H6.5): propagate layouts through the
+                // content-addressed path so `load_linked_program` → VM
+                // preserves enough metadata for the raw producer path.
+                // Keyed by function name because the linker's topo_sort
+                // reorders blobs.
+                closure_function_layouts_by_name: {
+                    let mut map: std::collections::HashMap<
+                        String,
+                        std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>,
+                    > = std::collections::HashMap::new();
+                    for (idx, layout_opt) in
+                        self.program.closure_function_layouts.iter().enumerate()
+                    {
+                        if let Some(layout) = layout_opt {
+                            if let Some(func) = self.program.functions.get(idx) {
+                                map.insert(func.name.clone(), layout.clone());
+                            }
+                        }
+                    }
+                    map
+                },
             });
         }
     }

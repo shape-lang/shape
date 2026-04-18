@@ -147,6 +147,15 @@ impl VirtualMachine {
                         VTableEntry::FunctionId(func_id) => {
                             (ValueWord::from_function(*func_id), *func_id)
                         }
+                        // Closure spec §14.6 (H6.5): VTable closure entries
+                        // keep carrying their legacy `Vec<Upvalue>` because
+                        // the VTable itself predates the raw layout
+                        // plumbing; producing `HeapValue::Closure` here
+                        // keeps backward compatibility. The shim will read
+                        // this as Legacy backing (see
+                        // `VmClosureHandle::legacy`). A follow-up phase
+                        // can promote VTables to carry
+                        // `Arc<OwnedClosureBlock>` directly.
                         VTableEntry::Closure {
                             function_id,
                             upvalues,

@@ -1306,13 +1306,13 @@ impl BytecodeCompiler {
             }
         }
 
-        // Finalize the __main__ blob and build the content-addressed program.
-        self.build_content_addressed_program();
-
         // Closure-spec Phase H1: build a `function_id → ClosureLayout` side
         // table for the JIT worker. `emit_heap_closure` consumes this to lay
         // out captures at their natural-width offsets without going through
-        // the `jit_make_closure` FFI.
+        // the `jit_make_closure` FFI. Closure spec §14.6 (H6.5) moves this
+        // ABOVE `build_content_addressed_program` so the layouts propagate
+        // through the `ContentAddressedProgram` → `LinkedProgram` →
+        // `BytecodeProgram` path into the VM's producer.
         {
             let total_fns = self.program.functions.len();
             let mut layouts: Vec<Option<std::sync::Arc<
@@ -1327,6 +1327,9 @@ impl BytecodeCompiler {
             }
             self.program.closure_function_layouts = layouts;
         }
+
+        // Finalize the __main__ blob and build the content-addressed program.
+        self.build_content_addressed_program();
 
         // Transfer content-addressed program to the bytecode output.
         self.program.content_addressed = self.content_addressed_program.take();

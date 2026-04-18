@@ -285,7 +285,7 @@ fn infer_semantic_type_heap(hv: &HeapValue) -> SemanticType {
         // exhaustive-match coverage. The H6.5 producer swap
         // (Arc<HeapValue::Closure> → raw TypedClosureHeader) is
         // transparent here.
-        HeapValue::Closure { .. } | HeapValue::FunctionRef { .. } => {
+        HeapValue::Closure { .. } | HeapValue::ClosureRaw(..) | HeapValue::FunctionRef { .. } => {
             SemanticType::Function(Box::new(super::semantic::FunctionSignature {
                 params: vec![],
                 return_type: SemanticType::Named("Unknown".to_string()),

@@ -153,11 +153,11 @@ impl<'a> ValueFormatter<'a> {
             }) => self.format_typed_object(*schema_id as u32, slots, *heap_mask, depth),
             Some(HeapValue::Decimal(d)) => format!("{}D", d),
             Some(HeapValue::BigInt(i)) => i.to_string(),
-            Some(HeapValue::Closure { .. }) => {
-                // Closure spec H6.2: the variant pattern stays because
-                // `as_heap_ref()`'s match is exhaustive; the `function_id`
-                // read goes through `VmClosureHandle` so the H6.5 producer
-                // swap does not revisit this site.
+            Some(HeapValue::Closure { .. }) | Some(HeapValue::ClosureRaw(..)) => {
+                // Closure spec H6.2/H6.5: the variant pattern covers both the
+                // legacy `Closure { .. }` and the new `ClosureRaw(..)` producer
+                // output; the `function_id` read goes through
+                // `VmClosureHandle` so either backing formats identically.
                 let handle = value
                     .as_closure_handle()
                     .expect("closure arm implies a closure handle");

@@ -1344,6 +1344,14 @@ impl fmt::Display for HeapValue {
             }
             HeapValue::TypedObject { .. } => write!(f, "{{...}}"),
             HeapValue::Closure { function_id, .. } => write!(f, "<closure:{}>", function_id),
+            HeapValue::ClosureRaw(owned) => {
+                // SAFETY: OwnedClosureBlock's invariant guarantees the
+                // pointer is live for the duration of `&self`.
+                let fid = unsafe {
+                    crate::v2::closure_raw::typed_closure_function_id(owned.as_ptr())
+                };
+                write!(f, "<closure:{}>", fid)
+            }
             HeapValue::Decimal(d) => write!(f, "{}", d),
             HeapValue::BigInt(i) => write!(f, "{}", i),
             HeapValue::HostClosure(_) => write!(f, "<host_closure>"),
@@ -1496,6 +1504,26 @@ impl HeapValue {
                 *function_id,
                 upvalues,
             )),
+            HeapValue::ClosureRaw(owned) => {
+                // Closure spec §14.6 (H6.5): producers now emit the Raw
+                // variant. Readers still go through the shim — constructing
+                // a `VmClosureHandle::raw` here keeps the migrated call sites
+                // unchanged. The borrow `'_` on the handle is tied to the
+                // borrow of `self`, which covers the `OwnedClosureBlock`'s
+                // live-pointer invariant.
+                //
+                // SAFETY: `OwnedClosureBlock::from_raw` upholds that
+                // `as_header_ptr()` points to a live `TypedClosureHeader`
+                // whose layout matches `owned.layout()`; both remain valid
+                // for the duration of the `&self` borrow.
+                let handle = unsafe {
+                    crate::vm_closure_handle::VmClosureHandle::raw(
+                        owned.as_header_ptr(),
+                        owned.layout().as_ref(),
+                    )
+                };
+                Some(handle)
+            }
             _ => None,
         }
     }
@@ -1627,6 +1655,27 @@ impl HeapValue {
                     function_id: f2, ..
                 },
             ) => f1 == f2,
+            // Closure spec §14.6 (H6.5): new ClosureRaw variant compares by
+            // function_id. Cross-variant Closure <-> ClosureRaw equality is
+            // also handled so mixed-producer programs (e.g. a legacy
+            // snapshot reloaded alongside a freshly-JIT-ed closure) observe
+            // the same identity semantics as pre-H6.5.
+            (HeapValue::ClosureRaw(a), HeapValue::ClosureRaw(b)) => {
+                // SAFETY: both blocks are live per OwnedClosureBlock invariant.
+                let fa = unsafe { crate::v2::closure_raw::typed_closure_function_id(a.as_ptr()) };
+                let fb = unsafe { crate::v2::closure_raw::typed_closure_function_id(b.as_ptr()) };
+                fa == fb
+            }
+            (HeapValue::Closure { function_id: f1, .. }, HeapValue::ClosureRaw(b)) => {
+                // SAFETY: block is live per OwnedClosureBlock invariant.
+                let fb = unsafe { crate::v2::closure_raw::typed_closure_function_id(b.as_ptr()) };
+                *f1 == fb
+            }
+            (HeapValue::ClosureRaw(a), HeapValue::Closure { function_id: f2, .. }) => {
+                // SAFETY: block is live per OwnedClosureBlock invariant.
+                let fa = unsafe { crate::v2::closure_raw::typed_closure_function_id(a.as_ptr()) };
+                fa == *f2
+            }
             (HeapValue::Decimal(a), HeapValue::Decimal(b)) => a == b,
             (HeapValue::BigInt(a), HeapValue::BigInt(b)) => a == b,
             (HeapValue::BigInt(a), HeapValue::Decimal(b)) => bigint_decimal_eq(a, b),

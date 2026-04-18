@@ -181,6 +181,10 @@ impl VirtualMachine {
                 .enumerate()
                 .map(|(idx, _)| hashes.get(idx).copied().flatten())
                 .collect(),
+            // Closure spec §14.6 (H6.5): propagate the linker's
+            // per-function `ClosureLayout` side-table so the VM
+            // `op_make_closure` producer can emit `HeapValue::ClosureRaw`.
+            closure_function_layouts: linked.closure_function_layouts.clone(),
             ..BytecodeProgram::default()
         };
 

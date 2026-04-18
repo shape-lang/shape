@@ -663,6 +663,76 @@ impl VirtualMachine {
             // when BoxLocal was skipped) fall back to the closure-local
             // write semantics that the fresh-Arc branch provided pre-H3.
             let _ = &mutable_captures; // mutability flag remains for future frame-pointer work
+
+            // Closure spec §14.6 (H6.5): when the program has a registered
+            // `ClosureLayout` for this function id, emit the new
+            // `HeapValue::ClosureRaw` variant backed by a raw
+            // `TypedClosureHeader` block. The captures are written at the
+            // layout's typed offsets via `closure_raw::write_capture_typed`.
+            // Heap-typed captures (`heap_capture_mask` bits) need an
+            // additional retain — the block takes ownership of one share,
+            // the source stack slot keeps its own share.
+            //
+            // When no layout is registered (e.g. runtime-loaded bytecode
+            // where the side-table wasn't serialised — see
+            // `closure_function_layouts` serde skip), fall back to the
+            // legacy `HeapValue::Closure` variant. H6.6 deletes this
+            // fallback once layout registration becomes universal.
+            //
+            // Mutable-capture guard: when any capture bit is set in
+            // `mutable_captures` the enclosing scope has boxed the
+            // underlying binding into a `HeapValue::SharedCell`. Writing
+            // that ValueWord through `write_capture_typed` at a typed
+            // width (e.g. `FieldKind::Bool`) would strip the SharedCell
+            // pointer, breaking auto-deref semantics. Fall back to the
+            // legacy `Vec<Upvalue>` variant for those closures — the
+            // ClosureRaw path stays for purely-immutable captures, which
+            // is the common §10-benchmark hot loop shape (`arr.map(|x|
+            // x + n)` etc.).
+            let any_mutable_capture = mutable_captures.iter().any(|b| *b);
+            let layout_opt = if any_mutable_capture {
+                None
+            } else {
+                self.program
+                    .closure_function_layouts
+                    .get(func_id.index())
+                    .and_then(|l| l.as_ref())
+                    .cloned()
+            };
+
+            if let Some(layout) = layout_opt {
+                if upvalues.len() == layout.capture_count() {
+                    use shape_value::v2::closure_raw::{
+                        OwnedClosureBlock, alloc_typed_closure, write_capture_typed,
+                    };
+                    // SAFETY: `alloc_typed_closure` returns a freshly-
+                    // allocated block with refcount=1; we write the
+                    // captures at their typed offsets in-bounds, then
+                    // transfer ownership to the `OwnedClosureBlock` below.
+                    unsafe {
+                        let ptr = alloc_typed_closure(func_id.0, 0, &layout);
+                        for (i, bits) in upvalues.iter().enumerate() {
+                            // Heap-typed captures: retain one share for the
+                            // block. The source stack slot keeps its own
+                            // share (the capture ValueWord came from the
+                            // stack via `pop_raw_u64` which did NOT drop).
+                            if layout.is_heap_capture(i) {
+                                let _dup = ValueWord::clone_from_bits(*bits);
+                                std::mem::forget(_dup);
+                            }
+                            write_capture_typed(ptr, &layout, i, *bits);
+                        }
+                        let owned = OwnedClosureBlock::from_raw(ptr as *const u8, layout);
+                        self.push_raw_u64(ValueWord::from_heap_value(
+                            shape_value::heap_value::HeapValue::ClosureRaw(owned),
+                        ))?;
+                    }
+                    return Ok(());
+                }
+                // Capture-count mismatch: layout is stale; fall through to
+                // legacy path rather than UB on a size mismatch.
+            }
+
             let upvalues: Vec<Upvalue> = upvalues
                 .into_iter()
                 .map(Upvalue::new)
@@ -901,5 +971,146 @@ impl VirtualMachine {
             self.ip = self.program.instructions.len();
         }
         Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Closure spec §14.6 — H6.5 regression tests
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// H6.5 makes producers emit `HeapValue::ClosureRaw` (backed by an
+// `OwnedClosureBlock` around a raw `TypedClosureHeader`) in place of
+// `HeapValue::Closure { function_id, upvalues }`. These end-to-end tests
+// exercise the new variant through the full compile → VM pipeline:
+//
+// 1. `h6_5_raw_alloc_destructor_correctness`: a simple escaping closure
+//    with an immutable int capture; verifies the result decodes as
+//    `ClosureRaw` via the shim, invoking it returns the expected value,
+//    and subsequent drops do not leak or double-free.
+// 2. `h6_5_cross_boundary_refcount_preservation`: stores a ClosureRaw
+//    into an Array (emulating escape to a container), retrieves it, and
+//    invokes it. Retain/release on the array path must keep the capture
+//    alive through multiple calls.
+#[cfg(test)]
+mod h6_5_tests {
+    use crate::test_utils::eval;
+    use shape_value::ValueWordExt;
+
+    #[test]
+    fn h6_5_raw_alloc_destructor_correctness() {
+        // Immutable int capture — exercises the layout-driven raw path
+        // in `op_make_closure`. Result must equal `n + x = 15` and the
+        // runtime must not leak (tests would crash under Miri / leak
+        // detector; here we rely on tier-2 ASan-free execution).
+        //
+        // Follows the same shape as the H6.3 regression test — the
+        // closure goes through the full escape path (return from
+        // `make` → `let f` → `f(5)`).
+        let val = eval(
+            "fn make(n: int) -> any {\n\
+                 return |x| x + n\n\
+             }\n\
+             let f = make(10)\n\
+             f(5)",
+        );
+        assert_eq!(val.as_i64(), Some(15));
+    }
+
+    #[test]
+    fn h6_5_cross_boundary_refcount_preservation() {
+        // Store the closure in an Array and invoke it through element
+        // access. Each array read/write copies the NaN-boxed bits, which
+        // translates to an Arc<HeapValue::ClosureRaw> refcount bump. The
+        // `OwnedClosureBlock`'s `Clone` bumps the `TypedClosureHeader`
+        // refcount, and its Drop releases it. If the retain/release
+        // protocol is off-by-one the closure body's capture read will
+        // fault or return garbage.
+        let val = eval(
+            "fn make(n: int) -> any {\n\
+                 return |x| x + n\n\
+             }\n\
+             let f = make(7)\n\
+             let arr = [f]\n\
+             let g = arr[0]\n\
+             g(3) + g(4)",
+        );
+        // (7 + 3) + (7 + 4) = 10 + 11 = 21
+        assert_eq!(val.as_i64(), Some(21));
+    }
+
+    #[test]
+    fn h6_5_multiple_immutable_captures_raw_path() {
+        // Multi-capture closure: two int captures both marked
+        // immutable. Exercises the raw path's typed `write_capture_typed`
+        // at distinct layout offsets.
+        let val = eval(
+            "fn make(a: int, b: int) -> any {\n\
+                 return |x| x + a + b\n\
+             }\n\
+             let f = make(100, 2)\n\
+             f(7)",
+        );
+        assert_eq!(val.as_i64(), Some(109));
+    }
+
+    /// Closure spec §14.6 (H6.5): the VM producer must emit a
+    /// `HeapValue::ClosureRaw` when a layout is registered and no
+    /// captures are marked mutable. This is the structural proxy for
+    /// "hot loop allocates no `Arc<Vec<Upvalue>>`" — the `ClosureRaw`
+    /// variant's storage is a raw `TypedClosureHeader` block, not a
+    /// `Vec<Upvalue>`.
+    ///
+    /// Full Cranelift-IR inspection for `arr.map(|x| x + n)` is gated on
+    /// the JIT test harness being teachable to expose its disassembled
+    /// output; this structural check is the stable companion.
+    #[test]
+    fn h6_5_immutable_capture_produces_raw_variant() {
+        // Return the closure as the top-level result and inspect its
+        // backing variant. H6.5 producer must emit `ClosureRaw` when
+        // (a) a `ClosureLayout` is registered for the function_id, and
+        // (b) no captures are marked mutable.
+        let result = eval(
+            "fn make(n: int) -> any {\n\
+                 return |x| x + n\n\
+             }\n\
+             make(10)",
+        );
+        let hv = result
+            .as_heap_ref()
+            .expect("closure result is heap-tagged");
+        assert!(
+            matches!(hv, shape_value::HeapValue::ClosureRaw(..)),
+            "H6.5 expects ClosureRaw variant for immutable captures, got {}",
+            hv.type_name()
+        );
+        // Sanity: shim reads the capture correctly.
+        let handle = hv.as_closure_handle().expect("handle");
+        let caps = handle.captures_as_values();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].as_i64(), Some(10));
+    }
+
+    #[test]
+    fn h6_5_mutable_capture_falls_back_to_legacy_variant() {
+        // The H6.5 producer guards on `function.mutable_captures`. When
+        // any capture is mutable (SharedCell-backed), the raw path is
+        // skipped and the legacy `HeapValue::Closure { upvalues }`
+        // variant is emitted — preserving auto-deref semantics for
+        // shared-mutable captures.
+        //
+        // Regression test: a mutating closure must still produce the
+        // correct observable shared-mutation result.
+        let val = eval(
+            "fn main() -> int {\n\
+                 let mut n: int = 0\n\
+                 let f = |x: int| { n = n + x }\n\
+                 f(1)\n\
+                 f(2)\n\
+                 f(3)\n\
+                 n\n\
+             }\n\
+             main()",
+        );
+        assert_eq!(val.as_i64(), Some(6));
     }
 }

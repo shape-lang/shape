@@ -36,6 +36,133 @@
 use super::closure_layout::{ClosureLayout, TypedClosureHeader};
 use super::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
 use super::struct_layout::FieldKind;
+use std::sync::Arc;
+
+/// Owning handle for a raw `TypedClosureHeader` block paired with its layout.
+///
+/// # Closure spec §14.6 (H6.5)
+///
+/// Wraps a `*const TypedClosureHeader` returned by
+/// [`alloc_typed_closure`] alongside the `Arc<ClosureLayout>` needed to
+/// decode/release its captures. `Clone` bumps the block's refcount via
+/// [`retain_typed_closure`]; `Drop` decrements via
+/// [`release_typed_closure`] so ownership mirrors the `Arc<HeapValue>`
+/// convention used by every other heap-backed value.
+///
+/// The raw pointer is stashed as `*const u8` internally (erased) because
+/// `TypedClosureHeader` is `!Send + !Sync`; the owner's manual
+/// `unsafe impl Send + Sync` is justified by the fact that the block
+/// itself is immutable (refcount aside) and the layout is already `Send +
+/// Sync` via `Arc`.
+///
+/// # Safety invariant
+///
+/// For every live `OwnedClosureBlock`, `ptr` was allocated by
+/// [`alloc_typed_closure`] with the exact `layout` carried in this owner,
+/// and the block is refcount-owned by this instance.
+pub struct OwnedClosureBlock {
+    /// Raw pointer to the block. Erased to `*const u8` so the outer type
+    /// can implement `Send + Sync` without leaking `TypedClosureHeader`'s
+    /// raw-pointer auto-trait status.
+    ptr: *const u8,
+    /// Program-lifetime layout reference. Shared with the JIT's
+    /// `closure_function_layouts` side-table so cloning is cheap.
+    layout: Arc<ClosureLayout>,
+}
+
+// SAFETY: The raw pointer is only dereferenced via the `unsafe` helpers
+// in this module, which uphold their own aliasing / lifetime invariants.
+// The block's only mutable state is the `HeapHeader::refcount` atomic,
+// which is already thread-safe. Every other byte is immutable for the
+// lifetime of the `OwnedClosureBlock`.
+unsafe impl Send for OwnedClosureBlock {}
+// SAFETY: Same justification as Send — the interior is atomic-protected
+// or immutable, matching the `Arc<HeapValue>` convention.
+unsafe impl Sync for OwnedClosureBlock {}
+
+impl OwnedClosureBlock {
+    /// Construct an `OwnedClosureBlock` from a freshly-allocated raw
+    /// pointer. The caller transfers exactly one refcount share.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been returned by [`alloc_typed_closure`] with the
+    ///   exact `layout` passed in here.
+    /// - The caller must not call [`release_typed_closure`] on `ptr`
+    ///   independently — `Drop` takes over that responsibility.
+    #[inline]
+    pub unsafe fn from_raw(ptr: *const u8, layout: Arc<ClosureLayout>) -> Self {
+        Self { ptr, layout }
+    }
+
+    /// Borrow the underlying raw pointer. The returned pointer is live for
+    /// at least as long as `self`.
+    #[inline]
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Borrow the underlying raw pointer typed as `TypedClosureHeader`.
+    #[inline]
+    pub fn as_header_ptr(&self) -> *const TypedClosureHeader {
+        self.ptr as *const TypedClosureHeader
+    }
+
+    /// Borrow the layout that describes this block's captures. Shared with
+    /// the program's `closure_function_layouts` side-table; clones are
+    /// cheap Arc bumps.
+    #[inline]
+    pub fn layout(&self) -> &Arc<ClosureLayout> {
+        &self.layout
+    }
+}
+
+impl Clone for OwnedClosureBlock {
+    /// Bumps the block's refcount and the layout Arc's refcount.
+    #[inline]
+    fn clone(&self) -> Self {
+        // SAFETY: `self.ptr` was validated at construction; the live
+        // invariant is preserved by the outer type.
+        unsafe {
+            retain_typed_closure(self.ptr);
+        }
+        Self {
+            ptr: self.ptr,
+            layout: Arc::clone(&self.layout),
+        }
+    }
+}
+
+impl Drop for OwnedClosureBlock {
+    /// Releases the block's refcount share. If this was the last share
+    /// the block is walked (`heap_capture_mask` bits drop their shares)
+    /// and deallocated. The layout Arc is decremented by the default
+    /// field-drop below.
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: construction invariant guarantees `ptr` was allocated
+        // by `alloc_typed_closure` with `self.layout`; double-frees are
+        // prevented because there is exactly one `OwnedClosureBlock`
+        // owning this share.
+        unsafe {
+            release_typed_closure(self.ptr as *mut u8, &self.layout);
+        }
+    }
+}
+
+impl std::fmt::Debug for OwnedClosureBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // SAFETY: `self.ptr` is live per the construction invariant; the
+        // reads here are in-bounds for a live block.
+        let fid = unsafe { typed_closure_function_id(self.ptr) };
+        let tid = unsafe { typed_closure_type_id(self.ptr) };
+        f.debug_struct("OwnedClosureBlock")
+            .field("fn_id", &fid)
+            .field("type_id", &tid)
+            .field("captures", &self.layout.capture_count())
+            .finish()
+    }
+}
 
 /// Allocate a zero-initialised `TypedClosureHeader` block matching the given
 /// layout. The `HeapHeader` is written with `refcount = 1`, `kind =
