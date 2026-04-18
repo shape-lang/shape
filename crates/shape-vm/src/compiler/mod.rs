@@ -855,6 +855,16 @@ pub struct BytecodeCompiler {
     /// Stack of scopes, each containing locals that need Drop calls at scope exit.
     /// Each entry is (local_index, is_async).
     pub(crate) drop_locals: Vec<Vec<(u16, bool)>>,
+    /// Phase V1.1C: parallel scope stack tracking locals whose storage class
+    /// is `UniqueHeap` and therefore (when the ownership-moves flag is on)
+    /// need an ownership-aware `DropLocal` opcode emitted at scope exit to
+    /// release the owned heap allocation. Orthogonal to `drop_locals` (which
+    /// drives user-facing `Drop` trait calls via `DropCall`). Populated and
+    /// consumed only when `ownership_moves_enabled()` is true; otherwise the
+    /// scope stack is pushed/popped in lockstep with `drop_locals` but kept
+    /// empty, so the compiler's emission path is byte-identical to
+    /// pre-V1.1C.
+    pub(crate) ownership_drop_locals: Vec<Vec<u16>>,
     /// Per-type drop kind: tracks whether each type has sync, async, or both drop impls.
     /// Populated during the first-pass registration of impl blocks.
     pub(crate) drop_type_info: HashMap<String, DropKind>,

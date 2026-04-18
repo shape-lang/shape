@@ -4535,6 +4535,32 @@ impl BytecodeCompiler {
                                 Some(DropKind::SyncOnly) | None => false,
                             };
                             self.track_drop_local(local_idx, is_async);
+                            // Phase V1.1C: also track the slot for an
+                            // ownership-aware `DropLocal` at scope exit
+                            // when the binding is heap-backed (so releasing
+                            // the Arc/Box actually does work). The
+                            // `pop_drop_scope` emission is gated on
+                            // `SHAPE_V2_OWNERSHIP_MOVES`, so this tracking
+                            // is a no-op at the bytecode level when the
+                            // flag is off.
+                            //
+                            // Heap-backed means one of:
+                            //   * `UniqueHeap` storage class — owned Box
+                            //     allocation per the Phase 4 spec;
+                            //   * `Direct` storage class *for a let/const
+                            //     of a heap type* — the `PromoteToOwned`
+                            //     emission a few lines above boxed a heap
+                            //     value into the slot (inline scalars
+                            //     round-trip as a no-op and don't need
+                            //     drops).
+                            //
+                            // We skip `SharedCow` (its own refcount path
+                            // handles release), `Reference` (borrow, no
+                            // ownership), and `LocalMutablePtr`
+                            // (stack-resident).
+                            if self.binding_slot_needs_ownership_drop(local_idx, var_decl.kind) {
+                                self.track_ownership_drop_local(local_idx);
+                            }
                             if let Some(value) = &var_decl.value {
                                 self.finish_reference_binding_from_expr(
                                     local_idx, true, name, value, ref_borrow,

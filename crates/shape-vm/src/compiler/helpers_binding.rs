@@ -196,6 +196,28 @@ impl BytecodeCompiler {
     /// This is intentionally conservative: the `query_ownership_decision`
     /// lookup can return `None` for many spans (e.g. compiler-generated
     /// code, pre-MIR contexts), and the fallback is always safe.
+    ///
+    /// Phase V1.1C: when the process-level `SHAPE_V2_OWNERSHIP_MOVES` flag
+    /// is on AND the slot's MIR storage class is `UniqueHeap` (owned
+    /// heap-ref), emit the leaner V1.1A/B `CloneLocal` opcode instead of
+    /// `LoadLocal`/`LoadLocalMove`/`LoadLocalClone`. `CloneLocal` routes
+    /// through `raw_helpers::clone_raw_bits`, which handles inline scalars,
+    /// shared Arc refs, and owned Box refs in a single dispatch — avoiding
+    /// the `LoadLocalMove`/`LoadLocalClone` SharedCell fallback (not
+    /// reachable for a `UniqueHeap` slot by construction). We emit
+    /// `CloneLocal` rather than `MoveLocal` as the conservative default;
+    /// last-use information is not yet threaded through this emission
+    /// path, so treating every read as a clone is the safe baseline.
+    /// TODO(V1.1D prerequisite): once MIR `OwnershipDecision::Move` is
+    /// re-consulted here the compiler should emit `MoveLocal` on the last
+    /// use and `DropLocal` tracking must skip moved-out slots.
+    ///
+    /// For inline-scalar (`Direct`) bindings, heap-shared (`SharedCow`)
+    /// bindings, and references we fall through to the existing emission
+    /// path unchanged — the new opcodes target owned heap allocations
+    /// only.
+    ///
+    /// Flag off: emission is byte-identical to pre-V1.1C.
     pub(super) fn emit_load_local_owned(
         &mut self,
         slot: u16,
@@ -203,6 +225,15 @@ impl BytecodeCompiler {
     ) {
         use crate::bytecode::{Instruction, OpCode, Operand};
         use crate::mir::analysis::OwnershipDecision;
+
+        // Phase V1.1C gate. Flag off ⇒ byte-identical pre-V1.1C emission.
+        if super::helpers::ownership_moves_enabled() && self.slot_is_heap_backed_owned(slot) {
+            self.emit(Instruction::new(
+                OpCode::CloneLocal,
+                Some(Operand::Local(slot)),
+            ));
+            return;
+        }
 
         let decision = self.query_ownership_decision(span);
 

@@ -6,10 +6,85 @@ use crate::type_tracking::{NumericType, StorageHint, TypeTracker, VariableTypeIn
 use shape_ast::ast::{Spanned, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::OnceLock;
 
 use super::{
     BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, ResolutionScope,
 };
+
+/// Phase V1.1C bisect-safety gate; V1.1D flips default to on after 24h soak.
+///
+/// When `true`, the compiler emits the ownership-aware `MoveLocal` /
+/// `CloneLocal` / `DropLocal` opcodes (V1.1A/B) in place of the existing
+/// `LoadLocalMove` / `LoadLocalClone` emission path, for heap-ref
+/// (`UniqueHeap`) bindings. When `false` (the V1.1C default), the compiler's
+/// emission path is **byte-identical** to pre-V1.1C: `LoadLocal` /
+/// `LoadLocalMove` / `LoadLocalClone` continue to be emitted; no
+/// `MoveLocal` / `CloneLocal` / `DropLocal` are produced. This is the
+/// bisect safety net for the A/B/C/D staging pattern — V1.1D flips the
+/// default after the 24-hour soak.
+///
+/// The env var is read once per process and cached in a `OnceLock`. Values
+/// `1` / `true` / `on` / `yes` (case-insensitive, trimmed) enable the flag;
+/// the env var being unset, empty, or any other value keeps the default
+/// `false`. This mirrors the V0.a `SHAPE_V2_VAR_SHAREDCOW` pattern (see
+/// `crates/shape-vm/src/mir/storage_planning.rs:50`) but inverts the
+/// default — V1.1C explicitly starts OFF to preserve byte-identical
+/// bytecode for the intermediate commit.
+///
+/// For unit-test determinism — the OnceLock cache freezes whichever env
+/// state the test binary starts with, and multiple tests racing
+/// `std::env::set_var` would poison the cache — a `#[cfg(test)]`
+/// thread-local override (`with_ownership_moves_flag`) lets a single
+/// test temporarily force the flag on/off without touching the env.
+pub(super) fn ownership_moves_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(v) = TEST_OWNERSHIP_MOVES_OVERRIDE.with(|cell| cell.get()) {
+            return v;
+        }
+    }
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_OWNERSHIP_MOVES") {
+        Ok(v) => matches!(
+            v.trim(),
+            "1" | "true" | "TRUE" | "True"
+                | "on" | "ON" | "On"
+                | "yes" | "YES" | "Yes"
+        ),
+        Err(_) => false,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Phase V1.1C test hook: per-thread override for
+    /// `ownership_moves_enabled()`. When `Some(b)`, the flag reads as `b`
+    /// regardless of env-var state. The override is scoped to a single
+    /// closure via `with_ownership_moves_flag` and is cleared on drop —
+    /// tests running on the same thread cannot leak flag state into each
+    /// other. Thread-local rather than a global mutex so concurrent
+    /// `cargo test` workers stay independent.
+    pub(super) static TEST_OWNERSHIP_MOVES_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Phase V1.1C test helper: run `f` with the ownership-moves flag
+/// forced to `enabled`. Restores the previous override on return (even
+/// on panic). This is the compile-time-gated test path; production code
+/// reads the env var exclusively via `ownership_moves_enabled()`.
+#[cfg(test)]
+pub(crate) fn with_ownership_moves_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<bool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_OWNERSHIP_MOVES_OVERRIDE.with(|cell| cell.set(self.0));
+        }
+    }
+    let prev = TEST_OWNERSHIP_MOVES_OVERRIDE.with(|cell| cell.replace(Some(enabled)));
+    let _guard = Guard(prev);
+    f()
+}
 
 /// Emit a runtime-dispatched addition instruction.
 ///
@@ -2209,11 +2284,34 @@ impl BytecodeCompiler {
     /// Push a new drop scope. Must be paired with pop_drop_scope().
     pub(super) fn push_drop_scope(&mut self) {
         self.drop_locals.push(Vec::new());
+        // Phase V1.1C: parallel ownership-drop scope (heap-ref locals that
+        // need a `DropLocal` opcode at scope exit when the flag is on).
+        // Pushed in lockstep regardless of flag state; only the emission in
+        // `pop_drop_scope` is gated.
+        self.ownership_drop_locals.push(Vec::new());
     }
 
     /// Pop the current drop scope, emitting DropCall instructions for all
     /// tracked locals in reverse order.
     pub(super) fn pop_drop_scope(&mut self) -> Result<()> {
+        // Phase V1.1C: when `SHAPE_V2_OWNERSHIP_MOVES` is on, emit an
+        // ownership-aware `DropLocal` for each heap-ref local declared in
+        // this scope — in reverse order — *before* the legacy `DropCall`
+        // trait-invocation pass. Conservative: with the current
+        // always-Clone read policy no local is ever poisoned by a Move, so
+        // every tracked `UniqueHeap` local is still live at scope exit.
+        // TODO: once MIR last-use information is threaded into read-side
+        // emission (so `MoveLocal` can be emitted on terminal reads), the
+        // tracker here must be updated to skip drops for moved-out slots.
+        let ownership_locals = self.ownership_drop_locals.pop().unwrap_or_default();
+        if ownership_moves_enabled() {
+            for local_idx in ownership_locals.into_iter().rev() {
+                self.emit(Instruction::new(
+                    OpCode::DropLocal,
+                    Some(Operand::Local(local_idx)),
+                ));
+            }
+        }
         // Emit DropCall for each tracked local in reverse order
         if let Some(locals) = self.drop_locals.pop() {
             for (local_idx, is_async) in locals.into_iter().rev() {
@@ -2221,6 +2319,80 @@ impl BytecodeCompiler {
             }
         }
         Ok(())
+    }
+
+    /// Phase V1.1C: record a local slot as needing an ownership-aware
+    /// `DropLocal` at the next `pop_drop_scope`. Called from the compiler's
+    /// variable-declaration path when the slot's MIR storage class is
+    /// `UniqueHeap` (i.e. owned heap allocation that the ownership-moves
+    /// runtime would otherwise leak). No-op when no drop scope is active.
+    pub(super) fn track_ownership_drop_local(&mut self, local_idx: u16) {
+        if let Some(scope) = self.ownership_drop_locals.last_mut() {
+            scope.push(local_idx);
+        }
+    }
+
+    /// Phase V1.1C: true when the slot's storage hint matches an
+    /// inline-scalar native type (int / number / bool / sized integers).
+    /// Used to separate Box-promoted heap values from zero-cost inline
+    /// values both for `DropLocal` emission at scope exit and for
+    /// `CloneLocal` emission on reads.
+    pub(super) fn slot_has_inline_scalar_hint(&self, local_idx: u16) -> bool {
+        let hint = self
+            .type_tracker
+            .get_local_type(local_idx)
+            .map(|info| info.storage_hint)
+            .unwrap_or(StorageHint::Unknown);
+        hint.is_numeric_family() || matches!(hint, StorageHint::Bool)
+    }
+
+    /// Phase V1.1C: true when the slot is backed by an owned heap
+    /// allocation per the Phase 4 contract — either `UniqueHeap` storage
+    /// class, or `Direct` storage class combined with a non-scalar
+    /// storage hint. The latter captures the Box-promoted heap path
+    /// (strings, arrays, hashmaps, typed objects) handed to the slot by
+    /// `PromoteToOwned`. Inline scalars on Direct slots and every other
+    /// storage class (SharedCow, Reference, LocalMutablePtr, Deferred)
+    /// are excluded.
+    pub(super) fn slot_is_heap_backed_owned(&self, local_idx: u16) -> bool {
+        use crate::type_tracking::BindingStorageClass;
+        match self.mir_storage_class_for_slot(local_idx) {
+            Some(BindingStorageClass::UniqueHeap) => true,
+            Some(BindingStorageClass::Direct) => !self.slot_has_inline_scalar_hint(local_idx),
+            _ => false,
+        }
+    }
+
+    /// Phase V1.1C: decide whether the newly-declared local slot should
+    /// receive a `DropLocal` opcode at scope exit (when the ownership-moves
+    /// flag is on). The slot needs a drop iff it is heap-backed — either
+    /// `UniqueHeap` storage class (owned Box allocation), or `Direct`
+    /// storage class combined with a `let`/`const` binding of a heap type
+    /// (the `PromoteToOwned` emission converts these to Box). Inline
+    /// scalars (`int`, `number`, `bool`, etc.) own no heap resource and
+    /// are skipped per `docs/ownership-aware-runtime-v2.md` §Phase 1.
+    /// `var` bindings of heap type on Direct storage are skipped too —
+    /// the Arc refcount path already releases them.
+    pub(super) fn binding_slot_needs_ownership_drop(
+        &self,
+        local_idx: u16,
+        var_kind: shape_ast::ast::VarKind,
+    ) -> bool {
+        use crate::type_tracking::BindingStorageClass;
+        match self.mir_storage_class_for_slot(local_idx) {
+            Some(BindingStorageClass::UniqueHeap) => true,
+            Some(BindingStorageClass::Direct) => {
+                // Only let / const are Box-promoted by the PromoteToOwned
+                // rule (see statements.rs §Phase 3/4). var bindings with
+                // Direct storage stay Arc-wrapped and release via the
+                // existing refcount path.
+                matches!(
+                    var_kind,
+                    shape_ast::ast::VarKind::Let | shape_ast::ast::VarKind::Const
+                ) && !self.slot_has_inline_scalar_hint(local_idx)
+            }
+            _ => false,
+        }
     }
 
     /// Emit a single LoadLocal + DropCall pair for a local variable.
@@ -2301,6 +2473,36 @@ impl BytecodeCompiler {
         let total = self.drop_locals.len();
         if scopes_to_exit > total {
             return Ok(());
+        }
+        // Phase V1.1C: when the ownership-moves flag is on, also emit a
+        // `DropLocal` for each heap-ref (UniqueHeap) local tracked in the
+        // scopes being exited, innermost-first / reverse declaration order.
+        // Flag off: no ownership drops — byte-identical to pre-V1.1C.
+        // Note: early-exit drops are inserted at the jump/return site; the
+        // scope stack itself is popped later by the enclosing block, so we
+        // must *not* consume `self.ownership_drop_locals` here. Cloning
+        // matches the `self.drop_locals` treatment below.
+        if ownership_moves_enabled() {
+            let ownership_total = self.ownership_drop_locals.len();
+            if scopes_to_exit <= ownership_total {
+                let mut ownership_scopes: Vec<Vec<u16>> = Vec::new();
+                for i in (ownership_total - scopes_to_exit..ownership_total).rev() {
+                    let locals = self
+                        .ownership_drop_locals
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_default();
+                    ownership_scopes.push(locals);
+                }
+                for locals in ownership_scopes {
+                    for local_idx in locals.into_iter().rev() {
+                        self.emit(Instruction::new(
+                            OpCode::DropLocal,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                    }
+                }
+            }
         }
         // Collect locals from scopes being exited (innermost first)
         let mut scopes: Vec<Vec<(u16, bool)>> = Vec::new();

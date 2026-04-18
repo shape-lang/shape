@@ -3809,3 +3809,171 @@ fn test_phase5c_explicit_return_statement_also_emits_return_owned() {
     );
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Phase V1.1C: compiler emission of MoveLocal / CloneLocal / DropLocal
+// behind the SHAPE_V2_OWNERSHIP_MOVES flag
+// ═══════════════════════════════════════════════════════════════════════
+//
+// V1.1A added the opcodes (dead), V1.1B wired the executor handlers, this
+// phase (V1.1C) emits the opcodes from the compiler — but behind a
+// process-level env flag. Default is OFF: flag-off bytecode must be
+// byte-identical to pre-V1.1C. V1.1D flips the default to on after a
+// 24-hour soak.
+//
+// Tests here use the `#[cfg(test)]` thread-local override hook
+// (`with_ownership_moves_flag`) to toggle the flag deterministically —
+// `std::env::set_var` is unreliable because the real flag reader caches
+// in a `OnceLock` and cargo runs many tests in parallel on the same
+// process.
+
+fn function_ownership_ops(code: &str, fn_name: &str) -> Vec<OpCode> {
+    function_bytecode(code, fn_name)
+}
+
+#[test]
+fn test_v11c_flag_off_does_not_emit_move_clone_drop_local() {
+    // Default: flag off. The compiler must not emit any of the V1.1A/B
+    // ownership-aware opcodes for a plain owned heap binding.
+    let code = r#"
+    fn test() -> string {
+        let s = "hi"
+        print(s)
+        s
+    }
+    test()
+    "#;
+    let ops = super::helpers::with_ownership_moves_flag(false, || {
+        function_ownership_ops(code, "test")
+    });
+    assert!(
+        !ops.contains(&OpCode::MoveLocal),
+        "flag-off: MoveLocal must not appear, got ops: {:?}",
+        ops
+    );
+    assert!(
+        !ops.contains(&OpCode::CloneLocal),
+        "flag-off: CloneLocal must not appear, got ops: {:?}",
+        ops
+    );
+    assert!(
+        !ops.contains(&OpCode::DropLocal),
+        "flag-off: DropLocal must not appear, got ops: {:?}",
+        ops
+    );
+}
+
+#[test]
+fn test_v11c_flag_off_bytecode_contains_no_v11c_opcodes() {
+    // Core contract of V1.1C: when the ownership-moves flag is off,
+    // the compiler emits *no* V1.1A/B opcodes (`MoveLocal`,
+    // `CloneLocal`, `DropLocal`). This is the byte-identical
+    // guarantee — V1.1A/B added opcodes to the table but the flag
+    // gate here keeps them out of any program's bytecode at the
+    // default setting. Deliberately uses a program with one heap-ref
+    // binding (`let s = "hello"`) whose storage class plus let-kind
+    // would make it a candidate for `CloneLocal` / `DropLocal` when
+    // the flag flips on in V1.1D.
+    let code = r#"
+    fn test() -> string {
+        let s = "hello"
+        let t = s
+        t
+    }
+    test()
+    "#;
+    let ops_forced_off = super::helpers::with_ownership_moves_flag(false, || {
+        let program = parse_program(code).unwrap();
+        BytecodeCompiler::new().compile(&program).unwrap().instructions
+    });
+    for (i, ins) in ops_forced_off.iter().enumerate() {
+        assert!(
+            !matches!(
+                ins.opcode,
+                OpCode::MoveLocal | OpCode::CloneLocal | OpCode::DropLocal
+            ),
+            "flag-off: instruction {} unexpectedly emitted V1.1C opcode {:?}",
+            i,
+            ins.opcode
+        );
+    }
+}
+
+#[test]
+fn test_v11c_flag_on_emits_clone_local_for_heap_read() {
+    // Flag on + a read of a UniqueHeap binding ⇒ compiler emits
+    // `CloneLocal` (conservative: no MIR last-use threading in V1.1C,
+    // so every read is treated as a clone). The binding must be a
+    // heap-ref owned local — strings bound via `let` land at
+    // `UniqueHeap` after Phase 4 + Promote.
+    let code = r#"
+    fn test() -> string {
+        let s = "hi"
+        let t = s
+        t
+    }
+    test()
+    "#;
+    let ops = super::helpers::with_ownership_moves_flag(true, || {
+        function_ownership_ops(code, "test")
+    });
+    // Either MoveLocal or CloneLocal must appear — the conservative
+    // fallback emits CloneLocal, but any future tightening (MoveLocal on
+    // the last use) is also accepted by this test.
+    assert!(
+        ops.contains(&OpCode::CloneLocal) || ops.contains(&OpCode::MoveLocal),
+        "flag-on: expected MoveLocal or CloneLocal for heap-ref read, got ops: {:?}",
+        ops
+    );
+    // With no MIR last-use threading yet, the conservative path emits
+    // CloneLocal — check that at least one shows up.
+    assert!(
+        ops.contains(&OpCode::CloneLocal),
+        "flag-on (V1.1C conservative): expected CloneLocal for heap-ref read, got ops: {:?}",
+        ops
+    );
+}
+
+#[test]
+fn test_v11c_flag_on_emits_drop_local_at_scope_exit() {
+    // A function body with a UniqueHeap binding must close with a
+    // `DropLocal` for that slot when the flag is on.
+    let code = r#"
+    fn test() -> int {
+        let s = "hi"
+        print(s)
+        42
+    }
+    test()
+    "#;
+    let ops = super::helpers::with_ownership_moves_flag(true, || {
+        function_ownership_ops(code, "test")
+    });
+    assert!(
+        ops.contains(&OpCode::DropLocal),
+        "flag-on: expected DropLocal at scope exit for UniqueHeap local, got ops: {:?}",
+        ops
+    );
+}
+
+#[test]
+fn test_v11c_flag_on_does_not_drop_local_for_inline_int() {
+    // An inline-scalar `let x = 42` binding is `Direct` (or Deferred),
+    // not `UniqueHeap`. The flag-on path must not track it for
+    // `DropLocal` — inline scalars own no heap resource.
+    let code = r#"
+    fn test() -> int {
+        let x = 42
+        x
+    }
+    test()
+    "#;
+    let ops = super::helpers::with_ownership_moves_flag(true, || {
+        function_ownership_ops(code, "test")
+    });
+    assert!(
+        !ops.contains(&OpCode::DropLocal),
+        "flag-on: inline-scalar Direct binding must not get DropLocal, got ops: {:?}",
+        ops
+    );
+}
+
