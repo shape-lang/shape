@@ -975,6 +975,15 @@ impl BytecodeCompiler {
             self.exclusive_reference_value_module_bindings.clone();
         let saved_comptime_mode = self.comptime_mode;
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
+        // Phase V1.1C fix: the ownership-aware drop-local scope stack must be
+        // saved & restored in lockstep with `drop_locals`. Previously it
+        // was left untouched, which caused the function's ownership drop
+        // scope to leak back into the enclosing (main) scope. When main's
+        // own `pop_drop_scope` ran at program end it emitted `DropLocal`
+        // opcodes for slot indices that were only valid inside the callee's
+        // frame — writing 0u64 into arbitrary caller stack slots and
+        // corrupting results like `test()`'s DateTime return value.
+        let saved_ownership_drop_locals = std::mem::take(&mut self.ownership_drop_locals);
         let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
         let saved_param_locals = std::mem::take(&mut self.param_locals);
         let saved_function_params =
@@ -1216,6 +1225,7 @@ impl BytecodeCompiler {
                         self.current_blob_builder = saved_blob_builder;
                         // Restore state
                         self.drop_locals = saved_drop_locals;
+                        self.ownership_drop_locals = saved_ownership_drop_locals;
                         self.boxed_locals = saved_boxed_locals;
                         self.param_locals = saved_param_locals;
                         self.current_function_params = saved_function_params;
@@ -1313,6 +1323,7 @@ impl BytecodeCompiler {
 
         // Restore state
         self.drop_locals = saved_drop_locals;
+        self.ownership_drop_locals = saved_ownership_drop_locals;
         self.boxed_locals = saved_boxed_locals;
         self.current_function_params = saved_function_params;
         self.pop_scope();

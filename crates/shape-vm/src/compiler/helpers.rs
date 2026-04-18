@@ -12,27 +12,46 @@ use super::{
     BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, ResolutionScope,
 };
 
-/// Phase V1.1C bisect-safety gate; V1.1D flips default to on after 24h soak.
+/// Phase V1.1D: default-on ownership-aware local opcodes.
 ///
 /// When `true`, the compiler emits the ownership-aware `MoveLocal` /
-/// `CloneLocal` / `DropLocal` opcodes (V1.1A/B) in place of the existing
-/// `LoadLocalMove` / `LoadLocalClone` emission path, for heap-ref
-/// (`UniqueHeap`) bindings. When `false` (the V1.1C default), the compiler's
-/// emission path is **byte-identical** to pre-V1.1C: `LoadLocal` /
-/// `LoadLocalMove` / `LoadLocalClone` continue to be emitted; no
-/// `MoveLocal` / `CloneLocal` / `DropLocal` are produced. This is the
-/// bisect safety net for the A/B/C/D staging pattern — V1.1D flips the
-/// default after the 24-hour soak.
+/// `CloneLocal` / `DropLocal` opcodes (V1.1A/B) for heap-ref (`UniqueHeap`
+/// / Direct-owned) bindings. When `false`, emission is byte-identical to
+/// pre-V1.1C: `LoadLocal` / `LoadLocalMove` / `LoadLocalClone` continue
+/// unchanged; no `MoveLocal` / `CloneLocal` / `DropLocal` are produced.
 ///
-/// The env var is read once per process and cached in a `OnceLock`. Values
-/// `1` / `true` / `on` / `yes` (case-insensitive, trimmed) enable the flag;
-/// the env var being unset, empty, or any other value keeps the default
-/// `false`. This mirrors the V0.a `SHAPE_V2_VAR_SHAREDCOW` pattern (see
-/// `crates/shape-vm/src/mir/storage_planning.rs:50`) but inverts the
-/// default — V1.1C explicitly starts OFF to preserve byte-identical
-/// bytecode for the intermediate commit.
+/// V1.1C landed with the default `false` (opt-in via
+/// `SHAPE_V2_OWNERSHIP_MOVES=1`). V1.1D flips the default to `true` after
+/// fixing three emission bugs the opt-in soak surfaced:
 ///
-/// For unit-test determinism — the OnceLock cache freezes whichever env
+///   * Function compilation did not save/restore `ownership_drop_locals`
+///     around the callee scope, leaking per-function `DropLocal` entries
+///     into the caller's main-level drop pass. This corrupted the result
+///     of any heap-returning callee (DateTime arithmetic, comptime body
+///     replacement). Fixed in `compiler/functions.rs`.
+///   * `CloneLocal` was emitted for `let mut` slots that had been
+///     `BoxLocal`-wrapped into a `SharedCell` by a subsequent closure
+///     capture. `clone_raw_bits` bumps the cell's Arc without unwrapping,
+///     so arithmetic then saw `shared_cell` instead of the inner scalar
+///     ("Cannot apply '+' to int and shared_cell"). Gated by
+///     `slot_is_boxed` in `emit_load_local_owned`.
+///   * Symmetric bug for `DropLocal`: a boxed slot received both the
+///     V1.1C `DropLocal` *and* the legacy `DropCall` pass, poisoning the
+///     SharedCell before the legacy unwrap could read it.
+///     `binding_slot_needs_ownership_drop` and the drop-scope emission
+///     sites now skip boxed slots so the Arc-refcount release path owns
+///     the release alone.
+///
+/// Polarity inversion: the env var is now an opt-OUT. Values
+/// `0` / `false` / `off` / `no` (case-insensitive, trimmed) disable the
+/// flag; unset, empty, or any other value keeps the V1.1D default of
+/// `true`. This mirrors the V0.a `SHAPE_V2_VAR_SHAREDCOW` pattern (see
+/// `crates/shape-vm/src/mir/storage_planning.rs:50`).
+///
+/// Rollback: `SHAPE_V2_OWNERSHIP_MOVES=0` restores the pre-V1.1D
+/// byte-identical emission. A single-commit revert is also sufficient.
+///
+/// For unit-test determinism — the `OnceLock` cache freezes whichever env
 /// state the test binary starts with, and multiple tests racing
 /// `std::env::set_var` would poison the cache — a `#[cfg(test)]`
 /// thread-local override (`with_ownership_moves_flag`) lets a single
@@ -46,13 +65,13 @@ pub(super) fn ownership_moves_enabled() -> bool {
     }
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| match std::env::var("SHAPE_V2_OWNERSHIP_MOVES") {
-        Ok(v) => matches!(
+        Ok(v) => !matches!(
             v.trim(),
-            "1" | "true" | "TRUE" | "True"
-                | "on" | "ON" | "On"
-                | "yes" | "YES" | "Yes"
+            "0" | "false" | "FALSE" | "False"
+                | "off" | "OFF" | "Off"
+                | "no" | "NO" | "No"
         ),
-        Err(_) => false,
+        Err(_) => true,
     })
 }
 
@@ -1010,6 +1029,32 @@ impl BytecodeCompiler {
             }
         }
         None
+    }
+
+    /// Reverse lookup: slot index → local name (if any currently in scope).
+    /// Used by the Phase V1.1C emission gate to consult `boxed_locals` (keyed
+    /// by name) for a given slot. Returns the first match walking the scope
+    /// stack innermost→outermost.
+    pub(super) fn local_name_for_slot(&self, slot: u16) -> Option<&str> {
+        for scope in self.locals.iter().rev() {
+            for (name, &idx) in scope.iter() {
+                if idx == slot {
+                    return Some(name.as_str());
+                }
+            }
+        }
+        None
+    }
+
+    /// Phase V1.1C: true when the slot has been converted to a SharedCell
+    /// wrapper via a prior `BoxLocal` (tracked in `self.boxed_locals` keyed
+    /// by binding name). The V1.1C `CloneLocal` opcode does not auto-
+    /// unwrap `SharedCell`s, so boxed slots must fall through to the
+    /// legacy `LoadLocal` path which handles the unwrap.
+    pub(super) fn slot_is_boxed(&self, slot: u16) -> bool {
+        self.local_name_for_slot(slot)
+            .map(|name| self.boxed_locals.contains(name))
+            .unwrap_or(false)
     }
 
     /// Declare a temporary local variable
@@ -2306,6 +2351,18 @@ impl BytecodeCompiler {
         let ownership_locals = self.ownership_drop_locals.pop().unwrap_or_default();
         if ownership_moves_enabled() {
             for local_idx in ownership_locals.into_iter().rev() {
+                // Phase V1.1C fix: `BoxLocal` may have converted the slot
+                // to a `SharedCell` wrapper between declaration time
+                // (when `track_ownership_drop_local` captured the slot)
+                // and scope exit. `DropLocal` poisons the slot with
+                // `0u64`, which breaks the `LoadLocal` + `DropCall` pass
+                // that immediately follows (it would no longer see the
+                // Arc-backed cell). The pre-existing refcount release
+                // path in the `DropCall` pass handles boxed slots
+                // correctly, so skip here.
+                if self.slot_is_boxed(local_idx) {
+                    continue;
+                }
                 self.emit(Instruction::new(
                     OpCode::DropLocal,
                     Some(Operand::Local(local_idx)),
@@ -2379,6 +2436,16 @@ impl BytecodeCompiler {
         var_kind: shape_ast::ast::VarKind,
     ) -> bool {
         use crate::type_tracking::BindingStorageClass;
+        // Phase V1.1C fix: if the slot has been SharedCell-wrapped by a prior
+        // `BoxLocal` (closure capture path), the legacy Arc-refcount release
+        // path in `pop_drop_scope` / `emit_drops_for_early_exit` handles the
+        // release. Emitting `DropLocal` here poisons the slot to `0u64`
+        // which breaks the auto-unwrap in `LoadLocal` / `LoadClosure` for any
+        // subsequent read (e.g. compiler-injected reads like `LoadLocal` +
+        // `DropCall` pairs that immediately follow the `DropLocal`).
+        if self.slot_is_boxed(local_idx) {
+            return false;
+        }
         match self.mir_storage_class_for_slot(local_idx) {
             Some(BindingStorageClass::UniqueHeap) => true,
             Some(BindingStorageClass::Direct) => {
@@ -2496,6 +2563,13 @@ impl BytecodeCompiler {
                 }
                 for locals in ownership_scopes {
                     for local_idx in locals.into_iter().rev() {
+                        // Phase V1.1C fix: skip `DropLocal` emission for
+                        // slots that were SharedCell-wrapped by a prior
+                        // `BoxLocal`. See the companion comment in
+                        // `pop_drop_scope` for the rationale.
+                        if self.slot_is_boxed(local_idx) {
+                            continue;
+                        }
                         self.emit(Instruction::new(
                             OpCode::DropLocal,
                             Some(Operand::Local(local_idx)),

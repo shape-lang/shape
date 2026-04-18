@@ -3977,3 +3977,145 @@ fn test_v11c_flag_on_does_not_drop_local_for_inline_int() {
     );
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Phase V1.1D: flip default, fix three emission bugs surfaced by the
+// opt-in soak. Regression tests for each.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_v11d_function_scope_does_not_leak_ownership_drops_to_main() {
+    // V1.1D fix #1: `compile_function_definition` must save/restore
+    // `ownership_drop_locals` around the callee body. V1.1C took+restored
+    // `drop_locals` but not `ownership_drop_locals`, so per-function
+    // `DropLocal` entries for slots 0/1 leaked into main's scope and
+    // were emitted at program end — stomping arbitrary caller stack
+    // slots (including the call result) with `0u64`.
+    //
+    // Regression check: compile a function that uses two heap-backed
+    // locals (DateTime arithmetic — both operands go through
+    // `PromoteToOwned`). Before the fix the compiled main bytecode
+    // ended with `... Call ; DropLocal 1 ; DropLocal 0 ; Halt`, with
+    // the two trailing drops writing 0 into unrelated stack slots.
+    // After the fix there are no main-level DropLocals.
+    let code = r#"
+        fn test() {
+            let dt = @"2024-01-15"
+            let dur = 3d
+            dt + dur
+        }
+        test()
+    "#;
+    let main_ops = super::helpers::with_ownership_moves_flag(true, || {
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+        bytecode.instructions.clone()
+    });
+    // Find the outer Call instruction. Any `DropLocal` after it would be
+    // a main-level leak; before V1.1D that pattern stomped the call
+    // result.
+    let call_idx = main_ops
+        .iter()
+        .position(|ins| matches!(ins.opcode, OpCode::Call | OpCode::CallFunctionIndirect))
+        .expect("main must contain a Call to test()");
+    for (offset, ins) in main_ops[call_idx + 1..].iter().enumerate() {
+        assert!(
+            ins.opcode != OpCode::DropLocal,
+            "main at index {} (= call + {}) unexpectedly contains `DropLocal`: \
+             callee's `ownership_drop_locals` scope leaked into the caller. \
+             Full instruction: {:?}",
+            call_idx + 1 + offset,
+            offset + 1,
+            ins
+        );
+    }
+}
+
+#[test]
+fn test_v11d_clone_local_skipped_for_boxed_slot() {
+    // V1.1D fix #2: `BoxLocal` converts a slot from inline-scalar to a
+    // `SharedCell`-wrapped Arc<HeapValue> at closure-capture time. The
+    // V1.1C `CloneLocal` opcode (via `clone_raw_bits`) bumps the cell's
+    // Arc without unwrapping, so subsequent arithmetic would see
+    // `shared_cell` instead of the inner int. `emit_load_local_owned`
+    // must fall through to the legacy `LoadLocal` path when the slot
+    // is in `self.boxed_locals`.
+    //
+    // Regression check: a `let mut b: int = 0` captured by a mutable
+    // closure then read outside the closure with `a + b` must use
+    // `LoadLocal` (auto-unwraps the SharedCell), not `CloneLocal`.
+    let code = r#"
+        fn main() -> int {
+            let mut a: int = 0
+            let mut b: int = 0
+            let f = || { a = a + 1; b = b + 2 }
+            f()
+            a + b
+        }
+        main()
+    "#;
+    let ops = super::helpers::with_ownership_moves_flag(true, || {
+        function_ownership_ops(code, "main")
+    });
+    // After `BoxLocal`, the two reads for `a + b` must NOT appear as
+    // `CloneLocal` — they must stay `LoadLocal` so the executor auto-
+    // unwraps the SharedCell. (V1.1C would have emitted a `CloneLocal`
+    // for at least one of the two slots.)
+    let box_idx = ops
+        .iter()
+        .position(|op| *op == OpCode::BoxLocal)
+        .expect("closure capture must emit `BoxLocal`");
+    for (offset, op) in ops[box_idx..].iter().enumerate() {
+        assert!(
+            *op != OpCode::CloneLocal,
+            "post-BoxLocal index {} unexpectedly emits `CloneLocal`: \
+             V1.1C would bump the SharedCell Arc instead of unwrapping. \
+             Ops: {:?}",
+            box_idx + offset,
+            ops
+        );
+    }
+}
+
+#[test]
+fn test_v11d_drop_local_skipped_for_boxed_slot() {
+    // V1.1D fix #3: symmetric to fix #2. A slot that has been
+    // SharedCell-wrapped by `BoxLocal` must not receive a `DropLocal`
+    // at scope exit: `DropLocal` releases the Arc and poisons the slot
+    // with `0u64`, but the legacy `DropCall` pass that immediately
+    // follows reads the same slot. `binding_slot_needs_ownership_drop`
+    // and the drop-scope emission sites skip boxed slots so the
+    // Arc-refcount release path owns the release alone.
+    //
+    // Regression check: the same closure-capturing program must not
+    // contain any `DropLocal` for the boxed slots.
+    let code = r#"
+        fn main() -> int {
+            let mut a: int = 0
+            let mut b: int = 0
+            let f = || { a = a + 1; b = b + 2 }
+            f()
+            a + b
+        }
+        main()
+    "#;
+    let ops = super::helpers::with_ownership_moves_flag(true, || {
+        function_ownership_ops(code, "main")
+    });
+    // `BoxLocal` must appear (the closure captures both mutably).
+    assert!(
+        ops.contains(&OpCode::BoxLocal),
+        "test setup expects BoxLocal to be emitted, got: {:?}",
+        ops
+    );
+    // After fix #3, no `DropLocal` can target a boxed slot. In this
+    // program slots 0 and 1 are the two boxed captures; the only
+    // `DropLocal` candidate would be a V1.1C leak, so the simplest
+    // assertion is that there is no `DropLocal` at all.
+    assert!(
+        !ops.contains(&OpCode::DropLocal),
+        "flag-on: boxed slots must not receive DropLocal — the DropCall / \
+         Arc-refcount release path handles them. Got ops: {:?}",
+        ops
+    );
+}
+

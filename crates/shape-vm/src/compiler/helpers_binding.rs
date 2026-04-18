@@ -227,7 +227,23 @@ impl BytecodeCompiler {
         use crate::mir::analysis::OwnershipDecision;
 
         // Phase V1.1C gate. Flag off ⇒ byte-identical pre-V1.1C emission.
-        if super::helpers::ownership_moves_enabled() && self.slot_is_heap_backed_owned(slot) {
+        //
+        // Boxed-slot bailout: when the slot appears in `self.boxed_locals`,
+        // a prior `BoxLocal` emission has replaced the slot's inline value
+        // with a `SharedCell`-wrapped heap pointer (see
+        // `expressions/closures.rs`). The `LoadLocal` legacy path auto-
+        // unwraps that cell via `raw_helpers::extract_shared_cell`. The
+        // V1.1C `CloneLocal` path reads the raw u64 bits and delegates to
+        // `raw_helpers::clone_raw_bits`, which bumps the Arc on the cell
+        // itself — it does not unwrap. Emitting `CloneLocal` on a boxed
+        // slot therefore leaves a `shared_cell` ValueWord on the stack,
+        // which later arithmetic / method dispatch rejects ("cannot apply
+        // '+' to int and shared_cell"). Fall through to the existing
+        // emission so the legacy unwrap path handles it.
+        if super::helpers::ownership_moves_enabled()
+            && self.slot_is_heap_backed_owned(slot)
+            && !self.slot_is_boxed(slot)
+        {
             self.emit(Instruction::new(
                 OpCode::CloneLocal,
                 Some(Operand::Local(slot)),
