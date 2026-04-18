@@ -664,6 +664,45 @@ mod tests {
         );
     }
 
+    /// V1.2A: the new `PromoteToShared` opcode is not trusted and not
+    /// v2-typed. Both verifier passes accept it as a no-op — the opcode
+    /// operates on top-of-stack with no operand, identical in shape to
+    /// `PromoteToOwned`, and needs no FrameDescriptor. V1.2B adds the
+    /// handler; until then reaching this opcode panics in dispatch.
+    #[test]
+    fn v12a_promote_to_shared_passes_both_verifiers() {
+        let func = Function {
+            name: "promote_shared_fn".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 0,
+            entry_point: 0,
+            body_length: 2,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: None,
+            osr_entry_points: vec![],
+            mir_data: None,
+        };
+        let instructions = vec![
+            Instruction::simple(OpCode::PromoteToShared),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(vec![func], instructions);
+        assert!(
+            verify_trusted_opcodes(&prog).is_ok(),
+            "V1.2A PromoteToShared should pass trusted verification"
+        );
+        assert!(
+            verify_v2_typed_opcodes(&prog).is_ok(),
+            "V1.2A PromoteToShared should pass v2-typed verification"
+        );
+    }
+
     #[test]
     fn v2_multiple_errors_collected() {
         let func = Function {

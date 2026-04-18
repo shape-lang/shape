@@ -823,6 +823,30 @@ define_opcodes! {
     /// Executor handler added in V1.1B; currently unreachable via dispatch.
     DropLocal = 0x127, Variable, pops: 0, pushes: 0;
 
+    // ===== V1.2A: PromoteToShared (UNWIRED — V1.2B adds handler) =====
+    //
+    // Inverse of `PromoteToOwned` (0x107). Converts a Box-owned heap value on
+    // top-of-stack into an Arc-shared one on demand (used when the value is
+    // captured by an escaping closure, stored into a SharedCow slot, or
+    // passed to a function expecting Arc-shared ownership).
+    //
+    // Staged A/B/C/D rollout per
+    // `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §V1.2A:
+    //   - V1.2A (this commit): enum variant only, dead.
+    //   - V1.2B: executor handler wired to dispatch, still unused.
+    //   - V1.2C: compiler emission behind a gating flag.
+    //   - V1.2D: default flip after soak.
+    //
+    // See `docs/ownership-aware-runtime-v2.md` §Phase 3 for semantics.
+    //
+    // Operand: none — operates on the value already at top-of-stack and
+    // mutates it in place (identical stack shape to `PromoteToOwned`).
+    /// V1.2A (UNWIRED): Demote/promote the top-of-stack value from Box-owned
+    /// to Arc-shared allocation. No-op for inline values or already-shared
+    /// heap values. Executor handler added in V1.2B; currently unreachable
+    /// via dispatch — reaching this opcode panics.
+    PromoteToShared = 0x128, Stack, pops: 0, pushes: 0;
+
     // ===== v2 Typed Field Access Operations =====
     /// Load f64 field from typed struct at byte offset. Operand: FieldOffset(u16). Pops struct_ptr, pushes f64.
     FieldLoadF64 = 0x82, Object, pops: 1, pushes: 1;
@@ -1795,5 +1819,55 @@ mod tests {
         let d = Instruction::new(OpCode::DropLocal, Some(Operand::Local(42)));
         assert_eq!(d.opcode, OpCode::DropLocal);
         assert!(matches!(d.operand, Some(Operand::Local(42))));
+    }
+
+    /// V1.2A: the new `PromoteToShared` opcode is assigned 0x128, immediately
+    /// after `DropLocal` (0x127). Mirrors the V1.1A discriminant pins.
+    #[test]
+    fn v12a_promote_to_shared_discriminant() {
+        assert_eq!(OpCode::PromoteToShared as u16, 0x128);
+    }
+
+    /// V1.2A: `PromoteToShared` is the inverse of `PromoteToOwned` and shares
+    /// its categorization — both live in the `Stack` category because they
+    /// operate on top-of-stack without an operand.
+    #[test]
+    fn v12a_promote_to_shared_is_stack_category() {
+        assert_eq!(OpCode::PromoteToShared.category(), OpcodeCategory::Stack);
+        // Symmetry: PromoteToOwned is the companion and must share the category.
+        assert_eq!(OpCode::PromoteToOwned.category(), OpcodeCategory::Stack);
+    }
+
+    /// V1.2A: stack effect is zero/zero — the opcode mutates the top-of-stack
+    /// value in place (identical to `PromoteToOwned`).
+    #[test]
+    fn v12a_promote_to_shared_stack_effect() {
+        assert_eq!(OpCode::PromoteToShared.stack_pops(), 0);
+        assert_eq!(OpCode::PromoteToShared.stack_pushes(), 0);
+        // Symmetry with the inverse opcode.
+        assert_eq!(OpCode::PromoteToOwned.stack_pops(), 0);
+        assert_eq!(OpCode::PromoteToOwned.stack_pushes(), 0);
+    }
+
+    /// V1.2A: `PromoteToShared` is neither a trusted opcode nor a v2-typed
+    /// opcode. Ownership-aware opcodes will be validated by a dedicated
+    /// ownership verifier pass in a later phase.
+    #[test]
+    fn v12a_promote_to_shared_not_trusted_or_v2() {
+        let op = OpCode::PromoteToShared;
+        assert!(!op.is_trusted(), "PromoteToShared should not be trusted");
+        assert!(!op.is_v2_typed(), "PromoteToShared should not be v2_typed");
+    }
+
+    /// V1.2A: `Instruction::simple` constructs a `PromoteToShared` with no
+    /// operand (same shape as `PromoteToOwned`) and round-trips the opcode.
+    #[test]
+    fn v12a_promote_to_shared_instruction_roundtrip() {
+        let instr = Instruction::simple(OpCode::PromoteToShared);
+        assert_eq!(instr.opcode, OpCode::PromoteToShared);
+        assert!(
+            instr.operand.is_none(),
+            "PromoteToShared should have no operand (like PromoteToOwned)"
+        );
     }
 }
