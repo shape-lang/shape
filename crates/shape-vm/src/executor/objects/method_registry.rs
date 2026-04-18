@@ -525,6 +525,50 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "toArray" => crate::executor::objects::typed_array_methods::handle_int_to_array,
 };
 
+/// PHF registry for native v2 `TypedArray<i64>` methods (scaffolding, V0.c).
+///
+/// **Status:** scaffolding only — NOT wired into the dispatch cascade yet.
+/// Phase V2.a of `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md`
+/// wires this map into `executor/objects/mod.rs` ahead of the generic
+/// `ARRAY_METHODS` lookup so native typed-int arrays skip the HeapKind match.
+/// Handlers live in
+/// [`typed_int_array_methods`](crate::executor::objects::typed_int_array_methods)
+/// and delegate to the typed element primitives in
+/// `executor::v2_handlers::v2_array_detect` (read/write/push/pop/sum).
+///
+/// **Methods:** len, push, pop, sum, first, last, get, set.
+#[allow(dead_code)] // V2.a wires this up; see module-level doc.
+pub static TYPED_INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    "len" => crate::executor::objects::typed_int_array_methods::len,
+    "length" => crate::executor::objects::typed_int_array_methods::len,
+    "push" => crate::executor::objects::typed_int_array_methods::push,
+    "pop" => crate::executor::objects::typed_int_array_methods::pop,
+    "sum" => crate::executor::objects::typed_int_array_methods::sum,
+    "first" => crate::executor::objects::typed_int_array_methods::first,
+    "last" => crate::executor::objects::typed_int_array_methods::last,
+    "get" => crate::executor::objects::typed_int_array_methods::get,
+    "set" => crate::executor::objects::typed_int_array_methods::set,
+};
+
+/// PHF registry for native v2 `TypedArray<f64>` methods (scaffolding, V0.c).
+///
+/// **Status:** scaffolding only — NOT wired into the dispatch cascade yet.
+/// See [`TYPED_INT_ARRAY_METHODS`] above; wiring lands in V2.a.
+///
+/// **Methods:** len, push, pop, sum, first, last, get, set.
+#[allow(dead_code)] // V2.a wires this up; see module-level doc.
+pub static TYPED_NUMBER_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
+    "len" => crate::executor::objects::typed_number_array_methods::len,
+    "length" => crate::executor::objects::typed_number_array_methods::len,
+    "push" => crate::executor::objects::typed_number_array_methods::push,
+    "pop" => crate::executor::objects::typed_number_array_methods::pop,
+    "sum" => crate::executor::objects::typed_number_array_methods::sum,
+    "first" => crate::executor::objects::typed_number_array_methods::first,
+    "last" => crate::executor::objects::typed_number_array_methods::last,
+    "get" => crate::executor::objects::typed_number_array_methods::get,
+    "set" => crate::executor::objects::typed_number_array_methods::set,
+};
+
 /// PHF registry for Vec<bool> (BoolArray) methods
 ///
 /// **Standard:** len, length, toArray

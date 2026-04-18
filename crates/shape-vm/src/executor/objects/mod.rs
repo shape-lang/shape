@@ -69,6 +69,13 @@ pub mod iterator_methods;
 // Typed array (Vec<int>, Vec<number>, Vec<bool>) method handlers
 pub mod typed_array_methods;
 
+// V0.c scaffolding: handlers for native v2 TypedArray<i64>/TypedArray<f64>
+// receivers. Registered in `method_registry` under typed-array PHF maps but
+// NOT wired into the dispatch cascade here — that wiring lands in V2.a
+// (see /home/dev/.claude/plans/i-want-a-complete-foamy-eich.md §V2.a).
+pub mod typed_int_array_methods;
+pub mod typed_number_array_methods;
+
 // Concurrency primitive (Mutex<T>, Atomic<T>, Lazy<T>) method handlers
 pub mod concurrency_methods;
 
