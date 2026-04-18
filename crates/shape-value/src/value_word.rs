@@ -827,6 +827,13 @@ pub trait ValueWordExt {
     fn as_indexed_table(&self) -> Option<(u64, &Arc<DataTable>, u32)>;
     fn as_typed_object(&self) -> Option<(u64, &[ValueSlot], u64)>;
     fn as_closure(&self) -> Option<(u16, &[crate::value::Upvalue])>;
+    /// Obtain a [`crate::vm_closure_handle::VmClosureHandle`] over this
+    /// value's closure backing, if any.
+    ///
+    /// Closure spec §14.2 (H6.1): additive accessor that delegates to
+    /// `as_closure` through the Legacy backing today; H6.5 swaps the
+    /// producer to the Raw backing and flips the backing in place.
+    fn as_closure_handle(&self) -> Option<crate::vm_closure_handle::VmClosureHandle<'_>>;
     fn as_err_payload(&self) -> Option<ValueWord>;
     fn as_future(&self) -> Option<u64>;
     fn as_trait_object(&self) -> Option<(&ValueWord, &Arc<VTable>)>;
@@ -1539,6 +1546,11 @@ impl ValueWordExt for u64 {
             HeapValue::Closure { function_id, upvalues } => Some((*function_id, upvalues)),
             _ => None,
         }
+    }
+
+    #[inline]
+    fn as_closure_handle(&self) -> Option<crate::vm_closure_handle::VmClosureHandle<'_>> {
+        self.as_heap_ref()?.as_closure_handle()
     }
 
     fn as_err_payload(&self) -> Option<ValueWord> {

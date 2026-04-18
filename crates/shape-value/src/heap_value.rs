@@ -1480,6 +1480,26 @@ impl fmt::Display for HeapValue {
 // ── Hand-written methods (complex per-variant logic) ────────────────────────
 
 impl HeapValue {
+    /// Obtain a [`crate::vm_closure_handle::VmClosureHandle`] over this
+    /// heap value, if it is a `HeapValue::Closure`.
+    ///
+    /// Closure spec §14.2 (H6.1): the handle is the stable read API for
+    /// closure state across the H6.5 producer swap. Returns `None` for
+    /// non-closure heap values.
+    #[inline]
+    pub fn as_closure_handle(&self) -> Option<crate::vm_closure_handle::VmClosureHandle<'_>> {
+        match self {
+            HeapValue::Closure {
+                function_id,
+                upvalues,
+            } => Some(crate::vm_closure_handle::VmClosureHandle::legacy(
+                *function_id,
+                upvalues,
+            )),
+            _ => None,
+        }
+    }
+
     /// Structural equality comparison for HeapValue.
     ///
     /// Used by ValueWord::PartialEq when two heap-tagged values have different

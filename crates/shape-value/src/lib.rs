@@ -82,6 +82,7 @@ pub mod unified_string;
 pub mod unified_wrapper;
 pub mod v2;
 pub mod value;
+pub mod vm_closure_handle;
 
 pub use aligned_vec::AlignedVec;
 pub use closure::Closure;
@@ -122,6 +123,7 @@ pub use value::{
     VMArrayBuf, VMARRAY_INLINE_CAP, VTable, VTableEntry, vmarray_from_nanboxed,
     vmarray_from_value_words, vmarray_from_vec,
 };
+pub use vm_closure_handle::VmClosureHandle;
 
 // v2 runtime re-exports
 pub use v2::heap_header::HeapHeader as V2HeapHeader;
