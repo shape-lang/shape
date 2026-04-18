@@ -739,15 +739,22 @@ fn value_to_usize(value: &ValueWord, label: &str) -> Result<usize, String> {
 fn is_shape_callable(value: &ValueWord) -> bool {
     value.as_function_id().is_some()
         || value.as_module_function().is_some()
+        // Closure spec H6.3: route closure detection through VmClosureHandle
+        // so H6.5's producer swap (Arc<HeapValue::Closure> → raw
+        // TypedClosureHeader) transparently flips the backing. HostClosure
+        // and FunctionRef keep their variant patterns — neither is affected
+        // by the closure-backing migration.
         // cold-path: as_heap_ref retained — multi-variant callable check
-        || matches!(
-            value.as_heap_ref(), // cold-path
-            Some(
-                HeapValue::Closure { .. }
-                    | HeapValue::HostClosure(_)
-                    | HeapValue::FunctionRef { .. }
-            )
-        )
+        || value
+            .as_heap_ref()
+            .map(|hv| {
+                hv.as_closure_handle().is_some()
+                    || matches!(
+                        hv,
+                        HeapValue::HostClosure(_) | HeapValue::FunctionRef { .. }
+                    )
+            })
+            .unwrap_or(false)
 }
 
 #[repr(C)]

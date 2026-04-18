@@ -160,7 +160,8 @@ impl VirtualMachine {
     ///
     /// Looks up the callable in the TaskScheduler, then executes it:
     /// - Function -> calls via call_function_with_nb_args
-    /// - HeapValue::Closure -> calls via call_closure_with_nb_args
+    /// - Closure value -> calls via call_closure_with_nb_args (reader routed
+    ///   through `VmClosureHandle` per Closure spec H6.3)
     /// - Other values -> returns them directly (already-resolved value)
     ///
     /// For externally-completed tasks (remote calls), checks the oneshot
@@ -430,21 +431,34 @@ impl VirtualMachine {
                 let result_nb = self.invoke_module_fn(&module_fn, &args_vec)?;
                 return Ok(result_nb);
             }
+            // Closure spec H6.3: closure dispatch routes through
+            // `VmClosureHandle` so H6.5's producer swap transparently flips
+            // the backing. The `upvalues_legacy()` escape hatch returns the
+            // Legacy backing's `&[Upvalue]` directly — the Raw backing has
+            // no `Upvalue` slice, so H6.5 replaces the call below with a
+            // Raw-aware `call_closure_with_nb_args` variant that consumes
+            // the raw capture block.
             // cold-path: as_heap_ref retained — multi-variant callee dispatch
-            TAG_HEAP => match callee.as_heap_ref() { // cold-path
-                Some(shape_value::HeapValue::Closure {
-                    function_id,
-                    upvalues,
-                }) => {
-                    self.call_closure_with_nb_args(*function_id, upvalues.clone(), args)?;
-                }
-                Some(shape_value::HeapValue::HostClosure(callable)) => {
+            TAG_HEAP => {
+                let heap_ref = callee.as_heap_ref(); // cold-path
+                if let Some(handle) = heap_ref.and_then(|hv| hv.as_closure_handle()) {
+                    let fid = handle.function_id() as u16;
+                    // H6.3: Legacy is the only backing until H6.5 swaps the
+                    // producer. Preserves the `Vec<Upvalue>` shape that
+                    // `call_closure_with_nb_args` consumes today.
+                    let upvalues = handle
+                        .upvalues_legacy()
+                        .expect("H6.3: Legacy backing is the only producer until H6.5")
+                        .to_vec();
+                    self.call_closure_with_nb_args(fid, upvalues, args)?;
+                } else if let Some(shape_value::HeapValue::HostClosure(callable)) = heap_ref {
                     let args_vec: Vec<ValueWord> = args.to_vec();
                     let result_nb = callable.call(&args_vec).map_err(VMError::RuntimeError)?;
                     return Ok(result_nb);
+                } else {
+                    return Err(VMError::InvalidCall);
                 }
-                _ => return Err(VMError::InvalidCall),
-            },
+            }
             _ => return Err(VMError::InvalidCall),
         }
 
@@ -712,5 +726,75 @@ impl VirtualMachine {
         });
         self.ip = entry_point;
         Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Closure spec §14.4 — H6.3 regression tests
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// These tests cover the two dispatch shapes whose reader paths were migrated
+// onto `VmClosureHandle` in this commit:
+//
+// 1. Direct `call_value_immediate_nb` dispatch on a heap closure returned from
+//    a factory function. Exercises the `TAG_HEAP => { handle.function_id() +
+//    handle.upvalues_legacy() }` arm added at line ~434 of this file.
+// 2. Polymorphic `CallFunctionIndirect` dispatch through an `Array<Function<…>>`
+//    whose elements are structurally distinct closures. Exercises the indirect
+//    dispatch path in `control_flow::dispatch_call_closure_like`, which itself
+//    routes through H6.2-migrated `raw_helpers::extract_closure_info`.
+//
+// Both paths must return identical results to the pre-H6.3 code because the
+// shim's Legacy backing still destructures the same `Arc<HeapValue::Closure>`
+// under the hood.
+#[cfg(test)]
+mod h6_3_tests {
+    use crate::test_utils::eval;
+    use shape_value::ValueWordExt;
+
+    #[test]
+    fn h6_3_heap_closure_dispatch_via_handle_reader() {
+        // Factory returns a heap-escaping closure capturing `n = 10`. The
+        // returned value is held in a `let` binding, then invoked with
+        // `f(5)` — which compiles to a CallValue / CallFunctionIndirect
+        // against a TAG_HEAP closure and dispatches through the migrated
+        // handle reader in `call_value_immediate_nb`. Result must be
+        // `n + x = 15`.
+        //
+        // Source-syntax note: mirrors the pattern already proven out by
+        // `test_phase_f_runtime_returned_closure_executes_correctly` in
+        // `compiler/expressions/closures.rs` — `-> any` return and bare
+        // `|x| …` (untyped params infer at the call site).
+        let val = eval(
+            "fn make(n: int) -> any {\n\
+                 return |x| x + n\n\
+             }\n\
+             let f = make(10)\n\
+             f(5)",
+        );
+        assert_eq!(val.as_i64(), Some(15));
+    }
+
+    #[test]
+    fn h6_3_array_of_closures_indirect_dispatch_via_handle_reader() {
+        // `Array<Function<(int) -> int>>` with three structurally-distinct
+        // closures: each `arr[i](1)` performs a CallFunctionIndirect on a
+        // TAG_HEAP closure, driving through the indirect-dispatch reader
+        // path whose closure extraction goes through
+        // `raw_helpers::extract_closure_info` (H6.2-migrated onto the
+        // shim). Sum = 2 + 11 + 101 = 114.
+        //
+        // Source-syntax note: mirrors the pattern already proven out by
+        // `test_phase_f_runtime_array_of_closures_dispatches_each` in
+        // `compiler/expressions/closures.rs`.
+        let val = eval(
+            "fn main() -> int {\n\
+                 let arr = [|x| x + 1, |x| x + 10, |x| x + 100]\n\
+                 let sum = arr[0](1) + arr[1](1) + arr[2](1)\n\
+                 sum\n\
+             }\n\
+             main()",
+        );
+        assert_eq!(val.as_i64(), Some(114));
     }
 }
